@@ -1984,6 +1984,7 @@ export async function buildHarnessEngine(
     adapter,
     executor: loopExecutor,
     registry: registryTools,
+    parentThinking: Object.freeze(buildThinkingParams(env.llm)),
     // Inject secretRegistry so roundtrip mode can placeholder-replace user
     // text in run(); absent under block mode → recognition skipped.
     ...(secretRegistry ? { secretRegistry } : {}),

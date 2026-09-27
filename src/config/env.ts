@@ -24,6 +24,8 @@ import {
   loadIknowSettings,
   type IknowSettings,
   type IknowSettingsLlmProvider,
+  type IknowSettingsThinking,
+  type IknowSettingsThinkingEffort,
   DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
 } from "./settings.js";
 import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
@@ -623,8 +625,7 @@ export interface McpEnv {
 }
 
 /**
- * Subagent config arm (passed to the SIGTERM timer consumption point in
- * harness/subagent/manager.ts).
+ * Subagent config arm (worker route and thinking settings, plus manager limits).
  *
  * `taskTimeoutMs` = whole-task lifetime cap per subagent (per-task wallclock, ms).
  * Semantics, naming and consumption point are kept fully separate from
@@ -654,6 +655,10 @@ export interface IknowSubagentEnv {
    * empty / wrong-typed / unbuildable — the worker then uses `llm.model`.
    */
   model?: SubagentModelEnv;
+  /** Optional worker thinking mode from user settings; no dedicated env override. */
+  thinking?: IknowSettingsThinking;
+  /** Optional worker thinking effort from user settings; no dedicated env override. */
+  thinkingEffort?: IknowSettingsThinkingEffort;
 }
 
 export interface IknowEnv {
@@ -1276,6 +1281,12 @@ export function loadIknowEnv(
         mergedSettings.subagent?.maxConcurrentWorkers ??
         DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
       ...spreadSubagentModel(subagentModel),
+      ...(mergedSettings.subagent?.thinking !== undefined
+        ? { thinking: mergedSettings.subagent.thinking }
+        : {}),
+      ...(mergedSettings.subagent?.thinkingEffort !== undefined
+        ? { thinkingEffort: mergedSettings.subagent.thinkingEffort }
+        : {}),
     },
     // Workspace-root per-root state anchor (registered at env SSOT;
     // `envOptional` canonical reader — empty/unset → undefined; the consumer

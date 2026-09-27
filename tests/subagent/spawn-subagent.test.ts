@@ -30,8 +30,11 @@
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { mkdtempSync, rmSync } from "node:fs";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import type { ChildProcess } from "node:child_process";
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
 
@@ -47,6 +50,11 @@ import type {
   QueryBufferResult,
   SubAgentManager,
 } from "../../src/harness/subagent/manager.ts";
+import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
+import type {
+  SubAgentEnvelope,
+  WorkerEnvelope,
+} from "../../src/harness/subagent/envelope.ts";
 import {
   PER_TASK_TIMEOUT_MS,
   SubAgentAbortError,
@@ -1500,3 +1508,81 @@ describe("spawn_subagent — WaitTimeoutError queryBuffer 分流", () => {
     expect(message).not.toContain("operator killed");
   });
 });
+
+describe("spawn_subagent — parent thinking snapshot", () => {
+  it("keeps distinct per-call snapshots on concurrent worker payloads", async () => {
+    const subagentsDir = mkdtempSync(join(tmpdir(), "iknow-thinking-spawn-"));
+    const launches: Array<{
+      readonly taskId: string;
+      readonly payload: WorkerEnvelope;
+      readonly child: FakePayloadChild;
+    }> = [];
+    const manager = createSubAgentManager({
+      subagentsDir,
+      spawn: (_def, taskId, payload) => {
+        const child = makePayloadChild();
+        launches.push({ taskId, payload, child });
+        return child as unknown as ChildProcess;
+      },
+    });
+
+    try {
+      const tool = createSpawnSubAgentTool({ manager });
+      const calls = await Promise.all([
+        tool.handler(
+          { title: "first worker", task: "first task", wait: false },
+          { parentThinking: { mode: "off", effort: "low" } } as never
+        ),
+        tool.handler(
+          { title: "second worker", task: "second task", wait: false },
+          { parentThinking: { mode: "adaptive", effort: "xhigh" } } as never
+        ),
+      ]);
+
+      expect(calls).toHaveLength(2);
+      expect(launches).toHaveLength(2);
+      expect(
+        launches.map(({ payload }) =>
+          (payload as WorkerEnvelope & {
+            readonly parentThinking?: unknown;
+          }).parentThinking
+        ),
+      ).toEqual([
+        { mode: "off", effort: "low" },
+        { mode: "adaptive", effort: "xhigh" },
+      ]);
+    } finally {
+      const completed = Promise.all(
+        launches.map(({ taskId }) => manager.waitFor(taskId, 2_000))
+      );
+      for (const { child } of launches) {
+        const envelope: SubAgentEnvelope = {
+          status: "ok",
+          summary: "finished",
+          result: "finished",
+        };
+        child.stdout.write(JSON.stringify(envelope) + "\n");
+        child.emit("exit", 0, null);
+      }
+      await completed;
+      await manager.shutdown();
+      rmSync(subagentsDir, { recursive: true, force: true });
+    }
+  });
+});
+
+interface FakePayloadChild {
+  readonly stdout: PassThrough;
+  readonly stderr: PassThrough;
+  readonly kill: () => boolean;
+  emit: (event: string | symbol, ...args: unknown[]) => boolean;
+  once: (event: string | symbol, ...args: unknown[]) => unknown;
+}
+
+function makePayloadChild(): FakePayloadChild {
+  return Object.assign(new EventEmitter(), {
+    stdout: new PassThrough(),
+    stderr: new PassThrough(),
+    kill: () => true,
+  }) as unknown as FakePayloadChild;
+}

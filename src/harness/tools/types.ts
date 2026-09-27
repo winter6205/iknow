@@ -16,6 +16,7 @@ import type {
   AnthropicNativeMessage,
 } from "../model-adapter/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
+import type { ThinkingParams } from "../model-adapter/anthropic-adapter.js";
 
 /**
  * Runtime entry signature: takes strictly validated input, returns a
@@ -64,6 +65,8 @@ export interface ToolExecutionContext {
    * consumers fail closed.
    */
   readonly messages?: ReadonlyArray<AnthropicNativeMessage>;
+  /** Effective parent thinking snapshot for subagent spawn and continuation. */
+  readonly parentThinking?: ThinkingParams;
 }
 
 /**
@@ -204,6 +207,8 @@ export interface Executor {
     turnId?: string, // forwarded to ctx.turnId; absent = no owning turn
     onStream?: (event: HarnessStreamEvent) => void, // in-tool emits (graph progress etc.)
     /** Read-only model-visible history snapshot for this turn; absent → handler fails closed. */
-    messages?: ReadonlyArray<AnthropicNativeMessage>
+    messages?: ReadonlyArray<AnthropicNativeMessage>,
+    /** Effective parent thinking snapshot; optional for legacy executeAll callers. */
+    parentThinking?: ThinkingParams
   ) => Promise<ReadonlyArray<ToolExecutionResult>>;
 }

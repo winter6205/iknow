@@ -109,5 +109,9 @@ export function withThinkingOverride(opts: {
   return {
     ...deps,
     adapter,
+    parentThinking: Object.freeze({
+      mode: override.mode,
+      effort: override.effort ?? "",
+    }),
   };
 }

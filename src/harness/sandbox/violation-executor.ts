@@ -54,7 +54,8 @@ export function wrapWithViolationHook(
       ) => void | Promise<void>,
       turnId?: string,
       onStream?: (event: HarnessStreamEvent) => void,
-      messages?: ToolExecutionContext["messages"]
+      messages?: ToolExecutionContext["messages"],
+      parentThinking?: ToolExecutionContext["parentThinking"]
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       const seen = new Set<number>();
       // observe is async: PostToolUseHook may now return a Promise, and an
@@ -101,7 +102,8 @@ export function wrapWithViolationHook(
         },
         turnId,
         onStream,
-        messages
+        messages,
+        parentThinking
       );
       for (let i = 0; i < out.length; i += 1) {
         const r = out[i];

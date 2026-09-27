@@ -361,7 +361,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
     conversationId?: string,
     turnId?: string,
     onStream?: ToolExecutionContext["onStream"],
-    messages?: ToolExecutionContext["messages"]
+    messages?: ToolExecutionContext["messages"],
+    parentThinking?: ToolExecutionContext["parentThinking"]
   ): Promise<ToolExecutionResult> {
     const validation = validateCall(registry, call);
     if (!validation.ok) return validation.failure;
@@ -382,6 +383,7 @@ export function createExecutor(registry: RegistryImpl): Executor {
       // unfilled.
       toolUseId: call.id,
       ...(messages !== undefined ? { messages } : {}),
+      ...(parentThinking !== undefined ? { parentThinking } : {}),
     };
     try {
       const out =
@@ -411,7 +413,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
     onStream?: ToolExecutionContext["onStream"],
     // skill() second pass-through: a read-only snapshot of the model-visible
     // history, forwarded verbatim into ctx.messages.
-    messages?: ToolExecutionContext["messages"]
+    messages?: ToolExecutionContext["messages"],
+    parentThinking?: ToolExecutionContext["parentThinking"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
@@ -422,7 +425,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
         conversationId,
         turnId,
         onStream,
-        messages
+        messages,
+        parentThinking
       );
       await onSettled?.(result, index);
       out.push(result);

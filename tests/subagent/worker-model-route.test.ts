@@ -87,7 +87,10 @@ function baseEnv(): IknowEnv {
   } as unknown as IknowEnv;
 }
 
-function probeOpts(env: IknowEnv): CreateWorkerDepsOptions {
+function probeOpts(
+  env: IknowEnv,
+  parentThinking?: { readonly mode: "off" | "adaptive"; readonly effort: string }
+): CreateWorkerDepsOptions {
   return {
     env,
     sandboxRoot: "/tmp/sb-model-route",
@@ -96,6 +99,7 @@ function probeOpts(env: IknowEnv): CreateWorkerDepsOptions {
     skillCatalog: createSkillCatalog([]),
     system: async () => undefined,
     trace: createNoopTraceService(),
+    ...(parentThinking !== undefined ? { parentThinking } : {}),
   } as unknown as CreateWorkerDepsOptions;
 }
 
@@ -150,5 +154,89 @@ describe("worker adapter route (settings.subagent.model)", () => {
     assert.equal(client.baseURL, "http://main.test/v1");
     assert.equal(client.apiKey, "main-key");
     assert.deepEqual(client.defaultHeaders, { "X-Main": "m" });
+  });
+
+  it("explicit subagent thinking settings override the parent's snapshot", async () => {
+    const env = baseEnv();
+    Object.assign(env.subagent, {
+      thinking: "adaptive",
+      thinkingEffort: "high",
+    });
+
+    await createWorkerDeps(
+      probeOpts(env, { mode: "off", effort: "low" })
+    );
+
+    assert.deepEqual(adapterArgs[0]!.thinking, {
+      mode: "adaptive",
+      effort: "high",
+    });
+  });
+
+  it("unset subagent settings inherit both parent thinking values", async () => {
+    const env = baseEnv();
+
+    await createWorkerDeps(
+      probeOpts(env, { mode: "adaptive", effort: "xhigh" })
+    );
+
+    assert.deepEqual(adapterArgs[0]!.thinking, {
+      mode: "adaptive",
+      effort: "xhigh",
+    });
+  });
+
+  it("effort-only subagent setting enables adaptive thinking", async () => {
+    const env = baseEnv();
+    Object.assign(env.subagent, { thinkingEffort: "medium" });
+
+    await createWorkerDeps(
+      probeOpts(env, { mode: "off", effort: "low" })
+    );
+
+    assert.deepEqual(adapterArgs[0]!.thinking, {
+      mode: "adaptive",
+      effort: "medium",
+    });
+  });
+
+  it("mode-only subagent setting inherits the parent's effort", async () => {
+    const env = baseEnv();
+    Object.assign(env.subagent, { thinking: "adaptive" });
+
+    await createWorkerDeps(
+      probeOpts(env, { mode: "off", effort: "max" })
+    );
+
+    assert.deepEqual(adapterArgs[0]!.thinking, {
+      mode: "adaptive",
+      effort: "max",
+    });
+  });
+
+  it("explicit off mode overrides an adaptive parent", async () => {
+    const env = baseEnv();
+    env.llm.thinking = "adaptive";
+    env.llm.thinkingEffort = "low";
+    Object.assign(env.subagent, { thinking: "off" });
+
+    await createWorkerDeps(
+      probeOpts(env, { mode: "adaptive", effort: "high" })
+    );
+
+    assert.equal(
+      (adapterArgs[0]!.thinking as { readonly mode: string }).mode,
+      "off"
+    );
+  });
+
+  it("legacy worker without a parent snapshot falls back to env.llm thinking", async () => {
+    const env = baseEnv();
+    env.llm.thinking = "adaptive";
+    env.llm.thinkingEffort = "max";
+
+    await createWorkerDeps(probeOpts(env));
+
+    assert.deepEqual(adapterArgs[0]!.thinking, buildThinkingParams(env.llm));
   });
 });

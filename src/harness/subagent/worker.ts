@@ -65,6 +65,7 @@ import {
   createExecutor,
   withTransportRetry,
   translateAnthropicTransportFault,
+  type ThinkingParams,
   type LoopEngineDeps,
 } from "../index.js";
 import { createDefaultAciRegistry } from "../aci/tools/registry.js";
@@ -239,6 +240,8 @@ export interface CreateWorkerDepsOptions {
   readonly env: IknowEnv;
   /** Soft sandbox root (the worker fs tools' containment bound, from WorkerEnvelope.sandboxRoot). */
   readonly sandboxRoot: string;
+  /** Parent turn's effective thinking snapshot, when supplied by the envelope. */
+  readonly parentThinking?: ThinkingParams;
   /** Test seam: inject a stub model (createStubModel) in place of the real Anthropic adapter. */
   readonly model?: LoopEngineDeps["adapter"];
   /** Test seam: custom skill catalog (default = worker's own scan). */
@@ -671,6 +674,7 @@ export async function createWorkerRuntime(
   const askUser = createNoAskUser();
 
   const workerRoute = env.subagent?.model;
+  const thinking = resolveWorkerThinking(env, opts.parentThinking);
   const adapter =
     opts.model ??
     withTransportRetry(
@@ -683,7 +687,7 @@ export async function createWorkerRuntime(
         model: wireModelFromRoute(workerRoute?.model ?? env.llm.model),
         maxTokens: env.llm.maxOutputTokens,
         temperature: env.llm.temperature,
-        thinking: buildThinkingParams(env.llm),
+        thinking,
         stream: env.llm.stream === "on",
       }),
       { translate: translateAnthropicTransportFault }
@@ -935,6 +939,7 @@ export async function createWorkerRuntime(
   const deps: LoopEngineDeps = {
     adapter,
     executor,
+    parentThinking: thinking,
     // Worker uses the same seam — no warmup at assembly time; the first
     // language-server tool-name resolution arms it (sharing lsp/warmup.ts's
     // view with build-engine).
@@ -1033,6 +1038,24 @@ export async function createWorkerRuntime(
     deps:
       opts.maxTurns !== undefined ? { ...deps, maxTurns: opts.maxTurns } : deps,
     catalog: reg.catalog,
+  };
+}
+
+/** Resolve subagent overrides over the current parent snapshot or env fallback. */
+function resolveWorkerThinking(
+  env: IknowEnv,
+  parentThinking?: ThinkingParams
+): ThinkingParams {
+  const inherited = parentThinking ?? buildThinkingParams(env.llm);
+  const mode =
+    env.subagent?.thinking ??
+    (env.subagent?.thinkingEffort !== undefined
+      ? "adaptive"
+      : inherited.mode);
+  const effort = env.subagent?.thinkingEffort ?? inherited.effort;
+  return {
+    mode,
+    ...(effort !== undefined ? { effort } : {}),
   };
 }
 
@@ -1883,6 +1906,9 @@ async function assembleAndRunWorker(
     env,
     sandboxRoot: workerEnvelope.sandboxRoot,
     disallowedTools: workerEnvelope.disallowedTools,
+    ...(workerEnvelope.parentThinking !== undefined
+      ? { parentThinking: workerEnvelope.parentThinking }
+      : {}),
     // envelope.role is threaded to the createWorkerDeps seam — when absent,
     // the key is omitted (V1 baseline, byte-stable). ADR-0112: envelope.systemPrompt
     // is no longer passed through as an addendum — the worker reads the envelope

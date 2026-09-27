@@ -185,7 +185,8 @@ export interface PermissionRuntime {
     conversationId?: string,
     turnId?: string,
     onStream?: (event: HarnessStreamEvent) => void,
-    messages?: ToolExecutionContext["messages"]
+    messages?: ToolExecutionContext["messages"],
+    parentThinking?: ToolExecutionContext["parentThinking"]
   ) => Promise<ToolExecutionResult>;
 }
 
@@ -389,7 +390,8 @@ export function createPermissionRuntime(
     conversationId?: string,
     turnId?: string,
     onStream?: (event: HarnessStreamEvent) => void,
-    messages?: ToolExecutionContext["messages"]
+    messages?: ToolExecutionContext["messages"],
+    parentThinking?: ToolExecutionContext["parentThinking"]
   ): Promise<ToolExecutionResult> {
     const [result] = await opts.inner.executeAll(
       [call],
@@ -399,7 +401,8 @@ export function createPermissionRuntime(
       undefined,
       turnId,
       onStream,
-      messages
+      messages,
+      parentThinking
     );
     const r = result as ToolExecutionResult;
     if (!def) return r;
@@ -444,7 +447,8 @@ export function createPermissionRuntime(
     ) => void | Promise<void>,
     turnId?: string,
     onStream?: (event: HarnessStreamEvent) => void,
-    messages?: ToolExecutionContext["messages"]
+    messages?: ToolExecutionContext["messages"],
+    parentThinking?: ToolExecutionContext["parentThinking"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
@@ -460,7 +464,8 @@ export function createPermissionRuntime(
               conversationId,
               turnId,
               onStream,
-              messages
+              messages,
+              parentThinking
             );
       await onSettled?.(result, index);
       out.push(result);
