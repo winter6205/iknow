@@ -81,6 +81,7 @@ import type {
 } from "../harness/isolation/worktree-gate.js";
 import { createWorktreeHostProvision } from "../harness/isolation/worktree-host.js";
 import type { AskUser } from "../harness/permission/types.js";
+import type { SecurityReviewRoute } from "../harness/permission/security-review.js";
 import type {
   ServeAskUserHandle,
   PendingAskView,
@@ -751,6 +752,9 @@ export type SessionHubOptions = {
    * construction-time check below throws otherwise.
    * Tests injecting `deps` are unaffected. */
   askUser?: AskUser;
+  /** ADR-0127: interactive security-review route (the host wraps the SPA ask
+   * queue with it). Absent → session engines deny reviews typed. */
+  securityReview?: SecurityReviewRoute;
   /** Full serve AskUser handle (ask + resolveAsk + pendingAll). When provided,
    * the web SPA can list + resolve pending permission requests. */
   askHandle?: ServeAskUserHandle;
@@ -1091,6 +1095,8 @@ export class SessionHub {
   private readonly traceServices = new Set<TraceServiceWithHealth>();
   /** askUser inlet; required unless deps are pre-built. */
   private readonly askUser: AskUser | undefined;
+  /** ADR-0127: interactive security-review route (absent → typed deny). */
+  private readonly securityReview: SecurityReviewRoute | undefined;
   /** Full serve AskUser handle (when provided, SPA can list + resolve asks). */
   private readonly askHandle: ServeAskUserHandle | undefined;
   /** Session allow-list source ("always-allow" from web UI lands here). */
@@ -1307,6 +1313,7 @@ export class SessionHub {
     this.buildEngine = opts.buildEngine;
     this.traceOut = opts.traceOut;
     this.askUser = opts.askUser;
+    this.securityReview = opts.securityReview;
     this.askHandle = opts.askHandle;
     this.sessionGrants = opts.sessionGrants;
     this.permissionMode = opts.permissionMode;
@@ -4045,6 +4052,8 @@ export class SessionHub {
     const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
+      // ADR-0127: undefined passes as absent — the gates deny reviews typed.
+      securityReview: this.securityReview,
       cwd: root,
       sandboxRoot: root,
       workspaceRoot: root,
@@ -4224,6 +4233,8 @@ export class SessionHub {
     const built = await buildHarnessEngine({
       env,
       askUser: this.askUser,
+      // ADR-0127: undefined passes as absent — the gates deny reviews typed.
+      securityReview: this.securityReview,
       ...(this.sandboxRoot ? { sandboxRoot: this.sandboxRoot } : {}),
       // Review High-2 (hard req 9): fallback path reuses the startup settings
       // object too (rebind-rebuilt engines must not reload settings).

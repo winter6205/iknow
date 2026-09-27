@@ -8,6 +8,12 @@ import {
   legacyFindDangerousPattern,
   type DangerousPatternHit,
 } from "../../../src/harness/permission/hard-walls.js";
+import {
+  checkPermission,
+  createPermissionPolicy,
+} from "../../../src/harness/permission/policy.js";
+import { createSessionGrants } from "../../../src/harness/permission/session-grants.js";
+import type { AciToolDef } from "../../../src/harness/aci/types.js";
 import { parseForSecurity } from "../../../src/harness/permission/shell-parse.js";
 
 // The destructive rules judge argv and declared code operands off the parse, and
@@ -349,23 +355,128 @@ describe("SC-S2-8 fork bomb — structural rule renders destructive-disk", () =>
     assert.equal(liveHit("cat /tmp/x; :(){ :|:& };:"), null);
   });
 
-  // The literal is not in the roster the parse-armed rules read, because the
-  // quote-blind scan never denied it in a code operand or an interpreter body
-  // either: the splitter broke the spelling at its own `;` and `|` before the
-  // substring could line up. A bomb-shaped string there answers nothing, while
-  // the one shape the structural rule owns keeps its rendered pair.
-  it("keeps the bomb literal out of the roster the parse arms read", () => {
+  // The literal is not in the SUBSTRING roster the argv arms read — the
+  // quote-blind scan never denied it inside a code operand, and no substring
+  // arm may start now. SC-S2-8 reaches those operands differently: the
+  // structural rule re-parses eval / shell-`-c` code and denies the CONFIRMED
+  // bomb there (the two authorized new-deny shapes), while a bomb-shaped
+  // string in code the rule cannot read as shell — a non-shell interpreter's
+  // operand or body — and in inert quoted data still answers nothing.
+  it("denies the bomb supplied as shell code, and no neighboring shape", () => {
     for (const command of [
       "bash -c ':(){ :|:& };:'",
       "eval ':(){ :|:& };:'",
+    ]) {
+      const hit = liveHit(command);
+      assert.equal(id(hit), "destructive-disk", command);
+      assert.equal(desc(hit), ":(){ :|:& };:", command);
+      assert.equal(id(astHit(command)), "destructive-disk", command);
+    }
+    for (const command of [
       "python3 <<'EOF'\n:(){ :|:& };:\nEOF\n",
+      "python3 -c ':(){ :|:& };:'",
+      "echo ':(){ :|:& };:'",
+      "cat <<'EOF'\n:(){ :|:& };:\nEOF",
     ]) {
       assert.equal(liveHit(command), null, command);
-      assert.equal(astHit(command), null, command);
     }
     const bare = liveHit(":(){ :|:& };:");
     assert.equal(id(bare), "destructive-disk");
     assert.equal(desc(bare), ":(){ :|:& };:");
+  });
+
+  // The nested scan is a scan of REGIONS, not of one operand: a bomb reached
+  // through a further code operand (an `eval` inside a `-c` string) is the
+  // same confirmed structure one region deeper, and the descent is bounded by
+  // the analysis ceiling the substitution walk already uses.
+  it("descends through nested code operands to the bomb", () => {
+    for (const command of [
+      `bash -c "eval ':(){ :|:& };:'"`,
+      `eval 'bash -c ":(){ :|:& };:"'`,
+    ]) {
+      const hit = liveHit(command);
+      assert.equal(id(hit), "destructive-disk", command);
+      assert.equal(desc(hit), ":(){ :|:& };:", command);
+    }
+  });
+
+  // Precedence, both directions: a bomb riding in a code region behind a
+  // shape the argv arms already denied keeps THAT arm's record (no second
+  // move of an id), and the nested arm still speaks when only the code
+  // region carries the structure.
+  it("keeps an earlier argv deny's own record over the nested bomb", () => {
+    const rmFirst = "rm -rf / && bash -c ':(){ :|:& };:'";
+    assert.equal(id(liveHit(rmFirst)), "destructive-rm", rmFirst);
+    const bombFirstRmLater = "bash -c ':(){ :|:& };:' && rm -rf /";
+    assert.equal(id(liveHit(bombFirstRmLater)), "destructive-rm", bombFirstRmLater);
+    const onlyTheBomb = "bash -c 'echo hi; :(){ :|:& };:'";
+    assert.equal(id(liveHit(onlyTheBomb)), "destructive-disk", onlyTheBomb);
+    assert.equal(desc(liveHit(onlyTheBomb)), ":(){ :|:& };:", onlyTheBomb);
+  });
+});
+
+describe("SC-S2-8 — every fork-bomb form is a hard-wall deny in both modes", () => {
+  const bashTool = Object.freeze({
+    name: "bash",
+    description: "fork-bomb mode probe",
+    inputSchema: { type: "object", additionalProperties: false },
+    handler: async () => "ok",
+    aci: Object.freeze({
+      category: "execute" as const,
+      isConcurrencySafe: false,
+      interruptBehavior: "cancel" as const,
+      timeoutTier: "default" as const,
+    }),
+  }) as AciToolDef;
+
+  function outcomeOf(command: string, mode: "default" | "full_auto") {
+    const p = createPermissionPolicy({ mode });
+    return checkPermission({
+      def: bashTool,
+      input: { command },
+      sources: p.sources,
+      hardWalls: p.hardWalls,
+      defaultByCategory: p.defaultByCategory,
+      mode: p.mode,
+    });
+  }
+
+  for (const command of [
+    ":(){ :|:& };:",
+    "eval ':(){ :|:& };:'",
+    "bash -c ':(){ :|:& };:'",
+  ]) {
+    for (const mode of ["default", "full_auto"] as const) {
+      it(`denies ${JSON.stringify(command)} in ${mode}`, () => {
+        const out = outcomeOf(command, mode);
+        assert.equal(out.decision, "deny", `${command} / ${mode}`);
+        assert.ok(out.reason.startsWith("[hard_wall] "), out.reason);
+        assert.ok(out.reason.includes("destructive-disk"), out.reason);
+      });
+    }
+  }
+
+  it("a permissive session grant cannot override the eval form's wall", () => {
+    const session = createSessionGrants();
+    session.add({
+      id: "session-allow-all",
+      match: () => true,
+      decision: "allow",
+      reason: "session allows everything",
+    });
+    const p = createPermissionPolicy({ session });
+    const out = checkPermission({
+      def: bashTool,
+      input: { command: "eval ':(){ :|:& };:'" },
+      sources: p.sources,
+      hardWalls: p.hardWalls,
+      defaultByCategory: p.defaultByCategory,
+    });
+    assert.equal(out.decision, "deny");
+    assert.ok(
+      out.reason.includes('pattern=":(){ :|:& };:"'),
+      out.reason
+    );
   });
 });
 

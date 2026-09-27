@@ -26,6 +26,7 @@ import {
   storeWorkerTranscriptIo,
 } from "./cli/worker-transcript.js";
 import { shutdownDefaultLspPool } from "./harness/lsp/client.js";
+import { securityReviewRouteFromAsk } from "./harness/build-engine.js";
 import {
   buildHarnessEngine,
   prepareRuntime,
@@ -488,9 +489,14 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     projectIdentityRoot: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
   });
   const memoryDir = join(todoProjectDir, MEMORY_DIR_NAME);
+  // ADR-0127: the chat entry's ask inlet is a real human path (readline y/N)
+  // — the security-review route shares it. The ordinary ask semantics are
+  // unchanged; reviews ride the same prompt with the typed-cause hint.
+  const chatAskUser = createTtyAskUser();
   // Assembly opts shared by the initial build and rebind rebuilds (same askUser/holders/settings).
   const chatEngineOpts = {
-    askUser: createTtyAskUser(),
+    askUser: chatAskUser,
+    securityReview: securityReviewRouteFromAsk(chatAskUser),
     surface: "chat" as const,
     memory: { enabled: true } as const,
     permissionMode,
@@ -927,6 +933,10 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       hubOptions: {
         askUser: askHandle.ask,
         sessionGrants,
+        // ADR-0127: the SPA ask queue (5s fail-closed) is the serve entry's
+        // interactive review route; without askHandle consumers headless
+        // builds get no route and deny typed.
+        securityReview: securityReviewRouteFromAsk(askHandle.ask),
       },
     });
     writeErr(`iknow serve  http://${listening.host}:${listening.port}/`);

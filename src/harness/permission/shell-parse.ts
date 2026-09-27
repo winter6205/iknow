@@ -920,7 +920,26 @@ function redirectOwnerStartOf(
     return REDIRECT_NODE_TYPES.has(node.type) ? ctx.redirectOwnerStart : null;
   }
   const body = node.childForFieldName("body");
-  return body !== null && body.type === "command" ? spanOf(body).start : null;
+  if (body === null) {
+    return null;
+  }
+  if (body.type === "command") {
+    return spanOf(body).start;
+  }
+  // A list body hoists the redirect out of its chain: in
+  // `cd /tmp && bash <<'EOF'` the operator sits after the whole list, and the
+  // process bash hands the body to is the LAST command before it. Attributing
+  // the redirect there keeps the receiver parse-derived; falling back to the
+  // first word (`cd`) or to silence (`null`) would both misprice the body.
+  if (body.type === "list") {
+    for (let index = body.childCount - 1; index >= 0; index -= 1) {
+      const child = body.child(index);
+      if (child !== null && child.type === "command") {
+        return spanOf(child).start;
+      }
+    }
+  }
+  return null;
 }
 
 function ownerForChildren(
@@ -1252,8 +1271,11 @@ function emitHeredocFacts(
   });
   if (quoted) {
     drafts.inert.push(
+      // The quoting flag is a fact about the delimiter, not about the
+      // receiver: an ownerless entry is still a quoted body, and the
+      // receiver rule downstream is what decides whether that makes it data.
       owner === null
-        ? { span: bodySpan, why: "heredoc-body" }
+        ? { delimiterQuoted: true, span: bodySpan, why: "heredoc-body" }
         : {
             delimiterQuoted: true,
             ownerCommandIndex: owner,

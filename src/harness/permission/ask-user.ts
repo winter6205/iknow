@@ -30,10 +30,17 @@ const NO_TOKEN = "n";
 /**
  * Prompt the user via readline for y/N approval. Returns true on `y`, false on
  * `n`. EOF, input failure, or caller abort → false (fail-closed).
+ *
+ * ADR-0127 (H5): every prompt returned by ONE `createTtyAskUser` instance is
+ * serialized behind a FIFO queue. The inlet is shared (chat's ordinary ask
+ * and relayed subagent security reviews ride the same stdin), and two live
+ * readlines on one stream let a single typed answer settle both calls — a
+ * violation of the one-call-scoped approval contract. Queued prompts each
+ * own their readline and receive only their own answer; an aborted caller
+ * still short-circuits at entry (false, no prompt).
  */
 export function createTtyAskUser(opts?: TtyAskUserOpts): AskUser {
-  return async (ctx) => {
-    if (ctx.signal?.aborted === true) return false;
+  const promptOnce = (ctx: Parameters<AskUser>[0]): Promise<boolean> => {
     const stdin = opts?.stdin ?? process.stdin;
     const stdout = opts?.stdout ?? process.stdout;
     const hint = ctx.summaryHint ? ` ${ctx.summaryHint}` : "";
@@ -85,6 +92,30 @@ export function createTtyAskUser(opts?: TtyAskUserOpts): AskUser {
         finish(false);
       }
     });
+  };
+
+  // FIFO inlet: the first call prompts synchronously (a test / caller that
+  // touches stdin immediately must not race a microtask delay); later calls
+  // queue behind the previous prompt's settlement, never behind each other's
+  // answers.
+  let tail = Promise.resolve();
+  let queued = false;
+  return async (ctx) => {
+    if (ctx.signal?.aborted === true) return false;
+    const previous = tail;
+    let release!: () => void;
+    tail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const outcome = queued
+      ? previous.then(() => promptOnce(ctx))
+      : promptOnce(ctx);
+    queued = true;
+    // promptOnce never rejects (fail-closed by construction); the second
+    // handler is a belt so one impossible rejection can never wedge the
+    // queue for every later prompt.
+    outcome.then(release, release);
+    return await outcome;
   };
 }
 

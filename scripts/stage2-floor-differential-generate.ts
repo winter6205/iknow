@@ -3,24 +3,35 @@
  * Stage 2 floor-differential generator.
  *
  * Dual-runs a command-shape population through the PRE-migration oracle — the
- * base commit's own `hard-walls.ts`, materialized by `git show` into a
- * throwaway path outside the repository, never the working tree's legacy
- * export — and through the working tree, then writes one JSONL row per
+ * base commit's own `hard-walls.ts` AND its runtime import graph, each module
+ * materialized from its base blob by `git show` into a throwaway mirror
+ * outside the repository, never the working tree's legacy exports or siblings —
+ * and through the working tree, then writes one JSONL row per
  * (command, wall) pair to the tracked fixture.
  *
  * Rows carry the closed divergence vocabulary: `same` when both sides agree
  * exactly, `expected-relaxation` with the licensed class number AND the spec
  * clause that licenses it when the base denied and the working tree allows,
  * `authorized-id-move` for the one denial whose reported id changes while its
- * tier does not, and `open` for anything else — including any row where the
- * migration newly denies, which this generator can never license. `open` is a
- * loud result: the fixture test fails on it.
+ * tier does not, `fixed` for the allow-to-deny move the spec authorizes in
+ * advance — the two code-bearing fork-bomb variants, with their cause recorded —
+ * `security-review` for the deny-to-reviewed-ask move ADR-0127 routes (SC-S2-6
+ * class (4): the live review tier is asked first on every deny-to-allow
+ * transition, so no row a reviewed HEAD puts before a human is ever priced
+ * here as an inert relaxation), and `open` for anything else, including every
+ * other row on which the migration newly denies, which this generator can
+ * never license. `open` is a loud result: the fixture test fails on it.
  *
  * The licensing predicates here are written from the spec and the parse facts,
  * never read off the wall: a predicate that imported the roster it is grading
- * could not fail when the roster narrowed. That independence is why
- * `EXECUTION_CARRIER_NAMES` is a second list rather than an import, and why the
- * fixture test pins the two lists agreeing by membership.
+ * could not fail when the roster narrowed. That independence runs in both
+ * directions — this file prices a span as inert only from positive proofs it
+ * carries itself (an inert-consumer set it wrote, per-command labels in
+ * `tests/fixtures/shell-divergence/independent-class-fixtures.jsonl`, and the
+ * baseline hits recorded in the rows), never from an absence in any production
+ * roster, and the grader re-derives every license from those same fixture-side
+ * facts, so a name dropped from either side fails loudly instead of re-tagging
+ * a regression `same`.
  *
  * Corpus input is inert text. Nothing here executes a command; the only child
  * process is `git show`, and the only oracle import is a source file.
@@ -36,18 +47,21 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { checkCorpusLine } from "./shell-parse-divergence.ts";
 import {
+  analyzeSecurityReview,
   commandContainsSensitivePath,
   findDangerousPattern,
   type DangerousPatternHit,
 } from "../src/harness/permission/hard-walls.js";
+import type { SecurityReviewRequirement } from "../src/harness/permission/security-review.js";
 import {
   parseForSecurity,
   type FactSpan,
@@ -84,7 +98,12 @@ const DEFAULT_OUT = join(DIFFERENTIAL_DIR, "stage2-differential.jsonl");
 export type WallName = "pattern" | "sensitive";
 
 export type DivergenceLabel =
-  "same" | "expected-relaxation" | "authorized-id-move" | "fixed" | "open";
+  | "same"
+  | "expected-relaxation"
+  | "authorized-id-move"
+  | "fixed"
+  | "security-review"
+  | "open";
 
 /** The licensed relaxation classes: quote/heredoc, inert-span, operand-scope. */
 export type RelaxationClass = "1" | "2" | "3";
@@ -102,6 +121,16 @@ export const RELAXATION_CLAUSES: Record<RelaxationClass, string> = {
   "3": "specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)",
 };
 
+/**
+ * ADR-0127's per-call answers for a reviewed row: policy evaluates the
+ * requirement above both mode branches, so an interactive default and an
+ * interactive full_auto call each ask.
+ */
+export interface ReviewEvidence {
+  readonly default: "ask";
+  readonly full_auto: "ask";
+}
+
 export interface DifferentialRow {
   readonly command: string;
   readonly wall: WallName;
@@ -110,10 +139,14 @@ export interface DifferentialRow {
   readonly label: DivergenceLabel;
   readonly class?: RelaxationClass;
   readonly clause?: string;
+  /** The evidence a `fixed` or `security-review` row arrives with. */
+  readonly span?: FactSpan;
+  readonly cause?: string;
+  readonly review?: ReviewEvidence;
 }
 
 /** One wall answered by one side of the differential. */
-interface Oracle {
+export interface Oracle {
   readonly pattern: (command: string) => DangerousPatternHit | null;
   readonly sensitive: (command: string) => boolean;
 }
@@ -162,56 +195,66 @@ function gitShow(rev: string, path: string): string {
 }
 
 /**
- * The base file imports its siblings with `./name.js` specifiers, which resolve
- * to nothing once the file sits outside the repository. Point them at the
- * sibling that is actually on disk; `assertSiblingsFrozen` proves below that
- * "on disk" and "at the base rev" are the same bytes.
+ * The oracle's validity hinge, moved from comparison to construction: every
+ * module the copied file imports at RUNTIME is written from its own base blob,
+ * so a sibling that drifted in the working tree (a repaired receiver
+ * attribution, a moved roster) cannot silently change what the frozen copy
+ * computes. Type-only specifiers are left untouched — they carry no runtime
+ * edge and are erased when the mirror is loaded. `node_modules` is symlinked
+ * into the scratch root so the mirror's package requires resolve the same
+ * bindings the repository's would.
  */
-function rewriteSiblingSpecifiers(source: string): string {
-  return source.replace(
-    /from "\.\/([A-Za-z0-9_-]+)\.js"/g,
-    (_match, name: string) =>
-      `from "${join(REPO_ROOT, "src", "harness", "permission", `${name}.ts`)}"`
+function materializeOracleModule(
+  rev: string,
+  relPath: string,
+  outDir: string,
+  written: Map<string, string>
+): string {
+  const cached = written.get(relPath);
+  if (cached !== undefined) return cached;
+  const file = join(
+    outDir,
+    `base-${relPath.replace(/[/.]/g, "_")}.ts`
   );
-}
-
-/** Every sibling module name the copied file imports from its own directory. */
-function siblingModules(source: string): string[] {
-  return [
-    ...new Set(
-      [...source.matchAll(/from "\.\/([A-Za-z0-9_-]+)\.js"/g)].map(
-        (match) => match[1] as string
-      )
-    ),
-  ];
+  written.set(relPath, file);
+  const source = gitShow(rev, relPath);
+  const dir = dirname(relPath);
+  const runtime = new Set(runtimeSiblingPaths(relPath, source));
+  const rewritten = source.replace(
+    /from "(\.{1,2}\/[^"]+\.js)"/g,
+    (match, spec: string) => {
+      const abs = resolve(REPO_ROOT, dir, spec.replace(/\.js$/, ".ts"));
+      const edge = relative(REPO_ROOT, abs).replace(/\\/g, "/");
+      if (!runtime.has(edge)) return match;
+      return `from "${materializeOracleModule(rev, edge, outDir, written)}"`;
+    }
+  );
+  writeFileSync(file, rewritten);
+  return file;
 }
 
 /**
- * The oracle's validity hinge: only `hard-walls.ts` may have moved since the
- * base rev. A sibling that moved would silently change what the frozen copy
- * computes, so the copy would stop being the pre-state. Fail rather than measure
- * something else.
+ * The runtime import edges of one source: statements beginning `import type`
+ * or `export type` are stripped first, because they contribute nothing the
+ * copy can observe at load.
  */
-function assertSiblingsFrozen(rev: string, modules: readonly string[]): void {
-  const dir = dirname(WALL_PATH);
-  for (const name of modules) {
-    const path = join(dir, `${name}.ts`);
-    const atBase = gitShow(rev, path);
-    if (atBase !== readFileSync(join(REPO_ROOT, path), "utf8")) {
-      throw new Error(
-        `oracle is not frozen: ${path} differs between ${rev} and the working tree`
-      );
-    }
+function runtimeSiblingPaths(relPath: string, source: string): string[] {
+  const stripped = source
+    .replace(/^[ \t]*import\s+type\s+[\s\S]*?from\s+"[^"]+";?[ \t]*$/gm, "")
+    .replace(/^[ \t]*export\s+type\s+[\s\S]*?from\s+"[^"]+";?[ \t]*$/gm, "");
+  const dir = dirname(relPath);
+  const edges: string[] = [];
+  for (const match of stripped.matchAll(/from\s+"(\.{1,2}\/[^"]+\.js)"/g)) {
+    const abs = resolve(REPO_ROOT, dir, match[1]!.replace(/\.js$/, ".ts"));
+    edges.push(relative(REPO_ROOT, abs).replace(/\\/g, "/"));
   }
+  return [...new Set(edges)];
 }
 
-/** The base `hard-walls.ts` written outside the repo, ready to import. */
+/** The base `hard-walls.ts` and its runtime graph, mirrored outside the repo. */
 function materializeBaseSource(rev: string, outDir: string): string {
-  const frozen = gitShow(rev, WALL_PATH);
-  assertSiblingsFrozen(rev, siblingModules(frozen));
-  const file = join(outDir, "base-hard-walls.ts");
-  writeFileSync(file, rewriteSiblingSpecifiers(frozen));
-  return file;
+  symlinkSync(join(REPO_ROOT, "node_modules"), join(outDir, "node_modules"));
+  return materializeOracleModule(rev, WALL_PATH, outDir, new Map());
 }
 
 type ImportedModule = {
@@ -236,7 +279,7 @@ async function loadBaseOracle(rev: string, outDir: string): Promise<Oracle> {
 // ---------------------------------------------------------------------------
 
 /** `text` with each span replaced by blanks — never trimmed or joined. */
-function blankSpans(text: string, spans: readonly FactSpan[]): string {
+export function blankSpans(text: string, spans: readonly FactSpan[]): string {
   if (spans.length === 0) return text;
   const chars = text.split("");
   for (const span of spans) {
@@ -267,14 +310,37 @@ const CODE_CONSUMING_NAMES: ReadonlySet<string> = new Set([
 ]);
 
 /**
+ * The receivers this file positively classifies as inert data consumers: names
+ * whose own sweeps it has priced as treating operands as text, written here as
+ * fixture data with their expectations labeled per command in
+ * `independent-class-fixtures.jsonl`. This is the only path to a `data` owner:
+ * absence from the carriers and wrappers proves nothing, so an unlisted head
+ * like `chroot` is classified as unproven, never as inert (SC-S2-9).
+ * `awk` is deliberately NOT in this set — its program operand can call
+ * `system()`, so SC-S2-9 keeps it outside the proof of inertness and its
+ * security-relevant operands land before the review tier instead.
+ */
+const PROVEN_INERT_CONSUMERS: ReadonlySet<string> = new Set([
+  "echo",
+  "cat",
+  "test",
+  "head",
+  "grep",
+  "printf",
+  "ls",
+  "notify-send",
+]);
+
+/**
  * Names that run what they are handed somewhere other than in this shell: `ssh`
  * and `su` hand the words to a shell on the far side or under another uid,
  * `docker` / `podman` / `kubectl exec` spawn them, `watch`, `parallel` and
  * `xargs` build a command out of them. An operand run elsewhere is not data in
  * SC-S2-1's third-flip sense, so no relaxation class may license a span one of
- * these names was handed. This list is written from the spec, not imported from
- * the wall — the fixture test pins the two agreeing by membership, so drift in
- * either direction fails loudly instead of re-tagging a regression `same`.
+ * these names was handed. This list is the ledger's own classification, written
+ * from the spec and priced through the carrier sweep; a wall that stops
+ * denying any swept shape fails the fixture test on the wall's live answer, not
+ * on a comparison of the two declarations.
  */
 export const EXECUTION_CARRIER_NAMES: ReadonlySet<string> = new Set([
   "ssh",
@@ -291,8 +357,8 @@ export const EXECUTION_CARRIER_NAMES: ReadonlySet<string> = new Set([
  * The wall's other four, which are not carriers across a process boundary but
  * still neither discard nor print what they are handed: `eval` runs it in this
  * shell, `trap` stores it to run later, `alias` stores it as a name, `env` runs
- * it as the program's own argv. Written from the spec and pinned by membership
- * against the wall's own literal, exactly as the carrier list is.
+ * it as the program's own argv. Ledger-owned classifications like the carrier
+ * list, each priced by a swept shape that must stay denied on both sides.
  */
 export const STORED_OR_RUNNED_OPERAND_NAMES: ReadonlySet<string> = new Set([
   "eval",
@@ -311,10 +377,10 @@ const EXECUTED_OPERAND_NAMES: ReadonlySet<string> = new Set([
 /**
  * Wrappers that stay in front of a command position without owning it — the
  * wall's own fold universe, minus the names that own it by running or storing
- * what they are handed. Pinned by membership against the wall's two roster
- * literals, because a prefix answered as an ordinary data command here hands
- * its operand to class 3: `timeout 5 rm -rf /x` relaxed would be excused, not
- * opened.
+ * what they are handed. A prefix answered as an ordinary data command here
+ * hands its operand to class 3: `timeout 5 rm -rf /x` relaxed would be excused,
+ * not opened, so every wrapper spelling is swept as a shape that must stay
+ * unlicensable.
  */
 export const TRANSPARENT_WRAPPERS: ReadonlySet<string> = new Set([
   "sudo",
@@ -359,14 +425,19 @@ function wordName(word: WordFact | undefined): string {
 }
 
 /**
- * What owns a node's command position: a named command, an ordinary data
- * command, or nothing this file can name because a wrapper prefix ran out into
- * a token it does not model (`sudo -u root …`, whose arity the wall reads and
- * this ledger deliberately does not import). The third arm licenses nothing.
+ * What owns a node's command position: a named command, a positively
+ * classified inert consumer, an executor this file has no label for, or
+ * nothing it can name because a wrapper prefix ran out into a token it does not
+ * model (`sudo -u root …`, whose arity the wall reads and this ledger
+ * deliberately does not import). The last two arms license nothing: SC-S2-9
+ * refuses the inference "absent from the runner list, therefore data", so an
+ * unlisted head like `chroot` is `unproven` and its operands are never
+ * class-(3) material.
  */
-type NodeOwner =
+export type NodeOwner =
   | { readonly state: "owner"; readonly at: number }
   | { readonly state: "data" }
+  | { readonly state: "unproven" }
   | { readonly state: "unresolved"; readonly at: number };
 
 /** A token that is one wrapper's own argument, never the wrapped command. */
@@ -379,21 +450,36 @@ function isWrapperArgument(word: WordFact): boolean {
   return true;
 }
 
-/** The node's command position, folded the way the wall folds. */
-function nodeOwner(argv: readonly WordFact[]): NodeOwner {
+/** Does this folded word name own (execute) what follows it? */
+function ownsExecutedOperand(name: string): boolean {
+  return EXECUTED_OPERAND_NAMES.has(name) || isDestructiveName(name);
+}
+
+/** A word with no wrapper ahead of it: proven data consumer or unproven. */
+function firstWordOwner(name: string): NodeOwner {
+  return PROVEN_INERT_CONSUMERS.has(name)
+    ? { state: "data" }
+    : { state: "unproven" };
+}
+
+/** The node's command position, folded the way the wall folds. Exported for
+ * the fixture test, which prices its labeled unknown-executor cases through it
+ * without reading any production declaration. */
+export function nodeOwner(argv: readonly WordFact[]): NodeOwner {
   let wrapped = false;
   for (let i = 0; i < argv.length; i += 1) {
     const name = wordName(argv[i]);
-    if (EXECUTED_OPERAND_NAMES.has(name) || isDestructiveName(name))
-      return { state: "owner", at: i };
+    if (ownsExecutedOperand(name)) return { state: "owner", at: i };
     if (TRANSPARENT_WRAPPERS.has(name)) {
       wrapped = true;
       continue;
     }
     if (wrapped && isWrapperArgument(argv[i]!)) continue;
-    return wrapped ? { state: "unresolved", at: i } : { state: "data" };
+    if (wrapped) return { state: "unresolved", at: i };
+    return firstWordOwner(name);
   }
-  return wrapped ? { state: "unresolved", at: argv.length } : { state: "data" };
+  if (wrapped) return { state: "unresolved", at: argv.length };
+  return argv.length === 0 ? { state: "data" } : { state: "unproven" };
 }
 
 function spansOf(words: readonly WordFact[]): FactSpan[] {
@@ -450,20 +536,21 @@ function doubleQuotedSpans(facts: SecurityParseOkFacts): FactSpan[] {
 }
 
 /**
- * A quoted-delimiter heredoc body whose receiver, wrappers folded, neither eats
- * code nor runs what it is handed — so the body is that command's data.
+ * A quoted-delimiter heredoc body whose receiver, wrappers folded, is
+ * positively classified as an inert data consumer — so the body is that
+ * command's data. A missing `receiverCommandIndex`, a receiver the parse does
+ * not name, and a receiver this file cannot prove inert are all unresolved
+ * cases, never data by fallback (SC-S2-6).
  */
-function dataHeredocSpans(facts: SecurityParseOkFacts): FactSpan[] {
+export function dataHeredocSpans(facts: SecurityParseOkFacts): FactSpan[] {
   const spans: FactSpan[] = [];
   for (const heredoc of facts.heredocs) {
     if (!heredoc.delimiterQuoted) continue;
     const receiver = facts.commands.find(
       (command) => command.index === heredoc.receiverCommandIndex
     );
-    // No receiver, or a receiver this file cannot name an owner for, is not
-    // evidence that the body is data.
-    if (receiver !== undefined && nodeOwner(receiver.argv).state !== "data")
-      continue;
+    if (receiver === undefined) continue;
+    if (nodeOwner(receiver.argv).state !== "data") continue;
     spans.push(heredoc.bodySpan);
   }
   return spans;
@@ -490,6 +577,7 @@ export interface Verdict {
   readonly label: DivergenceLabel;
   readonly class?: RelaxationClass;
   readonly clause?: string;
+  readonly cause?: string;
 }
 
 export function valuesEqual(left: WallValue, right: WallValue): boolean {
@@ -509,7 +597,7 @@ function factsOf(command: string): SecurityParseOkFacts | null {
  * operand blocks the excuse in every direction: the words a carrier was handed
  * are run somewhere, so no class may record them as inert text.
  */
-function quoteLicensedSpans(command: string): FactSpan[] {
+export function quoteLicensedSpans(command: string): FactSpan[] {
   const facts = factsOf(command);
   if (facts === null) return [];
   return outsideOf(
@@ -523,7 +611,7 @@ function quoteLicensedSpans(command: string): FactSpan[] {
 }
 
 /** The inert spans the path wall may excise: comment text and data bodies. */
-function inertLicensedSpans(command: string): FactSpan[] {
+export function inertLicensedSpans(command: string): FactSpan[] {
   const facts = factsOf(command);
   if (facts === null) return [];
   return [...inertTextSpans(facts), ...dataHeredocSpans(facts)];
@@ -533,7 +621,7 @@ function inertLicensedSpans(command: string): FactSpan[] {
  * Operands of a command that eats no code, runs nothing it is handed and is not
  * itself destructive — the only operands class (3) may call data.
  */
-function operandLicensedSpans(command: string): FactSpan[] {
+export function operandLicensedSpans(command: string): FactSpan[] {
   const facts = factsOf(command);
   if (facts === null) return [];
   return outsideOf(dataOperandSpans(facts), executedOperandSpans(facts));
@@ -573,6 +661,36 @@ function relaxation(cls: RelaxationClass): Verdict {
   };
 }
 
+/**
+ * The two code-bearing fork-bomb shapes SC-S2-8 authorizes to newly deny, and
+ * the hit the structural rule must report for the authorization to hold. The
+ * direct form is not here — it keeps its deny and owns the one authorized id
+ * move instead.
+ */
+const AUTHORIZED_NEW_DENY_SHAPES: readonly string[] = [
+  "eval ':(){ :|:& };:'",
+  "bash -c ':(){ :|:& };:'",
+];
+
+const FORK_BOMB_DENY: DangerousPatternHit = {
+  id: "destructive-disk",
+  pattern: ":(){ :|:& };:",
+};
+
+const NEW_DENY_CAUSE =
+  "specs/hard-wall-ast-migration.md SC-S2-8: a confirmed fork-bomb structure supplied as code to eval or a shell -c operand";
+
+function isAuthorizedNewDeny(
+  command: string,
+  head: DangerousPatternHit
+): boolean {
+  return (
+    AUTHORIZED_NEW_DENY_SHAPES.includes(command) &&
+    head.id === FORK_BOMB_DENY.id &&
+    head.pattern === FORK_BOMB_DENY.pattern
+  );
+}
+
 export function classifyPattern(
   command: string,
   base: DangerousPatternHit | null,
@@ -580,7 +698,11 @@ export function classifyPattern(
   oracle: Oracle
 ): Verdict {
   if (valuesEqual(base, head)) return { label: "same" };
-  if (base === null) return { label: "open" };
+  if (base === null) {
+    return head !== null && isAuthorizedNewDeny(command, head)
+      ? { label: "fixed", cause: NEW_DENY_CAUSE }
+      : { label: "open" };
+  }
   if (head !== null) {
     return isAuthorizedMove(base, head)
       ? { label: "authorized-id-move" }
@@ -608,37 +730,84 @@ export function classifySensitive(
     : { label: "open" };
 }
 
+/**
+ * A review row's evidence: ADR-0127's requirement carries the unresolved span
+ * and typed cause, and policy evaluates the requirement above both mode
+ * branches, so each interactive call answers `ask`.
+ */
+function reviewRowEvidence(requirement: SecurityReviewRequirement): {
+  label: "security-review";
+  span: FactSpan;
+  cause: string;
+  review: ReviewEvidence;
+} {
+  return {
+    label: "security-review",
+    span: requirement.span,
+    cause: `${requirement.cause}: ${requirement.detail}`,
+    review: { default: "ask", full_auto: "ask" },
+  };
+}
+
+/**
+ * SC-S2-6 class (4): the review tier is asked FIRST on any deny-to-allow
+ * transition. A command live HEAD routes to security review records the
+ * requirement's span, typed cause and both-mode ask evidence — never a
+ * relaxation that prices reviewed content as inert. An `invalid` or `fault`
+ * scan ends in a typed flow deny, so such a transition is left unresolved
+ * (`open`) and fails the fixture loudly instead of being priced inert.
+ */
+export function priceWall(
+  command: string,
+  base: WallValue,
+  head: WallValue,
+  classify: () => Verdict
+): Verdict & Pick<DifferentialRow, "span" | "review"> {
+  if (denies(base) && !denies(head)) {
+    const scan = analyzeSecurityReview(command);
+    if (scan.verdict === "review") {
+      return reviewRowEvidence(scan.requirement);
+    }
+    if (scan.verdict !== "clean") return { label: "open" };
+  }
+  return classify();
+}
+
 export function buildRows(
   commands: readonly string[],
   oracle: Oracle
 ): DifferentialRow[] {
   const rows: DifferentialRow[] = [];
   for (const command of commands) {
-    const pattern = classifyPattern(
+    const patternBase = oracle.pattern(command);
+    const patternHead = headOracle.pattern(command);
+    const sensitiveBase = oracle.sensitive(command);
+    const sensitiveHead = headOracle.sensitive(command);
+    const pattern = priceWall(
       command,
-      oracle.pattern(command),
-      headOracle.pattern(command),
-      oracle
+      patternBase,
+      patternHead,
+      () => classifyPattern(command, patternBase, patternHead, oracle)
     );
-    const sensitive = classifySensitive(
+    const sensitive = priceWall(
       command,
-      oracle.sensitive(command),
-      headOracle.sensitive(command),
-      oracle
+      sensitiveBase,
+      sensitiveHead,
+      () => classifySensitive(command, sensitiveBase, sensitiveHead, oracle)
     );
     rows.push(
       {
         command,
         wall: "pattern",
-        base: oracle.pattern(command),
-        head: headOracle.pattern(command),
+        base: patternBase,
+        head: patternHead,
         ...pattern,
       },
       {
         command,
         wall: "sensitive",
-        base: oracle.sensitive(command),
-        head: headOracle.sensitive(command),
+        base: sensitiveBase,
+        head: sensitiveHead,
         ...sensitive,
       }
     );
@@ -825,25 +994,49 @@ const CARRIER_HEREDOC_SHAPES: readonly string[] = [
   "docker exec -i c sh <<'EOF'\nrm -rf /tmp/x\nEOF",
 ];
 
-/** Every shape the carrier floor is priced on. */
+/**
+ * Every shape the carrier floor is priced on: each roster carrier, every
+ * folded wrapper, the store-or-run four, and the carrier heredoc — all of them
+ * in the priced population, all of them denied on both sides. The fixture test
+ * re-checks every one, so a name dropped from the wall's roster surfaces as a
+ * loud failure on the wall's live answer, not on a comparison of declarations.
+ */
 export function carrierFloorShapes(): string[] {
   return [
     ...carrierSweepShapes(),
     ...carrierShapes(),
     ...CARRIER_HEREDOC_SHAPES,
+    ...wrapperShapes(),
+  ];
+}
+
+/**
+ * The shapes whose receiver or head this file cannot positively classify —
+ * carriers, wrappers, store-or-run names, unknown executors, bodies with no
+ * attributed receiver. None of them may ever be licensed as an inert
+ * relaxation, whether or not the wall currently allows them.
+ */
+export function unlicensableFloorShapes(): string[] {
+  return [
+    ...carrierFloorShapes(),
+    ...UNPROVEN_EXECUTOR_SHAPES,
+    ...nullReceiverHeredocShapes(),
   ];
 }
 
 /**
  * The license's own floor, asked where only this file can ask it: hand each
- * carrier shape to the licensing predicates as if the wall had stopped denying
- * it, and require the answer `open`. A carrier shape that came back
- * `expected-relaxation` would mean this generator could excuse the very
- * regression the carrier roster exists to catch.
+ * carrier, wrapper-fold, and unknown-executor shape to the licensing
+ * predicates as if the wall had stopped denying it, and require the answer
+ * `open`. A shape that came back `expected-relaxation` would mean this
+ * generator could excuse the very regression the rosters exist to catch —
+ * including the regression of a roster narrowing on one side only.
  */
 function assertCarrierOperandsUnlicensable(oracle: Oracle): void {
-  for (const command of carrierFloorShapes()) {
+  for (const command of unlicensableFloorShapes()) {
     const base = oracle.pattern(command);
+    const head = headOracle.pattern(command);
+    if (base === null && head === null) continue;
     if (base === null) {
       throw new Error(
         `carrier floor shape has no pre-state deny to price: ${JSON.stringify(command)}`
@@ -852,7 +1045,7 @@ function assertCarrierOperandsUnlicensable(oracle: Oracle): void {
     const verdict = classifyPattern(command, base, null, oracle);
     if (verdict.label !== "open") {
       throw new Error(
-        `a carrier's operand must stay unlicensable: ${JSON.stringify(command)} ` +
+        `an unlicensable operand would be licensed: ${JSON.stringify(command)} ` +
           `would be recorded ${JSON.stringify(verdict)}`
       );
     }
@@ -866,19 +1059,25 @@ function carrierSweepShapes(): string[] {
   );
 }
 
-/** Names on neither roster, so their operands are the class-(3) material. */
-const INERT_NAMES: readonly string[] = [
-  "grep",
-  "echo",
-  "cat",
-  "awk",
-  "head",
-  "test",
-];
+/**
+ * The names the inert sweep prices, one spelling per class-(3) supplier the
+ * ledger owns. The sweep and the `data` classification read this one list, so
+ * a name can never be swept as inert while being priced as something else.
+ */
+const INERT_NAMES: readonly string[] = [...PROVEN_INERT_CONSUMERS];
 
-/** Every inert name × every roster literal, in each inert spelling. */
-function inertNameSweepShapes(): string[] {
-  return INERT_NAMES.flatMap((name) =>
+/**
+ * The name SC-S2-9 withholds from the positive-inert set on purpose — `awk`'s
+ * program operand can call `system()`. Swept in the same four spellings as
+ * the inert names so the withholding is priced, not asserted: a
+ * security-relevant awk operand must land before the review tier, never
+ * inside a data license.
+ */
+const EXCLUDED_FROM_INERT_NAMES: readonly string[] = ["awk"];
+
+/** One real invocation per name × roster literal, in each operand spelling. */
+function sweepFor(names: readonly string[]): string[] {
+  return names.flatMap((name) =>
     SWEEP_LITERALS.flatMap((literal) => [
       `${name} ${literal}`,
       `${name} '${literal}'`,
@@ -886,6 +1085,41 @@ function inertNameSweepShapes(): string[] {
       `${name} notes.txt # ${literal}`,
     ])
   );
+}
+
+/** An executor no roster of this file knows: neither carrier, wrapper, nor
+ * proven inert consumer — the class SC-S2-9 keeps out of the inert set. */
+const UNPROVEN_EXECUTOR_SHAPES: readonly string[] = [
+  "chroot /srv rm -rf /tmp/x",
+  "chroot /srv shutdown -h now",
+];
+
+/** Every inert name × every roster literal, in each inert spelling. */
+function inertNameSweepShapes(): string[] {
+  return sweepFor(INERT_NAMES);
+}
+
+/** The excluded-name sweep, priced in the ledger as review, never as data. */
+export function excludedFromInertSweepShapes(): string[] {
+  return sweepFor(EXCLUDED_FROM_INERT_NAMES);
+}
+
+/**
+ * Heredocs whose receiver the parse genuinely cannot attribute: an assignment
+ * prefix owning no command, a redirect hoisted onto a pipeline or a compound
+ * statement. None of them may be priced as data; on HEAD each one with
+ * relevant dangerous content is the review tier's (`receiver-unresolved`).
+ * `cd /tmp && cat <<'EOF'` is NOT here: the list-body attribution repair names
+ * `cat` as the receiver, which makes its quoted body a data body under the
+ * proven-inert rule.
+ */
+function nullReceiverHeredocShapes(): string[] {
+  return [
+    "FOO=1 <<'EOF'\nrm -rf /tmp/x\nEOF",
+    "FOO=1 <<'EOF'\nid_rsa\nEOF",
+    "echo a | cat <<'EOF'\nrm -rf /tmp/x\nEOF",
+    "{ true; } <<'EOF'\nrm -rf /tmp/x\nEOF",
+  ];
 }
 
 /** Heredocs under a code receiver and under a data receiver, quoted or not. */
@@ -904,6 +1138,12 @@ function heredocShapes(): string[] {
     "python3 <<'EOF'\nrm -rf /tmp/x\nEOF",
     "sudo bash <<'EOF'\nrm -rf /tmp/x\nEOF",
     "docker exec -i c sh <<'EOF'\ncat /etc/passwd\nEOF",
+    // The list- and compound-body attributions SC-S2-7 pins: the receiver is
+    // parse-derived in a multi-command segment, so `cat`'s quoted bodies here
+    // are data bodies under the positive-inert rule.
+    "cd /tmp && cat <<'EOF'\nrm -rf /tmp/x\nEOF",
+    "cd /tmp && cat <<'EOF'\nid_rsa\nEOF",
+    "if true; then cat <<'EOF'\nrm -rf /tmp/x\nEOF\nfi",
   ];
 }
 
@@ -996,7 +1236,10 @@ export function buildPopulation(corpusDir: string): string[] {
     carrierShapes(),
     carrierSweepShapes(),
     inertNameSweepShapes(),
+    excludedFromInertSweepShapes(),
+    [...UNPROVEN_EXECUTOR_SHAPES],
     heredocShapes(),
+    nullReceiverHeredocShapes(),
     wrapperShapes(),
     inertTextShapes(),
     forkBombShapes(),
@@ -1023,15 +1266,48 @@ function movedId(row: DifferentialRow): boolean {
   );
 }
 
+/** Both recorded answers are `ask`: the review reached the human surface. */
+function reviewedAsAsk(row: DifferentialRow): boolean {
+  return (
+    row.review !== undefined &&
+    row.review.default === "ask" &&
+    row.review.full_auto === "ask"
+  );
+}
+
+/** The evidence bumps a `security-review` row arrives with. */
+function securityReviewBumps(row: DifferentialRow): string[] {
+  const keys = [
+    "deny-to-review",
+    reviewedAsAsk(row) ? "reviewed-ask" : "review-evidence-missing",
+  ];
+  if (row.cause !== undefined) {
+    keys.push(`review-cause:${row.cause.split(":")[0]}`);
+  }
+  return keys;
+}
+
+/** Row-kind → extra report keys, one table per label (the bump names are the
+ * report vocabulary; unknown labels contribute nothing). */
+const LABEL_ROW_BUMPS: Readonly<
+  Partial<Record<DivergenceLabel, (row: DifferentialRow) => string[]>>
+> = {
+  "expected-relaxation": (row) => [
+    row.clause === undefined ? "clauseless" : "cited",
+  ],
+  "security-review": securityReviewBumps,
+  fixed: () => ["authorized-new-deny"],
+};
+
 /** The report buckets one row falls into. */
 function rowBumps(row: DifferentialRow): string[] {
   const keys = [`label:${row.label}`];
   if (row.class !== undefined) keys.push(`class:${row.class}`);
-  if (row.label === "expected-relaxation") {
-    keys.push(row.clause === undefined ? "clauseless" : "cited");
-  }
+  const labelBumps = LABEL_ROW_BUMPS[row.label];
+  if (labelBumps !== undefined) keys.push(...labelBumps(row));
   if (!denies(row.base) && denies(row.head)) keys.push("new-deny");
-  if (denies(row.base) && !denies(row.head)) keys.push("new-allow");
+  if (denies(row.base) && !denies(row.head) && row.label !== "security-review")
+    keys.push("new-allow");
   if (movedId(row)) keys.push("moved");
   return keys;
 }

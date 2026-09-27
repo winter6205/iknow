@@ -106,6 +106,7 @@ export interface CategorizedResult {
  *   - `[hard_wall] sensitive path`               → mid
  *   - `[permission_denied] dangerous`            → mid (dangerous command variant)
  *   - `[network_denied]`                         → mid (network denial)
+ *   - `[security_review_unavailable]`            → mid (ADR-0127 typed review deny)
  *   - `[permission_denied]` (non-dangerous)      → low
  *   - `[user_denied]`                            → low
  *   - `[fs_denied]`                              → mid
@@ -122,8 +123,14 @@ export function categorizeResult(result: {
   }
   const msg = result.message ?? "";
 
-  const { hardWall, permissionDenied, userDenied, networkDenied, fsDenied } =
-    VIOLATION_PREFIXES;
+  const {
+    hardWall,
+    permissionDenied,
+    userDenied,
+    networkDenied,
+    fsDenied,
+    securityReviewUnavailable,
+  } = VIOLATION_PREFIXES;
 
   // Order matters: check the more specific dangerous patterns first so
   // "[permission_denied] dangerous command" doesn't fall through to generic
@@ -134,6 +141,11 @@ export function categorizeResult(result: {
   }
   const permDangerousRe = new RegExp(`\\${permissionDenied}\\s+dangerous`);
   if (permDangerousRe.test(msg)) {
+    return { tier: "mid", detail: msg };
+  }
+  // ADR-0127: a security-review typed deny is security-relevant by
+  // construction — mid, beside the other security denials.
+  if (msg.includes(securityReviewUnavailable)) {
     return { tier: "mid", detail: msg };
   }
   if (msg.includes(networkDenied)) {

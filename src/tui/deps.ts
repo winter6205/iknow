@@ -42,6 +42,7 @@ import { randomUUID } from "node:crypto";
 import type { MemoryLiveFlags } from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
+import type { SecurityReviewRoute } from "../harness/permission/security-review.js";
 import type { WorktreeIsolationHostOpts } from "../harness/isolation/worktree-gate.js";
 import type { IknowSettings } from "../config/settings.js";
 import type { LiveTaskRoot } from "../harness/session-roots.js";
@@ -95,6 +96,9 @@ export interface TuiToolEvent {
 
 export interface BuildTuiDepsOptions {
   readonly askUser: AskUser;
+  /** ADR-0127: interactive security-review route (the TUI ask-bridge modal
+   *  wrapped by the entry); absent → reviews deny typed. */
+  readonly securityReview?: SecurityReviewRoute;
   /** Tool completion event; attribution rules live in hub-bridge.ts
    *  (attribute only when a single session is in flight). */
   readonly onToolEvent?: (event: TuiToolEvent) => void;
@@ -471,6 +475,9 @@ export async function buildTuiDeps(
   const built = await buildHarnessEngine({
     env: bundle.env,
     askUser: opts.askUser,
+    // ADR-0127: the TUI's interactive review route (ask-bridge modal);
+    // absent (undefined passes as absent) → reviews deny typed at the gates.
+    securityReview: opts.securityReview,
     surface: "tui",
     memory: { enabled: true },
     todoDir: todoProjectDir,

@@ -29,10 +29,17 @@ import { checkPermission, type PermissionPolicy } from "./policy.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type {
   AskUser,
+  PermissionOutcome,
   PreHookBlock,
   PreToolUseHook,
   PostToolUseHook,
 } from "./types.js";
+import {
+  SECURITY_REVIEW_DENY_PREFIX,
+  SECURITY_REVIEW_OPTION,
+  type SecurityReviewRequirement,
+  type SecurityReviewRoute,
+} from "./security-review.js";
 
 // Permission-executor prefixes consumed from the SSOT table. Keeping a local
 // const alias preserves the call-site ergonomics (no template-literal drift).
@@ -165,7 +172,23 @@ export interface PermissionExecutorOptions {
    * non-ACI assembly path (handed straight to inner).
    */
   readonly discover?: (name: string) => void;
+  /**
+   * ADR-0127's end-to-end interactive review route (option name pinned by
+   * `SECURITY_REVIEW_OPTION` below). Host entry adapters supply it; a worker
+   * without a parent-owned broker and a bare ACI caller without an
+   * interactive host do NOT — and an ordinary `askUser` callback is never
+   * such a route, however permissive its implementation.
+   */
+  readonly securityReview?: SecurityReviewRoute;
 }
+
+/**
+ * Compile-time pin: the options field above must keep the exact name the
+ * frozen contract exports, so a rename on either side breaks the build.
+ */
+const _SECURITY_REVIEW_OPTION_IS_FIELD: typeof SECURITY_REVIEW_OPTION extends
+  keyof PermissionExecutorOptions ? true : never = true;
+void _SECURITY_REVIEW_OPTION_IS_FIELD;
 
 export type PermissionGate =
   | { readonly kind: "blocked"; readonly result: ToolExecutionResult }
@@ -220,6 +243,76 @@ export function createPermissionRuntime(
   const askUser = opts.askUser;
   const policy = opts.policy;
   const onHookError = opts.onHookError;
+  const reviewRoute = opts.securityReview;
+  let reviewRequestCounter = 0;
+
+  /** One `blocked` outcome with an `execution_failed` message. */
+  function reviewBlocked(call: ToolCall, message: string): PermissionGate {
+    return {
+      kind: "blocked",
+      result: { kind: "execution_failed", toolUseId: call.id, message },
+    };
+  }
+
+  /**
+   * ADR-0127's executor gate, run INSTEAD of the ordinary ask whenever the
+   * outcome carries a review requirement: presence of the end-to-end route —
+   * not of an ask callback — is the proof that a question can reach a human.
+   * No route → typed deny without ever invoking `askUser` (a permissive
+   * callback must not answer a review). Route present → exactly one request
+   * for this call, fresh every call and never persisted; a false answer, a
+   * throw, or a cancellation all deny with the cause recorded.
+   */
+  async function reviewGate(
+    call: ToolCall,
+    def: AciToolDef,
+    requirement: SecurityReviewRequirement,
+    signal?: AbortSignal
+  ): Promise<PermissionGate> {
+    const cause =
+      `cause=${requirement.cause} ` +
+      `span=${String(requirement.span.start)}-${String(requirement.span.end)} ` +
+      `(${def.name})`;
+    if (reviewRoute === undefined) {
+      return reviewBlocked(
+        call,
+        `${SECURITY_REVIEW_DENY_PREFIX}no interactive security-review route for this call: ${cause}`
+      );
+    }
+    let approved = false;
+    try {
+      reviewRequestCounter += 1;
+      approved = await reviewRoute.request({
+        requirement,
+        tool: def.name,
+        input: call.input,
+        summaryHint: summarizeInput(call.input),
+        requestId: `${call.id}#review-${String(reviewRequestCounter)}`,
+        ...(signal !== undefined ? { signal } : {}),
+      });
+    } catch {
+      // EXIT: a failed or disconnected review channel denies this call; the
+      // review never falls through to the ordinary inlet either.
+      approved = false;
+    }
+    if (isAborted(signal)) {
+      return {
+        kind: "blocked",
+        result: {
+          kind: "execution_failed",
+          toolUseId: call.id,
+          message: CANCELLED_RESULT_MESSAGE,
+        },
+      };
+    }
+    if (!approved) {
+      return reviewBlocked(
+        call,
+        `${SECURITY_REVIEW_DENY_PREFIX}security review not approved for this call: ${cause}`
+      );
+    }
+    return { kind: "proceed", def };
+  }
 
   async function gateOne(
     call: ToolCall,
@@ -321,54 +414,7 @@ export function createPermissionRuntime(
     });
 
     if (outcome.decision === "ask") {
-      if (isAborted(signal)) {
-        return {
-          kind: "blocked",
-          result: {
-            kind: "execution_failed",
-            toolUseId: call.id,
-            message: CANCELLED_RESULT_MESSAGE,
-          },
-        };
-      }
-      const hint = summarizeInput(call.input);
-      let approved = false;
-      try {
-        approved = await askUser({
-          tool: def.name,
-          input: call.input,
-          summaryHint: hint,
-          ...(signal !== undefined ? { signal } : {}),
-        });
-      } catch {
-        // EXIT: an unavailable approval inlet must deny the call; never allow
-        // a tool side effect merely because the user prompt failed.
-        approved = false;
-      }
-      if (isAborted(signal)) {
-        // EXIT: caller cancellation wins over a late approval; AskUser cannot
-        // revive a call after the permission wait has been cancelled.
-        return {
-          kind: "blocked",
-          result: {
-            kind: "execution_failed",
-            toolUseId: call.id,
-            message: CANCELLED_RESULT_MESSAGE,
-          },
-        };
-      }
-      if (!approved) {
-        return {
-          kind: "blocked",
-          result: {
-            kind: "execution_failed",
-            toolUseId: call.id,
-            message: isAborted(signal)
-              ? CANCELLED_RESULT_MESSAGE
-              : `${USER_DENIED_PREFIX} user declined tool call: ${def.name}`,
-          },
-        };
-      }
+      return await askGate(call, def, outcome, signal);
     } else if (outcome.decision === "deny") {
       return {
         kind: "blocked",
@@ -376,6 +422,72 @@ export function createPermissionRuntime(
           kind: "execution_failed",
           toolUseId: call.id,
           message: `${PERMISSION_DENIED_PREFIX} ${outcome.reason}`,
+        },
+      };
+    }
+    return { kind: "proceed", def };
+  }
+
+  /**
+   * The `ask` arm of the gate: a review-required ask is answered ONLY through
+   * the route — checked BEFORE `askUser` is invoked, in every mode alike
+   * (ADR-0127) — and everything else keeps the ordinary approval flow
+   * (abort → deny, inlet failure → deny, explicit decline → `[user_denied]`).
+   */
+  async function askGate(
+    call: ToolCall,
+    def: AciToolDef,
+    outcome: PermissionOutcome,
+    signal?: AbortSignal
+  ): Promise<PermissionGate> {
+    if (outcome.securityReview !== undefined) {
+      return await reviewGate(call, def, outcome.securityReview, signal);
+    }
+    if (isAborted(signal)) {
+      return {
+        kind: "blocked",
+        result: {
+          kind: "execution_failed",
+          toolUseId: call.id,
+          message: CANCELLED_RESULT_MESSAGE,
+        },
+      };
+    }
+    const hint = summarizeInput(call.input);
+    let approved = false;
+    try {
+      approved = await askUser({
+        tool: def.name,
+        input: call.input,
+        summaryHint: hint,
+        ...(signal !== undefined ? { signal } : {}),
+      });
+    } catch {
+      // EXIT: an unavailable approval inlet must deny the call; never allow
+      // a tool side effect merely because the user prompt failed.
+      approved = false;
+    }
+    if (isAborted(signal)) {
+      // EXIT: caller cancellation wins over a late approval; AskUser cannot
+      // revive a call after the permission wait has been cancelled.
+      return {
+        kind: "blocked",
+        result: {
+          kind: "execution_failed",
+          toolUseId: call.id,
+          message: CANCELLED_RESULT_MESSAGE,
+        },
+      };
+    }
+    if (!approved) {
+      return {
+        kind: "blocked",
+        result: {
+          kind: "execution_failed",
+          toolUseId: call.id,
+          message: isAborted(signal)
+            ? CANCELLED_RESULT_MESSAGE
+            : `${USER_DENIED_PREFIX} user declined tool call: ${def.name}`,
         },
       };
     }

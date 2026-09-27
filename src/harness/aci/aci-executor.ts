@@ -44,9 +44,21 @@ import {
 import { partitionConcurrencyWaves } from "../tools/concurrency-waves.js";
 import { createAciCatalog } from "../permission/permission-executor.js";
 import { checkPermission } from "../permission/policy.js";
+import { SECURITY_REVIEW_OPTION } from "../permission/security-review.js";
+import type { SecurityReviewRoute } from "../permission/security-review.js";
 import { errorMessage } from "../errors.js";
 import { createPermissionPolicy } from "./permission.js";
 import { TIMEOUT_TIER_MS, type AciCatalog, type AciToolDef } from "./types.js";
+
+/**
+ * Compile-time pin (ADR-0127 H3): `createAciExecutor` passes the route to the
+ * permission runtime under the declared `securityReview` field directly; this
+ * pin keeps that field's name welded to the frozen contract constant — a
+ * rename on either side breaks the build.
+ */
+const _SECURITY_REVIEW_OPTION_IS_FIELD: typeof SECURITY_REVIEW_OPTION extends
+  keyof PermissionExecutorOptions ? true : never = true;
+void _SECURITY_REVIEW_OPTION_IS_FIELD;
 
 export interface AciBackgroundRejection {
   readonly kind: "background_handler_rejection";
@@ -74,8 +86,18 @@ export interface AciExecutorOptions {
   readonly policy?: ReturnType<typeof createPermissionPolicy>;
   /** Legacy shape compat: when no registry/catalog passed, build catalog from registry. */
   readonly registry?: Registry;
-  /** Optional askUser injection (defaults to no-ask for prototype/test callers). */
+  /** Optional askUser injection (defaults to no-ask for prototype/test callers).
+   *  ADR-0127: this inlet is the ORDINARY ask only — the permissive default
+   *  below never answers a security review (that rides its own route). */
   readonly askUser?: PermissionExecutorOptions["askUser"];
+  /**
+   * ADR-0127: end-to-end interactive security-review route (host UI or, for
+   * workers, the parent-owned broker relay). Threaded to the permission
+   * runtime under SECURITY_REVIEW_OPTION; consumption is the executor's
+   * gate. Absent → security reviews deny typed ([security_review_unavailable])
+   * — fabricating a route from the permissive ask default is forbidden.
+   */
+  readonly securityReview?: SecurityReviewRoute;
   /** Optional hooks; default no-op. */
   readonly hooks?: {
     readonly preToolUse?: PermissionExecutorOptions["preToolUse"];
@@ -130,6 +152,9 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
       "createAciExecutor: either `catalog` or `registry` must be provided"
     );
   }
+  // ADR-0127: permissive default stays legal for the ORDINARY ask only
+  // (prototype/test callers). It is never a security-review answer path —
+  // reviews require the explicit route above.
   const askUser = opts.askUser ?? (async () => true); // prototype default: no-ask approve
   // ADR-0043 + ADR-0046: inject isDiscovered / discover from the catalog into
   // the permission runtime so gateOne takes the hydrate-then-execute path
@@ -137,7 +162,11 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
   // registry — the latter keeps byte-stable behavior: without
   // isDiscovered/discover the gate never triggers hydrate).
   const catalogForT5: AciCatalog = opts.catalog ?? createAciCatalog(registry);
-  const perm = createPermissionRuntime({
+  // ADR-0127 + H3: the route is declared on PermissionExecutorOptions, so the
+  // direct pass below needs no intersection shim anymore; the pin keeps the
+  // frozen option NAME (SECURITY_REVIEW_OPTION) compile-checked against the
+  // field — a rename on either side breaks the build.
+  const permRuntimeOpts: PermissionExecutorOptions = {
     inner: opts.inner,
     registry,
     policy,
@@ -150,7 +179,11 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
       ? { isDiscovered: catalogForT5.isDiscovered }
       : {}),
     ...(catalogForT5.discover ? { discover: catalogForT5.discover } : {}),
-  });
+    // undefined passes as absent: the runtime reads the route with an
+    // `=== undefined` check, and an absent route denies reviews typed.
+    securityReview: opts.securityReview,
+  };
+  const perm = createPermissionRuntime(permRuntimeOpts);
   return Object.freeze({
     executeAll: async (
       calls: ReadonlyArray<ToolCall>,

@@ -1,0 +1,18 @@
+{"command":"chroot /srv rm -rf /tmp/x","wall":"pattern","classification":"unknown-executor","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"chroot /srv shutdown -h now","wall":"pattern","classification":"unknown-executor","baseHit":{"id":"destructive-disk","pattern":"shutdown"}}
+{"command":"awk rm -rf /tmp/x","wall":"pattern","classification":"unknown-executor","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"echo rm -rf","wall":"pattern","classification":"proven-inert","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"grep rm -rf /tmp/x","wall":"pattern","classification":"proven-inert","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"watch -n 1 rm -rf /tmp/x","wall":"pattern","classification":"carrier","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"ssh host rm -rf /tmp/x","wall":"pattern","classification":"carrier","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"xargs rm -rf","wall":"pattern","classification":"carrier","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"eval 'rm -rf /tmp/x'","wall":"pattern","classification":"store-or-run","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"trap 'rm -rf /tmp/x' EXIT","wall":"pattern","classification":"store-or-run","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"alias rmall='rm -rf /tmp/x'","wall":"pattern","classification":"store-or-run","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"sudo -u root rm -rf /tmp/x","wall":"pattern","classification":"wrapper","baseHit":{"id":"destructive-rm","pattern":"rm -rf"}}
+{"command":"cat <<'EOF'\nid_rsa\nEOF","wall":"sensitive","classification":"heredoc-data-body","sensitiveFragment":"id_rsa"}
+{"command":"cd /tmp && cat <<'EOF'\nid_rsa\nEOF","wall":"sensitive","classification":"heredoc-data-body","sensitiveFragment":"id_rsa"}
+{"command":"cat <<'EOF'\n/etc/passwd\nEOF","wall":"sensitive","classification":"heredoc-data-body","sensitiveFragment":"/etc/passwd"}
+{"command":"python3 <<'EOF'\nopen('/etc/passwd').read()\nEOF","wall":"sensitive","classification":"heredoc-code-body","sensitiveFragment":"/etc/passwd"}
+{"command":"docker exec -i c sh <<'EOF'\ncat /etc/passwd\nEOF","wall":"sensitive","classification":"heredoc-code-body","sensitiveFragment":"/etc/passwd"}
+{"command":"FOO=1 <<'EOF'\nid_rsa\nEOF","wall":"sensitive","classification":"heredoc-null-receiver","sensitiveFragment":"id_rsa"}

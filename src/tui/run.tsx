@@ -64,6 +64,7 @@ import {
   type TuiExtensions,
 } from "./deps.js";
 import { createTuiAskUserBridge } from "./ask-user.js";
+import { securityReviewRouteFromAsk } from "../harness/build-engine.js";
 import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
 import { resolveTraceRoot } from "../cli/trace-root.js";
 import { createToolEventSink, TuiApp, type TuiAppProps } from "./app.js";
@@ -755,6 +756,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
 
     const depsOpts: BuildTuiDepsOptions = {
       askUser: askBridge.ask,
+      // ADR-0127: the ask-bridge modal (60s fail-closed) is the TUI's human
+      // review path — security reviews reuse the real prompt surface, they
+      // never ride an auto-true inlet.
+      securityReview: securityReviewRouteFromAsk(askBridge.ask),
       onToolEvent: (event) => toolEventSink.emit(event),
       soleInflightId: () => inflight.soleId(),
       permissionMode,

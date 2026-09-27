@@ -35,6 +35,10 @@ import {
 import { createPermissionPolicy } from "./permission/policy.js";
 import { resolveProjectPermissionSource } from "./permission/project-settings.js";
 import type { PermissionModeContext } from "./permission/modes.js";
+import type {
+  SecurityReviewRequest,
+  SecurityReviewRoute,
+} from "./permission/security-review.js";
 import type { GraphModeContext } from "./graph/mode.js";
 import { createGraphAssembly, type GraphAssembly } from "./graph/assembly.js";
 import type { LiveGraphLedgerHost } from "./graph/ledger.js";
@@ -165,6 +169,14 @@ import { reapStaleTasks } from "./background/stale-reap.js";
 export type BuildEngineOpts = {
   readonly env: IknowEnv;
   readonly askUser: AskUser;
+  /**
+   * ADR-0127: end-to-end interactive security-review route (TTY / TUI modal
+   * / serve queue — an inlet a human can actually answer). Threaded to both
+   * the permission executor and the subagent manager broker. Absent (oneshot
+   * ask, headless, bare ACI) → security reviews deny typed at every gate;
+   * never fabricate one from the ask placeholder.
+   */
+  readonly securityReview?: SecurityReviewRoute;
   /** Process working directory used as the soft sandbox root for fs tools. */
   readonly sandboxRoot?: string;
   /** Entry surface (default "chat"); BOOTSTRAP only activates for chat/tui. */
@@ -650,6 +662,42 @@ export type BuiltEngine = EngineBundle & {
   readonly invalidateMemorySystem?: () => void;
 };
 
+/** Cap for the review detail rendered into the ask hint (display surface). */
+const SECURITY_REVIEW_HINT_DETAIL_CAP = 300;
+
+/**
+ * ADR-0127 host adapter — wraps an entry's AskUser inlet as a
+ * SecurityReviewRoute, carrying the typed cause + span detail into the human
+ * hint. LEGITIMATE ONLY for inlets that actually reach a human (TTY prompt /
+ * TUI modal / serve queue): wrapping an always-true placeholder
+ * (createNoAskUser, the bare-ACI permissive default) fabricates a route and
+ * is forbidden — headless entries pass no route at all and the gates deny
+ * typed. Approvals are one-call (requestId-bound by the executor), never
+ * persisted; the ordinary askUser semantics of the entry are unchanged.
+ */
+export function securityReviewRouteFromAsk(
+  ask: AskUser
+): SecurityReviewRoute {
+  return {
+    interactive: true,
+    request: (req: SecurityReviewRequest) => {
+      const detail =
+        req.requirement.detail.length > SECURITY_REVIEW_HINT_DETAIL_CAP
+          ? req.requirement.detail.slice(
+              0,
+              SECURITY_REVIEW_HINT_DETAIL_CAP
+            ) + "…"
+          : req.requirement.detail;
+      return ask({
+        tool: req.tool,
+        input: req.input,
+        summaryHint: `[security-review ${req.requirement.cause} span ${req.requirement.span.start}-${req.requirement.span.end}] ${req.summaryHint} — ${detail}`,
+        signal: req.signal,
+      });
+    },
+  };
+}
+
 /**
  * Build the harness engine deps + engine. `askUser` is required so the
  * permission middleware can prompt on `decision: "ask"` outcomes (#162).
@@ -1096,6 +1144,11 @@ export async function buildHarnessEngine(
           // Opaque pass-through: the ledger codec lives in the store layer,
           // which the harness may not import.
           readInFlightTool: opts.subagentActivityReader,
+          // ADR-0127: the host's interactive review route arms the manager's
+          // per-spawn broker (stdin kept open + broker_ready marker). Absent
+          // (undefined passes as absent) → legacy stdin-end shape, workers
+          // deny reviews structurally.
+          securityReview: opts.securityReview,
         }))
       : undefined;
   // bash background-task manager — conditional assembly (surface !== "ask"):
@@ -1829,6 +1882,10 @@ export async function buildHarnessEngine(
     catalog: reg.catalog,
     policy,
     askUser,
+    // ADR-0127: main-chain security-review route (host-provided only; absent
+    // — undefined passes as absent → typed deny at the gate, the ordinary
+    // askUser inlet never doubles).
+    securityReview: opts.securityReview,
     hooks: {
       preToolUse,
       ...(postToolUse ? { postToolUse } : {}),

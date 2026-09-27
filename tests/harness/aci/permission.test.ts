@@ -571,22 +571,24 @@ describe("checkPermission — execute 安全兜底细节", () => {
     assert.equal(out.decision, "ask");
   });
 
-  it("execute + 数字 command → ask（bash.ts 自验）", () => {
+  it("execute + 数字 command → 类型化 deny（C2 输入契约：非字符串是无效输入）", () => {
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
       input: { command: 42 },
       policy,
     });
-    assert.equal(out.decision, "ask");
+    assert.equal(out.decision, "deny");
+    assert.match(out.reason, /\[security_review_input_invalid\]/);
   });
 
-  it("execute + 对象 command → ask（bash.ts 自验）", () => {
+  it("execute + 对象 command → 类型化 deny（C2 输入契约：非字符串是无效输入）", () => {
     const out = checkPermission({
       def: makeTool({ name: "bash", category: "execute" }),
       input: { command: { evil: true } },
       policy,
     });
-    assert.equal(out.decision, "ask");
+    assert.equal(out.decision, "deny");
+    assert.match(out.reason, /\[security_review_input_invalid\]/);
   });
 
   it("execute + echo 放行：hard-wall 没命中 → ask（允许 askUser 决定）", () => {

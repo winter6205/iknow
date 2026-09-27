@@ -26,6 +26,13 @@ export const VIOLATION_PREFIXES = Object.freeze({
   fsDenied: "[fs_denied]",
   hookBlocked: "[hook_blocked]",
   hookError: "[hook_error]",
+  // ADR-0127: the security-review gate's typed denies. `securityReviewUnavailable`
+  // is emitted by permission-executor (kept with a trailing space at the emit
+  // site by SECURITY_REVIEW_DENY_PREFIX); the other two are the policy layer's
+  // invalid-input / evaluation-fault denies.
+  securityReviewUnavailable: "[security_review_unavailable]",
+  securityReviewInputInvalid: "[security_review_input_invalid]",
+  securityReviewEvaluationFailed: "[security_review_evaluation_failed]",
 });
 
 export type ViolationPrefixName = keyof typeof VIOLATION_PREFIXES;

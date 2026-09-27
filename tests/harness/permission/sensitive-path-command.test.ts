@@ -7,8 +7,10 @@ import { commandContainsSensitivePath } from "../../../src/harness/permission/ha
 // Stage 2 makes to it: the frozen `SENSITIVE_PATH_FRAGMENTS` roster keeps
 // running as a single substring/regex pass over the command text, and exactly
 // two kinds of span are blanked out first — (a) comment text and (b) a
-// quoted-delimiter heredoc body whose receiver is not an interpreter. Blanking
-// writes spaces of the same byte count, so nothing is trimmed, nothing is
+// quoted-delimiter heredoc body whose receiver the shared predicate
+// `receiverRunsOrStoresBody` classifies as neither running nor storing the
+// body. Blanking writes spaces of the same byte count, so nothing is trimmed,
+// nothing is
 // rejoined, and the roster's `$`-anchored arms keep matching end-of-command-text
 // and only there. The roster itself, `matchSensitivePath` and the deny reason
 // sentence are untouched by this stage.
@@ -146,7 +148,7 @@ describe("SC-S2-7 keep-denied asymmetry — expansion and interpreter code stay 
   it("judges an interpreter heredoc body whatever the delimiter's quoting", () => {
     // `python3` is the receiver, so excision (b) does not apply to its body. Note
     // the asymmetry in the reporting seam: this command's `findDangerousPattern`
-    // is not `null` like the six above — it answers `unparseable` /
+    // is not `null` like the eight above — it answers `unparseable` /
     // `verdict=malformed` (the body's own sub-parse is not shell), so today the
     // dangerous-pattern wall reports it first. The sensitive-path verdict is
     // nonetheless `true` on its own terms, which is what SC-S2-7 pins.

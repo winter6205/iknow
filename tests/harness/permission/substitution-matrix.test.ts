@@ -1804,7 +1804,10 @@ describe("SC17(g) — the step's position, its sole constructors, the untouched 
     for (const name of readdirSync(PERMISSION_SOURCE_DIR)) {
       if (!name.endsWith(".ts")) continue;
       const count = countOf(sourceFile(name), 'decision: "ask"');
-      expect(count, `${name} emits an ask`).toBe(name === "policy.ts" ? 2 : 0);
+      // policy.ts carries three ask constructors: the mode-scoped parse-layer
+      // step, the ordinary substitution ask tier, and the ADR-0127 review-ask
+      // arm (a requirement carried before grants and mode allowance).
+      expect(count, `${name} emits an ask`).toBe(name === "policy.ts" ? 3 : 0);
     }
   });
 

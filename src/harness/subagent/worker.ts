@@ -30,7 +30,7 @@
  * (createStubModel) without spawning a real worker child.
  */
 import { homedir } from "node:os";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
 import { workerFenceTmpBesideRecord } from "../sandbox/fence-tmp.js";
 import Anthropic from "@anthropic-ai/sdk";
@@ -116,11 +116,19 @@ import {
 } from "../isolation/worktree-gate.js";
 import {
   parseWorkerEnvelope,
+  parseReviewResponseFrame,
+  parseReviewBrokerReadyFrame,
+  frameTag,
   truncateEnvelopeResult,
+  type ReviewRequestFrame,
   type SkillIndexSnapshotEntry,
   type SubAgentEnvelope,
   type WorkerEnvelope,
 } from "./envelope.js";
+import type {
+  SecurityReviewRequest,
+  SecurityReviewRoute,
+} from "../permission/security-review.js";
 import { toolConstraintsSegment } from "../identity/assemble.js";
 import type { SkillSummary } from "../identity/assemble.js";
 import type { SkillCatalogFaces } from "../skill/catalog.js";
@@ -405,6 +413,15 @@ export interface CreateWorkerDepsOptions {
    * (byte-stable legacy shape).
    */
   readonly preimageCapture?: PreimageCapture;
+  /**
+   * ADR-0127: parent-owned security-review broker route. Present only when
+   * the worker verified the end-to-end route over the control frames (a
+   * `review_broker_ready` frame from the parent within the bounded startup
+   * window). Absent (no broker, headless parent, legacy envelope) → the
+   * executor gets no route and security reviews structurally deny — the
+   * always-true `createNoAskUser` never substitutes for one.
+   */
+  readonly securityReview?: SecurityReviewRoute;
 }
 
 /**
@@ -689,9 +706,15 @@ export async function createWorkerRuntime(
     DEFAULT_WORKER_TRACE_DIR
   );
 
-  // Task-shaped subagent: fail-closed askUser (no interaction; insufficient
-  // permission = immediate denial, at parity with the main assembly). The
-  // subagent focuses on execution and never re-prompts the operator y/N.
+  // Task-shaped subagent: the ordinary ask inlet is createNoAskUser — an
+  // always-true placeholder, NOT a fail-closed channel and NOT a user
+  // interaction (ADR-0127: an approval that never reaches a human is no
+  // approval). It keeps ordinary ask semantics of the main assembly at
+  // parity; the ADR-0127 security review gate is separate: it only exists
+  // when a parent-owned broker route was established over the stdin/stdout
+  // control frames (see createWorkerReviewControl), and a worker without
+  // that end-to-end route denies security reviews structurally (no route
+  // passed to the executor → typed deny), never via this callback.
   const askUser = createNoAskUser();
 
   const workerRoute = env.subagent?.model;
@@ -894,6 +917,11 @@ export async function createWorkerRuntime(
     catalog: reg.catalog,
     policy,
     askUser,
+    // ADR-0127: the broker route only exists when the worker verified the
+    // end-to-end control-frame route; undefined passes as absent → the
+    // executor denies reviews structurally (never through the permissive
+    // ask placeholder).
+    securityReview: opts.securityReview,
     hooks: {
       preToolUse: composePreHooks([settingsHooks.pre, pluginHooks.pre]),
       postToolUse,
@@ -1565,7 +1593,8 @@ export function mapStopReasonToEnvelope(
 /**
  * Test seam (exported for tests only): envelope → run → truncateEnvelopeResult.
  *
- * Splits out readStdin → parseWorkerEnvelope → run → derive envelope → truncate,
+ * Splits out the stdin envelope read → parseWorkerEnvelope → run → derive
+ * envelope → truncate,
  * so unit tests can call runWorkerOnce({ workerEnvelope, deps }) directly with
  * stub deps injected, without spawning a real worker child (avoids depending on
  * a real LLM key).
@@ -1792,16 +1821,289 @@ async function runTimeoutEpilogue(
   return summary;
 }
 
-/** Read all stdin bytes once (worker protocol: single envelope, read to EOF). */
-function readStdin(): Promise<string> {
-  return new Promise<string>((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    process.stdin.on("data", (c: Buffer) => chunks.push(c));
-    process.stdin.on("end", () =>
-      resolve(Buffer.concat(chunks).toString("utf8"))
-    );
-    process.stdin.on("error", (err) => reject(err));
+/**
+ * ADR-0127 worker-side review control channel.
+ *
+ * Wire (beside the frozen envelopes):
+ *   - stdin:  line 1 = worker envelope; subsequent lines = parent→child
+ *             control frames (`review_broker_ready`, `review_response`);
+ *   - stdout: `review_request` frame lines (newline-JSON) beside the single
+ *             terminal result envelope.
+ *
+ * Route posture (the frozen contract in permission/security-review.ts):
+ *   - `interactive: true` only after the parent actually declared broker
+ *     support via a `review_broker_ready` frame within the bounded startup
+ *     window — the END-TO-END route is verified, not mere pipe existence;
+ *     absent/late/legacy parent → no route at all (executor denies
+ *     structurally);
+ *   - `request()` writes the request frame and awaits the matching
+ *     `review_response` by request_id; disconnect (stdin end / stdout write
+ *     failure), caller abort, timeout, or a rejected route promise all
+ *     settle **false** (fail closed; the executor turns it into a typed
+ *     deny);
+ *   - stray / duplicate request_ids are protocol notes, never answers
+ *     (an answer only ever settles the call that generated its id).
+ */
+export const REVIEW_BROKER_READY_WINDOW_MS = 1_000;
+/**
+ * Backstop for a live-but-silent parent. Host UI fail-closed timers are
+ * shorter (serve 5s / TUI 60s) and settle the answer first; this only
+ * bounds the hang case.
+ */
+export const REVIEW_RESPONSE_TIMEOUT_MS = 120_000;
+
+export interface WorkerReviewControl {
+  /**
+   * Await the parent's broker capability. Resolves true on a valid
+   * `review_broker_ready` frame, false on window expiry or stdin end.
+   */
+  readonly waitForBrokerReady: (timeoutMs?: number) => Promise<boolean>;
+  /** Build the route (only call after waitForBrokerReady() === true). */
+  readonly createRoute: (
+    opts?: { readonly timeoutMs?: number }
+  ) => SecurityReviewRoute;
+  /** Feed one post-envelope stdin line (dispatch / protocol note). */
+  readonly feed: (line: string) => void;
+  /** Stdin reached EOF / error: settle everything pending with deny. */
+  readonly close: () => void;
+}
+
+export function createWorkerReviewControl(
+  writeLine: (line: string) => void,
+  note: (message: string) => void = (m) => log(m)
+): WorkerReviewControl {
+  let dead = false;
+  let ready = false;
+  let settleReady: ((v: boolean) => void) | undefined;
+  const readyPromise = new Promise<boolean>((resolve) => {
+    settleReady = resolve;
   });
+  const pending = new Map<string, (approved: boolean) => void>();
+
+  const feed = (line: string): void => {
+    if (dead) return;
+    const tag = frameTag(line);
+    try {
+      if (tag === "review_broker_ready") {
+        parseReviewBrokerReadyFrame(line);
+        if (!ready) {
+          ready = true;
+          settleReady?.(true);
+        } else {
+          note("protocol note: duplicate review_broker_ready ignored");
+        }
+        return;
+      }
+      if (tag === "review_response") {
+        const frame = parseReviewResponseFrame(line);
+        const settle = pending.get(frame.request_id);
+        if (settle === undefined) {
+          note(
+            `protocol note: review_response for unknown/reused request_id ${frame.request_id} ignored`
+          );
+          return;
+        }
+        pending.delete(frame.request_id);
+        settle(frame.approved === true);
+        return;
+      }
+    } catch {
+      // EXIT: a control line that fails its frame schema is never an answer
+      // and never a route signal — ignored; the waiting call still settles
+      // false by its own bounded timeout (fail-closed).
+      note("protocol note: malformed control frame ignored");
+      return;
+    }
+    // Unknown tagged / untagged stdin lines: never an answer, keep running.
+    note("protocol note: unrecognized control frame ignored");
+  };
+
+  const close = (): void => {
+    if (dead) return;
+    dead = true;
+    settleReady?.(false);
+    for (const settle of pending.values()) settle(false);
+    pending.clear();
+  };
+
+  return {
+    waitForBrokerReady: (timeoutMs = REVIEW_BROKER_READY_WINDOW_MS) =>
+      new Promise<boolean>((resolve) => {
+        const timer = setTimeout(() => resolve(false), timeoutMs);
+        timer.unref?.();
+        void readyPromise.then((v) => {
+          clearTimeout(timer);
+          resolve(v);
+        });
+      }),
+    createRoute: (routeOpts) => {
+      const timeoutMs = routeOpts?.timeoutMs ?? REVIEW_RESPONSE_TIMEOUT_MS;
+      return {
+        interactive: true,
+        request: (req: SecurityReviewRequest) =>
+          new Promise<boolean>((resolve) => {
+            if (dead || !ready) {
+              resolve(false);
+              return;
+            }
+            if (req.signal?.aborted === true) {
+              resolve(false);
+              return;
+            }
+            if (pending.has(req.requestId)) {
+              // Request-id reuse is a protocol violation — deny this call,
+              // never let it hijack the in-flight one.
+              note(
+                `protocol note: duplicate request_id ${req.requestId} denied`
+              );
+              resolve(false);
+              return;
+            }
+            const settle = (approved: boolean): void => {
+              clearTimeout(timer);
+              req.signal?.removeEventListener("abort", onAbort);
+              pending.delete(req.requestId);
+              resolve(approved);
+            };
+            const onAbort = (): void => settle(false);
+            const timer = setTimeout(() => {
+              note(
+                `protocol note: review_response timeout for ${req.requestId} — denied`
+              );
+              settle(false);
+            }, timeoutMs);
+            timer.unref?.();
+            pending.set(req.requestId, settle);
+            req.signal?.addEventListener("abort", onAbort, { once: true });
+            const frame: ReviewRequestFrame = {
+              type: "review_request",
+              request_id: req.requestId,
+              tool: req.tool,
+              summary_hint: req.summaryHint,
+              cause: req.requirement.cause,
+              span: {
+                start: req.requirement.span.start,
+                end: req.requirement.span.end,
+              },
+              detail: req.requirement.detail,
+              input_digest: inputDigest(req.input),
+            };
+            try {
+              writeLine(JSON.stringify(frame) + "\n");
+            } catch {
+              // EXIT: a closed stdout (parent gone) can never carry the
+              // request — fail closed.
+              note("protocol note: stdout closed — review request denied");
+              settle(false);
+            }
+          }),
+      };
+    },
+    feed,
+    close,
+  };
+}
+
+/** sha256(short) of the serialized input — the full input never rides the wire. */
+function inputDigest(input: unknown): string {
+  let serialized: string;
+  try {
+    serialized = JSON.stringify(input) ?? String(input);
+  } catch {
+    // EXIT: an unserializable input (cycle / BigInt / throwing toJSON)
+    // digests to a fixed placeholder — the digest is display metadata only,
+    // the approval decision never reads it, so a lost digest cannot widen
+    // permission (fail-closed stays with the review answer itself).
+    serialized = "(unserializable input)";
+  }
+  return createHash("sha256").update(serialized).digest("hex").slice(0, 16);
+}
+
+/**
+ * Stdin frame reader: line 1 resolves the envelope promise; subsequent
+ * lines are buffered and, once a control channel is attached, delivered as
+ * control frames. EOF settles the buffer (a last unterminated line is
+ * delivered like any other line).
+ */
+export interface WorkerStdinReader {
+  readonly envelopeLine: Promise<string>;
+  /** Attach the control channel; drains any already-buffered lines. */
+  readonly attach: (control: WorkerReviewControl) => void;
+}
+
+export function attachWorkerStdinReader(
+  stdin: NodeJS.ReadableStream = process.stdin
+): WorkerStdinReader {
+  let resolveEnvelope: (line: string) => void = () => {};
+  const envelopeLine = new Promise<string>((resolve) => {
+    resolveEnvelope = resolve;
+  });
+  let envelopeTaken = false;
+  let control: WorkerReviewControl | undefined;
+  const buffered: string[] = [];
+
+  const deliver = (line: string): void => {
+    if (!envelopeTaken) {
+      envelopeTaken = true;
+      resolveEnvelope(line);
+      return;
+    }
+    if (control === undefined) {
+      buffered.push(line);
+      return;
+    }
+    control.feed(line);
+  };
+
+  let carry = "";
+  const onData = (chunk: Buffer | string): void => {
+    carry += chunk.toString("utf8");
+    let idx: number;
+    while ((idx = carry.indexOf("\n")) !== -1) {
+      const line = carry.slice(0, idx);
+      carry = carry.slice(idx + 1);
+      if (line.trim().length > 0) deliver(line);
+    }
+  };
+  const onEnd = (): void => {
+    if (carry.trim().length > 0) deliver(carry);
+    carry = "";
+    if (!envelopeTaken) {
+      // Legacy / crash shape: EOF without a complete line — hand over the
+      // raw carry so parseWorkerEnvelope produces its typed ProtocolError.
+      resolveEnvelope("");
+      envelopeTaken = true;
+    }
+    control?.close();
+  };
+  // EXIT: a stdin stream error is handled as EOF — the envelope (or its
+  // absence) and every pending review settle fail-closed through onEnd /
+  // control.close(); the error name is recorded (never its message, which
+  // can carry environment detail) so the channel fault stays diagnosable.
+  const onError = (err: unknown): void => {
+    const name = err instanceof Error ? err.name : typeof err;
+    log(`stdin error (${String(name)}): treating the channel as ended`);
+    onEnd();
+  };
+
+  stdin.on("data", onData);
+  stdin.on("end", onEnd);
+  stdin.on("error", onError);
+
+  return {
+    envelopeLine,
+    attach: (c) => {
+      control = c;
+      for (const line of buffered.splice(0, buffered.length)) c.feed(line);
+      // stdin may already have ended before attach ran (fast legacy parent):
+      if (
+        (stdin as NodeJS.ReadableStream & { readableEnded?: boolean })
+          .readableEnded === true
+      ) {
+        c.close();
+      }
+    },
+  };
 }
 
 /**
@@ -1869,15 +2171,34 @@ export async function runSubagentWorker(
   transcriptIo?: WorkerTranscriptIOFactory,
   preimageCaptureFactory?: WorkerPreimageCaptureFactory
 ): Promise<void> {
-  const input = await readStdin();
+  // ADR-0127: stdin is a framed channel now — line 1 is the worker envelope,
+  // later lines are parent→child control frames. The reader starts before the
+  // parse so control frames arriving back-to-back with the envelope are never
+  // dropped (they buffer until the control channel attaches).
+  const stdinReader = attachWorkerStdinReader();
+  const input = await stdinReader.envelopeLine;
   const workerEnvelope = parseWorkerEnvelope(input);
+  const reviewControl = createWorkerReviewControl((line) => {
+    process.stdout.write(line);
+  });
+  stdinReader.attach(reviewControl);
+  // End-to-end proof, not pipe existence: the route exists only when the
+  // parent actually declared broker support inside the bounded window. A
+  // legacy / route-less parent closes stdin at envelope write → the control
+  // settles closed immediately (no added latency).
+  const route = (await reviewControl.waitForBrokerReady())
+    ? reviewControl.createRoute()
+    : undefined;
   const phase = await runWorkerPhase(
     workerEnvelope,
     transcriptIo,
-    preimageCaptureFactory
+    preimageCaptureFactory,
+    route
   );
   // Single stdout wire: success and run-phase escapes share one write point;
-  // the exit code is decided by the phase containment.
+  // the exit code is decided by the phase containment. review_request frames
+  // (line-delimited JSON) ride the same wire beside the terminal envelope —
+  // the parent dispatches by the `type` tag.
   process.stdout.write(JSON.stringify(phase.envelope) + "\n");
   process.exit(phase.exitCode);
 }
@@ -1887,7 +2208,8 @@ export async function runSubagentWorker(
 async function runWorkerPhase(
   workerEnvelope: WorkerEnvelope,
   transcriptIo: WorkerTranscriptIOFactory | undefined,
-  preimageCaptureFactory: WorkerPreimageCaptureFactory | undefined
+  preimageCaptureFactory: WorkerPreimageCaptureFactory | undefined,
+  securityReview: SecurityReviewRoute | undefined
 ): Promise<{
   readonly envelope: SubAgentEnvelope;
   readonly exitCode: number;
@@ -1897,7 +2219,8 @@ async function runWorkerPhase(
       envelope: await assembleAndRunWorker(
         workerEnvelope,
         transcriptIo,
-        preimageCaptureFactory
+        preimageCaptureFactory,
+        securityReview
       ),
       exitCode: WORKER_EXIT_OK,
     };
@@ -1918,7 +2241,8 @@ async function runWorkerPhase(
 async function assembleAndRunWorker(
   workerEnvelope: WorkerEnvelope,
   transcriptIo: WorkerTranscriptIOFactory | undefined,
-  preimageCaptureFactory: WorkerPreimageCaptureFactory | undefined
+  preimageCaptureFactory: WorkerPreimageCaptureFactory | undefined,
+  securityReview: SecurityReviewRoute | undefined
 ): Promise<SubAgentEnvelope> {
   const env = loadIknowEnv();
   const { deps, catalog } = await createWorkerRuntime({
@@ -2000,6 +2324,10 @@ async function assembleAndRunWorker(
     // ADR-0121: write-tool preimage capture, host-built through the
     // injected factory (see workerPreimageCaptureOption for the anchors).
     ...workerPreimageCaptureOption(workerEnvelope, preimageCaptureFactory),
+    // ADR-0127: parent-owned security-review broker route — present only
+    // when the broker_ready control frame verified the end-to-end route
+    // before assembly; absent → the executor denies reviews structurally.
+    ...(securityReview !== undefined ? { securityReview } : {}),
   });
   // Observation floor for fileRefs: derived from the ACI catalog actually
   // assembled for this worker, taking the tools with category:"write" (the

@@ -170,6 +170,31 @@ describe("SC-GATES-6 — the golden deny-reason table, one row per destructive i
     });
   }
 
+  it("renders the SC-S2-9 valid PowerShell code operand byte for byte", () => {
+    // SC-GATES-6 names this input as the PowerShell golden. The replay corpus's
+    // trailing-backslash spelling (`powershell -c Remove-Item -Recurse -Force
+    // C:\`) is NOT a golden row: its trailing backslash makes the parse
+    // `malformed` and the wall routes it through the verdict contract (id
+    // `unparseable`, pinned that way in `destructive-roster-ast.test.ts`), so
+    // only this well-formed operand can pin the `remove-item` code-operand
+    // answer. Measured against the current code, like every value in this file.
+    const command = "powershell -c 'Remove-Item -Recurse -Force C:/Temp'";
+    const hit = hitOf(command);
+    assert.notEqual(hit, null, command);
+    assert.equal(hit!.id, "destructive-rm", command);
+    assert.equal(hit!.pattern, "remove-item", command);
+    assert.equal(
+      detailOf(command),
+      `dangerous command pattern matched (id=${hit!.id}, pattern="${hit!.pattern}")`,
+      command
+    );
+    assert.equal(
+      reasonOf(command),
+      '[hard_wall] dangerous command pattern matched (id=destructive-rm, pattern="remove-item")',
+      command
+    );
+  });
+
   it("carries the whitespace-bearing roster descs verbatim", () => {
     // SC-GATES-6 names these three: the AST rules no longer need the padding,
     // so the spaces must live in the emitted text, not have been dropped with
@@ -275,4 +300,31 @@ describe("SC-GATES-6 — the one authorized (id, pattern) move, tier unchanged",
       "deny"
     );
   });
+
+  // SC-GATES-6 names all three fork-bomb rows: the direct shape and its two
+  // code-bearing variants render ONE pair, the structural rule's own literal,
+  // through the unmodified wrapper — the nested reading moves the mechanism,
+  // not the sentence. Measured values, like every row in this file.
+  const FORK_BOMB_GOLDEN =
+    '[hard_wall] dangerous command pattern matched (id=destructive-disk, pattern=":(){ :|:& };:")';
+  for (const command of [
+    ":(){ :|:& };:",
+    "eval ':(){ :|:& };:'",
+    "bash -c ':(){ :|:& };:'",
+  ]) {
+    it(`renders the fork-bomb family byte for byte for ${JSON.stringify(
+      command
+    )}`, () => {
+      const hit = hitOf(command);
+      assert.notEqual(hit, null, command);
+      assert.equal(hit!.id, "destructive-disk", command);
+      assert.equal(hit!.pattern, ":(){ :|:& };:", command);
+      assert.equal(
+        detailOf(command),
+        `dangerous command pattern matched (id=${hit!.id}, pattern="${hit!.pattern}")`,
+        command
+      );
+      assert.equal(reasonOf(command), FORK_BOMB_GOLDEN, command);
+    });
+  }
 });

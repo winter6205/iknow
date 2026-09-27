@@ -1,4 +1,8 @@
 import type { HardRuleSpec } from "./types.js";
+import type {
+  SecurityReviewCause,
+  SecurityReviewRequirement,
+} from "./security-review.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import {
   parseForSecurity,
@@ -1216,6 +1220,52 @@ function runsWhatItIsHanded(name: string): boolean {
 }
 
 /**
+ * SC-S2-9's positive inert-consumer roster. Membership is the ONE proof that a
+ * command treats the text it is handed as data: every name here copies, prints,
+ * compares, or lists its operand bytes and never interprets any of them as a
+ * program (`echo`/`printf` write their operands to stdout, `cat`/`head` dump
+ * file contents, `ls` lists, `test` compares, `grep` filters, `notify-send`
+ * displays the literal as a notification body). Absence from this set is NOT
+ * evidence of execution — `awk` (`system()` in its program operand) and
+ * `chroot` (it execs its operand) sit outside precisely so their
+ * security-relevant operands reach the Security review requirement instead of
+ * either automatic class. One owner predicate, asked by both the destructive
+ * and the sensitive-path wall, so a name cannot be data to one and code to the
+ * other.
+ */
+const PROVEN_INERT_DATA_COMMAND_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set([
+    "echo",
+    "cat",
+    "test",
+    "head",
+    "grep",
+    "printf",
+    "ls",
+    "notify-send",
+  ])
+);
+
+function provenInertDataConsumer(name: string): boolean {
+  return PROVEN_INERT_DATA_COMMAND_NAMES.has(name);
+}
+
+/**
+ * Names whose OWN argv the destructive arms already judge at full strength:
+ * the destructive words (their argv is the deletion), the code consumers (the
+ * declared-code-operand rule reads their operands), and the run-or-store names
+ * (the handed-operand rule reads theirs). A node headed by one of these has no
+ * ownership left to review — danger denied, absence of danger is enough.
+ */
+function operandOwnershipEstablished(name: string): boolean {
+  return (
+    isDestructiveWord(name) ||
+    runsWhatItIsHanded(name) ||
+    provenInertDataConsumer(name)
+  );
+}
+
+/**
  * The index of such a name when everything before it is a transparent wrapper
  * (`sudo env -S "…"`), stopping at the first word that could itself be the
  * command — an `echo env "…"` operand is data, not a name in command position.
@@ -1276,25 +1326,27 @@ function heredocBodyDestructiveHit(
  * The quoted bodies the collector drops because it names the receiver by its
  * FIRST word and by the frozen interpreter roster only: `sudo bash <<'EOF'`
  * reads as `sudo`, so its body is called data, while `sudo bash -c "…"` folds.
- * This arm asks the same question both walls ask — `receiverConsumesBody` — and
- * may re-read a body the collector already took, which costs one rescan of
+ * This arm asks the same question both walls ask — `receiverRunsOrStoresBody` —
+ * and may re-read a body the collector already took, which costs one rescan of
  * already-judged text and nothing else.
  *
- * A body with no receiver to ask is judged, not dropped. `receiverCommandIndex`
- * is a declared `null` whenever the segment carries more than one node, so
- * `cd /tmp && bash <<'EOF'` arrives here unattributed; the quote-blind scan read
- * that body, and abstaining on an absent fact is how a code heredoc became a new
- * allow. This mirrors the sensitive wall, which already fails closed on the same
- * population.
+ * A quoted body whose receiver the parse cannot attribute at all is not judged
+ * here either: SC-S2-9 prices a missing or ambiguous receiver as the Security
+ * review requirement (`receiver-unresolved`), never as data and never as a
+ * confident deny. After the receiver-attribution repair this population is the
+ * genuinely unattributable one — a redirect hoisted onto a compound statement.
+ * A receiver index that addresses no node is the parse contradicting its own
+ * text, and stays judged here (the fail-closed arm this file has always had).
  */
 function foldedReceiverBodies(parse: SecurityParseOk): string[] {
   const bodies: string[] = [];
   for (const heredoc of parse.heredocs) {
     if (!heredoc.delimiterQuoted) continue;
+    if (heredoc.receiverCommandIndex === null) continue;
     const body = spanText(parse.text, heredoc.bodySpan);
     if (body === undefined) continue;
     const receiver = findCommand(parse.commands, heredoc.receiverCommandIndex);
-    if (receiver === undefined || receiverConsumesBody(receiver)) {
+    if (receiver === undefined || receiverRunsOrStoresBody(receiver)) {
       bodies.push(body);
     }
   }
@@ -1406,12 +1458,83 @@ function isColonNamedDefinition(head: string): boolean {
 }
 
 /**
+ * The names whose operands SC-S2-8 re-parses as shell code: `eval` re-executes
+ * its operand in this shell and the shell names read a `-c` operand as a
+ * script. Non-shell interpreters (python / node / perl / …) stay out — their
+ * operand is not shell code, and the two shapes the floor authorizes as new
+ * denies name `eval` and a shell `-c` only.
+ */
+const SHELL_CODE_OPERAND_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set([
+    "eval",
+    "bash",
+    "sh",
+    "zsh",
+    "dash",
+    "ksh",
+    ...SHELL_FAMILY_ROSTER,
+  ])
+);
+
+/**
+ * SC-S2-8's recursion into code-bearing regions: the bomb text reaches the
+ * wall as the DECODED value of an eval / shell-`-c` operand, where no
+ * substring arm may read it (the `SUBSTRING_ROSTER` exclusion) and the outer
+ * tree's structural gate cannot see it either (the region's `;` and `|` sit
+ * inside one quoted word of the outer argv). Each such operand is re-parsed
+ * and the structural rule run on THAT tree, descending through further code
+ * operands up to `MAX_SUBSTITUTION_LEVEL` regions deep. A region the parser
+ * cannot read as `ok` says nothing here: SC-S2-8 licenses only the CONFIRMED
+ * structure as a new deny, and the outer command's own verdicts were already
+ * routed by the caller.
+ */
+/**
+ * The bomb rule run on ONE code operand re-parsed as shell code: `null` when
+ * the region is empty, parses as nothing (`not ok` — SC-S2-8 licenses only
+ * the CONFIRMED structure as a new deny, and the outer command's own verdicts
+ * were already routed by the caller), or holds neither a fork bomb here nor
+ * one in a region nested further down.
+ */
+function codeOperandBombHit(
+  operand: WordFact,
+  level: number
+): DangerousPatternHit | null {
+  const source = operand.value ?? wordSource(operand);
+  if (source.length === 0) return null;
+  const inner = parseForSecurity(source);
+  if (inner.kind !== "ok") return null;
+  const bomb = forkBombStructuralHit(inner);
+  if (bomb !== null) return bomb;
+  return nestedCodeBombHit(inner, level + 1);
+}
+
+function nestedCodeBombHit(
+  parse: SecurityParseOk,
+  level: number
+): DangerousPatternHit | null {
+  if (level > MAX_SUBSTITUTION_LEVEL) return null;
+  for (const cmd of parse.commands) {
+    const at = destructiveCommandAt(cmd);
+    if (at === undefined || !SHELL_CODE_OPERAND_NAMES.has(at.name)) continue;
+    for (const word of cmd.argv.slice(at.index + 1)) {
+      const hit = codeOperandBombHit(word, level);
+      if (hit !== null) return hit;
+    }
+  }
+  return null;
+}
+
+/**
  * The destructive judgment on an `ok` tree: every command node in source order,
- * command-word rule then declared-code-operand rule then handed-operand rule then
- * the escape rule; then the here-string spans, the heredoc bodies the receiver
- * rule keeps, and the fork-bomb structural rule. Precedence with the root-find
- * fold (which owns `find /`) is preserved at the call site, which runs the fold
- * first.
+ * command-word rule then declared-code-operand rule then handed-operand rule
+ * then the escape rule; then the here-string spans, the heredoc bodies the
+ * receiver rule keeps, and the structural fork-bomb rule run on the re-parsed
+ * bodies of eval / shell-`-c` code operands. The bomb's recognition at the
+ * OUTER level is NOT one of these arms — the call site runs it there only past
+ * the `isPureMetacharBody` gate, so an argv rule that already denied a shape
+ * keeps its own id and the nested arm adds no move this stage does not own.
+ * Precedence with the root-find fold (which owns `find /`) is preserved at the
+ * call site, which runs the fold first.
  */
 export function findDestructiveOnParse(
   parse: SecurityParseOk
@@ -1428,7 +1551,9 @@ export function findDestructiveOnParse(
   }
   const hereStringHit = hereStringDestructiveHit(parse);
   if (hereStringHit !== null) return hereStringHit;
-  return heredocBodyDestructiveHit(parse);
+  const bodyHit = heredocBodyDestructiveHit(parse);
+  if (bodyHit !== null) return bodyHit;
+  return nestedCodeBombHit(parse, 1);
 }
 
 /**
@@ -1499,11 +1624,13 @@ function findDestructiveAfterParse(
   const astHit = findDestructiveOnParse(parse);
   if (astHit !== null) return astHit;
   if (format !== null) return format.hit;
-  // Every argv rule abstained, so the body names no command word anywhere. That
-  // is the one shape where the text roster still speaks with full authority —
-  // nothing about it was licensed away — and it keeps the precedence it has
-  // always had: the fork bomb's structural recognition, then the segment scan,
-  // then the bare operator noise neither of them claimed.
+  // Reaching here means every argv rule abstained — which by itself says
+  // nothing about command words; the gate below asks that question on its own.
+  // Where it passes, the body names no command word anywhere, and that is the
+  // one shape where the text roster still speaks with full authority — nothing
+  // about it was licensed away — keeping the precedence it has always had: the
+  // fork bomb's structural recognition, then the segment scan, then the bare
+  // operator noise neither of them claimed.
   if (!isPureMetacharBody(command)) return null;
   const bomb = forkBombStructuralHit(parse);
   if (bomb !== null) return bomb;
@@ -1695,22 +1822,24 @@ type HeredocEntry =
   | { state: "data" }
   | { state: "body"; body: HeredocBody };
 
-/** The text of one fact's `bodySpan`, or the fault saying it addresses none. */
+/**
+ * The text of one fact's `bodySpan`, or the fault saying it addresses none. The
+ * validity check is `spanText`'s and nobody else's: the folded-receiver arm
+ * reads the same predicate, so a body one path calls valid cannot be the fault
+ * the other path reports.
+ */
 function heredocBodyText(
   text: string,
   bodySpan: HeredocFact["bodySpan"]
 ): { body: string } | { state: "fault"; reason: string } {
-  if (!hasSpan(bodySpan)) {
-    return { state: "fault", reason: "a heredocs[] bodySpan is not a span" };
-  }
-  const { start, end } = bodySpan;
-  if (start < 0 || end < start || end > text.length) {
+  const body = spanText(text, bodySpan);
+  if (body === undefined) {
     return {
       state: "fault",
-      reason: `heredocs[] bodySpan ${start}..${end} names nothing in the text`,
+      reason: "a heredocs[] bodySpan names nothing in the parsed text",
     };
   }
-  return { body: text.slice(start, end) };
+  return { body };
 }
 
 /** One fact's receiver, resolved to its command word. */
@@ -1786,14 +1915,18 @@ function resolveHeredocEntry(
 }
 
 /**
- * The receiver, not the delimiter, decides what a heredoc body IS, and this is
- * the one owner of that rule: an interpreter executes its body whatever the
- * quoting, and an unquoted body is live for any receiver because bash expands
- * it. A quoted body of a text command is data, so it is collected by neither
- * walk. A `null` receiver is a declared arm of the field's type — the body is
- * quoted and unattributable, so it comes back as an ask rather than being
- * guessed at; unquoted, the receiver's identity is irrelevant and the body stays
- * live code.
+ * The receiver, not the delimiter, decides what a heredoc body IS; the receiver
+ * rule itself belongs to `receiverRunsOrStoresBody`, the one question both
+ * walls ask. This collector is where the substitution walk applies its narrow
+ * frozen-roster reading, widened per caller by `extraCodeReceivers` — the
+ * destructive wall completes that reading with `foldedReceiverBodies`, so
+ * neither this function nor that one owns the rule alone. An interpreter
+ * executes its body whatever the quoting, and an unquoted body is live for any
+ * receiver because bash expands it. A quoted body of a text command is data, so
+ * it is collected by neither walk. A `null` receiver is a declared arm of the
+ * field's type — the body is quoted and unattributable, so it comes back as an
+ * ask rather than being guessed at; unquoted, the receiver's identity is
+ * irrelevant and the body stays live code.
  */
 function collectHeredocBodies(
   text: string,
@@ -2144,6 +2277,13 @@ function walkSite(
   const nested = prepared.children.get(inner) ?? [];
   if (nested.length === 0) return CLEAN_STEP;
   if (level + 1 > MAX_SUBSTITUTION_LEVEL) {
+    // SC-S2-9's ordering rule: a CONFIRMED inner deny outranks any outer
+    // uncertainty, so the cap inspects the deeper regions for denials before
+    // it abstains. The descent collects no asks of its own (the budget's ask
+    // is the one pushed below) and terminates on the same `visited` set plus
+    // the strict substring shrink the normal walk relies on.
+    const deep = denyOnlySites(prepared, nested, visited);
+    if (deep.kind !== "clean") return deep;
     asks.push({
       kind: "substitution-depth-exceeded",
       detail: `depth=${level + 1}`,
@@ -2152,6 +2292,52 @@ function walkSite(
     return CLEAN_STEP;
   }
   return walkSites(prepared, nested, level + 1, visited, asks);
+}
+
+/**
+ * The deny-only twin of `walkSites`: run at the substitution-depth cap so a
+ * confirmed denial below the budget still reaches the deny tier. It reads the
+ * combo wall and each inner command's own text exactly as `walkSite` does and
+ * recurses without ever consulting the depth budget — bounded because every
+ * step marks a new index in `visited` and the site set is finite.
+ */
+function denyOnlySites(
+  prepared: PreparedParse,
+  sites: readonly SubstitutionFact[],
+  visited: Set<number>
+): WalkStep {
+  for (const site of sites) {
+    const combo = comboHitFor(prepared, site);
+    if (combo !== null) return { kind: "hit", hit: combo };
+    const inner = site.innerCommandIndex;
+    if (inner === null) continue;
+    const command = prepared.byIndex.get(inner);
+    if (command === undefined) {
+      return {
+        kind: "fault",
+        reason: `innerCommandIndex ${String(inner)} vanished from the parse`,
+      };
+    }
+    if (visited.has(inner)) continue;
+    visited.add(inner);
+    const own = scanCommandText(commandText(prepared.text, command));
+    if (own !== null) {
+      return {
+        kind: "hit",
+        hit: {
+          id: "command-substitution",
+          pattern: `subst=${String(site.kind)}→${own.id}`,
+        },
+      };
+    }
+    const deeper = denyOnlySites(
+      prepared,
+      prepared.children.get(inner) ?? [],
+      visited
+    );
+    if (deeper.kind !== "clean") return deeper;
+  }
+  return CLEAN_STEP;
 }
 
 /**
@@ -2179,6 +2365,10 @@ function walkPrepared(
   if (step.kind !== "clean") return step;
   for (const body of prepared.bodies) {
     if (level + 1 > MAX_SUBSTITUTION_LEVEL) {
+      // Same ordering as the site cap: the skipped region is still searched
+      // for a CONFIRMED denial before the walk abstains.
+      const deep = denyOnlyBody(body);
+      if (deep.kind !== "clean") return deep;
       asks.push({
         kind: "substitution-depth-exceeded",
         detail: `depth=${level + 1}`,
@@ -2187,6 +2377,31 @@ function walkPrepared(
     }
     const bodyStep = walkBody(body, level + 1, asks);
     if (bodyStep.kind !== "clean") return bodyStep;
+  }
+  return CLEAN_STEP;
+}
+
+/**
+ * The deny-only reading of a body the depth budget skips: its destructive
+ * argv rules and its substitution family run for a confirmed denial (and an
+ * analysis contradiction stays a fault), while every ask-shaped verdict —
+ * unknown syntax, a further exhausted budget — keeps today's ordinary ask
+ * flow rather than being re-priced here.
+ */
+function denyOnlyBody(body: HeredocBody): WalkStep {
+  const parsed = parseForSecurity(body.text);
+  if (isHardDenyVerdict(parsed)) {
+    if (!body.isCode) return CLEAN_STEP;
+    const routed = routeParseVerdict(parsed);
+    return routed === null ? CLEAN_STEP : { kind: "hit", hit: routed };
+  }
+  if (parsed.kind !== "ok") return CLEAN_STEP;
+  const destructive = findDestructiveOnParse(parsed);
+  if (destructive !== null) return { kind: "hit", hit: destructive };
+  const analysis = analyzeSubstitutions(parsed);
+  if (analysis.verdict === "denied") return { kind: "hit", hit: analysis.hit };
+  if (analysis.verdict === "analysis-fault") {
+    return { kind: "fault", reason: analysis.reason };
   }
   return CLEAN_STEP;
 }
@@ -2533,44 +2748,42 @@ function dangerousExecuteReasonFor(input: {
 }
 
 /**
- * Whether the receiver of a heredoc body runs or stores that body. One rule for
- * both walls, read off the folded command word so `sudo bash <<'EOF'` and
+ * The one receiver rule both walls ask: whether the receiver of a heredoc body
+ * runs OR stores that body (`trap`/`alias` only store). Read off the folded
+ * command word through `runsWhatItIsHanded`, so `sudo bash <<'EOF'` and
  * `docker exec -i c sh <<'EOF'` answer the same way their `-c` spellings do.
  */
-function receiverConsumesBody(receiver: CommandFact): boolean {
+function receiverRunsOrStoresBody(receiver: CommandFact): boolean {
   const at = destructiveCommandAt(receiver);
   return at !== undefined && runsWhatItIsHanded(at.name);
 }
 
 /**
- * Whether a quoted heredoc body may be text some program reads as
- * instructions — which is the same question `receiverConsumesBody` answers, and
- * answered by it. The fail-closed arms are the two that cannot say: no declared
- * receiver, and a receiver index addressing no node, which is the parse
- * contradicting its own text.
+ * Whether the sensitive-path wall excises one inert span from its DENY
+ * judgment. A comment never carries a live path; `single-quoted` text always
+ * does (those quotes are shell hygiene around an `argv` operand, and a
+ * sensitive path inside one is a real path — the operand exclusion). A quoted
+ * heredoc body is decided by the one receiver rule both walls ask:
+ * `receiverRunsOrStoresBody` keeps it executable (judged, deny confirmable),
+ * `provenInertDataConsumer` proves it data, and a receiver that is missing,
+ * ambiguous, or named but unclassified is excised too — because its match is
+ * the Security review requirement's to price (SC-S2-7's "review, not a
+ * confident allow or deny"), not this wall's to decide either way. The
+ * contradiction arms — an owner index addressing no node, a receiver with no
+ * command word, an unquoted body bash expands — stay judged whole.
  */
-function heredocBodyMayBeCode(
-  parse: SecurityParseOk,
-  entry: InertFact
+function spanExcisedFromSensitiveDeny(
+  span: InertFact,
+  parse: SecurityParseOk
 ): boolean {
-  if (entry.ownerCommandIndex === undefined) return true;
-  const receiver = findCommand(parse.commands, entry.ownerCommandIndex);
-  // An index addressing no node is the parse contradicting its own text, so
-  // nothing of this command can be called data.
-  if (receiver === undefined) return true;
-  return receiverConsumesBody(receiver);
-}
-
-/**
- * Whether one inert span is text this wall may still judge as a live path: a
- * comment never is, `single-quoted` text always is (those quotes are shell
- * hygiene around an `argv` operand, and a sensitive path inside one is a real
- * path — the operand exclusion), and a heredoc body is judged by its receiver.
- */
-function spanIsData(span: InertFact, parse: SecurityParseOk): boolean {
   if (span.why === "single-quoted") return false;
   if (span.why === "comment") return true;
-  return span.delimiterQuoted === true && !heredocBodyMayBeCode(parse, span);
+  if (span.delimiterQuoted !== true) return false;
+  if (span.ownerCommandIndex === undefined) return true;
+  const receiver = findCommand(parse.commands, span.ownerCommandIndex);
+  if (receiver === undefined) return false;
+  if (receiverRunsOrStoresBody(receiver)) return false;
+  return destructiveCommandAt(receiver) !== undefined;
 }
 
 /**
@@ -2609,7 +2822,7 @@ function scanTextForSensitivePath(command: string): string {
   if (!spansAreTrustworthy(parse, command)) return command;
   let scanned = command;
   for (const span of parse.inert) {
-    if (!spanIsData(span, parse)) continue;
+    if (!spanExcisedFromSensitiveDeny(span, parse)) continue;
     const range = spanRange(span.span);
     if (range === undefined) continue;
     scanned = `${scanned.slice(0, range.start)}${" ".repeat(
@@ -2620,15 +2833,34 @@ function scanTextForSensitivePath(command: string): string {
 }
 
 /**
+ * The frozen fragment roster run as one pass over `text`: substring arms match
+ * literally, `\\`-prefixed arms carry their own regex. Answers the matched
+ * fragment (for the review requirement's detail) or `null`.
+ */
+function sensitiveFragmentHit(text: string): string | null {
+  for (const fragment of SENSITIVE_PATH_FRAGMENTS) {
+    if (fragment.startsWith("\\")) {
+      if (new RegExp(fragment).test(text)) return fragment;
+    } else if (text.includes(fragment)) {
+      return fragment;
+    }
+  }
+  return null;
+}
+
+/**
  * Scan a command string for sensitive path fragments (`.ssh/`, `/etc/passwd`,
  * `/etc/shadow`, `.env`, `.pem`, etc.). This mirrors `matchSensitivePath` for
  * path-bearing tools, applied to the `command` field of execute tools so the
  * redirect exemption cannot be abused to write to a sensitive location.
  *
  * The roster itself runs unchanged; only the text it runs over is quote-aware —
- * exactly comment text and non-interpreter quoted-delimiter heredoc bodies are
- * blanked first, everything else (operands, redirect targets, interpreter code)
- * is judged whole.
+ * comment text, the quoted-delimiter heredoc bodies of receivers positively
+ * proven inert under SC-S2-9, and the quoted bodies whose receiver is missing,
+ * ambiguous, or unclassified (excised from THIS wall's deny because their
+ * match is answered by the Security review requirement, never by a confident
+ * allow or deny) are blanked first, everything else (operands, redirect
+ * targets, receiver code) is judged whole.
  *
  * Exported so `src/harness/aci/tools/bash.ts` (the handler-level gate) applies
  * the same check as the hard-wall — otherwise a redirect like `>> /etc/shadow`
@@ -2637,10 +2869,260 @@ function scanTextForSensitivePath(command: string): string {
  */
 export function commandContainsSensitivePath(command: string): boolean {
   const scanned = scanTextForSensitivePath(command);
-  return SENSITIVE_PATH_FRAGMENTS.some((fragment) => {
-    if (fragment.startsWith("\\")) return new RegExp(fragment).test(scanned);
-    return scanned.includes(fragment);
-  });
+  return sensitiveFragmentHit(scanned) !== null;
+}
+
+// --- SC-S2-9 / ADR-0127: the Security review requirement scanner -----------
+//
+// The deny tier is decided; this section prices what the parse could not
+// establish. It runs AFTER the hard walls (policy's order), so anything it
+// reports has already escaped every confirmed-deny arm — including the
+// deny-only descents this file's substitution walk makes at its depth caps,
+// which is what lets a confirmed inner deny outrank the review reported here.
+// It never denies and never allows: it answers `clean` (ordinary flow) or a
+// typed requirement with the unresolved source span, or a typed input/failure
+// verdict for shapes it cannot even ask the question about.
+
+/** The scan's full answer set. `invalid` and `fault` end in typed denies. */
+export type SecurityReviewScan =
+  | { readonly verdict: "clean" }
+  | { readonly verdict: "review"; readonly requirement: SecurityReviewRequirement }
+  | { readonly verdict: "invalid"; readonly reason: string }
+  | { readonly verdict: "fault"; readonly reason: string };
+
+/**
+ * Thrown by the scanner's arms when the INPUT to the attribution question is
+ * broken (no command word where one is required, a fact span addressing no
+ * text). Kept distinct from an ordinary throw so the entry can route it to
+ * `invalid` while anything unexpected stays `fault` — the C2 input-and-failure
+ * contract's two typed denials.
+ */
+class ReviewInputInvalid extends Error {}
+
+function reviewRequirement(
+  cause: SecurityReviewCause,
+  span: { start: number; end: number },
+  detail: string
+): SecurityReviewRequirement {
+  return { cause, span: { start: span.start, end: span.end }, detail };
+}
+
+/** The roster and the fragment table, over one piece of raw text. */
+function securityRelevantPattern(text: string): string | null {
+  const roster = rosterHit(scanFold(text));
+  if (roster !== null) return roster.pattern;
+  return sensitiveFragmentHit(text);
+}
+
+/**
+ * A command node whose head word has no positive classification: neither
+ * proven inert (data) nor judged by a deny arm that reads its operands whole
+ * (destructive argv, declared code, run-or-store). `chroot` and `awk` land
+ * here — `awk` on purpose, because its program operand can call `system()`
+ * and nothing in this file establishes whether it does.
+ */
+function commandNodeReview(
+  cmd: CommandFact
+): SecurityReviewRequirement | null {
+  const at = destructiveCommandAt(cmd);
+  const name = at === undefined ? undefined : at.name;
+  if (name !== undefined && operandOwnershipEstablished(name)) return null;
+  const operands = cmd.argv.slice(at === undefined ? 0 : at.index + 1);
+  const pattern = securityRelevantPattern(argvScanText(operands));
+  if (pattern === null) return null;
+  if (name === undefined) {
+    throw new ReviewInputInvalid(
+      "a security-relevant command node carries no command word"
+    );
+  }
+  const span = spanRange(cmd.span);
+  if (span === undefined) {
+    throw new ReviewInputInvalid(
+      `the command \`${name}\` carries a span addressing no text`
+    );
+  }
+  return reviewRequirement(
+    "execution-unresolved",
+    span,
+    `command \`${name}\` is not proven to treat its operands as data and its operands carry \`${pattern}\``
+  );
+}
+
+/**
+ * A quoted heredoc body judged by the receiver rule both walls ask: code
+ * receivers are the deny tier's (reached or missed there, never re-priced
+ * here), proven-inert receivers are data, and everything the parse could not
+ * attribute — a missing receiver, an index that names no executable
+ * classification, a named-but-unclassified word — is a requirement, never a
+ * price of data.
+ */
+/**
+ * The receiver arms of the heredoc-body judgment, once a receiver index
+ * exists: a receiver the tree cannot name is the deny tier's contradiction
+ * (this scan says nothing after it has spoken), a receiver that runs or
+ * stores the body is the deny tier's price, a proven-inert consumer is data,
+ * and everything else is a `data-ownership-unresolved` requirement.
+ */
+function heredocReceiverReview(
+  parse: SecurityParseOk,
+  receiverIndex: number,
+  span: { start: number; end: number },
+  pattern: string
+): SecurityReviewRequirement | null {
+  const receiver = findCommand(parse.commands, receiverIndex);
+  if (receiver === undefined) return null;
+  if (receiverRunsOrStoresBody(receiver)) return null;
+  const name = destructiveCommandAt(receiver)?.name;
+  if (name === undefined) {
+    throw new ReviewInputInvalid(
+      "the receiver of a security-relevant heredoc carries no command word"
+    );
+  }
+  if (provenInertDataConsumer(name)) return null;
+  return reviewRequirement(
+    "data-ownership-unresolved",
+    span,
+    `command \`${name}\` receives the quoted body, neither runs nor stores it, and is not proven to treat it as data; the body carries \`${pattern}\``
+  );
+}
+
+function heredocBodyReview(
+  parse: SecurityParseOk,
+  heredoc: HeredocFact
+): SecurityReviewRequirement | null {
+  if (!heredoc.delimiterQuoted) return null;
+  const body = spanText(parse.text, heredoc.bodySpan);
+  if (body === undefined) {
+    throw new ReviewInputInvalid(
+      "a heredocs[] bodySpan names nothing in the parsed text"
+    );
+  }
+  const pattern = securityRelevantPattern(body);
+  if (pattern === null) return null;
+  const span = spanRange(heredoc.bodySpan);
+  if (span === undefined) {
+    throw new ReviewInputInvalid(
+      "a security-relevant heredoc body carries a span addressing no text"
+    );
+  }
+  if (heredoc.receiverCommandIndex === null) {
+    return reviewRequirement(
+      "receiver-unresolved",
+      span,
+      `a quoted heredoc body carries \`${pattern}\` and no command owns the redirect`
+    );
+  }
+  return heredocReceiverReview(parse, heredoc.receiverCommandIndex, span, pattern);
+}
+
+/**
+ * The unattached-substitution arm of the flat scan: a substitution site the
+ * parse attaches to no command node is an established-until-contradicted
+ * region, and security-relevant text inside one takes the budget's own
+ * exhaustion as its cause.
+ */
+function unattachedSubstitutionReview(
+  parse: SecurityParseOk
+): SecurityReviewScan | null {
+  for (const site of parse.substitutions) {
+    if (site.innerCommandIndex !== null) continue;
+    const text = spanText(parse.text, site.span);
+    if (text === undefined) {
+      throw new ReviewInputInvalid(
+        "a substitution site carries a span addressing no text"
+      );
+    }
+    const pattern = securityRelevantPattern(text);
+    if (pattern === null) continue;
+    const span = spanRange(site.span);
+    if (span === undefined) {
+      throw new ReviewInputInvalid(
+        "a security-relevant substitution site carries a span addressing no text"
+      );
+    }
+    return {
+      verdict: "review",
+      requirement: reviewRequirement(
+        "bounded-analysis-exhausted",
+        span,
+        `a substitution site the parse attaches to no command node carries \`${pattern}\``
+      ),
+    };
+  }
+  return null;
+}
+
+/**
+ * The one fault route shared by every entry of the review layer: an
+ * `ReviewInputInvalid` is the scan saying the INPUT broke its promise
+ * (`invalid`), anything else that throws is the analysis itself breaking
+ * (`fault`) — the caller's contract is that neither ever escapes as a throw.
+ */
+function routeReviewFault(fault: unknown): SecurityReviewScan {
+  if (fault instanceof ReviewInputInvalid) {
+    return { verdict: "invalid", reason: fault.message };
+  }
+  const name = fault instanceof Error ? fault.name || "Error" : typeof fault;
+  return {
+    verdict: "fault",
+    reason: `attribution analysis threw (${String(name)})`,
+  };
+}
+
+/**
+ * The flat facts of one `ok` parse decide every ownership question this stage
+ * can ask without recursing: `shell-parse.ts` publishes the whole tree —
+ * nested commands and bodies included — in `commands[]` / `heredocs[]` /
+ * `substitutions[]`, so no re-parse is owed to reach them. What no flat fact
+ * reaches is the CONTENT of a substitution site the parse attached to no
+ * command node: security-relevant text there is an established-until-
+ * contradicted region, and the budget's own exhaustion names the cause.
+ */
+export function securityReviewForParse(
+  parse: SecurityParseOk
+): SecurityReviewScan {
+  try {
+    for (const cmd of parse.commands) {
+      const requirement = commandNodeReview(cmd);
+      if (requirement !== null) return { verdict: "review", requirement };
+    }
+    for (const heredoc of parse.heredocs) {
+      const requirement = heredocBodyReview(parse, heredoc);
+      if (requirement !== null) return { verdict: "review", requirement };
+    }
+    const substitution = unattachedSubstitutionReview(parse);
+    if (substitution !== null) return substitution;
+    return { verdict: "clean" };
+  } catch (fault) {
+    return routeReviewFault(fault);
+  }
+}
+
+/**
+ * The string-level entry of the review layer, on the same totality promise as
+ * the substitution walk: it never throws. Only an `ok` tree is scanned — a
+ * hard-deny verdict stays the deny tier's (`aborted` and its siblings keep
+ * their typed denies above), `unknown-syntax` and the degrade path keep the
+ * mode flow ADR-0124 assigned them, and the empty command asks nothing of
+ * nobody.
+ */
+export function analyzeSecurityReview(
+  command: unknown
+): SecurityReviewScan {
+  if (typeof command !== "string") {
+    return {
+      verdict: "invalid",
+      reason: "the command under security review is not a string",
+    };
+  }
+  if (command.length === 0) return { verdict: "clean" };
+  try {
+    const result = parseForSecurity(command);
+    if (result.kind !== "ok") return { verdict: "clean" };
+    return securityReviewForParse(result);
+  } catch (fault) {
+    return routeReviewFault(fault);
+  }
 }
 
 function getPathLikeString(input: unknown): string | undefined {

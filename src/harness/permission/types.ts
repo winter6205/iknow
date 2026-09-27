@@ -20,6 +20,7 @@
 
 import type { AciCategory } from "../aci/types.js";
 import type { ToolResultMeta } from "../tools/types.js";
+import type { SecurityReviewRequirement } from "./security-review.js";
 
 /** Decision triple: "allow" | "deny" | "ask". */
 export type PermissionDecision = "allow" | "deny" | "ask";
@@ -30,6 +31,14 @@ export interface PermissionOutcome {
   /** Human/model-readable explanation; deny reasons carry a source prefix
    *  (hook_blocked / permission_denied / user_denied) at the call site. */
   readonly reason: string;
+  /**
+   * ADR-0127's Security review requirement, carried additively on an `ask`:
+   * the call needs a fresh human decision through a SecurityReviewRoute
+   * before any grant or mode allowance applies. Deliberately NOT part of
+   * `HardRuleSpec` (that type stays deny-only) and never persisted: an
+   * approval answers the current call only.
+   */
+  readonly securityReview?: SecurityReviewRequirement;
 }
 
 /** Tool category mirrors AciCategory but lives in permission/ to avoid an import cycle. */

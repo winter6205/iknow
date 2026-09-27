@@ -17,6 +17,8 @@ import {
   attachParentVisibleTmp,
   shouldAttachProductRoster,
   parseParentEnvelope,
+  parseReviewRequestFrame,
+  frameTag,
   truncateEnvelopeResult,
   FINAL_TEXT_PAD_NAME,
   SUMMARY_LIMIT,
@@ -27,6 +29,7 @@ import type {
   SubagentFailureReason,
   WorkerEnvelope,
 } from "./envelope.js";
+import type { SecurityReviewRoute } from "../permission/security-review.js";
 import type { SubAgentDefinition } from "./role.js";
 import { createSubAgentMailbox } from "./mailbox.js";
 import type { SubAgentTerminalSubscriber } from "./mailbox.js";
@@ -596,6 +599,19 @@ interface Task {
    * rejection): these are single-task scoped.
    */
   readonly waitRejects: Set<(reason: unknown) => void>;
+  /**
+   * ADR-0127 parent-owned review broker state — present only when the host
+   * wired a `securityReview` route at manager construction (the worker-side
+   * `review_broker_ready` capability marker is gated on the same condition).
+   * `pending` holds in-flight request_ids relayed to the host route; the
+   * answer goes back only to this child's stdin. Disposal hooks settle every
+   * pending relay with a typed deny (abort signal + drop).
+   */
+  reviewBroker?: {
+    readonly pending: Set<string>;
+    readonly ctrl: AbortController;
+    dead: boolean;
+  };
 }
 
 const WAIT_POLL_MS = 25;
@@ -1065,6 +1081,17 @@ export function createSubAgentManager(opts: {
    * consumer of the list stays byte-for-byte identical.
    */
   readonly readInFlightTool?: SubagentActivityReader;
+  /**
+   * ADR-0127 parent-owned security-review route — the host's end-to-end
+   * interactive path to a human (TTY prompt / TUI modal / serve queue).
+   * Present → each spawn keeps the worker stdin open for its lifetime,
+   * declares `review_broker_ready`, and relays `review_request` frames to
+   * this route (answers routed back per request_id). Absent (headless /
+   * oneshot / bare-ACI assembly) → the legacy stdin-end shape and no
+   * capability marker — workers structurally deny security reviews; the
+   * manager never fabricates a route.
+   */
+  readonly securityReview?: SecurityReviewRoute;
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
   /**
@@ -1633,6 +1660,139 @@ export function createSubAgentManager(opts: {
    * naturally; the per-agent trace is cached and reused by taskId, so the
    * resume's lifecycle records append to the same trace file.
    */
+  /**
+   * ADR-0127: write one review_response frame back to this child's stdin —
+   * the only channel to this task's waiting call. Broken / ended pipes are
+   * swallowed (the worker's own fail-closed timeout settles its side; a
+   * write-after-end must never crash the parent).
+   */
+  function writeReviewResponse(
+    task: Task,
+    requestId: string,
+    approved: boolean
+  ): void {
+    const stdin = task.child?.stdin;
+    if (!stdin || stdin.destroyed || stdin.writableEnded) return;
+    try {
+      stdin.write(
+        JSON.stringify({
+          type: "review_response",
+          request_id: requestId,
+          approved,
+        }) + "\n"
+      );
+    } catch {
+      // EXIT: pipe failure cannot carry an answer; the child denies by itself.
+    }
+  }
+
+  /**
+   * ADR-0127: settle the task's broker — every pending relay is denied at
+   * every disposal hook (child exit / child error / per-task timeout /
+   * abortTask / shutdown): the host prompt is released through the broker's
+   * abort signal (fail-closed ask bridges settle false on abort) and the
+   * pending set is dropped, so a late human answer can never reach a dead
+   * child or a recycled request id.
+   */
+  function settleReviewBroker(task: Task): void {
+    const broker = task.reviewBroker;
+    if (broker === undefined || broker.dead) return;
+    broker.dead = true;
+    broker.pending.clear();
+    try {
+      broker.ctrl.abort();
+    } catch {
+      // EXIT: AbortController.abort never throws in practice; belt only.
+    }
+    // The broker path keeps the child stdin open for the worker lifetime;
+    // once the task is terminal no answer can be relayed — release the pipe.
+    const stdin = task.child?.stdin;
+    if (stdin && !stdin.destroyed && !stdin.writableEnded) {
+      try {
+        stdin.end();
+      } catch {
+        // EXIT: already-broken pipe, nothing to release.
+      }
+    }
+  }
+
+  /**
+   * ADR-0127: relay one child→parent review_request frame to the host route.
+   * Answers bind to the frame's request_id — concurrent requests from this
+   * or any sibling worker coexist and one approval never satisfies another.
+   * A duplicate in-flight id is denied outright (never hijacks the original).
+   * With no host route (a rogue/misbehaving worker against a headless
+   * parent) the answer is an immediate typed deny — never a silent hang.
+   */
+  function relayReviewRequest(task: Task, line: string): void {
+    const frame = parseReviewRequestFrame(line);
+    const route = opts.securityReview;
+    const broker = task.reviewBroker;
+    if (route === undefined || broker === undefined || broker.dead) {
+      writeReviewResponse(task, frame.request_id, false);
+      return;
+    }
+    if (broker.pending.has(frame.request_id)) {
+      writeReviewResponse(task, frame.request_id, false);
+      return;
+    }
+    broker.pending.add(frame.request_id);
+    const origin = `[subagent ${task.id.slice(0, 8)}] ${frame.summary_hint}`;
+    void route
+      .request({
+        requirement: {
+          cause: frame.cause,
+          span: { start: frame.span.start, end: frame.span.end },
+          detail: frame.detail,
+        },
+        tool: frame.tool,
+        input:
+          frame.input_digest !== undefined
+            ? { input_digest: frame.input_digest }
+            : {},
+        summaryHint: origin,
+        requestId: frame.request_id,
+        signal: broker.ctrl.signal,
+      })
+      .then((approved) => {
+        // Only this live broker's in-flight id may be answered; disposal or a
+        // prior answer already settled the call (typed deny).
+        if (!broker.pending.delete(frame.request_id)) return;
+        writeReviewResponse(task, frame.request_id, approved === true);
+      })
+      .catch(() => {
+        // Route rejection = deny per the frozen contract (the executor /
+        // worker turn it into the typed deny); a dead relay is just dropped.
+        if (!broker.pending.delete(frame.request_id)) return;
+        writeReviewResponse(task, frame.request_id, false);
+      });
+  }
+
+  /**
+   * ADR-0127: write the envelope line to the child's stdin and choose the
+   * pipe's posture — with a host review route the stdin stays OPEN for the
+   * child's lifetime (broker state + `review_broker_ready` marker); without
+   * one, the legacy shape ends() the pipe immediately after the envelope.
+   */
+  function primeWorkerStdin(
+    task: Task,
+    child: ChildProcess,
+    payload: WorkerEnvelope
+  ): void {
+    if (!child.stdin) return;
+    child.stdin.write(JSON.stringify(payload) + "\n");
+    if (opts.securityReview !== undefined) {
+      task.reviewBroker = {
+        pending: new Set(),
+        ctrl: new AbortController(),
+        dead: false,
+      };
+      child.stdin.write(JSON.stringify({ type: "review_broker_ready" }) + "\n");
+    } else {
+      child.stdin.end();
+    }
+  }
+
   function launchWorker(
     def: SubAgentDefinition,
     id: string
@@ -1779,6 +1939,10 @@ export function createSubAgentManager(opts: {
           reason: "timeout",
           summary: `timeout after ${effectiveTimeoutMs}ms`,
         });
+        // ADR-0127 disposal hook: the timeout arm denies pending relays at
+        // the same moment it declares the task failed (the later exit hook
+        // is idempotent).
+        settleReviewBroker(task);
         if (task.child) {
           try {
             task.child.kill("SIGTERM");
@@ -1795,16 +1959,15 @@ export function createSubAgentManager(opts: {
       task.timeoutTimer.unref?.();
     }
 
-    // Write payload (stdin JSON-line). The worker's for-await stdin only
-    // starts running after EOF; end() immediately after writing, otherwise the
-    // worker waits for stdin forever. Reuse the already-validated payload from
-    // the single validation point to avoid side-effect risks of a second
-    // buildWorkerPayload call (it is currently a pure function, but explicit
-    // reuse is clearer and aligns with opts.spawn's third param).
-    if (child.stdin) {
-      child.stdin.write(JSON.stringify(payload) + "\n");
-      child.stdin.end();
-    }
+    // Write payload (stdin JSON-line). With a host review route the worker
+    // stdin stays OPEN for the child's lifetime (ADR-0127 control-frame
+    // channel): the worker reads line 1 as the envelope and later lines as
+    // frames, and review_response answers ride back down this pipe. The
+    // broker_ready marker is written right after the envelope only because
+    // this process actually holds an interactive route — the worker treats
+    // the marker (not pipe existence) as the end-to-end proof. Without a
+    // route: legacy shape, end() immediately after writing.
+    primeWorkerStdin(task, child, payload);
 
     // stdout newline-JSON → parse → truncate → completed. With multiple envelopes the last one wins.
     let stdoutBuf = "";
@@ -1816,6 +1979,14 @@ export function createSubAgentManager(opts: {
         stdoutBuf = stdoutBuf.slice(idx + 1);
         if (line.trim().length === 0) continue;
         try {
+          // ADR-0127: tagged control frames ride the same newline-JSON wire
+          // beside the terminal envelope. An *unknown* tag falls through to
+          // envelope validation and dies as protocolError (the frame grammar
+          // is closed — new frames must be schema members).
+          if (frameTag(line) === "review_request") {
+            relayReviewRequest(task, line);
+            continue;
+          }
           const env = locateEnvelope(
             task,
             truncateEnvelopeResult(parseParentEnvelope(line))
@@ -1855,6 +2026,9 @@ export function createSubAgentManager(opts: {
     });
 
     child.on("exit", (code, signal) => {
+      // ADR-0127: a dead child can never receive an answer — settle every
+      // pending relay with a typed deny before any other exit bookkeeping.
+      settleReviewBroker(task);
       // child exited -> clear timeoutTimer + killFallback to
       // avoid stray SIGKILL on already-dead children.
       if (task.timeoutTimer) {
@@ -1926,6 +2100,9 @@ export function createSubAgentManager(opts: {
     });
 
     child.on("error", (err) => {
+      // ADR-0127: the error arm can settle without a following exit (ENOENT
+      // spawn failures) — deny pending relays here too.
+      settleReviewBroker(task);
       void settleCrash({
         task,
         stderrClosed,
@@ -2268,7 +2445,10 @@ export function createSubAgentManager(opts: {
       reject(new SubAgentAbortError(taskId));
     }
     task.waitRejects.clear();
-    // 2. Then abort the worker child process + backstop.
+    // 2. Then abort the worker child process + backstop. The pending review
+    //    relays are denied at the same moment (ADR-0127 disposal hook — the
+    //    backstopped SIGKILL case may delay the exit event arbitrarily).
+    settleReviewBroker(task);
     task.abortCtrl?.abort();
     let signaled = false;
     if (task.child) {
@@ -2528,6 +2708,15 @@ export function createSubAgentManager(opts: {
     }
   }
 
+  /**
+   * ADR-0127: settle EVERY live task's broker in one pass — used by
+   * `shutdown`, which must not rely on the exit-driven settle for fakes /
+   * wedged children that never report exit.
+   */
+  function settleAllReviewBrokers(): void {
+    for (const t of tasks.values()) settleReviewBroker(t);
+  }
+
   async function shutdown(): Promise<void> {
     const runningTasks = [...tasks.values()].filter(
       (t) => t.state === "starting" || t.state === "running"
@@ -2535,6 +2724,11 @@ export function createSubAgentManager(opts: {
     const runningChildren = runningTasks
       .map((t) => t.child)
       .filter((c): c is ChildProcess => c !== undefined);
+
+    // ADR-0127 disposal hook: shutdown denies every pending relay up-front —
+    // the exit-driven settle cannot be relied on for fakes / wedged children
+    // that never report exit.
+    settleAllReviewBrokers();
 
     // shutdown clears all timeoutTimers so the manager
     // process does not hold dangling timers nor fire SIGKILL on already-

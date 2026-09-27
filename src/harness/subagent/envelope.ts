@@ -30,6 +30,10 @@ import { ProtocolError } from "../errors.js";
 import type { StopReason } from "../model-adapter/types.js";
 import type { ThinkingParams } from "../model-adapter/anthropic-adapter.js";
 import type { WriteSituation } from "../session-roots.js";
+import {
+  SECURITY_REVIEW_CAUSES,
+  type SecurityReviewCause,
+} from "../permission/security-review.js";
 
 /**
  * The parent session's model-visible skill index entries at the moment of
@@ -431,6 +435,180 @@ export const PARENT_SCHEMA: Record<string, unknown> = {
   additionalProperties: false,
 };
 
+/**
+ * ADR-0127 security-review wire frames (tagged members beside the frozen
+ * result/request envelopes; the envelope schemas themselves stay
+ * byte-identical — a tagged frame is discriminated by its required `type`
+ * key, which no envelope carries under `additionalProperties: false`).
+ *
+ * Direction map:
+ *   - child→parent (worker stdout, beside the single terminal envelope):
+ *       { type: "review_request", request_id, tool, summary_hint, cause,
+ *         span, detail, input_digest? }
+ *   - parent→child (worker stdin, after the envelope line):
+ *       { type: "review_broker_ready" }            — capability marker,
+ *         written by the manager right after the envelope **only when the
+ *         host actually has an interactive review route** (the worker's
+ *         broker-ready wait verifies the end-to-end route, not pipe
+ *         existence);
+ *       { type: "review_response", request_id, approved } — the one-call
+ *         answer relayed back to the waiting worker call.
+ *
+ * `request_id` is generated worker-side per review call (never reused);
+ * answers bind to the id, never to a class of calls (frozen contract in
+ * src/harness/permission/security-review.ts). Approvals are never persisted.
+ */
+export interface ReviewRequestFrame {
+  readonly type: "review_request";
+  readonly request_id: string;
+  readonly tool: string;
+  readonly summary_hint: string;
+  readonly cause: SecurityReviewCause;
+  readonly span: { readonly start: number; readonly end: number };
+  readonly detail: string;
+  /** Short digest of the call input (the full input never rides the wire). */
+  readonly input_digest?: string;
+}
+
+export interface ReviewResponseFrame {
+  readonly type: "review_response";
+  readonly request_id: string;
+  readonly approved: boolean;
+}
+
+export interface ReviewBrokerReadyFrame {
+  readonly type: "review_broker_ready";
+}
+
+/** child→parent review request frame schema (closed, tagged). */
+export const REVIEW_REQUEST_FRAME_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    type: { type: "string", enum: ["review_request"] },
+    request_id: { type: "string", minLength: 1 },
+    tool: { type: "string", minLength: 1 },
+    summary_hint: { type: "string", minLength: 1 },
+    cause: {
+      type: "string",
+      // Derived from SECURITY_REVIEW_CAUSES (SSOT in
+      // permission/security-review.ts) — the wire enum and the typed union
+      // can never list different values (ADR-0127).
+      enum: [...SECURITY_REVIEW_CAUSES],
+    },
+    span: {
+      type: "object",
+      properties: {
+        start: { type: "integer", minimum: 0 },
+        end: { type: "integer", minimum: 0 },
+      },
+      required: ["start", "end"],
+      additionalProperties: false,
+    },
+    detail: { type: "string", minLength: 1 },
+    input_digest: { type: "string" },
+  },
+  required: ["type", "request_id", "tool", "summary_hint", "cause", "span", "detail"],
+  additionalProperties: false,
+};
+
+/** parent→child review response frame schema (closed, tagged). */
+export const REVIEW_RESPONSE_FRAME_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    type: { type: "string", enum: ["review_response"] },
+    request_id: { type: "string", minLength: 1 },
+    approved: { type: "boolean" },
+  },
+  required: ["type", "request_id", "approved"],
+  additionalProperties: false,
+};
+
+/** parent→child broker capability marker frame schema (closed, tagged). */
+export const REVIEW_BROKER_READY_FRAME_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    type: { type: "string", enum: ["review_broker_ready"] },
+  },
+  required: ["type"],
+  additionalProperties: false,
+};
+
+/**
+ * Read the line's `type` tag without full validation (undefined for a
+ * non-object / JSON-invalid / untagged line). Consumers dispatch frames on
+ * it; an untagged line keeps its existing envelope / note handling.
+ */
+export function frameTag(line: string): string | undefined {
+  const firstLine = line.split("\n", 1)[0] ?? "";
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(firstLine.trim());
+  } catch {
+    return undefined;
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return undefined;
+  }
+  const tag = (parsed as { type?: unknown }).type;
+  return typeof tag === "string" ? tag : undefined;
+}
+
+/**
+ * Parse + validate a child→parent review_request frame line.
+ * Failure modes same as parseParentEnvelope (throw ProtocolError).
+ */
+export function parseReviewRequestFrame(input: string): ReviewRequestFrame {
+  return parseFramedLine(input, "review_request", reviewRequestValidate);
+}
+
+/**
+ * Parse + validate a parent→child review_response frame line.
+ */
+export function parseReviewResponseFrame(input: string): ReviewResponseFrame {
+  return parseFramedLine(input, "review_response", reviewResponseValidate);
+}
+
+/**
+ * Parse + validate a parent→child review_broker_ready frame line.
+ */
+export function parseReviewBrokerReadyFrame(
+  input: string
+): ReviewBrokerReadyFrame {
+  return parseFramedLine(
+    input,
+    "review_broker_ready",
+    reviewBrokerReadyValidate
+  );
+}
+
+function parseFramedLine<T>(
+  input: string,
+  direction: string,
+  validate: ValidateFunction
+): T {
+  const firstLine = input.split("\n", 1)[0] ?? "";
+  const trimmed = firstLine.trim();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(trimmed);
+  } catch (err) {
+    throw new ProtocolError(
+      `subagent ${direction} frame parse failed: ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    throw new ProtocolError(
+      `subagent ${direction} frame: expected a JSON object, got ${Array.isArray(parsed) ? "array" : typeof parsed}`
+    );
+  }
+  if (!validate(parsed)) {
+    throw new ProtocolError(
+      `subagent ${direction} frame validation failed: ${JSON.stringify(validate.errors ?? [])}`
+    );
+  }
+  return parsed as T;
+}
+
 function compileEnvelopeAjv(schema: Record<string, unknown>): ValidateFunction {
   return makeEnvelopeAjv().compile(schema);
 }
@@ -639,3 +817,8 @@ export function truncateEnvelopeResult(
 
 const workerValidate = compileEnvelopeAjv(WORKER_SCHEMA);
 const parentValidate = compileEnvelopeAjv(PARENT_SCHEMA);
+const reviewRequestValidate = compileEnvelopeAjv(REVIEW_REQUEST_FRAME_SCHEMA);
+const reviewResponseValidate = compileEnvelopeAjv(REVIEW_RESPONSE_FRAME_SCHEMA);
+const reviewBrokerReadyValidate = compileEnvelopeAjv(
+  REVIEW_BROKER_READY_FRAME_SCHEMA
+);

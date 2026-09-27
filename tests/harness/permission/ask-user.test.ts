@@ -137,6 +137,46 @@ describe("createTtyAskUser", () => {
 
     assert.equal(await p, false);
   });
+
+  it("serializes concurrent prompts — one typed answer settles only its own call (ADR-0127 H5)", async () => {
+    // Two wait:false reviews relayed from subagents share this inlet.
+    // Before the FIFO queue they each opened a readline on the same stdin
+    // and a single `y` answered BOTH — breaking the one-call-scoped
+    // approval contract (permission/security-review.ts).
+    const stdin = new Readable({ read() {} });
+    const stdout = new MockWritable();
+    const a = createTtyAskUser({ stdin, stdout });
+    const first = a({
+      tool: "edit_file",
+      input: { path: "one" },
+      summaryHint: "first-call",
+    });
+    const second = a({
+      tool: "edit_file",
+      input: { path: "two" },
+      summaryHint: "second-call",
+    });
+    await new Promise((r) => setImmediate(r));
+    // Sequential rendering: only the queued-first prompt has reached stdout.
+    assert.ok(stdout.data.includes("first-call"));
+    assert.ok(!stdout.data.includes("second-call"));
+
+    stdin.push("y\n");
+    assert.equal(await first, true);
+
+    // The answer routed to the first call must not have settled the second.
+    let secondSettled = false;
+    void second.then(() => {
+      secondSettled = true;
+    });
+    await new Promise((r) => setImmediate(r));
+    assert.equal(secondSettled, false);
+    assert.ok(stdout.data.includes("second-call"));
+
+    // The second prompt is live and gets its own, separately typed answer.
+    stdin.push("n\n");
+    assert.equal(await second, false);
+  });
 });
 
 describe("createServeAskUser (#115 H3: fail-closed)", () => {
