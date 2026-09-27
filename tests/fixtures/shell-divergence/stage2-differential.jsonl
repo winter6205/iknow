@@ -1,0 +1,680 @@
+{"command":"echo hi","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo hi","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo $HOME","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo $HOME","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo \"rm -rf /\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo \"rm -rf /\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo '$(whoami)'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo '$(whoami)'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat <<'EOF'\n$(whoami)\nEOF","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cat <<'EOF'\n$(whoami)\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo $(whoami)","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo $(whoami)","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rm -rf /tmp/deep","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"rm -rf /tmp/deep","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":{"id":"destructive-disk","pattern":"dd if="},"label":"same"}
+{"command":"dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"> /tmp/x","wall":"pattern","base":{"id":"bare-metachar","pattern":">"},"head":{"id":"bare-metachar","pattern":">"},"label":"same"}
+{"command":"> /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"find /","wall":"pattern","base":{"id":"root-find-walk","pattern":"find"},"head":{"id":"root-find-walk","pattern":"find"},"label":"same"}
+{"command":"find /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"[[ a == b ]]","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"[[ a == b ]]","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo hi &&","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed"},"label":"same"}
+{"command":"echo hi &&","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo\\ test","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 echo \"test\""},"head":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 echo \"test\""},"label":"same"}
+{"command":"echo\\ test","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"mkfs.ext4 /dev/sda1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"mkfs.ext4 /dev/sda1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"reboot","wall":"pattern","base":{"id":"destructive-disk","pattern":"reboot"},"head":{"id":"destructive-disk","pattern":"reboot"},"label":"same"}
+{"command":"reboot","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"format C:","wall":"pattern","base":{"id":"destructive-disk","pattern":"format"},"head":{"id":"destructive-disk","pattern":"format"},"label":"same"}
+{"command":"format C:","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"del /f important.txt","wall":"pattern","base":{"id":"destructive-disk","pattern":"del /f"},"head":{"id":"destructive-disk","pattern":"del /f"},"label":"same"}
+{"command":"del /f important.txt","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rd /s /q C:\\path","wall":"pattern","base":{"id":"destructive-disk","pattern":"rd /s"},"head":{"id":"destructive-disk","pattern":"rd /s"},"label":"same"}
+{"command":"rd /s /q C:\\path","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"Remove-Item -Recurse C:\\x","wall":"pattern","base":{"id":"destructive-rm","pattern":"remove-item"},"head":{"id":"destructive-rm","pattern":"remove-item"},"label":"same"}
+{"command":"Remove-Item -Recurse C:\\x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rmdir /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rmdir"},"head":{"id":"destructive-rm","pattern":"rmdir"},"label":"same"}
+{"command":"rmdir /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":{"id":"destructive-rm","pattern":"chmod -r"},"label":"same"}
+{"command":"chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":{"id":"destructive-rm","pattern":" -delete"},"label":"same"}
+{"command":"find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rm -fr /tmp/deep2","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -fr"},"head":{"id":"destructive-rm","pattern":"rm -fr"},"label":"same"}
+{"command":"rm -fr /tmp/deep2","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rm -r /tmp/tree","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -r "},"head":{"id":"destructive-rm","pattern":"rm -r "},"label":"same"}
+{"command":"rm -r /tmp/tree","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rm -f /tmp/file","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -f "},"head":{"id":"destructive-rm","pattern":"rm -f "},"label":"same"}
+{"command":"rm -f /tmp/file","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rm --recursive /tmp/tree","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm --recursive"},"head":{"id":"destructive-rm","pattern":"rm --recursive"},"label":"same"}
+{"command":"rm --recursive /tmp/tree","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo 'rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo 'rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat <<'EOF'\nrm -rf /\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat <<'EOF'\nrm -rf /\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo hi # rm -rf /","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo hi # rm -rf /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo rm -rf","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"echo rm -rf","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"grep rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo rmdir","wall":"pattern","base":{"id":"destructive-rm","pattern":"rmdir"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"echo rmdir","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo powershell -c rm -rf x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"echo powershell -c rm -rf x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash -c 'rm -rf /x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"bash -c 'rm -rf /x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cmd /c 'rmdir /s /q C:\\Windows'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rmdir"},"head":{"id":"destructive-rm","pattern":"rmdir"},"label":"same"}
+{"command":"cmd /c 'rmdir /s /q C:\\Windows'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"python3 -c \"import os; os.system('rm -rf /tmp/z')\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"python3 -c \"import os; os.system('rm -rf /tmp/z')\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":":(){ :|:& };:","wall":"pattern","base":{"id":"bare-metachar","pattern":"|"},"head":{"id":"destructive-disk","pattern":":(){ :|:& };:"},"label":"authorized-id-move"}
+{"command":":(){ :|:& };:","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"sudo format C:","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"sudo format C:","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"\"format\" C:","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"\"format\" C:","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"ls; :(){ :|:& };:","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"ls; :(){ :|:& };:","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash <<< \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"bash <<< \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash --login -c \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"bash --login -c \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"eval \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"eval \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"sudo bash <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"sudo bash <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rm \"-rf\" /tmp/x","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"rm \"-rf\" /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo `whoami`","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo `whoami`","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo ${PATH}","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo ${PATH}","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo $(rm -rf /)","wall":"pattern","base":{"id":"command-substitution","pattern":"subst=dollar-paren→destructive-rm"},"head":{"id":"command-substitution","pattern":"subst=dollar-paren→destructive-rm"},"label":"same"}
+{"command":"echo $(rm -rf /)","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"$(rm -rf /tmp/x) needle f","wall":"pattern","base":{"id":"command-substitution","pattern":"subst=dollar-paren→destructive-rm"},"head":{"id":"command-substitution","pattern":"subst=dollar-paren→destructive-rm"},"label":"same"}
+{"command":"$(rm -rf /tmp/x) needle f","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"$(which grep) needle f","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"$(which grep) needle f","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"python3 - <<'EOF'\nprint($(rm -rf /))\nEOF","wall":"pattern","base":{"id":"command-substitution","pattern":"subst=dollar-paren→destructive-rm"},"head":{"id":"command-substitution","pattern":"subst=dollar-paren→destructive-rm"},"label":"same"}
+{"command":"python3 - <<'EOF'\nprint($(rm -rf /))\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo '$(whoami) ${HOME} \\`id\\`'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo '$(whoami) ${HOME} \\`id\\`'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo hi # $(whoami) ${HOME} not a command","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo hi # $(whoami) ${HOME} not a command","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat <<'EOF'\n$(whoami) ${ANTHROPIC_AUTH_TOKEN} `id`\nEOF","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cat <<'EOF'\n$(whoami) ${ANTHROPIC_AUTH_TOKEN} `id`\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo '${HOME}'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo '${HOME}'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"rm -fr /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -fr"},"head":{"id":"destructive-rm","pattern":"rm -fr"},"label":"same"}
+{"command":"rm -fr /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash -c \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"bash -c \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash -lc'rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"bash -lc'rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash -ic'shutdown now'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"bash -ic'shutdown now'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash -ic rm -rf /","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"bash -ic rm -rf /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash -c rm -rf /","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"bash -c rm -rf /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"zsh -luc rd /s","wall":"pattern","base":{"id":"destructive-disk","pattern":"rd /s"},"head":{"id":"destructive-disk","pattern":"rd /s"},"label":"same"}
+{"command":"zsh -luc rd /s","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash --login -c 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"bash --login -c 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"python3 -c 'rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"python3 -c 'rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"python3 -c'rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"python3 -c'rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"python -i 'rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"python -i 'rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"node -e 'require(\"child_process\").execSync(\"rm -rf /\")'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"node -e 'require(\"child_process\").execSync(\"rm -rf /\")'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"node --eval 'rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"node --eval 'rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"perl -e 'rmdir'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rmdir"},"head":{"id":"destructive-rm","pattern":"rmdir"},"label":"same"}
+{"command":"perl -e 'rmdir'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"perl -te 'rmdir /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rmdir"},"head":{"id":"destructive-rm","pattern":"rmdir"},"label":"same"}
+{"command":"perl -te 'rmdir /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"php -r 'rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"php -r 'rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"php -e 'shutdown'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"php -e 'shutdown'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"powershell -c Remove-Item -Recurse -Force C:\\","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed"},"label":"same"}
+{"command":"powershell -c Remove-Item -Recurse -Force C:\\","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"powershell -c 'Write-Output rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"powershell -c 'Write-Output rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"pwsh -Command 'del /f x.txt'","wall":"pattern","base":{"id":"destructive-disk","pattern":"del /f"},"head":{"id":"destructive-disk","pattern":"del /f"},"label":"same"}
+{"command":"pwsh -Command 'del /f x.txt'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"powershell -Command\"del /f x.txt\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"del /f"},"head":{"id":"destructive-disk","pattern":"del /f"},"label":"same"}
+{"command":"powershell -Command\"del /f x.txt\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cmd /c echo del /f x.txt","wall":"pattern","base":{"id":"destructive-disk","pattern":"del /f"},"head":{"id":"destructive-disk","pattern":"del /f"},"label":"same"}
+{"command":"cmd /c echo del /f x.txt","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cmd /k echo del /f x.txt","wall":"pattern","base":{"id":"destructive-disk","pattern":"del /f"},"head":{"id":"destructive-disk","pattern":"del /f"},"label":"same"}
+{"command":"cmd /k echo del /f x.txt","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cmd /c 'echo one & echo two'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cmd /c 'echo one & echo two'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash -c 'echo one & echo two'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"bash -c 'echo one & echo two'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep -c rm -rf f","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"grep -c rm -rf f","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"timeout 5 rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"timeout 5 rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"env FOO=1 rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"env FOO=1 rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"nice -n 5 rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"nice -n 5 rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"nohup rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"nohup rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"time rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"time rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"stdbuf -oL rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"stdbuf -oL rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"watch -n 1 rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"watch -n 1 rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"ssh host rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"ssh host rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"docker exec c rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"docker exec c rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"su root -c 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"su root -c 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"parallel rm -rf {} ::: /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"parallel rm -rf {} ::: /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo /tmp/x | xargs rm -rf","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"echo /tmp/x | xargs rm -rf","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"eval 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"eval 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"trap 'rm -rf /tmp/x' EXIT","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"trap 'rm -rf /tmp/x' EXIT","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"alias rmall='rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"alias rmall='rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"env rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"env rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"ssh host dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":{"id":"destructive-disk","pattern":"dd if="},"label":"same"}
+{"command":"ssh host dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"ssh host mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"ssh host mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"ssh host chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":{"id":"destructive-rm","pattern":"chmod -r"},"label":"same"}
+{"command":"ssh host chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"ssh host shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"ssh host shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"ssh host find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":{"id":"destructive-rm","pattern":" -delete"},"label":"same"}
+{"command":"ssh host find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"su root -c 'dd if=/dev/zero of=/dev/sda'","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":{"id":"destructive-disk","pattern":"dd if="},"label":"same"}
+{"command":"su root -c 'dd if=/dev/zero of=/dev/sda'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"su root -c 'mkfs -t ext4 /dev/sdb1'","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"su root -c 'mkfs -t ext4 /dev/sdb1'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"su root -c 'chmod -R 777 /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":{"id":"destructive-rm","pattern":"chmod -r"},"label":"same"}
+{"command":"su root -c 'chmod -R 777 /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"su root -c 'shutdown -h now'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"su root -c 'shutdown -h now'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"su root -c 'find /tmp -delete'","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":{"id":"destructive-rm","pattern":" -delete"},"label":"same"}
+{"command":"su root -c 'find /tmp -delete'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"docker exec c dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":{"id":"destructive-disk","pattern":"dd if="},"label":"same"}
+{"command":"docker exec c dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"docker exec c mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"docker exec c mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"docker exec c chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":{"id":"destructive-rm","pattern":"chmod -r"},"label":"same"}
+{"command":"docker exec c chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"docker exec c shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"docker exec c shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"docker exec c find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":{"id":"destructive-rm","pattern":" -delete"},"label":"same"}
+{"command":"docker exec c find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"podman exec c rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"podman exec c rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"podman exec c dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":{"id":"destructive-disk","pattern":"dd if="},"label":"same"}
+{"command":"podman exec c dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"podman exec c mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"podman exec c mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"podman exec c chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":{"id":"destructive-rm","pattern":"chmod -r"},"label":"same"}
+{"command":"podman exec c chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"podman exec c shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"podman exec c shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"podman exec c find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":{"id":"destructive-rm","pattern":" -delete"},"label":"same"}
+{"command":"podman exec c find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"kubectl exec c -- rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"kubectl exec c -- rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"kubectl exec c -- dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":{"id":"destructive-disk","pattern":"dd if="},"label":"same"}
+{"command":"kubectl exec c -- dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"kubectl exec c -- mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"kubectl exec c -- mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"kubectl exec c -- chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":{"id":"destructive-rm","pattern":"chmod -r"},"label":"same"}
+{"command":"kubectl exec c -- chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"kubectl exec c -- shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"kubectl exec c -- shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"kubectl exec c -- find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":{"id":"destructive-rm","pattern":" -delete"},"label":"same"}
+{"command":"kubectl exec c -- find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"watch -n 1 dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":{"id":"destructive-disk","pattern":"dd if="},"label":"same"}
+{"command":"watch -n 1 dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"watch -n 1 mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"watch -n 1 mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"watch -n 1 chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":{"id":"destructive-rm","pattern":"chmod -r"},"label":"same"}
+{"command":"watch -n 1 chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"watch -n 1 shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"watch -n 1 shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"watch -n 1 find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":{"id":"destructive-rm","pattern":" -delete"},"label":"same"}
+{"command":"watch -n 1 find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"parallel rm -rf /tmp/x ::: /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"parallel rm -rf /tmp/x ::: /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"parallel dd if=/dev/zero of=/dev/sda ::: /tmp/x","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":{"id":"destructive-disk","pattern":"dd if="},"label":"same"}
+{"command":"parallel dd if=/dev/zero of=/dev/sda ::: /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"parallel mkfs -t ext4 /dev/sdb1 ::: /tmp/x","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"parallel mkfs -t ext4 /dev/sdb1 ::: /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"parallel chmod -R 777 / ::: /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":{"id":"destructive-rm","pattern":"chmod -r"},"label":"same"}
+{"command":"parallel chmod -R 777 / ::: /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"parallel shutdown -h now ::: /tmp/x","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"parallel shutdown -h now ::: /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"parallel find /tmp -delete ::: /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":{"id":"destructive-rm","pattern":" -delete"},"label":"same"}
+{"command":"parallel find /tmp -delete ::: /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo /tmp/x | xargs rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"echo /tmp/x | xargs rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo /tmp/x | xargs dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":{"id":"destructive-disk","pattern":"dd if="},"label":"same"}
+{"command":"echo /tmp/x | xargs dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo /tmp/x | xargs mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
+{"command":"echo /tmp/x | xargs mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo /tmp/x | xargs chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":{"id":"destructive-rm","pattern":"chmod -r"},"label":"same"}
+{"command":"echo /tmp/x | xargs chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo /tmp/x | xargs shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
+{"command":"echo /tmp/x | xargs shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo /tmp/x | xargs find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":{"id":"destructive-rm","pattern":" -delete"},"label":"same"}
+{"command":"echo /tmp/x | xargs find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep notes.txt # rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep notes.txt # rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"grep dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep 'dd if=/dev/zero of=/dev/sda'","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep 'dd if=/dev/zero of=/dev/sda'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep \"dd if=/dev/zero of=/dev/sda\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep \"dd if=/dev/zero of=/dev/sda\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep notes.txt # dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep notes.txt # dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"grep mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep 'mkfs -t ext4 /dev/sdb1'","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep 'mkfs -t ext4 /dev/sdb1'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep \"mkfs -t ext4 /dev/sdb1\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep \"mkfs -t ext4 /dev/sdb1\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep notes.txt # mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep notes.txt # mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"grep chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep 'chmod -R 777 /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep 'chmod -R 777 /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep \"chmod -R 777 /\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep \"chmod -R 777 /\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep notes.txt # chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep notes.txt # chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"grep shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep 'shutdown -h now'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep 'shutdown -h now'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep \"shutdown -h now\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep \"shutdown -h now\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep notes.txt # shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep notes.txt # shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"grep find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep 'find /tmp -delete'","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep 'find /tmp -delete'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep \"find /tmp -delete\"","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep \"find /tmp -delete\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"grep notes.txt # find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"grep notes.txt # find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"echo rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo notes.txt # rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo notes.txt # rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"echo dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo 'dd if=/dev/zero of=/dev/sda'","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo 'dd if=/dev/zero of=/dev/sda'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo \"dd if=/dev/zero of=/dev/sda\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo \"dd if=/dev/zero of=/dev/sda\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo notes.txt # dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo notes.txt # dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"echo mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo 'mkfs -t ext4 /dev/sdb1'","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo 'mkfs -t ext4 /dev/sdb1'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo \"mkfs -t ext4 /dev/sdb1\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo \"mkfs -t ext4 /dev/sdb1\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo notes.txt # mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo notes.txt # mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"echo chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo 'chmod -R 777 /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo 'chmod -R 777 /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo \"chmod -R 777 /\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo \"chmod -R 777 /\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo notes.txt # chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo notes.txt # chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"echo shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo 'shutdown -h now'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo 'shutdown -h now'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo \"shutdown -h now\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo \"shutdown -h now\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo notes.txt # shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo notes.txt # shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"echo find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo 'find /tmp -delete'","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo 'find /tmp -delete'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo \"find /tmp -delete\"","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo \"find /tmp -delete\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo notes.txt # find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"echo notes.txt # find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"cat rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat notes.txt # rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat notes.txt # rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"cat dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat 'dd if=/dev/zero of=/dev/sda'","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat 'dd if=/dev/zero of=/dev/sda'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat \"dd if=/dev/zero of=/dev/sda\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat \"dd if=/dev/zero of=/dev/sda\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat notes.txt # dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat notes.txt # dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"cat mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat 'mkfs -t ext4 /dev/sdb1'","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat 'mkfs -t ext4 /dev/sdb1'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat \"mkfs -t ext4 /dev/sdb1\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat \"mkfs -t ext4 /dev/sdb1\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat notes.txt # mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat notes.txt # mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"cat chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat 'chmod -R 777 /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat 'chmod -R 777 /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat \"chmod -R 777 /\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat \"chmod -R 777 /\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat notes.txt # chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat notes.txt # chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"cat shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat 'shutdown -h now'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat 'shutdown -h now'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat \"shutdown -h now\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat \"shutdown -h now\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat notes.txt # shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat notes.txt # shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"cat find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat 'find /tmp -delete'","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat 'find /tmp -delete'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat \"find /tmp -delete\"","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat \"find /tmp -delete\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat notes.txt # find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat notes.txt # find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"awk rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk notes.txt # rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk notes.txt # rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"awk dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk 'dd if=/dev/zero of=/dev/sda'","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk 'dd if=/dev/zero of=/dev/sda'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk \"dd if=/dev/zero of=/dev/sda\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk \"dd if=/dev/zero of=/dev/sda\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk notes.txt # dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk notes.txt # dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"awk mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk 'mkfs -t ext4 /dev/sdb1'","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk 'mkfs -t ext4 /dev/sdb1'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk \"mkfs -t ext4 /dev/sdb1\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk \"mkfs -t ext4 /dev/sdb1\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk notes.txt # mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk notes.txt # mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"awk chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk 'chmod -R 777 /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk 'chmod -R 777 /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk \"chmod -R 777 /\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk \"chmod -R 777 /\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk notes.txt # chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk notes.txt # chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"awk shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk 'shutdown -h now'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk 'shutdown -h now'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk \"shutdown -h now\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk \"shutdown -h now\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk notes.txt # shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk notes.txt # shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"awk find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk 'find /tmp -delete'","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk 'find /tmp -delete'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk \"find /tmp -delete\"","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk \"find /tmp -delete\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"awk notes.txt # find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"awk notes.txt # find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"head rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head notes.txt # rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head notes.txt # rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"head dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head 'dd if=/dev/zero of=/dev/sda'","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head 'dd if=/dev/zero of=/dev/sda'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head \"dd if=/dev/zero of=/dev/sda\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head \"dd if=/dev/zero of=/dev/sda\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head notes.txt # dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head notes.txt # dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"head mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head 'mkfs -t ext4 /dev/sdb1'","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head 'mkfs -t ext4 /dev/sdb1'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head \"mkfs -t ext4 /dev/sdb1\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head \"mkfs -t ext4 /dev/sdb1\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head notes.txt # mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head notes.txt # mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"head chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head 'chmod -R 777 /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head 'chmod -R 777 /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head \"chmod -R 777 /\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head \"chmod -R 777 /\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head notes.txt # chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head notes.txt # chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"head shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head 'shutdown -h now'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head 'shutdown -h now'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head \"shutdown -h now\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head \"shutdown -h now\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head notes.txt # shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head notes.txt # shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"head find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head 'find /tmp -delete'","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head 'find /tmp -delete'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head \"find /tmp -delete\"","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head \"find /tmp -delete\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"head notes.txt # find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"head notes.txt # find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"test rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test \"rm -rf /tmp/x\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test \"rm -rf /tmp/x\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test notes.txt # rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test notes.txt # rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"test dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test 'dd if=/dev/zero of=/dev/sda'","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test 'dd if=/dev/zero of=/dev/sda'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test \"dd if=/dev/zero of=/dev/sda\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test \"dd if=/dev/zero of=/dev/sda\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test notes.txt # dd if=/dev/zero of=/dev/sda","wall":"pattern","base":{"id":"destructive-disk","pattern":"dd if="},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test notes.txt # dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"test mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test 'mkfs -t ext4 /dev/sdb1'","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test 'mkfs -t ext4 /dev/sdb1'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test \"mkfs -t ext4 /dev/sdb1\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test \"mkfs -t ext4 /dev/sdb1\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test notes.txt # mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test notes.txt # mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"test chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test 'chmod -R 777 /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test 'chmod -R 777 /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test \"chmod -R 777 /\"","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test \"chmod -R 777 /\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test notes.txt # chmod -R 777 /","wall":"pattern","base":{"id":"destructive-rm","pattern":"chmod -r"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test notes.txt # chmod -R 777 /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"test shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test 'shutdown -h now'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test 'shutdown -h now'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test \"shutdown -h now\"","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test \"shutdown -h now\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test notes.txt # shutdown -h now","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test notes.txt # shutdown -h now","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"3","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)"}
+{"command":"test find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test 'find /tmp -delete'","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test 'find /tmp -delete'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test \"find /tmp -delete\"","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test \"find /tmp -delete\"","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"test notes.txt # find /tmp -delete","wall":"pattern","base":{"id":"destructive-rm","pattern":" -delete"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"test notes.txt # find /tmp -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"docker exec -i c sh <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"docker exec -i c sh <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"python3 <<EOF\nrm -rf /tmp/x\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"python3 <<EOF\nrm -rf /tmp/x\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"python3 <<'EOF'\nos.system('rm -rf /tmp/x')\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"python3 <<'EOF'\nos.system('rm -rf /tmp/x')\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"sudo python3 <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"sudo python3 <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat <<EOF\nrm -rf /tmp/x\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"cat <<EOF\nrm -rf /tmp/x\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"powershell <<'EOF'\ndel /f x.txt\nEOF","wall":"pattern","base":{"id":"destructive-disk","pattern":"del /f"},"head":{"id":"destructive-disk","pattern":"del /f"},"label":"same"}
+{"command":"powershell <<'EOF'\ndel /f x.txt\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash <<< 'rm -rf /tmp/x'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"bash <<< 'rm -rf /tmp/x'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat <<'EOF'\nhello\nEOF","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cat <<'EOF'\nhello\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat sh <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"cat sh <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"python3 <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"python3 <<'EOF'\nrm -rf /tmp/x\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"docker exec -i c sh <<'EOF'\ncat /etc/passwd\nEOF","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"docker exec -i c sh <<'EOF'\ncat /etc/passwd\nEOF","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"builtin rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"builtin rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"builtin docker exec c rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"builtin docker exec c rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"command rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"command rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"sudo rm -rf /home","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"sudo rm -rf /home","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"command docker exec c rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"command docker exec c rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"nice command rm -rf /tmp/x","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"nice command rm -rf /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"printf 'rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":null,"label":"expected-relaxation","class":"1","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)"}
+{"command":"printf 'rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo 'text-transform: uppercase'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo 'text-transform: uppercase'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo 'git format-patch -1'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo 'git format-patch -1'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"printf '%s format %s' a b","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"printf '%s format %s' a b","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat format-notes.md","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cat format-notes.md","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo a && rm -rf /","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"echo a && rm -rf /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo a; rm -rf /","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"echo a; rm -rf /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo a\nrm -rf /","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
+{"command":"echo a\nrm -rf /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo $(rm -rf /tmp/x)","wall":"pattern","base":{"id":"command-substitution","pattern":"subst=dollar-paren→destructive-rm"},"head":{"id":"command-substitution","pattern":"subst=dollar-paren→destructive-rm"},"label":"same"}
+{"command":"echo $(rm -rf /tmp/x)","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo hi && :(){ :|:& };:","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo hi && :(){ :|:& };:","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"bash -c ':(){ :|:& };:'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"bash -c ':(){ :|:& };:'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"eval ':(){ :|:& };:'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"eval ':(){ :|:& };:'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"python3 <<'EOF'\n:(){ :|:& };:\nEOF","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"python3 <<'EOF'\n:(){ :|:& };:\nEOF","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cat <<'EOF'\nid_rsa\nEOF","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cat <<'EOF'\nid_rsa\nEOF","wall":"sensitive","base":true,"head":false,"label":"expected-relaxation","class":"2","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (2) inert-span (SC-S2-7 comment text, non-code-receiver quoted body)"}
+{"command":"cat <<'EOF'\n/etc/passwd\nEOF","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cat <<'EOF'\n/etc/passwd\nEOF","wall":"sensitive","base":true,"head":false,"label":"expected-relaxation","class":"2","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (2) inert-span (SC-S2-7 comment text, non-code-receiver quoted body)"}
+{"command":"python3 <<'EOF'\nopen('/etc/passwd').read()\nEOF","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed"},"label":"same"}
+{"command":"python3 <<'EOF'\nopen('/etc/passwd').read()\nEOF","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"bash -c 'cat /etc/passwd'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"bash -c 'cat /etc/passwd'","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"sh -c 'cat /etc/shadow'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"sh -c 'cat /etc/shadow'","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"echo $(cat ~/.ssh/id_rsa)","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo $(cat ~/.ssh/id_rsa)","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"echo $(cat /etc/passwd)","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo $(cat /etc/passwd)","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"cat notes.txt # id_rsa here","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cat notes.txt # id_rsa here","wall":"sensitive","base":true,"head":false,"label":"expected-relaxation","class":"2","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (2) inert-span (SC-S2-7 comment text, non-code-receiver quoted body)"}
+{"command":"cp '/home/u/.ssh/id_rsa' /tmp/x","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cp '/home/u/.ssh/id_rsa' /tmp/x","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"cat '/etc/shadow'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cat '/etc/shadow'","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"mv \"$HOME/.aws/credentials\" /tmp","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"mv \"$HOME/.aws/credentials\" /tmp","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"echo a > '/etc/passwd'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo a > '/etc/passwd'","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"FOO='id_rsa' printenv","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"FOO='id_rsa' printenv","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"echo 'cat ~/.ssh/id_rsa'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo 'cat ~/.ssh/id_rsa'","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"echo \"cat ~/.ssh/id_rsa\"","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo \"cat ~/.ssh/id_rsa\"","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"test -r \"$HOME/.ssh/id_ed25519\"","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"test -r \"$HOME/.ssh/id_ed25519\"","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"echo a > ~/.ssh/x","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo a > ~/.ssh/x","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"echo a >> /etc/shadow","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo a >> /etc/shadow","wall":"sensitive","base":true,"head":true,"label":"same"}
+{"command":"cat .env | head","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cat .env | head","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"echo a > /tmp/x.pem && notify","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"echo a > /tmp/x.pem && notify","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cp app.key '.bak'","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cp app.key '.bak'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"cp app.key # backup","wall":"pattern","base":null,"head":null,"label":"same"}
+{"command":"cp app.key # backup","wall":"sensitive","base":false,"head":false,"label":"same"}

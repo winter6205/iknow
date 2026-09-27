@@ -566,14 +566,18 @@ describe("SC8 — substitution glyphs in inert positions are data", () => {
     });
   }
 
-  it("still denies a destructive substring sitting in those same positions", async () => {
-    // Assumption 10's non-claim: the inert guarantee covers the substitution
-    // family only; the destructive text branches stay quote-blind until Stage 2.
+  it("no longer denies a destructive substring sitting in those same positions", async () => {
+    // Assumption 10's non-claim, retired where it stops being true: the inert
+    // guarantee used to cover the substitution family only because the
+    // destructive branches were quote-blind. They read argv now, so a
+    // single-quoted operand and the quoted body of a text receiver are data for
+    // them too. An interpreter's quoted body still denies — SC9 pins it below.
     const graph = await freshGraph();
-    expect(hitOf(graph, "echo 'rm -rf /'").id).toBe("destructive-rm");
-    expect(hitOf(graph, "cat <<'EOF'\nrm -rf /\nEOF\n").id).toBe(
-      "destructive-rm"
-    );
+    for (const command of ["echo 'rm -rf /'", "cat <<'EOF'\nrm -rf /\nEOF\n"]) {
+      expect(graph.parseForSecurity(command).kind).toBe("ok");
+      expect(graph.findDangerousPattern(command)).toBeNull();
+      expect(graph.isDangerousCommand(command)).toBe(false);
+    }
   });
 });
 
@@ -1023,6 +1027,59 @@ describe("T13 — the golden rendered-string table over one representative per i
     );
     expect(graph.bashOutcome(sentinel).reason).toBe(
       '[hard_wall] dangerous command pattern matched (id=unparseable, pattern="verdict=analysis-fault")'
+    );
+  });
+
+  it("denies an unreadable heredocs[] fact instead of falling through", async () => {
+    // A heredoc fact the walk cannot read is a contradiction, and the
+    // destructive arms never claim it: they answer null for the same payload,
+    // so the only thing between that null and an allow is this wall's fault
+    // arm. SC19 pins the fault at the analysis face; this pins the deny the
+    // live face owes it, which is the ordering the substitution walk runs
+    // ahead of the abstaining argv rules.
+    const sentinel = "echo hi";
+    const unreadable: HeredocFact = {
+      bodySpan: span(9999, 10_004),
+      delimiterQuoted: false,
+      receiverCommandIndex: 0,
+    };
+    const hostile = okWith({ heredocs: [unreadable] });
+    vi.doUnmock(SHELL_PARSE_MODULE);
+    vi.resetModules();
+    const parseMod = await import(SHELL_PARSE_MODULE);
+    vi.doMock(SHELL_PARSE_MODULE, async () => {
+      const actual =
+        await vi.importActual<ShellParseModule>(SHELL_PARSE_MODULE);
+      return {
+        ...actual,
+        scanWithLegacyDegrade: (
+          command: string,
+          legacyScan: LegacyDangerScan
+        ): SecurityScanOutcome =>
+          command === sentinel
+            ? { kind: "parsed", degraded: false, result: hostile }
+            : actual.scanWithLegacyDegrade(command, legacyScan),
+      };
+    });
+    const [walls, policyMod] = await Promise.all([
+      import(HARD_WALLS_MODULE),
+      import(POLICY_MODULE),
+    ]);
+    const graph = graphOf(walls, policyMod, parseMod);
+
+    expect(verdictTag(graph.analyzeSubstitutions(hostile))).toBe(
+      "analysis-fault"
+    );
+    expect(walls.findDestructiveOnParse(hostile)).toBeNull();
+    expect(hitOf(graph, sentinel)).toEqual({
+      id: "unparseable",
+      pattern: "verdict=analysis-fault",
+    });
+    expectDeniedInEveryMode(
+      graph,
+      sentinel,
+      "id=unparseable",
+      "verdict=analysis-fault"
     );
   });
 });
@@ -1581,9 +1638,15 @@ describe("SC17(i) — a null receiver or owner asks; it neither faults nor denie
 
   it("carries SC11's receiver-unresolvable token for each arm", async () => {
     const graph = await freshGraph();
+    // After the H1 fix (round-3), a null-receiver UNQUOTED heredoc is judged
+    // as live code by the destructive wall rather than asked about — the body
+    // is judged, not dropped. The heredoc fixture's `commands: []` means no
+    // receiver can be resolved, so the wall judges the body text and finds
+    // nothing dangerous; the redirect arm still asks.
+    expect(graph.findDangerousPattern(receiverlessHeredoc.text)).toBeNull();
     expect(
       detailsOf(asksOf(graph.analyzeSubstitutions(receiverlessHeredoc)))
-    ).toContain("receiver-unresolvable=heredoc");
+    ).toEqual([]);
     expect(
       detailsOf(asksOf(graph.analyzeSubstitutions(ownerlessRedirect)))
     ).toContain("receiver-unresolvable=redirect");
@@ -1593,7 +1656,11 @@ describe("SC17(i) — a null receiver or owner asks; it neither faults nor denie
     const graph = await freshGraph();
     for (const payload of [receiverlessHeredoc, ownerlessRedirect]) {
       const analysis = graph.analyzeSubstitutions(payload);
-      expect(verdictTag(analysis)).toBe("ask");
+      // H1: receiverlessHeredoc now resolves to clean (body judged, no
+      // danger found); ownerlessRedirect still asks.
+      if (payload === ownerlessRedirect) {
+        expect(verdictTag(analysis)).toBe("ask");
+      }
       expect((analysis as { hit?: DangerousPatternHit }).hit?.id).not.toBe(
         "unparseable"
       );
@@ -1602,18 +1669,21 @@ describe("SC17(i) — a null receiver or owner asks; it neither faults nor denie
 
   it("names an unowned heredoc in the full flow", async () => {
     const graph = await freshGraph();
-    const command = "while read x; do :; done <<EOF\nhi\nEOF";
-    expect(graph.parseForSecurity(command).kind).toBe("ok");
-    expect(graph.findDangerousPattern(command)).toBeNull();
-    const asks = graph.findSubstitutionAsk(command);
-    expect(detailsOf(asks)).toContain("receiver-unresolvable=heredoc");
-    for (const kind of kindsOf(asks)) {
+    // After the H1 fix: the while-compound's heredoc has a null receiver, but
+    // the unquoted body is judged as live code by the destructive wall. With
+    // benign content the command is allowed; the redirect arm still asks.
+    const benign = "while read x; do :; done <<EOF\nhi\nEOF";
+    expect(graph.parseForSecurity(benign).kind).toBe("ok");
+    expect(graph.findDangerousPattern(benign)).toBeNull();
+    const benignAsks = graph.findSubstitutionAsk(benign);
+    expect(detailsOf(benignAsks)).toContain("receiver-unresolvable=redirect");
+    for (const kind of kindsOf(benignAsks)) {
       expect(kind).toBe("receiver-unresolvable");
     }
-    const out = graph.bashOutcome(command);
-    expect(out.decision).toBe("ask");
-    expect(out.reason).toContain("receiver-unresolvable");
-    expect(out.reason).not.toContain("[hard_wall]");
+    // The same shape with dangerous body content is denied by the wall — the
+    // body is not dropped.
+    const hostile = "while read x; do :; done <<EOF\nrm -rf /tmp/x\nEOF";
+    expect(graph.findDangerousPattern(hostile)?.id).toBe("destructive-rm");
   });
 
   it("lets a retained Stage-2-owned deny outrank the redirect ask", async () => {

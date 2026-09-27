@@ -11,3 +11,37 @@
 {"command": "[[ a == b ]]"}
 {"command": "echo hi &&"}
 {"command": "echo\\ test"}
+{"command": "mkfs -t ext4 /dev/sdb1"}
+{"command": "mkfs.ext4 /dev/sda1"}
+{"command": "shutdown -h now"}
+{"command": "reboot"}
+{"command": "format C:"}
+{"command": "del /f important.txt"}
+{"command": "rd /s /q C:\\path"}
+{"command": "Remove-Item -Recurse C:\\x"}
+{"command": "rmdir /tmp/x"}
+{"command": "chmod -R 777 /"}
+{"command": "find /tmp -delete"}
+{"command": "rm -fr /tmp/deep2"}
+{"command": "rm -r /tmp/tree"}
+{"command": "rm -f /tmp/file"}
+{"command": "rm --recursive /tmp/tree"}
+{"command": "echo 'rm -rf /'"}
+{"command": "cat <<'EOF'\nrm -rf /\nEOF"}
+{"command": "echo hi # rm -rf /"}
+{"command": "echo rm -rf"}
+{"command": "grep rm -rf /tmp/x"}
+{"command": "echo rmdir"}
+{"command": "echo powershell -c rm -rf x"}
+{"command": "bash -c 'rm -rf /x'"}
+{"command": "cmd /c 'rmdir /s /q C:\\Windows'"}
+{"command": "python3 -c \"import os; os.system('rm -rf /tmp/z')\""}
+{"command": ":(){ :|:& };:"}
+{"command": "sudo format C:"}
+{"command": "\"format\" C:"}
+{"command": "ls; :(){ :|:& };:"}
+{"command": "bash <<< \"rm -rf /tmp/x\""}
+{"command": "bash --login -c \"rm -rf /tmp/x\""}
+{"command": "eval \"rm -rf /tmp/x\""}
+{"command": "sudo bash <<'EOF'\nrm -rf /tmp/x\nEOF"}
+{"command": "rm \"-rf\" /tmp/x"}
