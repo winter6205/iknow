@@ -3,8 +3,8 @@
  * pure-function tests.
  *
  * Coverage (frontmatter half): parse / round-trip / defaults for missing
- * fields / retention of excess fields / signature stability / error when the
- * frontmatter fence is missing.
+ * fields / retention of excess fields / refusal of a non-scalar excess field /
+ * signature stability / error when the frontmatter fence is missing.
  *
  * The read side parses through the shared frontmatter module (ADR-0123), so
  * these tests pin both the old flat-subset shapes (they must keep parsing
@@ -23,6 +23,9 @@ import {
   serializeMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
 import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
+// A degraded parse must never be silent: the warn seam is part of the contract
+// these cases pin, so the shared recorder wraps every reading run.
+import { captureConsoleWarn } from "../../_helpers/capture-console-warn.ts";
 
 // -- fixtures ----------------------------------------------------------------
 
@@ -48,24 +51,6 @@ function fenceLines(out: string): string[] {
   const close = lines.indexOf("---", 1);
   assert.ok(close > 1, "file must close the fence");
   return lines.slice(1, close);
-}
-
-/**
- * Run `run` with console.warn captured, so a degraded parse cannot be silent.
- * `sink` lets a caller that expects `run` to throw keep what was warned before
- * it threw.
- */
-function captureConsoleWarn(run: () => void, sink: string[] = []): string[] {
-  const messages = sink;
-  const original = console.warn;
-  console.warn = (...args: unknown[]) =>
-    void messages.push(args.map(String).join(" "));
-  try {
-    run();
-  } finally {
-    console.warn = original;
-  }
-  return messages;
 }
 
 // -- parse -------------------------------------------------------------------
@@ -181,7 +166,7 @@ describe("parseMemoryEntry", () => {
 
   it("never registers a nested mapping key as a top-level field, and warns", () => {
     let parsed: Record<string, unknown> = {};
-    const warned = captureConsoleWarn(() => {
+    const { messages: warned } = captureConsoleWarn(() => {
       parsed = parseMemoryEntry(
         frontmatter(["id: x", "title:", "  importance: 9"], "body")
       ) as unknown as Record<string, unknown>;
@@ -231,7 +216,7 @@ describe("parseMemoryEntry", () => {
       "the body"
     );
     assert.throws(() => parseMemoryEntry(legacy), MemorySchemaInvalid);
-    const warned = captureConsoleWarn(() => {
+    const { messages: warned } = captureConsoleWarn(() => {
       assert.throws(() => parseMemoryEntry(legacy));
     });
     assert.ok(
@@ -424,6 +409,67 @@ describe("serializeMemoryEntry", () => {
     >;
     assert.equal(parsed["promoted"], true);
     assert.equal(parsed["tags"], "alpha,beta");
+  });
+
+  it("emits the pinned bytes for an entry whose extras are all scalar", () => {
+    const e = {
+      ...full(),
+      promoted: true,
+      tags: "alpha,beta",
+    } as unknown as MemoryEntryV1;
+    assert.equal(
+      serializeMemoryEntry(e),
+      [
+        "---",
+        "id: mem-1",
+        "type: preference",
+        "importance: 3",
+        "ttl_days: 30",
+        "disabled: false",
+        "supersedes: null",
+        "title: Use bar() not foo()",
+        "updated_at: 2026-01-01T00:00:00.000Z",
+        "promoted: true",
+        "tags: alpha,beta",
+        "---",
+        "Calling bar() is the supported path; foo() is thread-unsafe.",
+      ].join("\n")
+    );
+  });
+
+  it("refuses a non-scalar extra with a typed error naming the key, not the value", () => {
+    const cases: ReadonlyArray<readonly [string, unknown]> = [
+      ["tags", ["alpha", "beta"]],
+      ["origin", { recorded_by: "tester" }],
+    ];
+    for (const [key, value] of cases) {
+      const e = { ...full(), [key]: value } as unknown as MemoryEntryV1;
+      let caught: unknown;
+      try {
+        serializeMemoryEntry(e);
+      } catch (error) {
+        caught = error;
+      }
+      assert.ok(
+        caught instanceof MemorySchemaInvalid,
+        `${key}: a non-scalar extra must be refused with a typed error, got ${String(caught)}`
+      );
+      const err: MemorySchemaInvalid = caught;
+      assert.equal(err.field, key);
+      assert.ok(err.message.includes(key), "the message must name the key");
+      const valueTokens = JSON.stringify(value)
+        .split(/[^\p{L}\p{N}]+/u)
+        .filter((t) => t.length > 2);
+      assert.ok(
+        valueTokens.length > 0,
+        "the fixture must carry recognizable value text"
+      );
+      for (const token of valueTokens)
+        assert.ok(
+          !err.message.includes(token),
+          `the message must carry the key only, got: ${err.message}`
+        );
+    }
   });
 });
 

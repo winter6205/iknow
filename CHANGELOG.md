@@ -630,6 +630,22 @@ hardcoded defaults` for those three fields only; other fields unchanged.
 
 ### Fixed
 
+- **A memory write-back could drop a field it did not understand, and a quarantined file stayed silent (issue #1137, spec `memory-frontmatter-write-signals`, ADR-0123 residuals, 2026-09-26)**:
+  `serializeMemoryEntry` now throws a typed `MemorySchemaInvalid` naming the key when
+  an unknown frontmatter extra is not a scalar — the old `isScalar` filter emitted the
+  entry without that field — and `writeMemoryEntryAtomic` warns once (`[memory/save]`,
+  slug and key, never the value) and leaves the file on disk as it was. The refusal is
+  defense-in-depth: no on-disk file reaches it today, because the shared coerce
+  boundary hands the reader scalars only (spec assumption 6). On the read side
+  `MemoryStoreScan.skipped` / `MemoryGcResult.skipped` became `{ slug, reason }` records
+  and every scan consumer (gc, assembly, dream, ingest, prefetch) now warns when it
+  drops a file the reader could not parse, instead of the omission being discoverable
+  only by inspecting the disk. Healthy files are byte-unchanged: re-measured over the
+  rebuilt SC-Corpus stand-in corpus, 17/19 round-trip identical, 2/19 still grow 2 B at
+  byte offset 8 on their next save (the two blank-`id` entries), 0 rejected blocks, 0
+  field changes, `computeSignature` stable 19/19 — evidence
+  `docs/evidence/frontmatter-serialize-remeasure-1137.md`.
+
 - **Three valid YAML frontmatter shapes were misread, one of them silently (issue #1128, ADR-0123, 2026-09-23)**:
   the skill scanner's per-line parser dropped fields and miswarned on a block
   sequence, lost the body on a block scalar, and — the only unwarned data

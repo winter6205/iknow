@@ -16,7 +16,11 @@ import {
   type PersistedMemoryOp,
 } from "./ingest.js";
 import { normalizeMemoryType } from "./schema.js";
-import { listStoreEntries, type StoredMemoryEntry } from "./store.js";
+import {
+  listStoreEntries,
+  warnSkippedEntries,
+  type StoredMemoryEntry,
+} from "./store.js";
 import { validateAffirmativePhrasing } from "./tools/save.js";
 
 /** Provenance marker written into every entry produced by the merge pass. */
@@ -60,6 +64,7 @@ export async function runMemoryDream(
   opts: MemoryDreamOptions
 ): Promise<MemoryDreamResult> {
   const scan = await listStoreEntries(opts.memoryDir);
+  warnSkippedEntries("[memory/dream]", scan.skipped);
   const live = scan.entries.filter((entry) => !entry.entry.disabled);
   if (live.length < 2) return { ops: [], written: [] };
 

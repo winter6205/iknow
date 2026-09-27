@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createMemoryRecallTool } from "../../../src/harness/memory/tools/recall.ts";
 import { assembleSystemPrompt } from "../../../src/harness/memory/assembly.ts";
+import { captureConsoleWarnAsync } from "../../_helpers/capture-console-warn.ts";
 import {
   MEMORY_ADVISORY_PREFIX,
   MEMORY_PREFETCH_DISCIPLINE,
@@ -227,6 +228,41 @@ describe("buildMemoryPrefetchOverlay — promote eligibility is not an exclusion
     // disabled still does not surface.
     const hits = [...overlay.matchAll(/^### /gm)];
     assert.equal(hits.length, 1, "disabled entry must remain excluded");
+  });
+});
+
+// SC-B3 (specs/memory-frontmatter-write-signals.md): the disk-built path
+// quarantines an unreadable file and must say so on the module warn seam.
+describe("buildMemoryPrefetchOverlay — skipped quarantine warning", () => {
+  it("warns once naming the skipped slug and still serves the healthy entries", async () => {
+    const tmp = await mkdtemp(join(tmpdir(), "prefetch-skip-"));
+    written.push(tmp);
+    await writeFile(
+      join(tmp, "healthy.md"),
+      serializeMemoryEntry(
+        entry({
+          id: "healthy",
+          title: "Deploy pipeline",
+          body: "ship the deploy pipeline on Fridays",
+        })
+      )
+    );
+    await writeFile(join(tmp, "broken.md"), "no frontmatter here", "utf8");
+    const built = await captureConsoleWarnAsync(() =>
+      buildMemoryPrefetchOverlay({
+        memoryDir: tmp,
+        query: "deploy pipeline",
+      })
+    );
+    const skipWarns = built.messages.filter((w) =>
+      w.includes("[memory/prefetch] skipped")
+    );
+    assert.equal(skipWarns.length, 1);
+    assert.match(skipWarns[0]!, /broken\.md=frontmatter_unreadable/);
+    assert.ok(
+      built.result.includes("### Deploy pipeline"),
+      "a quarantined sibling must not change what the healthy entries serve"
+    );
   });
 });
 

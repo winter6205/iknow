@@ -38,6 +38,7 @@ import {
 } from "../../../src/harness/memory/index.ts";
 import type { AssemblyContext } from "../../../src/harness/memory/index.ts";
 import type { MemoryEntryV1 } from "../../../src/harness/memory/index.ts";
+import { captureConsoleWarnAsync } from "../../_helpers/capture-console-warn.ts";
 
 // -- tmpdir fixtures --------------------------------------------------------
 
@@ -589,5 +590,66 @@ describe("assembleSystemPrompt — capability observations stay out of the catal
     assert.ok(out.includes(EXISTENCE_POINTER));
     assert.ok(!out.includes(MEMORY_CATALOG_DISCIPLINE));
     assert.ok(!out.includes(capabilityTitle));
+  });
+});
+
+// -- skipped quarantine warning ----------------------------------------------
+//
+// SC-B3 (specs/memory-frontmatter-write-signals.md): the catalog reader runs
+// the same store scan as GC and ingest, so an unreadable file must be filed as
+// a quarantine and said out loud exactly once on the `[memory/assembly]` warn
+// seam — naming the slug and the reason category, never the file's own text —
+// while the healthy siblings still render.
+
+describe("assembleSystemPrompt — skipped quarantine warning", () => {
+  it("warns once naming the skipped slug and still renders the healthy catalog row", async () => {
+    // The unreadable row's own text. `title: Rule: …` is not a legal YAML
+    // scalar, which is what makes the reader reject the block.
+    const secretTitle = "lockfile edits go through npm";
+    const secretBody = "SECRET-ASSEMBLY-BODY-MUST-NEVER-LEAK";
+    await write(
+      join(memoryDir, "healthy.md"),
+      serializeMemoryEntry(
+        memoryEntry("healthy", "Deploy via bar()", "ship on Fridays")
+      )
+    );
+    await write(
+      join(memoryDir, "broken.md"),
+      [
+        "---",
+        "id: ab12cd34ef56",
+        `title: Rule: ${secretTitle}`,
+        "---",
+        secretBody,
+        "",
+      ].join("\n")
+    );
+    const assembled = await captureConsoleWarnAsync(() =>
+      assembleSystemPrompt(ctx({ autoExtract: true }))
+    );
+    // Scoped to the quarantine seam: the shared reader has its own degraded-key
+    // warn (`[memory/frontmatter]`) that echoes the offending line, and that
+    // text belongs to a different contract than the skip record under test.
+    const skipWarns = assembled.messages.filter((w) =>
+      w.includes("[memory/assembly] skipped")
+    );
+    assert.equal(
+      skipWarns.length,
+      1,
+      `exactly one quarantine line expected, got: ${JSON.stringify(skipWarns)}`
+    );
+    assert.match(skipWarns[0]!, /broken\.md=frontmatter_unreadable/);
+    for (const line of skipWarns) {
+      assert.ok(!line.includes(secretTitle), `title leaked: ${line}`);
+      assert.ok(!line.includes(secretBody), `body leaked: ${line}`);
+    }
+    assert.ok(
+      assembled.result.includes("Deploy via bar()"),
+      "a quarantined sibling must not cost the healthy entry its catalog row"
+    );
+    assert.ok(
+      !assembled.result.includes(secretBody),
+      "the unreadable file's content never reaches the prompt"
+    );
   });
 });

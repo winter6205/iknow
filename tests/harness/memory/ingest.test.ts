@@ -41,6 +41,7 @@ import type {
   MemoryExtractLlm,
 } from "../../../src/harness/memory/index.ts";
 import { createMemorySaveTool } from "../../../src/harness/memory/tools/save.ts";
+import { captureConsoleWarnAsync } from "../../_helpers/capture-console-warn.ts";
 
 // -- fixtures ----------------------------------------------------------------
 
@@ -1503,6 +1504,89 @@ describe("ingestMemory", () => {
     assert.ok(
       (await readdir(memoryDir)).every((n) => !n.endsWith(".tmp")),
       "no tmp files left behind"
+    );
+  });
+});
+
+// -- skipped quarantine warning ----------------------------------------------
+//
+// SC-B3 (specs/memory-frontmatter-write-signals.md): the extract pass reads the
+// store to decide its ops, so an unreadable file must be filed as a quarantine
+// and said out loud exactly once on the `[memory/ingest]` warn seam — naming
+// the slug and the reason category, never the file's own text — while the pass
+// still writes what it extracted and still preserves what it could not read.
+
+describe("ingestMemory — skipped quarantine warning", () => {
+  it("warns once naming the skipped slug and still persists the extracted entry", async () => {
+    // The unreadable row's own text. `title: Rule: …` is not a legal YAML
+    // scalar, which is what makes the reader reject the block.
+    const secretTitle = "lockfile edits go through npm";
+    const secretBody = "SECRET-INGEST-BODY-MUST-NEVER-LEAK";
+    await put("healthy", {
+      title: "Release trains on Fridays",
+      body: "cut the release every Friday afternoon",
+    });
+    await writeFile(
+      join(memoryDir, "broken.md"),
+      [
+        "---",
+        "id: ab12cd34ef56",
+        `title: Rule: ${secretTitle}`,
+        "---",
+        secretBody,
+        "",
+      ].join("\n"),
+      "utf8"
+    );
+    const before = await readFile(join(memoryDir, "broken.md"), "utf8");
+    const llm = llmReturning(
+      JSON.stringify([
+        {
+          title: "Use bar() for concurrency",
+          body: "bar() is the thread-safe entry point in this repo.",
+          type: "note",
+          confidence: 0.9,
+        },
+      ])
+    );
+
+    // gc:false keeps the warn surface to the pass under test — the mechanical
+    // arm behind it has its own `[memory/gc]` case in gc.test.ts.
+    const ingest = await captureConsoleWarnAsync(() =>
+      ingestMemory({
+        memoryDir,
+        transcript: TRANSCRIPT,
+        llm,
+        now: () => NOW_ISO,
+        randomBytes: seqBytes(),
+        gc: false,
+      })
+    );
+    // Scoped to the quarantine seam: the shared reader has its own degraded-key
+    // warn (`[memory/frontmatter]`) that echoes the offending line, and that
+    // text belongs to a different contract than the skip record under test.
+    const skipWarns = ingest.messages.filter((w) =>
+      w.includes("[memory/ingest] skipped")
+    );
+    assert.equal(
+      skipWarns.length,
+      1,
+      `exactly one quarantine line expected, got: ${JSON.stringify(skipWarns)}`
+    );
+    assert.match(skipWarns[0]!, /broken\.md=frontmatter_unreadable/);
+    for (const line of skipWarns) {
+      assert.ok(!line.includes(secretTitle), `title leaked: ${line}`);
+      assert.ok(!line.includes(secretBody), `body leaked: ${line}`);
+    }
+    assert.equal(
+      ingest.result.written.length,
+      1,
+      "one unreadable sibling must not stall the ingest pass"
+    );
+    assert.equal(
+      await readFile(join(memoryDir, "broken.md"), "utf8"),
+      before,
+      "a writing pass leaves the quarantined file byte-identical"
     );
   });
 });

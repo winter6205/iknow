@@ -40,7 +40,12 @@ import {
 import { MemoryGcOptionInvalid, MemoryIOError } from "./errors.js";
 import { loadUsageSidecar, type UsageSidecar } from "./promote.js";
 import type { MemoryEntryV1 } from "./schema.js";
-import { listStoreEntries, type StoredMemoryEntry } from "./store.js";
+import {
+  listStoreEntries,
+  warnSkippedEntries,
+  type MemoryStoreSkip,
+  type StoredMemoryEntry,
+} from "./store.js";
 import { writeMemoryEntryAtomic } from "./tools/save.js";
 
 /** Default active-entry ceiling for one project memory store. */
@@ -112,8 +117,8 @@ export interface MemoryGcResult {
   readonly archived: ReadonlyArray<string>;
   /** How many `<slug>.md` entries parsed successfully. */
   readonly scanned: number;
-  /** Slugs whose file could not be parsed; skipped, not disabled. */
-  readonly skipped: ReadonlyArray<string>;
+  /** Files the reader could not parse; quarantined with a reason category, never disabled. */
+  readonly skipped: ReadonlyArray<MemoryStoreSkip>;
 }
 
 /**
@@ -243,6 +248,8 @@ export async function runMemoryGc(
   opts?: MemoryGcOptions
 ): Promise<MemoryGcResult> {
   const scan = await listStoreEntries(memoryDir);
+  // One warn before the early exit so both scan paths report the quarantine.
+  warnSkippedEntries("[memory/gc]", scan.skipped);
   if (scan.entries.length === 0) {
     return { disabled: [], archived: [], scanned: 0, skipped: scan.skipped };
   }

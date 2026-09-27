@@ -3,9 +3,10 @@
  *
  * `<slug>.md` files are the entries; `MEMORY.md` is the human index and
  * `usage.json` is the recall sidecar, so both are skipped. A file that fails
- * to parse is reported in `skipped` rather than thrown — a single corrupt
- * entry must not stall a maintenance or ingest pass (same posture as the
- * per-slug skip in promote.ts / tools/recall.ts).
+ * to read or parse is quarantined into a structured `skipped` record — slug
+ * plus machine-usable reason category, never file content — rather than
+ * thrown: a single corrupt entry must not stall a maintenance or ingest pass
+ * (same posture as the per-slug skip in promote.ts / tools/recall.ts).
  *
  * A missing directory reads as an empty store: both callers (GC, ingest) run
  * before anything has necessarily been saved.
@@ -13,6 +14,7 @@
 import { opendir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 
+import { MemorySchemaInvalid } from "./errors.js";
 import { parseMemoryEntry } from "./frontmatter.js";
 import type { MemoryEntryV1 } from "./schema.js";
 
@@ -22,18 +24,38 @@ export interface StoredMemoryEntry {
   readonly entry: MemoryEntryV1;
 }
 
+/**
+ * The bounded grammar a skip reason may take: the two closed categories are
+ * wire-stable tokens, and the `read_failed:<code>` family carries only an
+ * errno code. Neither can carry an exception message, so no file content can
+ * ride along.
+ */
+export type MemorySkipReason =
+  "frontmatter_unreadable" | "read_failed" | `read_failed:${string}`;
+
+/**
+ * One quarantined file: slug plus a machine-usable reason category, never
+ * file content. `MemorySkipReason` is what makes that "wire-stable tokens
+ * only" claim checkable: a future version may add an arm, never reinterpret
+ * one a consumer already switches on.
+ */
+export interface MemoryStoreSkip {
+  readonly slug: string;
+  readonly reason: MemorySkipReason;
+}
+
 export interface MemoryStoreScan {
   /** Parsed entries, sorted by slug so scan order never leaks into a verdict. */
   readonly entries: ReadonlyArray<StoredMemoryEntry>;
-  /** Slugs whose file could not be parsed. */
-  readonly skipped: ReadonlyArray<string>;
+  /** Files the reader could not parse, sorted by slug. */
+  readonly skipped: ReadonlyArray<MemoryStoreSkip>;
 }
 
 export async function listStoreEntries(
   memoryDir: string
 ): Promise<MemoryStoreScan> {
   const entries: StoredMemoryEntry[] = [];
-  const skipped: string[] = [];
+  const skipped: MemoryStoreSkip[] = [];
   let dir;
   try {
     dir = await opendir(memoryDir);
@@ -54,12 +76,39 @@ export async function listStoreEntries(
           await readFile(join(memoryDir, e.name), "utf8")
         ),
       });
-    } catch {
-      // EXIT: skip-and-report — surfaced to the caller via `skipped`.
-      skipped.push(slug);
+    } catch (error) {
+      // EXIT: skip-and-report — structured {slug, reason} surfaced to the
+      // caller via `skipped`; bytes on disk stay untouched.
+      skipped.push({ slug, reason: classifySkip(error) });
     }
   }
   entries.sort((a, b) => a.slug.localeCompare(b.slug));
-  skipped.sort();
+  skipped.sort((a, b) => a.slug.localeCompare(b.slug));
   return { entries, skipped };
+}
+
+/** Categories, not messages: an exception message can carry the file's text. */
+export function classifySkip(error: unknown): MemorySkipReason {
+  if (error instanceof MemorySchemaInvalid) return "frontmatter_unreadable";
+  // A throw is `unknown` here: reading `.code` off a nullish one would turn
+  // the skip into a crash and stall the pass the skip exists to protect.
+  const code =
+    typeof error === "object" && error !== null
+      ? (error as NodeJS.ErrnoException).code
+      : undefined;
+  return typeof code === "string" ? `read_failed:${code}` : "read_failed";
+}
+
+/**
+ * Consumer warn seam: one aggregated line per scan run naming every skipped
+ * slug and its reason category — never content, same posture as the other
+ * `[memory/*]` warns. Each scan consumer calls it exactly once.
+ */
+export function warnSkippedEntries(
+  prefix: string,
+  skipped: ReadonlyArray<MemoryStoreSkip>
+): void {
+  if (skipped.length === 0) return;
+  const summary = skipped.map((s) => `${s.slug}.md=${s.reason}`).join(", ");
+  console.warn(`${prefix} skipped unparseable entries: ${summary}`);
 }

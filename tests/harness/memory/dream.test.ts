@@ -13,6 +13,7 @@ import {
   serializeMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
 import { MAX_SUPERSEDES_PER_CANDIDATE } from "../../../src/harness/memory/dream.ts";
+import { captureConsoleWarnAsync } from "../../_helpers/capture-console-warn.ts";
 import type {
   MemoryEntryV1,
   MemoryExtractLlm,
@@ -558,12 +559,97 @@ describe("runMemoryDream — runtime capability gate", () => {
       assert.equal(result.written.length, 1);
       assert.equal(result.written[0]!.kind, "SUPERSEDE");
       const stored = parseMemoryEntry(
-        await readFile(
-          join(memoryDir, `${result.written[0]!.slug}.md`),
-          "utf8"
-        )
+        await readFile(join(memoryDir, `${result.written[0]!.slug}.md`), "utf8")
       );
       assert.deepEqual(stored.supersedes, ["old"]);
+    } finally {
+      await rm(memoryDir, { recursive: true, force: true });
+    }
+  });
+});
+
+// -- skipped quarantine warning ----------------------------------------------
+//
+// SC-B3 (specs/memory-frontmatter-write-signals.md): the merge pass reads the
+// store through the same reader as GC, ingest and the catalog, so an unreadable
+// file must be filed as a quarantine and said out loud exactly once on the
+// `[memory/dream]` warn seam — naming the slug and the reason category, never
+// the file's own text — while the healthy entries still reach the model.
+
+describe("runMemoryDream — skipped quarantine warning", () => {
+  it("warns once naming the skipped slug and still feeds the healthy entries to the model", async () => {
+    const memoryDir = await mkdtemp(join(tmpdir(), "memory-dream-skip-"));
+    try {
+      // The unreadable row's own text. `title: Rule: …` is not a legal YAML
+      // scalar, which is what makes the reader reject the block.
+      const secretTitle = "lockfile edits go through npm";
+      const secretBody = "SECRET-DREAM-BODY-MUST-NEVER-LEAK";
+      await writeFile(
+        join(memoryDir, "queue.md"),
+        serializeMemoryEntry(entry("queue")),
+        "utf8"
+      );
+      await writeFile(
+        join(memoryDir, "deploy.md"),
+        serializeMemoryEntry(entry("deploy", { title: "Ship on Fridays" })),
+        "utf8"
+      );
+      await writeFile(
+        join(memoryDir, "broken.md"),
+        [
+          "---",
+          "id: ab12cd34ef56",
+          `title: Rule: ${secretTitle}`,
+          "---",
+          secretBody,
+          "",
+        ].join("\n"),
+        "utf8"
+      );
+      let prompt = "";
+      let calls = 0;
+      const llm: MemoryExtractLlm = {
+        complete: async (text: string) => {
+          calls++;
+          prompt = text;
+          return "[]";
+        },
+      };
+
+      const dream = await captureConsoleWarnAsync(() =>
+        runMemoryDream({ memoryDir, llm })
+      );
+      // Scoped to the quarantine seam: the shared reader has its own
+      // degraded-key warn (`[memory/frontmatter]`) that echoes the offending
+      // line, and that text belongs to a different contract than the skip
+      // record under test.
+      const skipWarns = dream.messages.filter((w) =>
+        w.includes("[memory/dream] skipped")
+      );
+      assert.equal(
+        skipWarns.length,
+        1,
+        `exactly one quarantine line expected, got: ${JSON.stringify(skipWarns)}`
+      );
+      assert.match(skipWarns[0]!, /broken\.md=frontmatter_unreadable/);
+      for (const line of skipWarns) {
+        assert.ok(!line.includes(secretTitle), `title leaked: ${line}`);
+        assert.ok(!line.includes(secretBody), `body leaked: ${line}`);
+      }
+      assert.equal(
+        calls,
+        1,
+        "one unreadable sibling must not stall the merge pass"
+      );
+      assert.ok(
+        prompt.includes("Ship on Fridays"),
+        "the healthy sibling still reaches the model"
+      );
+      assert.ok(
+        !prompt.includes(secretTitle) && !prompt.includes(secretBody),
+        "the quarantined file's content never reaches the model"
+      );
+      assert.deepEqual(dream.result, { ops: [], written: [] });
     } finally {
       await rm(memoryDir, { recursive: true, force: true });
     }

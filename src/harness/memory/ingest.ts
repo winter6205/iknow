@@ -26,7 +26,11 @@ import { MemoryExtractError } from "./errors.js";
 import { runMemoryGc, type MemoryGcResult } from "./gc.js";
 import { normalizeMemoryType } from "./schema.js";
 import type { MemoryEntryV1 } from "./schema.js";
-import { listStoreEntries, type StoredMemoryEntry } from "./store.js";
+import {
+  listStoreEntries,
+  warnSkippedEntries,
+  type StoredMemoryEntry,
+} from "./store.js";
 import { tokenize } from "./tokenize.js";
 import {
   refreshMemoryIndexLine,
@@ -509,6 +513,7 @@ export async function ingestMemory(
   if (candidates.length === 0) return { ops: [], written: [] };
 
   const scan = await listStoreEntries(opts.memoryDir);
+  warnSkippedEntries("[memory/ingest]", scan.skipped);
   const ops = decideMemoryOps(candidates, scan.entries);
   const written = await persistMemoryOps(opts.memoryDir, ops, {
     ...(opts.now ? { now: opts.now } : {}),

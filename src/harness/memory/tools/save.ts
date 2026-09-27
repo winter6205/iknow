@@ -35,6 +35,7 @@ import {
   MemoryCapabilityRejected,
   MemoryError,
   MemoryIOError,
+  MemorySchemaInvalid,
 } from "../errors.js";
 import {
   CAPABILITY_OBSERVATION_REASON,
@@ -257,6 +258,12 @@ export async function writeMemoryEntryAtomic(
   try {
     serialized = serializeMemoryEntry(written);
   } catch (error) {
+    // EXIT: serializer refused; disk untouched. One warn names slug and key
+    // (the typed message carries no value), then the caller sees the typed
+    // failure.
+    if (error instanceof MemorySchemaInvalid) {
+      console.warn(`[memory/save] refused ${slug}.md: ${error.message}`);
+    }
     throw new MemoryIOError(`[memory_save] serialize failed`, { cause: error });
   }
   try {

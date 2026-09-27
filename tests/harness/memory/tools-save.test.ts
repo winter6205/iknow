@@ -8,6 +8,10 @@
  *   - affirmative phrasing rejection: `don't` / `never` / `禁止` ("forbidden") /
  *     `不要` ("do not") / `不能` ("cannot") / body starting with `not ` → MemoryError (typed)
  *   - atomic write (tmp/rename); frontmatter auto-writes 6 fields + timestamp
+ *   - a non-scalar unknown extra is refused by the pure serializer: the writer
+ *     warns on the `[memory/save]` seam naming slug + key, leaves the target
+ *     absent (or a pre-existing file byte-identical), and surfaces a typed
+ *     `MemoryIOError` whose cause is the `MemorySchemaInvalid`
  *   - slug naming (implementation choice: hash-based, collision-safe under
  *     concurrent save)
  *   - **concurrent** boundary class: two concurrent `memory_save` to the same
@@ -36,18 +40,22 @@ import {
 } from "../../../src/harness/memory/tools/save.ts";
 import {
   CAPABILITY_OBSERVATION_REASON,
+  MemoryIOError,
+  MemorySchemaInvalid,
   defaultMemoryEntry,
   parseMemoryEntry,
 } from "../../../src/harness/memory/index.ts";
 import type {
   MemoryCapabilityRejected,
   MemoryError,
+  MemoryEntryV1,
 } from "../../../src/harness/memory/index.ts";
 import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
 import { createAciRegistry } from "../../../src/harness/aci/aci-registry.ts";
 import { createAciExecutor } from "../../../src/harness/aci/aci-executor.ts";
+import { captureConsoleWarnAsync } from "../../_helpers/capture-console-warn.ts";
 
 let memoryDir: string;
 
@@ -702,6 +710,130 @@ describe("memory_save — runtime capability persist gate", () => {
       results[0]!.kind === "execution_failed" ? results[0]!.message : "";
     assert.match(message, /capability_observation/);
     assert.deepEqual(await readdir(memoryDir), []);
+  });
+});
+
+// -- non-scalar extra: the shared writer refuses the write and says so --------
+
+/**
+ * Capture `console.warn` across an await and keep the rejection. The refusal
+ * is a pair — one warn plus one typed throw — and the cases below assert both
+ * halves, so the rejection is parked instead of rethrown.
+ */
+async function captureWarns(
+  run: () => Promise<unknown>
+): Promise<{ rejected: unknown; warned: string[] }> {
+  const warned: string[] = [];
+  let rejected: unknown;
+  try {
+    await captureConsoleWarnAsync(run, warned);
+  } catch (error) {
+    rejected = error;
+  }
+  return { rejected, warned };
+}
+
+/** The one shape the pinned writer cannot emit: an unknown extra that is a sequence. */
+function entryWithNonScalarExtra(): MemoryEntryV1 {
+  return {
+    ...defaultMemoryEntry(),
+    id: "mem-1",
+    title: "Use bar()",
+    body: "Calling bar() is the supported path.",
+    updated_at: "2026-02-01T12:00:00.000Z",
+    tags: ["alpha", "beta"],
+  } as unknown as MemoryEntryV1;
+}
+
+describe("writeMemoryEntryAtomic — a non-scalar extra refuses the write", () => {
+  const SLUG = "cafe0000beef";
+
+  it("leaves no file behind when the target did not exist", async () => {
+    const { rejected } = await captureWarns(() =>
+      writeMemoryEntryAtomic(memoryDir, SLUG, entryWithNonScalarExtra())
+    );
+    assert.ok(
+      rejected instanceof MemoryIOError,
+      `the caller must see a typed failure, got ${String(rejected)}`
+    );
+    assert.equal(await exists(join(memoryDir, `${SLUG}.md`)), false);
+    assert.deepEqual(
+      await readdir(memoryDir),
+      [],
+      "a refused write must leave neither the entry nor a stale tmp file"
+    );
+  });
+
+  it("leaves a pre-existing file byte-identical", async () => {
+    const first: MemoryEntryV1 = {
+      ...defaultMemoryEntry(),
+      id: "mem-1",
+      title: "Use bar()",
+      body: "first revision",
+      updated_at: "2026-02-01T12:00:00.000Z",
+      tags: "alpha",
+    } as unknown as MemoryEntryV1;
+    await writeMemoryEntryAtomic(memoryDir, SLUG, first);
+    const target = join(memoryDir, `${SLUG}.md`);
+    const before = await readFile(target, "utf8");
+
+    const { rejected } = await captureWarns(() =>
+      writeMemoryEntryAtomic(memoryDir, SLUG, entryWithNonScalarExtra())
+    );
+    assert.ok(rejected instanceof MemoryIOError);
+    assert.equal(await readFile(target, "utf8"), before);
+    assert.deepEqual(
+      await readdir(memoryDir),
+      [`${SLUG}.md`],
+      "no tmp file may survive the refusal"
+    );
+  });
+
+  it("warns once, naming the slug and the key but never the value", async () => {
+    const { rejected, warned } = await captureWarns(() =>
+      writeMemoryEntryAtomic(memoryDir, SLUG, entryWithNonScalarExtra())
+    );
+    assert.ok(rejected instanceof MemoryIOError);
+    assert.equal(
+      warned.length,
+      1,
+      `exactly one warning expected, got: ${JSON.stringify(warned)}`
+    );
+    assert.match(warned[0]!, /^\[memory\/save\]/);
+    // The warn text is the typed message, not a second copy of it: one string
+    // source, so the seam and the error can never drift apart.
+    assert.equal(
+      warned[0]!,
+      `[memory/save] refused ${SLUG}.md: memory frontmatter extra "tags" is not a scalar`
+    );
+    assert.ok(
+      warned[0]!.includes(SLUG),
+      `warning must name the slug: ${warned[0]}`
+    );
+    assert.ok(
+      warned[0]!.includes("tags"),
+      `warning must name the key: ${warned[0]}`
+    );
+    assert.ok(
+      !warned[0]!.includes("alpha") && !warned[0]!.includes("beta"),
+      `the warning must not carry extra content: ${warned[0]}`
+    );
+    assert.ok(
+      !warned[0]!.includes("Calling bar()"),
+      `the warning must not carry the body: ${warned[0]}`
+    );
+  });
+
+  it("surfaces the refusal as a typed MemoryIOError whose cause names the key", async () => {
+    const { rejected } = await captureWarns(() =>
+      writeMemoryEntryAtomic(memoryDir, SLUG, entryWithNonScalarExtra())
+    );
+    assert.ok(rejected instanceof MemoryIOError);
+    assert.ok(
+      rejected.cause instanceof MemorySchemaInvalid,
+      `the cause must stay typed, got ${String(rejected.cause)}`
+    );
+    assert.equal((rejected.cause as MemorySchemaInvalid).field, "tags");
   });
 });
 
