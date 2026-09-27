@@ -50,7 +50,7 @@ import { dirname, join } from "node:path";
 
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
-import { ToolExecutionError } from "../../errors.js";
+import { ToolExecutionError, ToolInputValidationError } from "../../errors.js";
 import { sanitizeConversationSegment } from "../../session-roots.js";
 import {
   appendSubjects,
@@ -201,8 +201,9 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
       properties: {
         mode: { type: "string", enum: [...TODO_WRITE_MODES] },
         // add: one `item` or many `items` at once (ADR-0085: write a
-        // multi-step plan in one call). The two are mutually exclusive;
-        // per-mode field exclusion is reported at the parseInput stage.
+        // multi-step plan in one call). The two are mutually exclusive; the
+        // mode contract branches reject per-mode field exclusion before the
+        // handler runs, and parseInput keeps the same checks for direct calls.
         item: {
           type: "string",
           description:
@@ -238,6 +239,9 @@ export function createTodoWriteTool(deps: TodoWriteToolDeps): AciToolDef {
       },
       required: ["mode"],
       additionalProperties: false,
+      // Mode-specific contract enforced at the ajv layer before the handler
+      // runs; FORBIDDEN_KEYS in parseInput stays as the direct-call fallback.
+      allOf: modeContractBranches(),
     },
     aci: {
       category: "write",
@@ -365,6 +369,10 @@ function formatUpdateReceipt(patch: TodoUpdatePatch): string {
 
 // ---------------------------------------------------------------------------
 // input parsing
+//
+// Every rejection here is a deterministic input-shape check →
+// ToolInputValidationError (executor classifies it validation_failed); IO /
+// state / capability failures below stay plain ToolExecutionError.
 // ---------------------------------------------------------------------------
 
 interface ReadParams {
@@ -396,14 +404,72 @@ const FORBIDDEN_KEYS: Readonly<Record<TodoWriteMode, ReadonlyArray<string>>> = {
   replace: ["item", "id", "subject", "status", "delete"],
 };
 
+/** Update fields that carry a change; `id` alone is a no-op the schema rejects. */
+const UPDATE_CHANGE_FIELDS = ["subject", "status", "delete"] as const;
+
+/**
+ * Mode-specific contract branches, derived from the same FORBIDDEN_KEYS table
+ * the parseInput fallback reads (single source of truth). Each branch is an
+ * `if / then` pair guarded by the mode discriminator, so only the branches of
+ * the mode the caller actually declared can fail: a cross-mode field is
+ * reported once, on that field, instead of one `mode` mismatch per branch.
+ * Within a mode the field-exclusion branch is listed first, so the surfaced
+ * rejection names the offending field ahead of any missing-field complaint.
+ */
+function modeContractBranches(): ReadonlyArray<Record<string, unknown>> {
+  const declaredAs = (
+    mode: TodoWriteMode,
+    alsoRequired: ReadonlyArray<string> = []
+  ): Record<string, unknown> => ({
+    properties: { mode: { const: mode } },
+    required: ["mode", ...alsoRequired],
+  });
+  const excludes = (
+    mode: TodoWriteMode,
+    forbidden: ReadonlyArray<string>
+  ): Record<string, unknown> => ({
+    if: declaredAs(mode),
+    then: {
+      properties: Object.fromEntries(forbidden.map((key) => [key, false])),
+    },
+  });
+  return [
+    excludes("read", FORBIDDEN_KEYS.read),
+    excludes("add", FORBIDDEN_KEYS.add),
+    {
+      // add takes `item` (single) or `items` (many): each arm accepts exactly
+      // one of the two, so coexisting fields match none.
+      if: declaredAs("add"),
+      then: {
+        anyOf: [
+          { required: ["item"], properties: { items: false } },
+          { required: ["items"], properties: { item: false } },
+        ],
+      },
+    },
+    excludes("update", FORBIDDEN_KEYS.update),
+    { if: declaredAs("update"), then: { required: ["id"] } },
+    {
+      // An id alone is a no-op: a change field is required only once the id is
+      // there, so a missing id stays the single reported problem.
+      if: declaredAs("update", ["id"]),
+      then: {
+        anyOf: UPDATE_CHANGE_FIELDS.map((field) => ({ required: [field] })),
+      },
+    },
+    excludes("replace", FORBIDDEN_KEYS.replace),
+    { if: declaredAs("replace"), then: { required: ["items"] } },
+  ];
+}
+
 function parseInput(input: unknown): ParsedInput {
   if (input === null || typeof input !== "object" || Array.isArray(input)) {
-    throw new ToolExecutionError("[todo_write] input must be an object");
+    throw new ToolInputValidationError("[todo_write] input must be an object");
   }
   const raw = input as Record<string, unknown>;
   for (const key of Object.keys(raw)) {
     if (!ALLOWED_KEYS.has(key)) {
-      throw new ToolExecutionError(`[todo_write] unknown field: ${key}`);
+      throw new ToolInputValidationError(`[todo_write] unknown field: ${key}`);
     }
   }
   const mode = requireMode(raw.mode);
@@ -420,13 +486,16 @@ function parseInput(input: unknown): ParsedInput {
   }
 }
 
+// EXIT: the schema's mode contract branches already reject these combinations
+// before the handler runs; this re-check can go once no todo_write handler is
+// invocable without the registry validator.
 function assertModeFieldsExclusive(
   raw: Record<string, unknown>,
   mode: TodoWriteMode
 ): void {
   for (const key of FORBIDDEN_KEYS[mode]) {
     if (raw[key] !== undefined) {
-      throw new ToolExecutionError(
+      throw new ToolInputValidationError(
         `[todo_write] mode ${mode} does not accept ${key}`
       );
     }
@@ -438,7 +507,7 @@ function parseAddInput(raw: Record<string, unknown>): AddParams {
   const hasItem = raw.item !== undefined;
   const hasItems = raw.items !== undefined;
   if (hasItem && hasItems) {
-    throw new ToolExecutionError(
+    throw new ToolInputValidationError(
       "[todo_write] mode add accepts item or items, not both"
     );
   }
@@ -451,7 +520,7 @@ function parseAddInput(raw: Record<string, unknown>): AddParams {
   }
   const subjects = requireStringArray(raw.items, "items");
   if (subjects.length === 0) {
-    throw new ToolExecutionError(
+    throw new ToolInputValidationError(
       "[todo_write] items must contain at least one subject"
     );
   }
@@ -470,12 +539,12 @@ function parseUpdateInput(raw: Record<string, unknown>): UpdateParams {
   if (subject !== undefined) validateItemText(subject);
   const del = parseDeleteFlag(raw.delete);
   if (del === true && (subject !== undefined || status !== undefined)) {
-    throw new ToolExecutionError(
+    throw new ToolInputValidationError(
       "[todo_write] mode update takes delete:true on its own"
     );
   }
   if (del !== true && subject === undefined && status === undefined) {
-    throw new ToolExecutionError(
+    throw new ToolInputValidationError(
       "[todo_write] mode update requires subject, status, or delete:true"
     );
   }
@@ -494,7 +563,7 @@ function requireMode(value: unknown): TodoWriteMode {
     typeof value !== "string" ||
     !(TODO_WRITE_MODES as ReadonlyArray<string>).includes(value)
   ) {
-    throw new ToolExecutionError(
+    throw new ToolInputValidationError(
       `[todo_write] mode must be one of ${TODO_WRITE_MODES.join(" | ")}`
     );
   }
@@ -503,7 +572,9 @@ function requireMode(value: unknown): TodoWriteMode {
 
 function requireStringValue(value: unknown, label: string): string {
   if (typeof value !== "string") {
-    throw new ToolExecutionError(`[todo_write] ${label} must be a string`);
+    throw new ToolInputValidationError(
+      `[todo_write] ${label} must be a string`
+    );
   }
   return value;
 }
@@ -513,13 +584,13 @@ function requireStringArray(
   label: string
 ): ReadonlyArray<string> {
   if (!Array.isArray(value)) {
-    throw new ToolExecutionError(
+    throw new ToolInputValidationError(
       `[todo_write] ${label} must be an array of strings`
     );
   }
   for (const entry of value) {
     if (typeof entry !== "string") {
-      throw new ToolExecutionError(
+      throw new ToolInputValidationError(
         `[todo_write] ${label} entries must be strings`
       );
     }
@@ -533,7 +604,7 @@ function parseOptionalStatus(value: unknown): TodoItemStatus | undefined {
     typeof value !== "string" ||
     !(TODO_ITEM_STATUSES as ReadonlyArray<string>).includes(value)
   ) {
-    throw new ToolExecutionError(
+    throw new ToolInputValidationError(
       `[todo_write] status must be one of ${TODO_ITEM_STATUSES.join(" | ")}`
     );
   }
@@ -544,7 +615,7 @@ function parseOptionalStatus(value: unknown): TodoItemStatus | undefined {
 function parseDeleteFlag(value: unknown): true | undefined {
   if (value === undefined || value === false) return undefined;
   if (value === true) return true;
-  throw new ToolExecutionError("[todo_write] delete must be a boolean");
+  throw new ToolInputValidationError("[todo_write] delete must be a boolean");
 }
 
 /**
@@ -554,7 +625,7 @@ function parseDeleteFlag(value: unknown): true | undefined {
  */
 function validateItemText(value: string): void {
   if (value.length === 0 || codepointLength(value) > MAX_ITEM_CODEPOINTS) {
-    throw new ToolExecutionError(
+    throw new ToolInputValidationError(
       `[todo_write] item must be a non-empty string ≤ ${MAX_ITEM_CODEPOINTS} codepoints`
     );
   }

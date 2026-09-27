@@ -71,8 +71,11 @@ _Avoid_: 与 verify 失败签名混名；与工具四 kind 混名；塞进 StopR
 **tool-call loop detection**: 本 `run()` 内，工具阶段结果已追加进 append-only messages 之后、下一次 adapter.step 之前，用调用键与结果键做周期（k=1..5）重复 R=5 且停滞则 trip。ADR-0029。
 _Avoid_: 连续 N=3 简化；verify 趋势停；sandbox violation kill；正文复读检测；settle 前取消同波 tool_use
 
-**LOOP_DETECTED envelope**: 环检测 trip 时追加的固定模板 user 消息，写入权威 messages 并落盘，下一问作为 priorMessages 进模型；对人至少经 `stop=fused` 可见。
+**LOOP_DETECTED envelope**: 环检测 trip 时追加的固定模板 user 消息（`hostInjected: true`），写入权威 messages 并落盘，下一问作为 priorMessages 进模型；对人经 `stop=fused` 可见，resume 分类靠 continue-pending 对全文等值匹配判 `fused_clean_stop`。
 _Avoid_: 只 toast 不进历史；下一轮不喂模型；当成 tool_result 吞掉真实失败
+
+**host-injected 消息的 UI 身份缺口**: 数据层有 `hostInjected` 标记但 UI 层无差异化渲染——恢复路径上这类消息（**LOOP_DETECTED envelope**、`<agent_status>` 栏历史）以普通 user 气泡形态进入 TUI 聊天流，人无法从视觉上区分 host 注入与真实用户输入。live run 的 `<agent_status>` 走专属 stream event 有专门渲染，不在缺口内。修复方案见 plans/host-injected-ui-identity.md。
+_Avoid_: 给持久化消息 schema 加 kind/type 字段当第一刀；改 continue-pending 的全等匹配契约；动 `<agent_status>` 的 live 流渲染
 
 **viewport API error**: 供应商/API/连接失败给人看的对话流行：薄外壳 `API error (status):` + 服务商原文；不追加进 **session transcript**，下一轮不喂模型。ADR-0094。异常停的底栏提示见 **sticky notice**。
 _Avoid_: 把 `protocolError` / 「可能是连接或模型故障」当 UX 文案；把 API 失败落成 append-only assistant；与 sticky notice 混成同一条消息气泡
@@ -444,6 +447,18 @@ _Avoid_: 把对照当运行时第二层；用脱敏后的命令当语料（改�
 
 **命令名录**: 权限层内一张冻结声明表，命令名单的单一事实源（阶段 4b 落，不早于此）——四个面 `allowlisted`（原 `ALLOWED_COMMAND_TOKENS`）/ `readonly_safe` / `execution_agent`（原 `bash-readonly.ts` 的两个名集）/ `interpreter`（ADR-0125 的 12 名解释器名册），每条另带 `flag_policy` 字符串键（`"find" | "sort" | "git" | null`），键→表的映射在 `bash-readonly.ts` 内解析，三张 flag 表仍归它私有。4b 只搬名字住哪儿，不改任何判定。
 _Avoid_: 把 `BASE_ENV_WHITELIST`（环境变量名轴，住 `sandbox/env-isolation.ts`）并进名录；为共享名单让 `permission/` 去 import `sandbox/` 的值（两层的输入是冻结副本 + 测试侧等值钉）；把名录当第二套权限判定
+
+**解析地基**: 权限决策前的语法级 shell 解析层——tree-sitter 原生绑定、全同步 `parseForSecurity(command)` 单一入口（`shell-parse.ts`），按命令字符串有界缓存，policy/handler 两道门共享一次解析。只供给语法事实（引号内外、替换结构、heredoc 语境），不做 deny 决策；各墙与切分器是它的消费者。ADR-0123。
+_Avoid_: 读片室；AST 层；把它当第二道墙或让它在解析层做政策；用旧裸子串扫描直接判新语法结构
+
+**解析判定**: 解析地基本身的输出契约——六态闭集（ok / 未知语法 / 畸形 / 中止 / 超容量 / 解析器不可用）加解析前字符级一票否决清单，是所有墙唯一的解析输入。仅"解析器不可用"降级旧扫描（终态、红字警示、不许静默），其余各态各有固定归宿。ADR-0124。
+_Avoid_: 把"未知语法"当硬拒；让运行时解析异常降级回旧扫描；把降级和硬拒混成一个态；无警示地静默降级
+
+**递归检查**: 替换类语法的判定模型——`$(...)`、反引号、`<(...)` 的内层命令提取出来，走与顶层完全相同的权限判定，ask 逐层上传导，嵌套上限 2 层（第 3 层 → ask）。静态判定不赌运行时条件：`${X:-$(cmd)}` 按会执行分析。ADR-0125。
+_Avoid_: 内层只读 allowlist（第二份清单）；出现即拒；只看外层不看内层
+
+**组合墙**: 解释器（bash/sh/python/node…）直接执行 `<(...)` 产出内容 → 硬拒，不问内层是什么。拒的是"内容运行时才生成、谁都看不见"的组合，不是"解释器执行脚本"——heredoc 脚本内容全可见，不在此墙内，改为逐行检查（正文定性看接收者）。ADR-0125。
+_Avoid_: 把它理解成禁止 bash 执行脚本；把它套到 heredoc 上；与 command-substitution 墙混同
 
 **compact reason**: 压缩路径分类，闭集 `below_token_threshold` | `messages_too_few` | `windowed` | `full_summary`，写入 `CompactSessionResponse.reason` 并驱动 UI 文案。`below_token_threshold` 只表示 proactive 未过 auto-compact token gate。
 _Avoid_: 把手动 `/compact` 的 noop 写成「未达自动阈值」；UI 字面当业务码；reason 当 `LoopTrace` / `LlmCallRecord` 字段

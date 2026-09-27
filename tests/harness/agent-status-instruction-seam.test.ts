@@ -24,7 +24,10 @@ import {
   renderGraphModeChangeNotification,
 } from "../../src/harness/graph/notification.ts";
 import { SKILL_INDEX_DELTA_PREFIX } from "../../src/harness/skill/index-delta.ts";
-import { LOOP_DETECTED_TEXT } from "../../src/harness/tool-loop-detect.ts";
+import {
+  LOOP_DETECTED_TEXT,
+  VALIDATION_LOOP_DETECTED_TEXT,
+} from "../../src/harness/tool-loop-detect.ts";
 import { buildCompactPrompt } from "../../src/harness/compress/full-compact.ts";
 import { MCP_RECONNECT_NOTIFICATION_TEMPLATE } from "../../src/harness/loop-engine.ts";
 import {
@@ -153,6 +156,13 @@ const ROSTER_RULES: ReadonlyArray<{
     label: "loop detected",
     match: (s) => s.arg === "LOOP_DETECTED_TEXT",
     sample: () => LOOP_DETECTED_TEXT,
+  },
+  {
+    // Narrow validation-stall fuse: separate site, separate text, same
+    // "LOOP_DETECTED:" prefix anchor.
+    label: "validation loop detected",
+    match: (s) => s.arg === "VALIDATION_LOOP_DETECTED_TEXT",
+    sample: () => VALIDATION_LOOP_DETECTED_TEXT,
   },
 ];
 

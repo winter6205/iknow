@@ -135,26 +135,33 @@ afterAll(async () => {
 });
 
 describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
-  it("returns the full ACI registry (incl. todo_write + run_graph + the five worktree tools) when serve constructs without deps", async () => {
-    const hub = new SessionHub({
-      store,
-      askUser: createNoAskUser(),
-    });
-    const ensure = (
-      hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
-    ).ensureDeps.bind(hub);
+  // Per-case timing budget: this case really assembles the whole ACI
+  // registry; on a 4-core box the global 30s ceiling measures wall-clock
+  // CPU contention (~34s observed), not a hang.
+  it(
+    "returns the full ACI registry (incl. todo_write + run_graph + the five worktree tools) when serve constructs without deps",
+    { timeout: 90_000 },
+    async () => {
+      const hub = new SessionHub({
+        store,
+        askUser: createNoAskUser(),
+      });
+      const ensure = (
+        hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
+      ).ensureDeps.bind(hub);
 
-    const deps = await ensure();
-    const names = deps.registry.list().map((def) => def.name);
-    // serve entry injects todoDir → todo_write assembled; the full SSOT
-    // registry is present (assembly conditions per group comment above).
-    for (const expected of EXPECTED_TOOLS) {
-      expect(names).toContain(expected);
+      const deps = await ensure();
+      const names = deps.registry.list().map((def) => def.name);
+      // serve entry injects todoDir → todo_write assembled; the full SSOT
+      // registry is present (assembly conditions per group comment above).
+      for (const expected of EXPECTED_TOOLS) {
+        expect(names).toContain(expected);
+      }
+      expect(names).toHaveLength(EXPECTED_TOOLS.length);
+      expect(names).toContain("todo_write");
+      expect(names).toContain("run_graph");
     }
-    expect(names).toHaveLength(EXPECTED_TOOLS.length);
-    expect(names).toContain("todo_write");
-    expect(names).toContain("run_graph");
-  });
+  );
 });
 
 // Same skill entering context through three paths (TUI slash envelope / hub
@@ -171,75 +178,81 @@ describe("SessionHub.ensureDeps (lazy SSOT delegation)", () => {
 // no-write-root-section assertions. The slash face follows the same contract
 // by derivation (no separate assembly test).
 describe("SessionHub.loadSkillBody — 正文不挂写根（ADR-0079 / SC2）", () => {
-  it("build-engine 装配后 loadSkillBody 正文与 createSkillBody 逐字节相等，末段 </skill_files>，不出现 current write root", async () => {
-    const { mkdir, writeFile } = await import("node:fs/promises");
-    const skillDir = join(baseDir, "skills-wrt", "wrt-echo");
-    await mkdir(skillDir, { recursive: true });
-    await writeFile(
-      join(skillDir, "SKILL.md"),
-      "---\nname: wrt-echo\ndescription: echo\n---\nbody line\n",
-      "utf8"
-    );
-    // Scan-root injection: IKNOW_SKILL_DIRS is one of the scanner's three
-    // root channels; the tmp fixture enters the catalog through it without
-    // relying on the cwd/.iknow convention.
-    const prevSkillDirs = process.env.IKNOW_SKILL_DIRS;
-    process.env.IKNOW_SKILL_DIRS = join(baseDir, "skills-wrt");
-    try {
-      const hub = new SessionHub({
-        store,
-        askUser: createNoAskUser(),
-      });
-      const load = hub as unknown as {
-        ensureDeps: () => Promise<LoopEngineDeps>;
-        loadSkillBody: (
-          name: string
-        ) => Promise<{ name: string; body: string }>;
-      };
-      await load.ensureDeps();
-      // Expected value taken from the same read point used at assembly:
-      // hub's skillCatalog is built by build-engine via the scanner over
-      // three roots (userHome / projectIdentityRoot / IKNOW_SKILL_DIRS),
-      // and loadSkillBody reads by entry.dir internally. Re-scanning here
-      // with an identically-shaped scanner (settingsSource.home shares the
-      // production assembly source) yields the real entry actually consumed
-      // by the delivery path — no hand-built entry.
-      const catalog = await createSkillScanner({
-        userHome: settingsSource.home,
-        projectIdentityRoot: process.cwd(),
-        env: process.env,
-      }).scan();
-      const entry = catalog.find((candidate) => candidate.name === "wrt-echo");
-      assert.ok(entry !== undefined, "fixture 必须经扫描根进 catalog");
-      const expected = await createSkillBody({ entry, dir: entry.dir });
+  it(
+    "build-engine 装配后 loadSkillBody 正文与 createSkillBody 逐字节相等，末段 </skill_files>，不出现 current write root",
+    { timeout: 90_000 },
+    async () => {
+      const { mkdir, writeFile } = await import("node:fs/promises");
+      const skillDir = join(baseDir, "skills-wrt", "wrt-echo");
+      await mkdir(skillDir, { recursive: true });
+      await writeFile(
+        join(skillDir, "SKILL.md"),
+        "---\nname: wrt-echo\ndescription: echo\n---\nbody line\n",
+        "utf8"
+      );
+      // Scan-root injection: IKNOW_SKILL_DIRS is one of the scanner's three
+      // root channels; the tmp fixture enters the catalog through it without
+      // relying on the cwd/.iknow convention.
+      const prevSkillDirs = process.env.IKNOW_SKILL_DIRS;
+      process.env.IKNOW_SKILL_DIRS = join(baseDir, "skills-wrt");
+      try {
+        const hub = new SessionHub({
+          store,
+          askUser: createNoAskUser(),
+        });
+        const load = hub as unknown as {
+          ensureDeps: () => Promise<LoopEngineDeps>;
+          loadSkillBody: (
+            name: string
+          ) => Promise<{ name: string; body: string }>;
+        };
+        await load.ensureDeps();
+        // Expected value taken from the same read point used at assembly:
+        // hub's skillCatalog is built by build-engine via the scanner over
+        // three roots (userHome / projectIdentityRoot / IKNOW_SKILL_DIRS),
+        // and loadSkillBody reads by entry.dir internally. Re-scanning here
+        // with an identically-shaped scanner (settingsSource.home shares the
+        // production assembly source) yields the real entry actually consumed
+        // by the delivery path — no hand-built entry.
+        const catalog = await createSkillScanner({
+          userHome: settingsSource.home,
+          projectIdentityRoot: process.cwd(),
+          env: process.env,
+        }).scan();
+        const entry = catalog.find(
+          (candidate) => candidate.name === "wrt-echo"
+        );
+        assert.ok(entry !== undefined, "fixture 必须经扫描根进 catalog");
+        const expected = await createSkillBody({ entry, dir: entry.dir });
 
-      const { body } = await load.loadSkillBody("wrt-echo");
-      assert.equal(
-        body,
-        expected,
-        "hub 交付正文必须与 createSkillBody 产物逐字节相等（SC2 三路同源）"
-      );
-      assert.ok(body.includes("body line"), "skill 自身正文必须保留");
-      assert.ok(
-        !body.includes("current write root"),
-        "正文末尾不得出现写根段（ADR-0079：trailer 退场）"
-      );
-      assert.ok(
-        !body.includes("no writable root"),
-        "正文末尾不得出现 ③ 态披露（ADR-0079：trailer 退场）"
-      );
-      assert.ok(
-        body.trimEnd().endsWith("</skill_files>"),
-        "末段必须是 </skill_files>，与 #337 SC6 形态逐字节一致"
-      );
-    } finally {
-      if (prevSkillDirs === undefined) {
-        delete process.env.IKNOW_SKILL_DIRS;
-      } else {
-        process.env.IKNOW_SKILL_DIRS = prevSkillDirs;
+        const { body } = await load.loadSkillBody("wrt-echo");
+        assert.equal(
+          body,
+          expected,
+          "hub 交付正文必须与 createSkillBody 产物逐字节相等（SC2 三路同源）"
+        );
+        assert.ok(body.includes("body line"), "skill 自身正文必须保留");
+        assert.ok(
+          !body.includes("current write root"),
+          "正文末尾不得出现写根段（ADR-0079：trailer 退场）"
+        );
+        assert.ok(
+          !body.includes("no writable root"),
+          "正文末尾不得出现 ③ 态披露（ADR-0079：trailer 退场）"
+        );
+        assert.ok(
+          body.trimEnd().endsWith("</skill_files>"),
+          "末段必须是 </skill_files>，与 #337 SC6 形态逐字节一致"
+        );
+      } finally {
+        if (prevSkillDirs === undefined) {
+          delete process.env.IKNOW_SKILL_DIRS;
+        } else {
+          process.env.IKNOW_SKILL_DIRS = prevSkillDirs;
+        }
       }
     }
-  });
+  );
 });
 
 // specs/skill-index-increment.md SC5/SC6/SC9: the human-side slash works on
@@ -265,83 +278,93 @@ describe("SessionHub skills 面 — 可加载面含无描述/disable（SC5/SC6/S
     );
   };
 
-  it("listSkills 含无 description 条目（description 缺席非空串）与 disable 条目；loadSkillBody 对 disable 条目仍交付正文", async () => {
-    const skillRoot = join(baseDir, "skills-loadable");
-    await plant(skillRoot, {
-      name: "no-desc",
-      matter: "name: no-desc",
-      text: "# 无描述技能",
-    });
-    await plant(skillRoot, {
-      name: "manual-only",
-      matter:
-        "name: manual-only\ndescription: 仅人侧\ndisable-model-invocation: true",
-      text: "# 手动技能",
-    });
-    const prevSkillDirs = process.env.IKNOW_SKILL_DIRS;
-    process.env.IKNOW_SKILL_DIRS = skillRoot;
-    try {
-      const hub = new SessionHub({ store, askUser: createNoAskUser() });
-      const api = hub as unknown as {
-        ensureDeps: () => Promise<LoopEngineDeps>;
-        listSkills: () => Promise<
-          readonly { name: string; description?: string }[]
-        >;
-        loadSkillBody: (
-          name: string
-        ) => Promise<{ name: string; body: string }>;
-      };
-      await api.ensureDeps();
+  it(
+    "listSkills 含无 description 条目（description 缺席非空串）与 disable 条目；loadSkillBody 对 disable 条目仍交付正文",
+    { timeout: 90_000 },
+    async () => {
+      const skillRoot = join(baseDir, "skills-loadable");
+      await plant(skillRoot, {
+        name: "no-desc",
+        matter: "name: no-desc",
+        text: "# 无描述技能",
+      });
+      await plant(skillRoot, {
+        name: "manual-only",
+        matter:
+          "name: manual-only\ndescription: 仅人侧\ndisable-model-invocation: true",
+        text: "# 手动技能",
+      });
+      const prevSkillDirs = process.env.IKNOW_SKILL_DIRS;
+      process.env.IKNOW_SKILL_DIRS = skillRoot;
+      try {
+        const hub = new SessionHub({ store, askUser: createNoAskUser() });
+        const api = hub as unknown as {
+          ensureDeps: () => Promise<LoopEngineDeps>;
+          listSkills: () => Promise<
+            readonly { name: string; description?: string }[]
+          >;
+          loadSkillBody: (
+            name: string
+          ) => Promise<{ name: string; body: string }>;
+        };
+        await api.ensureDeps();
 
-      const skills = await api.listSkills();
-      const byName = new Map(skills.map((s) => [s.name, s]));
-      // SC9: the two faces' difference is visible on the DTO — both entries
-      // are on the loadable face.
-      assert.ok(
-        byName.has("no-desc"),
-        "无 description 条目必须进可加载面（SC9）"
-      );
-      assert.ok(byName.has("manual-only"), "disable 条目必须进可加载面（SC6）");
-      // SC5: absence stays absence — never coerced to "" ("" would render as
-      // an "empty description" host-side).
-      assert.equal(
-        Object.prototype.hasOwnProperty.call(
-          byName.get("no-desc"),
-          "description"
-        ),
-        false,
-        '无 description 条目不得携带 description 键（不补 ""）'
-      );
-      assert.equal(byName.get("manual-only")?.description, "仅人侧");
-      // The model-index face must NOT contain either entry (diverging from
-      // the loadable face is the loadable face's reason to exist).
-      const catalog = (
-        hub as unknown as {
-          skillCatalog?: { modelIndex(): readonly { name: string }[] };
+        const skills = await api.listSkills();
+        const byName = new Map(skills.map((s) => [s.name, s]));
+        // SC9: the two faces' difference is visible on the DTO — both entries
+        // are on the loadable face.
+        assert.ok(
+          byName.has("no-desc"),
+          "无 description 条目必须进可加载面（SC9）"
+        );
+        assert.ok(
+          byName.has("manual-only"),
+          "disable 条目必须进可加载面（SC6）"
+        );
+        // SC5: absence stays absence — never coerced to "" ("" would render as
+        // an "empty description" host-side).
+        assert.equal(
+          Object.prototype.hasOwnProperty.call(
+            byName.get("no-desc"),
+            "description"
+          ),
+          false,
+          '无 description 条目不得携带 description 键（不补 ""）'
+        );
+        assert.equal(byName.get("manual-only")?.description, "仅人侧");
+        // The model-index face must NOT contain either entry (diverging from
+        // the loadable face is the loadable face's reason to exist).
+        const catalog = (
+          hub as unknown as {
+            skillCatalog?: { modelIndex(): readonly { name: string }[] };
+          }
+        ).skillCatalog;
+        const indexed = (catalog?.modelIndex() ?? []).map((e) => e.name);
+        assert.ok(!indexed.includes("no-desc"), "无描述条目不得进模型索引");
+        assert.ok(
+          !indexed.includes("manual-only"),
+          "disable 条目不得进模型索引"
+        );
+
+        // SC6: disable gates only the model index and skill(); human-side disk
+        // reads are not blocked.
+        const { body } = await api.loadSkillBody("manual-only");
+        assert.ok(body.includes("# 手动技能"), "disable 技能正文必须可读");
+        // SC5: the no-description entry is equally readable.
+        const noDesc = await api.loadSkillBody("no-desc");
+        assert.ok(noDesc.body.includes("# 无描述技能"));
+        await assert.rejects(
+          () => api.loadSkillBody("no-such-skill"),
+          /skill not found/,
+          "get miss 仍必须拒绝"
+        );
+      } finally {
+        if (prevSkillDirs === undefined) {
+          delete process.env.IKNOW_SKILL_DIRS;
+        } else {
+          process.env.IKNOW_SKILL_DIRS = prevSkillDirs;
         }
-      ).skillCatalog;
-      const indexed = (catalog?.modelIndex() ?? []).map((e) => e.name);
-      assert.ok(!indexed.includes("no-desc"), "无描述条目不得进模型索引");
-      assert.ok(!indexed.includes("manual-only"), "disable 条目不得进模型索引");
-
-      // SC6: disable gates only the model index and skill(); human-side disk
-      // reads are not blocked.
-      const { body } = await api.loadSkillBody("manual-only");
-      assert.ok(body.includes("# 手动技能"), "disable 技能正文必须可读");
-      // SC5: the no-description entry is equally readable.
-      const noDesc = await api.loadSkillBody("no-desc");
-      assert.ok(noDesc.body.includes("# 无描述技能"));
-      await assert.rejects(
-        () => api.loadSkillBody("no-such-skill"),
-        /skill not found/,
-        "get miss 仍必须拒绝"
-      );
-    } finally {
-      if (prevSkillDirs === undefined) {
-        delete process.env.IKNOW_SKILL_DIRS;
-      } else {
-        process.env.IKNOW_SKILL_DIRS = prevSkillDirs;
       }
     }
-  });
+  );
 });

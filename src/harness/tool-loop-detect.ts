@@ -1,7 +1,9 @@
 /**
  * Per-run tool-loop detection (call key + result key, periods k=1..5,
  * repetition R=5; trips only on a stall). Anything that cannot be
- * normalized (including irregular MCP shapes) → fail-open.
+ * normalized (including irregular MCP shapes) → fail-open. Plus the parallel
+ * narrow validation-stall fuse: one identical call, one identical
+ * deterministic validation_failed answer, three distinct phases.
  */
 
 import { createHash } from "node:crypto";
@@ -13,6 +15,37 @@ export const LOOP_DETECT_MAX_PERIOD = 5;
 
 export const LOOP_DETECTED_TEXT =
   "LOOP_DETECTED: tool-call loop stalled (period repeated R=5 with no result progress). Change the approach.";
+
+/** Narrow validation-stall fuse threshold. */
+export const VALIDATION_LOOP_REPEAT = 3;
+
+/**
+ * Keep the "LOOP_DETECTED:" prefix verbatim: the host-injection seam-lock
+ * (encodeUserText + continue-pending equality) is pinned on this envelope.
+ */
+export const VALIDATION_LOOP_DETECTED_TEXT =
+  "LOOP_DETECTED: identical tool call rejected by input validation (repeated R=3 with no argument or error progress). Change the arguments or the approach.";
+
+/**
+ * Result-key tag for a deterministic input-validation answer. Single source
+ * for the encoder in `resultKeyFrom` and for the narrow fuse's membership
+ * test, so the two cannot drift apart.
+ */
+export const VALIDATION_FAILED_RESULT_PREFIX = "validation_failed:";
+
+/**
+ * Every fuse envelope text a resumed session must treat as a clean stop.
+ * Add the text here when a new fuse lands — callers test membership with
+ * `isFuseEnvelopeText` instead of re-listing the constants.
+ */
+export const FUSE_ENVELOPE_TEXTS: ReadonlySet<string> = Object.freeze(
+  new Set([LOOP_DETECTED_TEXT, VALIDATION_LOOP_DETECTED_TEXT])
+);
+
+/** Exact membership test for a fuse envelope text. */
+export function isFuseEnvelopeText(text: string): boolean {
+  return FUSE_ENVELOPE_TEXTS.has(text);
+}
 
 export type ToolLoopEvent = {
   readonly callKey: string;
@@ -78,7 +111,7 @@ function resultKeyFrom(result: ToolExecutionResult): string | null {
     return `execution_failed:${result.message}`;
   }
   if (result.kind === "validation_failed") {
-    return `validation_failed:${result.message}`;
+    return `${VALIDATION_FAILED_RESULT_PREFIX}${result.message}`;
   }
   if (result.kind === "tool_not_found") {
     return `tool_not_found:${result.toolName}`;
@@ -161,4 +194,29 @@ export function isStalledToolLoop(
     if (windowRepeatsPeriod(window, k)) return true;
   }
   return false;
+}
+
+/**
+ * Narrow validation-stall fuse: the last VALIDATION_LOOP_REPEAT events must
+ * all be the same normalizable call answered by the same deterministic
+ * `validation_failed` message, each from a distinct phase (a parallel wave
+ * shares one phaseId → no trip). Deliberately stricter than
+ * `isStalledToolLoop`; that detector's constants and semantics are unchanged.
+ */
+export function isValidationStallLoop(
+  events: ReadonlyArray<ToolLoopEvent>
+): boolean {
+  const n = events.length;
+  if (n < VALIDATION_LOOP_REPEAT) return false;
+  const window = events.slice(n - VALIDATION_LOOP_REPEAT);
+  const first = window[0];
+  if (first === undefined || !first.normalizable) return false;
+  if (!first.resultKey.startsWith(VALIDATION_FAILED_RESULT_PREFIX))
+    return false;
+  for (const e of window) {
+    if (!e.normalizable) return false;
+    if (e.callKey !== first.callKey) return false;
+    if (e.resultKey !== first.resultKey) return false;
+  }
+  return new Set(window.map((e) => e.phaseId)).size >= VALIDATION_LOOP_REPEAT;
 }

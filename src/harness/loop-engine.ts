@@ -51,8 +51,10 @@ import {
 } from "./errors.js";
 import {
   isStalledToolLoop,
+  isValidationStallLoop,
   LOOP_DETECTED_TEXT,
   toolLoopEventFromCall,
+  VALIDATION_LOOP_DETECTED_TEXT,
   type ToolLoopEvent,
 } from "./tool-loop-detect.js";
 import type {
@@ -2775,6 +2777,66 @@ function closeModelInFlightWindow(ref: ModelStreamWindow | undefined): void {
 }
 
 /**
+ * Tool-loop fuses for one finished tool phase: the narrow validation-stall
+ * fuse first, then the generic R=5 detector. Both share this single envelope
+ * assembly so the stop stays structurally identical to the pre-existing fuse
+ * path; undefined = nothing tripped. Each seam's text stays a literal argument
+ * of `encodeUserText` — the roster-completeness lock enumerates injection
+ * seams by that argument expression.
+ */
+async function fuseStalledPhase(opts: {
+  readonly events: ReadonlyArray<ToolLoopEvent>;
+  readonly deps: LoopEngineDeps;
+  readonly pendingInjected: PendingInjected;
+  readonly nextState: LoopState;
+  readonly turn: TurnTrace;
+  readonly modelUsage: TokenUsage | undefined;
+}): Promise<
+  | {
+      transition: Transition;
+      turn: TurnTrace;
+      modelUsage: TokenUsage | undefined;
+    }
+  | undefined
+> {
+  const fusedStop = async (
+    stamped: AnthropicNativeMessage
+  ): Promise<{
+    transition: Transition;
+    turn: TurnTrace;
+    modelUsage: TokenUsage | undefined;
+  }> => {
+    const envelope = freezeMessage(stamped);
+    // The batch that persists the envelope itself also flushes pending
+    // injections (bar etc.) first, keeping the order consistent with the
+    // in-memory authoritative history.
+    await commitMessagesOrThrow(opts.deps, [
+      ...opts.pendingInjected.take(),
+      envelope,
+    ]);
+    const fusedState = appendMessage({ state: opts.nextState, msg: envelope });
+    return {
+      transition: { kind: "stop", reason: "fused", finalState: fusedState },
+      turn: opts.turn,
+      modelUsage: opts.modelUsage,
+    };
+  };
+  if (isValidationStallLoop(opts.events)) {
+    return fusedStop(
+      stampHostInjected(
+        opts.deps.adapter.encodeUserText(VALIDATION_LOOP_DETECTED_TEXT)
+      )
+    );
+  }
+  if (isStalledToolLoop(opts.events)) {
+    return fusedStop(
+      stampHostInjected(opts.deps.adapter.encodeUserText(LOOP_DETECTED_TEXT))
+    );
+  }
+  return undefined;
+}
+
+/**
  * stepWithTrace layers tracing on top of the original step logic:
  *   - records started = performance.now() at entry, computes durationMs at exit;
  *   - delegates adapter.step + timeout + abort + protocol errors to runModelPhase;
@@ -3384,27 +3446,15 @@ async function stepWithTrace(opts: {
         toolLoopEventFromCall(view.name, view.input, result, phaseId)
       );
     }
-    if (isStalledToolLoop(opts.toolLoopRef.events)) {
-      const envelope = freezeMessage(
-        stampHostInjected(opts.deps.adapter.encodeUserText(LOOP_DETECTED_TEXT))
-      );
-      // The batch that persists the envelope itself also flushes pending
-      // injections (bar etc.) first, keeping the order consistent with the
-      // in-memory authoritative history.
-      await commitMessagesOrThrow(opts.deps, [
-        ...opts.pendingInjected.take(),
-        envelope,
-      ]);
-      const fusedState = appendMessage({
-        state: toolPhase.transition.nextState,
-        msg: envelope,
-      });
-      return {
-        transition: { kind: "stop", reason: "fused", finalState: fusedState },
-        turn: toolPhase.turn,
-        modelUsage: turnResult.usage,
-      };
-    }
+    const fused = await fuseStalledPhase({
+      events: opts.toolLoopRef.events,
+      deps: opts.deps,
+      pendingInjected: opts.pendingInjected,
+      nextState: toolPhase.transition.nextState,
+      turn: toolPhase.turn,
+      modelUsage: turnResult.usage,
+    });
+    if (fused !== undefined) return fused;
   }
 
   return {

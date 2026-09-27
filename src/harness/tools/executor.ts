@@ -336,6 +336,19 @@ function buildFailureResult(
   err: unknown,
   outerSignal: AbortSignal | undefined
 ): ToolExecutionResult {
+  // Lifecycle outcomes outrank the input-rejection arm: an aborted or timed-out
+  // call reports cancelled / timeout, never validation_failed.
+  if (
+    !outerSignal?.aborted &&
+    err !== TIMEOUT &&
+    err instanceof ToolInputValidationError
+  ) {
+    return {
+      kind: "validation_failed",
+      toolUseId: call.id,
+      message: err.message,
+    };
+  }
   return {
     kind: "execution_failed",
     toolUseId: call.id,
@@ -433,22 +446,41 @@ export function createExecutor(registry: RegistryImpl): Executor {
   return Object.freeze({ executeAll });
 }
 
+/** One ajv error entry, read for the two fields the model needs. */
+interface AjvErrorEntry {
+  instancePath?: string;
+  message?: string;
+  keyword?: string;
+  params?: { allowedValues?: unknown };
+}
+
+/** Where in the instance the violation is. */
+function ajvErrorLocation(e: AjvErrorEntry): string {
+  return e.instancePath && e.instancePath.length > 0
+    ? e.instancePath
+    : "(root)";
+}
+
+/**
+ * What to change, in model-facing words (issue #1136): enum violations name the
+ * accepted values, and a `false` subschema — the author's explicit "never
+ * accepted here" — names the field instead of repeating ajv's boilerplate.
+ * Other keywords keep the prior shape.
+ */
+function ajvErrorGuidance(e: AjvErrorEntry): string {
+  if (e.keyword === "enum" && Array.isArray(e.params?.allowedValues)) {
+    return `${e.message ?? "schema violation"} (${e.params.allowedValues.join(" / ")})`;
+  }
+  if (e.keyword === "false schema") {
+    return "field is not accepted for this input shape";
+  }
+  return e.message ?? "schema violation";
+}
+
 function formatAjvError(errors: unknown): string {
   if (!Array.isArray(errors) || errors.length === 0) return "invalid input";
-  const e = errors[0] as {
-    instancePath?: string;
-    message?: string;
-    keyword?: string;
-    params?: { allowedValues?: unknown };
-  };
-  const where =
-    e.instancePath && e.instancePath.length > 0 ? e.instancePath : "(root)";
-  // Enum violations must name the accepted values so the model can
-  // self-correct. Other keywords keep the prior shape.
-  if (e.keyword === "enum" && Array.isArray(e.params?.allowedValues)) {
-    return `invalid input at ${where}: ${e.message ?? "schema violation"} (${e.params.allowedValues.join(" / ")})`;
-  }
-  return `invalid input at ${where}: ${e.message ?? "schema violation"}`;
+  const e = errors[0] as AjvErrorEntry;
+  return `invalid input at ${ajvErrorLocation(e)}: ${ajvErrorGuidance(e)}`;
 }
 
 function sanitizeFailure(err: unknown): string {
@@ -462,4 +494,4 @@ function sanitizeFailure(err: unknown): string {
 }
 
 // Late import to break potential cycle: error helpers referenced here.
-import { isModelFacingError } from "../errors.js";
+import { isModelFacingError, ToolInputValidationError } from "../errors.js";

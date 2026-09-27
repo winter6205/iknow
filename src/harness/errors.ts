@@ -7,6 +7,7 @@
  * - PromptTooLongError: SDK 400 prompt-too-long, translated for reactive compact
  * - MaxTurnsExceeded: throws instead of silent-stopping on maxTurns exhaustion
  * - ToolExecutionError: sanitized tool business failure fed back to the model
+ * - ToolInputValidationError: handler input-shape rejection (validation_failed)
  * - SubAgentSandboxRootError: sandboxRoot narrowed outside the parent root
  * - SkipAppend*Error: skip-append guards (`skip_append_with_text` / `skip_append_empty_prior`)
  *
@@ -93,6 +94,16 @@ export class MaxTurnsExceeded extends Error {
 export class ToolExecutionError extends Error {
   override readonly name: string = "ToolExecutionError";
 }
+
+/**
+ * Deterministic input-shape rejection thrown by a handler's validation stage
+ * (todo_write parseInput). The executor classifies it as `validation_failed`
+ * instead of `execution_failed`; as a `ToolExecutionError` subclass it keeps
+ * ADR-0086 message passthrough and every existing `instanceof` site unchanged.
+ * WHY no `name` override: rendering seam-locks on "ToolExecutionError"; the
+ * executor discriminates on class identity, not the name string.
+ */
+export class ToolInputValidationError extends ToolExecutionError {}
 
 /**
  * ADR-0086: opt-in contract marking an error's message as safe to show the

@@ -114,7 +114,10 @@ const capabilityRow = (): MemoryEntryV1 => ({
   supersedes: null,
   title: "web_search is unavailable in this sandbox",
   body: "The sandbox DNS/SSRF benchmarking segment blocks outbound network access.",
-  updated_at: "2026-08-26T00:00:00.000Z",
+  // WHY relative, not literal: a fixed date rots past GC's 30-day archive
+  // window and the row is renamed off disk mid-test (same clock-pin repair
+  // dcf200d84 applied to the dream fixture).
+  updated_at: new Date(Date.now() - 24 * 3600 * 1000).toISOString(),
 });
 
 const readDisabled = async (path: string): Promise<boolean> =>
