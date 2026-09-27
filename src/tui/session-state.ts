@@ -29,6 +29,8 @@ import {
 import { isSkillIndexDeltaText } from "../harness/skill/index-delta.js";
 import { jsonDeepEqual } from "../session-api/store/index.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
+import type { TurnOutcomeView } from "../session-api/contract.js";
+import { projectOutputLimitNotice } from "../session-api/contract.js";
 
 export type SessionRunState = "idle" | "running-fg" | "running-bg";
 export type TuiView = "chat" | "list" | "mcp";
@@ -72,7 +74,24 @@ export interface TuiSessionState {
    * N seconds" only when the total > 0, otherwise tool counts alone.
    */
   readonly thinkingMs?: ReadonlyArray<number | null>;
+  /**
+   * The last settled turn's output-limit notice, read from the persisted
+   * outcome on reopen and from the live answer at turn end. The sticky notice
+   * lane renders this string verbatim (the hub owns the copy), so a reopened
+   * session says exactly what the live turn said; the next settled turn
+   * replaces it or clears it. Absent = no truncation recorded — including an
+   * unknown outcome, which is never labelled either way.
+   */
+  readonly outputLimitNotice?: string;
 }
+
+/** Session file as the bridge hands it back, plus the terminal outcome of its
+ *  last settled turn (ADR-0126: read from the transcript's outcome records,
+ *  never inferred from the messages). Absent = loaded without outcome
+ *  evidence, which the reopen view treats as unknown. */
+export type TuiLoadedSessionFile = SessionFileV1 & {
+  readonly lastTurnOutcome?: TurnOutcomeView;
+};
 
 /** Create a draft session (startup lands directly in a new-session chat view; no disk touch). */
 export function createDraftSession(): TuiSessionState {
@@ -92,7 +111,17 @@ export function createDraftSession(): TuiSessionState {
 }
 
 /** Restore from a persisted session file (`iknow tui <session-id>` / Enter from the list view). */
-export function attachSession(file: SessionFileV1): TuiSessionState {
+export function attachSession(file: TuiLoadedSessionFile): TuiSessionState {
+  // The last settled turn's outcome comes with the loaded file (ADR-0126):
+  // reopens used to drop it, so an abnormal stop read as a fresh idle session.
+  // `unknown` (legacy transcript, crash before the terminal record) keeps both
+  // the stop reason and the notice absent — no label either way.
+  const outcome = file.lastTurnOutcome;
+  const lastStopReason =
+    outcome !== undefined && outcome.terminal === "known"
+      ? outcome.stopReason
+      : undefined;
+  const outputLimitNotice = projectOutputLimitNotice(outcome);
   return Object.freeze({
     conversationId: file.conversation_id,
     messages: Object.freeze([...file.messages]),
@@ -100,7 +129,7 @@ export function attachSession(file: SessionFileV1): TuiSessionState {
     updatedAt: file.updatedAt,
     jsonMode: file.jsonMode,
     runState: "idle",
-    lastStopReason: undefined,
+    lastStopReason,
     // #1079: reopen replays the file's persisted usage snapshot so a session
     // that ever had a successful usage never reopens at 0%. Missing field
     // (legacy file / never-successful session) → null → 0% (never chars/N).
@@ -110,6 +139,7 @@ export function attachSession(file: SessionFileV1): TuiSessionState {
     // Carry the persisted parallel array into session state — fold lines
     // read it from here (replacing the deleted in-memory thinking-seconds side channel).
     thinkingMs: file.thinkingMs,
+    ...(outputLimitNotice !== undefined ? { outputLimitNotice } : {}),
   });
 }
 
@@ -159,6 +189,12 @@ export interface TurnFinishedInput {
    * value, never clear it by mistake.
    */
   readonly thinkingMs?: ReadonlyArray<number | null>;
+  /**
+   * The settled turn's output-limit notice (from the hub's answer projection).
+   * Deliberately NOT an "absent = keep" field like the two above: it describes
+   * THIS turn's outcome, so a turn without one clears the previous turn's.
+   */
+  readonly outputLimitNotice?: string;
 }
 
 /**
@@ -188,8 +224,7 @@ function reuseMessageReferences(
   let i = 0;
   const limit = Math.min(prevMessages.length, next.length);
   while (i < limit && jsonDeepEqual(prevMessages[i], next[i])) i++;
-  if (i === prevMessages.length && i === next.length)
-    return prevMessages; // EXIT: fully content-equal projection
+  if (i === prevMessages.length && i === next.length) return prevMessages; // EXIT: fully content-equal projection
   return Object.freeze(prevMessages.slice(0, i).concat(next.slice(i)));
 }
 
@@ -212,6 +247,9 @@ export function turnFinished(
     workspaceRoot: input.workspaceRoot ?? session.workspaceRoot,
     // Refresh thinkingMs from the persisted file; absent -> keep the existing array (partial-recovery case).
     thinkingMs: input.thinkingMs ?? session.thinkingMs,
+    // The notice describes THIS turn's outcome, so an absent one clears the
+    // previous turn's rather than keeping it (unlike the two fields above).
+    outputLimitNotice: input.outputLimitNotice,
   });
 }
 

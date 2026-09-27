@@ -10,6 +10,10 @@
  *  - `headers?` (plain object, string keys and values; non-string value drops the whole key)
  *  - `models[]` (non-empty array; each item's id non-empty + optional name/contextWindow/maxTokens)
  *
+ * `models[].maxTokens` is the one field outside the drop-not-throw discipline:
+ * an explicit illegal value stops loading with a typed `LlmBudgetConfigError`
+ * instead of being dropped (the rest of the schema keeps dropping).
+ *
  * User-layer key: writing `llm.providers` in the project file drops the whole section with a warning.
  */
 import { describe, it, beforeAll, afterAll } from "vitest";
@@ -17,7 +21,10 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadIknowSettings } from "../../src/config/settings.ts";
+import {
+  isLlmBudgetConfigError,
+  loadIknowSettings,
+} from "../../src/config/settings.ts";
 
 let workDir: string;
 beforeAll(async () => {
@@ -65,7 +72,7 @@ describe("loadIknowSettings — llm.providers 段 (ADR-0093 / #1010)", () => {
                   id: "MiniMax-M3",
                   name: "MiniMax-M3",
                   contextWindow: 1000000,
-                  maxTokens: 128000,
+                  maxTokens: 131072,
                 },
               ],
             },
@@ -88,7 +95,7 @@ describe("loadIknowSettings — llm.providers 段 (ADR-0093 / #1010)", () => {
     assert.equal(s.llm?.providers?.[0]?.apiKeyEnv, "MINIMAX_CN_API_KEY");
     assert.equal(s.llm?.providers?.[0]?.models[0]?.id, "MiniMax-M3");
     assert.equal(s.llm?.providers?.[0]?.models[0]?.contextWindow, 1000000);
-    assert.equal(s.llm?.providers?.[0]?.models[0]?.maxTokens, 128000);
+    assert.equal(s.llm?.providers?.[0]?.models[0]?.maxTokens, 131072);
     assert.equal(s.llm?.providers?.[1]?.headers?.["X-Session"], "iknow-dev");
   });
 
@@ -159,6 +166,30 @@ describe("loadIknowSettings — llm.providers 段 (ADR-0093 / #1010)", () => {
     assert.equal(provider?.models[0]?.contextWindow, undefined);
     assert.equal(provider?.models[1]?.id, "ok2");
     assert.equal(provider?.models[1]?.name, "OK2");
+  });
+
+  it("models[].maxTokens 是 drop-not-throw 的唯一例外:显式非法值整段抛 typed 错误", async () => {
+    const { home, cwd } = await makeSettings(
+      {
+        llm: {
+          providers: [
+            {
+              id: "p",
+              baseUrl: "https://x",
+              apiKeyEnv: "K",
+              // contextWindow 的坏值仍按丢弃处理,maxTokens 的坏值让整次装载失败。
+              models: [{ id: "m", contextWindow: -1, maxTokens: "64000" }],
+            },
+          ],
+        },
+      },
+      {}
+    );
+    assert.throws(
+      () => loadIknowSettings({ home, cwd }),
+      (err: unknown) =>
+        isLlmBudgetConfigError(err) && err.kind === "model_max_tokens_invalid"
+    );
   });
 
   it("providers 空数组 → 丢弃 providers 字段(空集无意义)", async () => {

@@ -122,7 +122,8 @@ async function runWorkerEntry(opts: {
   if (opts.installApiKey) installTestProviderApiKey();
   else delete process.env.IKNOW_TEST_API_KEY;
   delete process.env.IKNOW_T4_UNSET_KEY;
-  process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "1024";
+  // Retired global output-token knob: a non-empty value now fails config load.
+  delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
   process.env.IKNOW_LLM_TIMEOUT_MS = "5000";
   process.env.IKNOW_LLM_STREAM = "off";
   delete process.env.IKNOW_WORKSPACE_ROOT;
@@ -141,10 +142,7 @@ async function runWorkerEntry(opts: {
   process.env.PATH = `${makeBwrapShimDir()}:${savedPath ?? ""}`;
   writeFileSync(join(opts.sandboxRoot, ".keep"), "");
 
-  const stdinPath = join(
-    scratch("iknow-t4-exit-stdin-"),
-    "envelope.jsonl"
-  );
+  const stdinPath = join(scratch("iknow-t4-exit-stdin-"), "envelope.jsonl");
   writeFileSync(stdinPath, JSON.stringify(opts.stdinEnvelope) + "\n");
 
   let exitCode = -1;

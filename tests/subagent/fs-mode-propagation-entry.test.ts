@@ -209,7 +209,8 @@ async function runWorkerEntry(opts: {
   }
   process.env.HOME = home;
   installTestProviderApiKey();
-  process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS = "1024";
+  // Retired global output-token knob: a non-empty value now fails config load.
+  delete process.env.IKNOW_LLM_MAX_OUTPUT_TOKENS;
   process.env.IKNOW_LLM_TIMEOUT_MS = "5000";
   process.env.IKNOW_LLM_STREAM = "off";
   delete process.env.IKNOW_WORKSPACE_ROOT;

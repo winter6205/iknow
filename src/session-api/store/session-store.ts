@@ -42,6 +42,8 @@ import path from "node:path";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
+  StopReason,
+  SupplierStopDetail,
 } from "../../harness/index.js";
 import type { SessionStoreError } from "./errors.js";
 import { closeoutOrphanToolUses } from "./closeout-projection.js";
@@ -55,12 +57,14 @@ import type {
   PreimageRef,
   SessionEventRecord,
   SessionHeadRecord,
+  SessionOutcomeRecord,
   SessionTitleRecord,
   SessionTailRecord,
 } from "./jsonl.js";
 import {
   chainFromHead,
   headChainEvents,
+  isStopReason,
   jsonDeepEqual,
   latestTitleText,
   matchCodePreimage,
@@ -68,6 +72,7 @@ import {
   parseSessionJsonl,
   projectSessionLog,
   resolveTitleText,
+  resolveTurnOutcomes,
   serializeSessionLog,
   SESSION_JSONL_EXT,
   sessionFileToJsonl,
@@ -549,6 +554,87 @@ export class SessionStore {
         conversation_id: id,
         cause: errMsg(err),
       } satisfies SessionStoreError;
+    }
+  }
+
+  /**
+   * ADR-0126: append one outcome record (`{type:"outcome", turnId,
+   * stopReason}`) to the JSONL tail — the authoritative terminal state of the
+   * settled host turn whose terminal message event is `turnId`. Pure append,
+   * single line: it never touches the message chain or the head pointer, so
+   * the record can never be mistaken for conversation content and an
+   * abandoned branch's outcome never projects (see `resolveTurnOutcomes`).
+   *
+   * Called by the hub right after a turn's messages are persisted. JSONL-only:
+   * a legacy `.json`-only session must be save()d once first to migrate (same
+   * migration signal as appendEvents/appendTitle). MUST be called under the
+   * hub serialize queue — the store stays lock-free.
+   * Throws: not_found | write_failed (legacy-only / IO) | parse_failed |
+   *   schema_invalid (field "outcome": stopReason outside the StopReason
+   *   union) | io_error
+   */
+  async appendOutcome(opts: {
+    readonly id: string;
+    readonly turnId: string;
+    readonly stopReason: StopReason;
+    readonly supplierDetail?: SupplierStopDetail;
+  }): Promise<void> {
+    const { id, turnId, stopReason, supplierDetail } = opts;
+    if (!isStopReason(stopReason)) {
+      throw {
+        kind: "schema_invalid",
+        conversation_id: id,
+        field: "outcome",
+      } satisfies SessionStoreError;
+    }
+    const path = this.jsonlPath(id);
+    await this.readJsonlLog(id, path, { legacyIsWriteFailed: true });
+    const record: SessionOutcomeRecord = {
+      type: "outcome",
+      turnId,
+      stopReason,
+      ...(supplierDetail !== undefined ? { supplierDetail } : {}),
+    };
+    try {
+      await appendFile(path, `${JSON.stringify(record)}\n`, "utf8");
+    } catch (err) {
+      throw {
+        kind: "write_failed",
+        conversation_id: id,
+        cause: errMsg(err),
+      } satisfies SessionStoreError;
+    }
+  }
+
+  /**
+   * ADR-0126: read-only projection of the ACTIVE head chain's turn outcomes —
+   * the message-event ids of that chain (root → head, index-aligned with
+   * `load()`'s messages) plus the outcome recorded for each of them. Outcomes
+   * of rewound-away / compacted-away branches are excluded, a later record
+   * replaces an earlier one for the same anchor, and a turn with no record is
+   * simply absent (the hub projects that as unknown). A legacy `.json`-only
+   * session has no outcome records: its ids are the synthetic e0..e{N-1} the
+   * migration would write.
+   * Throws: not_found | parse_failed | schema_invalid | io_error
+   */
+  async projectTurnOutcomes(id: string): Promise<{
+    readonly messageEventIds: ReadonlyArray<string>;
+    readonly outcomes: ReadonlyMap<string, SessionOutcomeRecord>;
+  }> {
+    const raw = await this.tryReadFile(this.jsonlPath(id), id);
+    if (raw === null) {
+      // Legacy `.json`-only: no outcome can exist, and load() derived the
+      // messages in exactly the order the migration would number them.
+      const file = await this.load(id);
+      return {
+        messageEventIds: file.messages.map((_, i) => messageEventId(i)),
+        outcomes: new Map<string, SessionOutcomeRecord>(),
+      };
+    }
+    try {
+      return resolveTurnOutcomes(parseSessionJsonl(raw));
+    } catch (err) {
+      throw this.attachId(id, err);
     }
   }
 

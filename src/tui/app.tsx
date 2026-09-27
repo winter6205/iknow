@@ -1986,7 +1986,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     Record<string, ReadonlyArray<string>>
   >(() => ({ [initialKey]: seedInputHistory(initial.messages) }));
   const inputHistory = inputHistories[activeKey] ?? [];
-  const [notice, setNotice] = useState<Notice | undefined>(undefined);
+  const [notice, setNotice] = useState<Notice | undefined>(() =>
+    turnLaneNoticeFor(initial)
+  );
   const [liveToolLines, setLiveToolLines] = useState<
     Record<string, ReadonlyArray<string>>
   >({});
@@ -2929,10 +2931,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     if (!entry) return;
     const id = entry.conversation_id;
     const existing = sessions[id];
+    let opened: TuiSessionState | undefined = existing;
     if (!existing) {
       try {
         const file = await props.bridge.loadSessionFile(id);
         const attached = attachSession(file);
+        opened = attached;
         setSessions((prev) => ({ ...prev, [id]: attached }));
         // First attach seeds input history from the transcript so ↑ recall
         // works at once; already-loaded sessions keep their in-process
@@ -2961,7 +2965,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     });
     setActiveKey(id);
     setView("chat");
-    setNotice(undefined);
+    // A reopened session brings its last settled turn's durable notice into
+    // the lane the live turn used; any other outcome (unknown included) clears
+    // it exactly as before.
+    setNotice(turnLaneNoticeFor(opened));
     setRewindTargets(undefined);
     setRewindConfirming(false);
     setRewindIndex(0);
@@ -3103,6 +3110,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     /** ADR-0094: gateway-side summary on transport failure; undefined = not a transport failure. */
     let apiError:
       { readonly status?: number; readonly message: string } | undefined;
+    /** The settled turn's output-limit notice (hub-owned copy, verbatim).
+     *  Undefined = this turn did not truncate, so the abnormal-stop lane keeps
+     *  its generic wording. */
+    let outputLimitNotice: string | undefined;
     let uncancellableOperationNotice: string | undefined;
     // Tracks transport_retry notices so completed/maxTurns teardown clears
     // only this turn's retry notice, never stop_summary or other sources.
@@ -3335,6 +3346,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // ADR-0094: pass the transport summary to the notice renderer;
       // undefined falls back to the generic text. Feeds "API error (status): message".
       apiError = resp.apiError;
+      // The hub's verbatim output-limit notice (present only on a recorded
+      // truncation). Carried through the lane and the session snapshot so the
+      // live turn and a reopen read one identical line.
+      outputLimitNotice = resp.outputLimitNotice;
       // Verify verdict into its slot. verifyFromWire validates the wire
       // shape at the runtime boundary; invalid wire → unavailable (degraded
       // render, no throw into React); none → drop the key, banner silent.
@@ -3432,6 +3447,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             // The persisted file carries thinkingMs as a parallel array; the
             // folded "thought for N s" row reads it (in-memory channel removed).
             thinkingMs: file.thinkingMs,
+            // Turn end owns this line: the settled turn's notice replaces the
+            // previous turn's (absent = cleared), so the session snapshot
+            // always describes the same turn a reopen would re-read.
+            outputLimitNotice,
           }),
         };
       });
@@ -3463,8 +3482,16 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // so the user sees the turn did not succeed. maxTurns is excluded —
         // it has its own completion feedback. ADR-0094: protocolError +
         // apiError render the dedicated "API error (status): message" text
-        // (single point = abnormalStopNoticeLines).
-        setNotice({ lines: abnormalStopNoticeLines(stopReason, apiError) });
+        // (single point = abnormalStopNoticeLines). An output-limit stop
+        // replaces only the generic line: the hub's own English notice is what
+        // a reopen shows too, so the two views cannot drift.
+        setNotice({
+          lines: abnormalStopNoticeLines(
+            stopReason,
+            apiError,
+            outputLimitNotice
+          ),
+        });
       } else if (retryNoticeShown) {
         // completed / maxTurns teardown: clear only this turn's transient
         // transport_retry notice so "backing off…" doesn't linger on a
@@ -5218,14 +5245,35 @@ function turnFailureOutcome(opts: {
 }
 
 /**
+ * The notice lane's durable content for a session just opened: its last
+ * settled turn's output-limit notice (carried by session state, which takes it
+ * from the persisted outcome on reopen and from the live answer at turn end).
+ * Undefined for every other outcome — an unknown one included, which is never
+ * labelled either way.
+ */
+function turnLaneNoticeFor(
+  session: TuiSessionState | undefined
+): Notice | undefined {
+  const notice = session?.outputLimitNotice;
+  return notice === undefined ? undefined : { lines: [notice] };
+}
+
+/**
  * Notice lines for abnormal stopReasons: protocolError + apiError gets the
- * dedicated API-error text; other abnormal stops get the generic
+ * dedicated API-error text; an output-limit stop shows the hub's own durable
+ * notice line; other abnormal stops get the generic
  * "turn did not finish" line.
  */
 function abnormalStopNoticeLines(
   stopReason: string,
-  apiError: { readonly status?: number; readonly message: string } | undefined
+  apiError: { readonly status?: number; readonly message: string } | undefined,
+  outputLimitNotice?: string
 ): string[] {
+  // The notice is attached by the hub only for a recorded truncation, so this
+  // never rewrites another stop reason's text.
+  if (stopReason === "nonSuccessStop" && outputLimitNotice !== undefined) {
+    return [outputLimitNotice];
+  }
   return stopReason === "protocolError" && apiError !== undefined
     ? [apiErrorNoticeLine(apiError)]
     : [`⚠ turn 未成功结束（${stopReason}）：可能是连接或模型故障，请重试`];

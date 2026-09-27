@@ -1,20 +1,21 @@
 /**
  * Stop-reason + turn-count meta line.
- * Renders one quiet mono meta line only when stopReason is not completed or turnCount > 1.
- * Label mapping lives in lib/stop-reason; this component only handles layout (warn text first, turn count after).
+ * Renders one quiet mono meta line only when the turn has something to say
+ * about how it ended (or turnCount > 1).
+ * Label mapping and the wire fields it reads live in lib/stop-reason (see
+ * `StopNoticeInput`); this component only handles layout (warn text first,
+ * turn count after).
  */
-import type { StopReason } from "../api/types";
-import { stopReasonLabel } from "../lib/stop-reason";
+import { stopNoticeLine, type StopNoticeInput } from "../lib/stop-reason";
 
-export type StopNoticeProps = {
-  /** Missing → treated as null → not shown. */
-  stopReason?: StopReason;
-  /** Missing / ≤ 1 → the "N 轮" ("N turns") count is not shown. */
-  turnCount?: number;
-};
+export type StopNoticeProps = StopNoticeInput;
 
-export function StopNotice({ stopReason, turnCount }: StopNoticeProps) {
-  const notice = stopReasonLabel(stopReason);
+export function StopNotice({
+  stopReason,
+  outputLimitNotice,
+  turnCount,
+}: StopNoticeProps) {
+  const notice = stopNoticeLine(stopReason, outputLimitNotice);
   const showTurnCount =
     typeof turnCount === "number" &&
     Number.isFinite(turnCount) &&

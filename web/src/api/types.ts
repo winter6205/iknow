@@ -19,6 +19,21 @@ export type StopReason =
   | "timeout"
   | "fused";
 
+/** Mirrors harness SupplierStopDetail — the adapter-normalized supplier stop
+ *  behind a `nonSuccessStop` (never a StopReason of its own). */
+export type SupplierStopDetail = "truncation" | "refusal" | "other";
+
+/** Mirrors TurnOutcomeView in src/session-api/contract.ts: `known` carries the
+ *  persisted terminal StopReason, `unknown` is the absence of terminal evidence
+ *  (legacy history / a crash before the terminal record). */
+export type TurnOutcomeView =
+  | {
+      readonly terminal: "known";
+      readonly stopReason: StopReason;
+      readonly supplierDetail?: SupplierStopDetail;
+    }
+  | { readonly terminal: "unknown" };
+
 /** Mirrors ThinkingEntryView in src/session-api/contract.ts. */
 export type ThinkingEntryView = {
   readonly text: string;
@@ -48,7 +63,20 @@ export type ActivityItem =
 /** Mirrors TurnAnswerDto in src/session-api/contract.ts. */
 export type TurnAnswerDto = {
   readonly finalText: string;
-  readonly stopReason: StopReason;
+  /** Absent when the turn's terminal outcome has no record — that state is
+   *  carried by `outcome: { terminal: "unknown" }`, so history never claims a
+   *  completion it cannot prove. Read the terminal state from `outcome`, not
+   *  from the presence of this key. */
+  readonly stopReason?: StopReason;
+  /** Terminal-outcome projection of the turn (ADR-0126). Present on every live
+   *  answer and on a reopened turn read from the ledger; absent on a
+   *  pre-ADR-0126 payload, which is likewise unknown. */
+  readonly outcome?: TurnOutcomeView;
+  /** The hub's deterministic English output-limit notice, present only when a
+   *  known outcome records supplier detail `truncation`. Rendered verbatim:
+   *  the copy is the server's, so the live turn and a reopened session cannot
+   *  drift apart. Never message content — a projection of the outcome. */
+  readonly outputLimitNotice?: string;
   readonly turnCount: number;
   /** Optional: per-turn thinking text (backend projection; omitted when absent). */
   readonly thinking?: ThinkingView;

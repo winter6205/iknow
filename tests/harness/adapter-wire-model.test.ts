@@ -37,6 +37,9 @@ function makeEnv(opts: {
       model: opts.model,
       fallback: [],
       maxOutputTokens: 64,
+      // The request budget comes from the route's model entry; 64 keeps the
+      // non-streaming arm inside the SDK's 10-minute-per-request allowance.
+      routeMaxTokens: 64,
       timeoutMs: 2_000,
       temperature: 0,
       thinking: "off",

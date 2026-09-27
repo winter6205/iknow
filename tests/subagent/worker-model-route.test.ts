@@ -52,6 +52,7 @@ import {
   createWorkerDeps,
   type CreateWorkerDepsOptions,
 } from "../../src/harness/subagent/worker.ts";
+import { DEFAULT_MAX_OUTPUT_TOKENS } from "../../src/config/env.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 
 /** Main-session transport the client must fall back to when no route resolved. */
@@ -109,13 +110,14 @@ beforeEach(() => {
 });
 
 describe("worker adapter route (settings.subagent.model)", () => {
-  it("resolved route → wire model + client triple from route; thinking/maxTokens/temperature stay main", async () => {
+  it("resolved route → wire model + client triple from route; budget from the route entry, thinking/temperature stay main", async () => {
     const env = baseEnv();
     env.subagent.model = {
       model: "sub/sub-model",
       baseUrl: "http://sub.test/v1",
       apiKey: "sub-key",
       headers: { "X-Sub": "s" },
+      maxTokens: 64_000,
     };
     await createWorkerDeps(probeOpts(env));
 
@@ -126,10 +128,24 @@ describe("worker adapter route (settings.subagent.model)", () => {
     assert.equal(client.baseURL, "http://sub.test/v1");
     assert.equal(client.apiKey, "sub-key");
     assert.deepEqual(client.defaultHeaders, { "X-Sub": "s" });
-    // host-level sampling remains the MAIN llm values even though the route differs.
-    assert.equal(adapterArgs[0]!.maxTokens, env.llm.maxOutputTokens);
+    // ADR-0122 amendment: the output budget follows the worker's own route, so
+    // the main session's cap never crosses over; thinking/temperature do.
+    assert.equal(adapterArgs[0]!.maxTokens, 64_000);
+    assert.notEqual(adapterArgs[0]!.maxTokens, env.llm.maxOutputTokens);
     assert.equal(adapterArgs[0]!.temperature, env.llm.temperature);
     assert.deepEqual(adapterArgs[0]!.thinking, buildThinkingParams(env.llm));
+  });
+
+  it("resolved route whose entry omits maxTokens → its own 32000 fallback, not the main cap", async () => {
+    const env = baseEnv();
+    env.llm.routeMaxTokens = 72_000;
+    env.subagent.model = {
+      model: "sub/sub-model",
+      baseUrl: "http://sub.test/v1",
+      apiKey: "sub-key",
+    };
+    await createWorkerDeps(probeOpts(env));
+    assert.equal(adapterArgs[0]!.maxTokens, DEFAULT_MAX_OUTPUT_TOKENS);
   });
 
   it("resolved route without headers → defaultHeaders key absent (does not borrow main headers)", async () => {
@@ -238,5 +254,16 @@ describe("worker adapter route (settings.subagent.model)", () => {
     await createWorkerDeps(probeOpts(env));
 
     assert.deepEqual(adapterArgs[0]!.thinking, buildThinkingParams(env.llm));
+  });
+
+  it("absent route → main-route entry budget; main entry silent → 32000", async () => {
+    const withMainBudget = baseEnv();
+    withMainBudget.llm.routeMaxTokens = 72_000;
+    await createWorkerDeps(probeOpts(withMainBudget));
+    assert.equal(adapterArgs[0]!.maxTokens, 72_000);
+
+    adapterArgs.length = 0;
+    await createWorkerDeps(probeOpts(baseEnv()));
+    assert.equal(adapterArgs[0]!.maxTokens, DEFAULT_MAX_OUTPUT_TOKENS);
   });
 });

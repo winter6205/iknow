@@ -37,6 +37,7 @@ import Anthropic from "@anthropic-ai/sdk";
 import {
   loadIknowEnv,
   wireModelFromRoute,
+  DEFAULT_MAX_OUTPUT_TOKENS,
   type IknowEnv,
   type SubagentModelEnv,
 } from "../../config/env.js";
@@ -594,6 +595,26 @@ function createWorkerAnthropicClient(
 }
 
 /**
+ * Output budget for the worker adapter, resolved from the route it is actually
+ * built from: a resolved worker route carries its own model entry's budget
+ * (`routeMaxTokens` when absent, the route's own when present), and a silent
+ * entry falls back to `DEFAULT_MAX_OUTPUT_TOKENS` — so it neither borrows the
+ * main session's cap nor passes this one's down. Sampling stays host-level.
+ *
+ * A named mount point rather than inline, for the same reason as
+ * createWorkerAnthropicClient above: createWorkerRuntime already sits at the
+ * S5 ceiling, so its budget branch must land in a new function.
+ */
+function resolveWorkerMaxTokens(
+  env: IknowEnv,
+  workerRoute?: SubagentModelEnv
+): number {
+  const routeBudget =
+    workerRoute === undefined ? env.llm.routeMaxTokens : workerRoute.maxTokens;
+  return routeBudget ?? DEFAULT_MAX_OUTPUT_TOKENS;
+}
+
+/**
  * Assemble the worker process's LoopEngineDeps. Real path:
  *   - adapter = createRealAnthropicAdapter (same params as build-engine);
  *   - registry = createDefaultAciRegistry (no subagentManager → no spawn_subagent);
@@ -681,11 +702,11 @@ export async function createWorkerRuntime(
       createRealAnthropicAdapter({
         // A resolved `settings.subagent.model` route supplies the wire model and
         // the provider triple (client); absent → the main-session llm transport.
-        // maxTokens / thinking stay the MAIN llm values even when the route
+        // thinking / temperature stay the MAIN llm values even when the route
         // differs (ADR-0093 host-level sampling).
         client: createWorkerAnthropicClient(env, workerRoute),
         model: wireModelFromRoute(workerRoute?.model ?? env.llm.model),
-        maxTokens: env.llm.maxOutputTokens,
+        maxTokens: resolveWorkerMaxTokens(env, workerRoute),
         temperature: env.llm.temperature,
         thinking,
         stream: env.llm.stream === "on",

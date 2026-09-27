@@ -3,6 +3,8 @@
 Date: 2026-09-13
 Status: accepted
 
+> **Amendment 2026-09-26** (MOT spec): the deferral below is superseded for request output budgets only. The effective model entry's `models[].maxTokens` supplies request `max_tokens`; an absent value falls back to 32,000. Main and separately routed subagent requests resolve their effective model independently (subagent routing is detailed in ADR-0122). Retire `IKNOW_LLM_MAX_OUTPUT_TOKENS` through an explicit fail-fast migration; it must not silently override model configuration, and `settings.json` is never rewritten. Other host-level sampling settings remain unchanged.
+
 The model routing ID `provider/model` (same shape as the currently live `minimax-cn/MiniMax-M3`) resolves through the `settings.llm.providers` registry: hit → `baseUrl = provider.baseUrl` + `apiKey = process.env[provider.apiKeyEnv]`; miss → legacy path `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey` (back-compat). Selecting in `/model` → persist + `reloadFromEnv` (effective next round, same round-trip as thinking). Anthropic format only (keeps `@anthropic-ai/sdk`, one client factory); `provider.headers?` is passed through to `defaultHeaders`.
 
 **Why not repo-bundled provider connection info:** vendor names + URLs written into a public repo are pollution; a user's own key and endpoint must never be overwritten by `git pull`. The registry lives in the user layer `~/.iknow/settings.json` (project files are not adopted, per ADR-0084).

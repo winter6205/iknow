@@ -66,6 +66,7 @@ import type {
   LoopState,
   RunResult,
   StopReason,
+  SupplierStopDetail,
   TokenUsage,
   Transition,
 } from "./model-adapter/types.js";
@@ -2841,6 +2842,142 @@ async function fuseStalledPhase(opts: {
 }
 
 /**
+ * ADR-0126: the adapter's normalized supplier stop projected as a failed
+ * turn's diagnostic detail; a successful turn carries no detail.
+ */
+function supplierDetailOf(
+  turnResult: AssistantTurnResult
+): SupplierStopDetail | undefined {
+  return turnResult.supplierStop === "success"
+    ? undefined
+    : turnResult.supplierStop;
+}
+
+/**
+ * ADR-0126: the carriers of the detail (step result, RunResult) omit the key
+ * when absent; one spread-shaped helper keeps that byte-stable shape at a
+ * single site instead of a branch per call site.
+ */
+function supplierDetailField(detail: SupplierStopDetail | undefined): {
+  supplierDetail?: SupplierStopDetail;
+} {
+  return detail === undefined ? {} : { supplierDetail: detail };
+}
+
+/**
+ * ADR-0011: after an exceptional stop (anything but completed) run one
+ * best-effort epilogue summary.
+ * ADR-0126 amends: an output-limit truncation is exempt — the settled partial
+ * turn is itself the record, so no summary round is requested.
+ */
+function needsEpilogueSummary(
+  reason: StopReason,
+  supplierDetail: SupplierStopDetail | undefined
+): boolean {
+  return reason !== "completed" && supplierDetail !== "truncation";
+}
+
+/**
+ * ADR-0126: the notice closing a tool call the output-limit stop left
+ * unexecuted. One exported constant so the live append and every replay of it
+ * carry identical bytes; it states the call never ran, which is why it must
+ * never borrow the process-closeout wording (an unknown outcome).
+ */
+export const OUTPUT_LIMIT_TOOL_RESULT_TEXT =
+  "The tool was not executed because the model output limit was reached.";
+
+/** The tool_result member the adapter's `encodeToolResults` emits (shared shape). */
+type ToolResultBlock = Extract<AnthropicContentBlock, { type: "tool_result" }>;
+
+/**
+ * ADR-0126: one `is_error` tool_result per tool_use id the truncated response
+ * returned. `encodeToolResults` prefixes its text with the failure kind, so
+ * this verbatim notice cannot go through it; the blocks stay pinned to its shape.
+ */
+function encodeOutputLimitToolResults(
+  toolUseIds: ReadonlyArray<string>
+): ToolResultBlock[] {
+  return toolUseIds.map((id) => ({
+    type: "tool_result",
+    tool_use_id: id,
+    is_error: true,
+    content: [{ type: "text", text: OUTPUT_LIMIT_TOOL_RESULT_TEXT }],
+  }));
+}
+
+/**
+ * One step's outcome: the transition plus this turn's trace row and the
+ * per-turn optional carriers.
+ */
+type StepResult = {
+  transition: Transition;
+  turn: TurnTrace | null;
+  /**
+   * ADR-0008: usage of this step's successful model call (undefined = no
+   * successful call, or that call's usage absent). run's lastUsage updates
+   * only when !== undefined.
+   */
+  modelUsage: TokenUsage | undefined;
+  /** ADR-0094: gateway-side summary attached to RunResult.apiError on modelStop paths.
+   *  undefined = non-transport failure path, RunResult carries no apiError. */
+  apiError?: ApiErrorSummary;
+  /** ADR-0126: normalized supplier-stop detail behind a nonSuccessStop stop;
+   *  absent for every other stop reason. */
+  supplierDetail?: SupplierStopDetail;
+};
+
+/**
+ * ADR-0126: the arms of a turn that ends with no tool phase — the plain finish
+ * and the output-limit stop that already closed its own tool_uses — share this
+ * one trace-and-return; only the final state differs. `durationMs` arrives
+ * measured by the caller, so the closeout commit stays outside the timed span.
+ */
+async function settleStopTurn(args: {
+  readonly deps: LoopEngineDeps;
+  readonly turnResult: AssistantTurnResult;
+  readonly finalState: LoopState;
+  readonly turnIndex: number;
+  readonly turnId: string;
+  readonly turnStartedAt: string;
+  readonly durationMs: number;
+  readonly llmCallId: string | undefined;
+}): Promise<StepResult> {
+  const reason =
+    args.turnResult.supplierStop === "success" ? "completed" : "nonSuccessStop";
+  if (args.deps.trace) {
+    await safeTrace(() =>
+      args.deps.trace!.recordTurn({
+        id: args.turnId,
+        turnIndex: args.turnIndex,
+        startedAt: args.turnStartedAt,
+        endedAt: new Date().toISOString(),
+        durationMs: args.durationMs,
+        llmCallIds: args.llmCallId ? [args.llmCallId] : [],
+        toolCallIds: [],
+        decision: reason,
+        status: reason === "completed" ? "ok" : "error",
+        error:
+          reason === "completed"
+            ? undefined
+            : { type: toTraceErrorType("nonSuccessStop"), message: reason },
+      })
+    );
+  }
+  return {
+    transition: { kind: "stop", reason, finalState: args.finalState },
+    turn: mkTurn({
+      turnIndex: args.turnIndex,
+      supplierStop: args.turnResult.supplierStop,
+      toolCalls: [],
+      durationMs: args.durationMs,
+      cancelKind: "none",
+    }),
+    modelUsage: args.turnResult.usage,
+    ...supplierDetailField(supplierDetailOf(args.turnResult)),
+  };
+}
+
+/**
  * stepWithTrace layers tracing on top of the original step logic:
  *   - records started = performance.now() at entry, computes durationMs at exit;
  *   - delegates adapter.step + timeout + abort + protocol errors to runModelPhase;
@@ -2904,19 +3041,7 @@ async function stepWithTrace(opts: {
    * (single step has no closeout).
    */
   readonly modelStreamRef?: ModelStreamWindow;
-}): Promise<{
-  transition: Transition;
-  turn: TurnTrace | null;
-  /**
-   * ADR-0008: usage of this step's successful model call (undefined = no
-   * successful call, or that call's usage absent). run's lastUsage updates
-   * only when !== undefined.
-   */
-  modelUsage: TokenUsage | undefined;
-  /** ADR-0094: gateway-side summary attached to RunResult.apiError on modelStop paths.
-   *  undefined = non-transport failure path, RunResult carries no apiError. */
-  apiError?: ApiErrorSummary;
-}> {
+}): Promise<StepResult> {
   // ADR-0011 + ADR-0012: maxTurns overflow → throw.
   // undefined = unlimited, never triggers (long exploration is not killed by turn counting).
   if (
@@ -3293,39 +3418,45 @@ async function stepWithTrace(opts: {
   );
 
   if (turnResult.projection.toolCalls.length === 0) {
+    return settleStopTurn({
+      deps: opts.deps,
+      turnResult,
+      finalState: afterAssistantState,
+      turnIndex: opts.state.turnCount,
+      turnId,
+      turnStartedAt,
+      durationMs: performance.now() - started,
+      llmCallId,
+    });
+  }
+
+  // ADR-0126: an output-limit stop settles here, so no tool returned in that
+  // incomplete response can run.
+  if (turnResult.supplierStop === "truncation") {
     const durationMs = performance.now() - started;
-    const reason =
-      turnResult.supplierStop === "success" ? "completed" : "nonSuccessStop";
-    if (opts.deps.trace) {
-      await safeTrace(() =>
-        opts.deps.trace!.recordTurn({
-          id: turnId,
-          turnIndex: opts.state.turnCount,
-          startedAt: turnStartedAt,
-          endedAt: new Date().toISOString(),
-          durationMs,
-          llmCallIds: llmCallId ? [llmCallId] : [],
-          toolCallIds: [],
-          decision: reason,
-          status: reason === "completed" ? "ok" : "error",
-          error:
-            reason === "completed"
-              ? undefined
-              : { type: toTraceErrorType("nonSuccessStop"), message: reason },
-        })
-      );
-    }
-    return {
-      transition: { kind: "stop", reason, finalState: afterAssistantState },
-      turn: mkTurn({
-        turnIndex: opts.state.turnCount,
-        supplierStop: turnResult.supplierStop,
-        toolCalls: [],
-        durationMs,
-        cancelKind: "none",
-      }),
-      modelUsage: turnResult.usage,
+    // The returned tool_use ids are closed in the same host turn so the
+    // transcript stays replayable: native assistant message → one synthetic
+    // protocol message → this turn's terminal outcome.
+    const closeoutMessage: AnthropicNativeMessage = {
+      role: "user",
+      content: encodeOutputLimitToolResults(
+        turnResult.projection.toolCalls.map((call) => call.id)
+      ),
     };
+    await commitMessagesOrThrow(opts.deps, [closeoutMessage]);
+    return settleStopTurn({
+      deps: opts.deps,
+      turnResult,
+      finalState: appendMessage({
+        state: afterAssistantState,
+        msg: closeoutMessage,
+      }),
+      turnIndex: opts.state.turnCount,
+      turnId,
+      turnStartedAt,
+      durationMs,
+      llmCallId,
+    });
   }
 
   const toolStartedAt = new Date().toISOString();
@@ -3686,13 +3817,7 @@ export async function run(
         }
       }
     }
-    let stepResult: {
-      transition: Transition;
-      turn: TurnTrace | null;
-      modelUsage: TokenUsage | undefined;
-      /** ADR-0094: gateway-side summary on transport failure; undefined otherwise. */
-      apiError?: ApiErrorSummary;
-    };
+    let stepResult: StepResult;
     try {
       stepResult = await stepWithTrace({
         state,
@@ -3723,7 +3848,8 @@ export async function run(
       }
       throw err;
     }
-    const { transition, turn, modelUsage, apiError } = stepResult;
+    const { transition, turn, modelUsage, apiError, supplierDetail } =
+      stepResult;
     if (turn !== null) {
       // immutable append; no push / in-place mutation.
       turns = [...turns, turn];
@@ -3758,13 +3884,14 @@ export async function run(
           turnCount: finalState.turnCount,
           stopReason: reason,
           lastUsage,
+          ...supplierDetailField(supplierDetail),
         },
         apiError
       );
-      // ADR-0011: after an exceptional stop (anything but completed), run one
-      // best-effort epilogue summary. It counts toward neither maxTurns nor the
-      // tool budget; on failure just skip, never block the original stop cause.
-      if (reason !== "completed") {
+      // ADR-0011: after an exceptional stop run one best-effort epilogue
+      // summary. It counts toward neither maxTurns nor the tool budget; on
+      // failure just skip, never block the original stop cause.
+      if (needsEpilogueSummary(reason, supplierDetail)) {
         await epilogueSummary({
           deps,
           messages: finalMessages,

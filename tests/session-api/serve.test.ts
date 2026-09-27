@@ -600,7 +600,10 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
             id: "prov",
             baseUrl: capture!.origin,
             apiKeyEnv: "IKNOW_SC6_API_KEY",
-            models: [{ id: "m1" }, { id: "m2" }],
+            models: [
+              { id: "m1", maxTokens: 128 },
+              { id: "m2", maxTokens: 128 },
+            ],
           },
         ],
       },
@@ -669,9 +672,12 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
     // non-streaming arm can parse it. Default stream="on" → the SDK waits for
     // SSE chunks forever → 500 (consistent with current behavior).
     process.env["IKNOW_LLM_STREAM"] = "off";
-    // Anthropic SDK: max_tokens > 8192 forces streaming. The test uses the
-    // non-streaming arm → max_tokens must be <= 8192.
-    process.env["IKNOW_LLM_MAX_OUTPUT_TOKENS"] = "128";
+    // The retired global output-token variable is a fail-fast migration error at
+    // config load, so an ambient value (dev shell export) must not reach the
+    // loader here. The budget comes from the models[].maxTokens entries below —
+    // the non-streaming arm would otherwise ride the 32,000 fallback, which the
+    // SDK rejects client-side (any budget over 21,333 tokens demands streaming).
+    delete process.env["IKNOW_LLM_MAX_OUTPUT_TOKENS"];
     capture = await startLlmCapture(MINIMAL_SDK_MESSAGE);
   });
 

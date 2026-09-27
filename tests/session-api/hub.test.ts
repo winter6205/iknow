@@ -48,6 +48,7 @@ import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { SubagentWakeError } from "../../src/harness/subagent/host-wake.ts";
 import { ValidationError } from "../../src/shared/errors.ts";
 import { TransportRetryExhaustedError } from "../../src/harness/errors.ts";
+import { OUTPUT_LIMIT_NOTICE } from "../../src/session-api/contract.ts";
 import {
   makeTestLlmEnv,
   startLlmCapture,
@@ -701,9 +702,11 @@ describe("postMessage answer wire fields — interrupted (B1)", () => {
     });
     assert.equal(res.turn.answer.stopReason, "completed");
     assert.equal("interrupted" in res.turn.answer, false);
-    // Same key set as the existing byte-stable assertion (no leaked new keys).
+    // Key set gains exactly "outcome" (the durable terminal-state view every
+    // live answer now carries); nothing else leaks.
     assert.deepEqual(Object.keys(res.turn.answer).sort(), [
       "finalText",
+      "outcome",
       "stopReason",
       "turnCount",
     ]);
@@ -1566,6 +1569,7 @@ describe("postMessage answer wire fields (T1)", () => {
     assert.equal("toolCalls" in res.turn.answer, false);
     assert.deepEqual(Object.keys(res.turn.answer).sort(), [
       "finalText",
+      "outcome",
       "stopReason",
       "turnCount",
     ]);
@@ -1666,6 +1670,7 @@ describe("postMessage answer wire fields — lastUsage (context-usage-display)",
     assert.equal("lastUsage" in res.turn.answer, false);
     assert.deepEqual(Object.keys(res.turn.answer).sort(), [
       "finalText",
+      "outcome",
       "stopReason",
       "turnCount",
     ]);
@@ -2400,5 +2405,346 @@ describe("T5 (#622): hub.rewindSession 移动 head、skipped 链保留", () => {
     const loaded = await store.load(id);
     assert.equal(loaded.messages.length, 2);
     assert.equal(loaded.turnCount, 1);
+  });
+});
+
+// -- T4: durable terminal turn outcome (SC7 / SC14 persistence half) ----------
+
+describe("turn outcome persistence (SC7 / SC14)", () => {
+  const outcomeRecords = async (
+    id: string
+  ): Promise<Array<Record<string, unknown>>> => {
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    const raw = await readFile(join(dir, `${id}${SESSION_JSONL_EXT}`), "utf8");
+    return raw
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r["type"] === "outcome");
+  };
+  const lastHead = async (id: string): Promise<string | null> =>
+    store.readHead(id);
+
+  it("a settled completed turn appends exactly one outcome anchored to the persisted head", async () => {
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["hi"] })]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await hub.postMessage({ conversationId: id, text: "hello" });
+
+    const outcomes = await outcomeRecords(id);
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0]!["stopReason"], "completed");
+    assert.equal(outcomes[0]!["turnId"], await lastHead(id));
+
+    // Reopen projects the authoritative outcome (known → completed), not a synthesis.
+    const res = await hub.getSession(id);
+    assert.equal(res.turns.length, 1);
+    assert.equal(res.turns[0]!.answer.stopReason, "completed");
+    assert.deepEqual(res.turns[0]!.answer.outcome, {
+      terminal: "known",
+      stopReason: "completed",
+    });
+  });
+
+  it("reopen with a missing outcome projects unknown and does not synthesize completed (SC7)", async () => {
+    // Legacy transcript: messages present, no outcome record at all.
+    const id = "outcome-legacy-reopen";
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    await mkdir(dir, { recursive: true });
+    await writeFile(
+      join(dir, `${id}${SESSION_JSONL_EXT}`),
+      [
+        JSON.stringify({
+          type: "session",
+          schemaVersion: CURRENT_SCHEMA_VERSION,
+          conversation_id: id,
+          title: "q",
+          cwd: "/tmp/test",
+          sanitized_at: "2026-01-01T00:00:00.000Z",
+          jsonMode: false,
+          turnCount: 1,
+          updatedAt: "2026-01-01T00:00:00.000Z",
+          checkpoints: [],
+          workspaceRoot: process.cwd(),
+        }),
+        JSON.stringify({
+          type: "message",
+          id: "e0",
+          parent: null,
+          message: userMsg("q"),
+        }),
+        JSON.stringify({
+          type: "message",
+          id: "e1",
+          parent: "e0",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "a" }],
+          },
+        }),
+        JSON.stringify({ type: "head", id: "e1" }),
+      ].join("\n") + "\n",
+      "utf8"
+    );
+    const hub = makeHub(makeDeps([]));
+    const res = await hub.getSession(id);
+    assert.equal(res.turns.length, 1);
+    const answer = res.turns[0]!.answer as unknown as Record<string, unknown>;
+    // Unknown is carried independently of StopReason; no fabricated completed.
+    assert.deepEqual(answer["outcome"], { terminal: "unknown" });
+    assert.equal("stopReason" in answer, false);
+  });
+
+  it("/continue settles with no new human message and still appends exactly one outcome (SC7)", async () => {
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["continued"] })]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          turnCount: 1,
+          messages: [
+            userMsg("do"),
+            {
+              role: "assistant",
+              content: [
+                { type: "tool_use", id: "t1", name: "noop", input: {} },
+              ],
+            },
+            {
+              role: "user",
+              content: [
+                { type: "tool_result", tool_use_id: "t1", content: "ok" },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+
+    const res = await hub.continueSession(id);
+    assert.equal(res.turn.answer.stopReason, "completed");
+
+    const outcomes = await outcomeRecords(id);
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0]!["stopReason"], "completed");
+    // Identity is the turn's terminal message event, not a newly appended query.
+    assert.equal(outcomes[0]!["turnId"], await lastHead(id));
+    const loaded = await store.load(id);
+    assert.equal(loaded.messages.length, 4);
+    assert.equal(loaded.messages[3]!.role, "assistant");
+  });
+
+  it("injected outcome-append failure surfaces typed persistence failure and never reports completed (SC14)", async () => {
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["hi"] })]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const spy = vi.spyOn(store, "appendOutcome").mockRejectedValue({
+      kind: "write_failed",
+      conversation_id: id,
+      cause: "injected",
+    } satisfies SessionStoreError);
+    try {
+      await assert.rejects(
+        () => hub.postMessage({ conversationId: id, text: "hello" }),
+        (err: unknown) => (err as SessionStoreError).kind === "write_failed"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    // The turn is NOT reported completed anywhere; the messages landed but the
+    // terminal outcome did not (the crash-before-outcome shape).
+    const outcomes = await outcomeRecords(id);
+    assert.equal(outcomes.length, 0);
+    const res = await hub.getSession(id);
+    assert.equal(res.turns.length, 1);
+    const answer = res.turns[0]!.answer as unknown as Record<string, unknown>;
+    assert.deepEqual(answer["outcome"], { terminal: "unknown" });
+    assert.equal("stopReason" in answer, false);
+  });
+});
+
+// -- T5/T6: settled truncation turn persists its supplier-stop detail ---------
+
+describe("turn outcome supplier-stop detail (output-limit truncation)", () => {
+  const outcomeRecordsOf = async (
+    id: string
+  ): Promise<Array<Record<string, unknown>>> => {
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    const raw = await readFile(join(dir, `${id}${SESSION_JSONL_EXT}`), "utf8");
+    return raw
+      .split("\n")
+      .filter((l) => l.trim().length > 0)
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((r) => r["type"] === "outcome");
+  };
+
+  it("a settled truncation turn records nonSuccessStop with detail truncation, live and reopened", async () => {
+    const hub = makeHub(
+      makeDeps([
+        assistantResult({
+          texts: ["partial answer cut off"],
+          toolCalls: [{ id: "toolu_a", name: "noop", input: {} }],
+          supplierStop: "truncation",
+        }),
+      ])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const res = await hub.postMessage({ conversationId: id, text: "go" });
+
+    assert.equal(res.turn.answer.stopReason, "nonSuccessStop");
+
+    const outcomes = await outcomeRecordsOf(id);
+    assert.equal(outcomes.length, 1);
+    assert.equal(outcomes[0]!["stopReason"], "nonSuccessStop");
+    assert.equal(outcomes[0]!["supplierDetail"], "truncation");
+    assert.equal(outcomes[0]!["turnId"], await store.readHead(id));
+
+    const reopened = await hub.getSession(id);
+    assert.equal(
+      reopened.turns.length,
+      1,
+      "the closeout opens no new human turn"
+    );
+    assert.deepEqual(reopened.turns[0]!.answer.outcome, {
+      terminal: "known",
+      stopReason: "nonSuccessStop",
+      supplierDetail: "truncation",
+    });
+  });
+
+  it("a protocolError stop persists no supplier detail (the field is never synthesized)", async () => {
+    const hub = makeHub(
+      makeDeps([assistantResult({ texts: ["hi"], supplierStop: "success" })])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await hub.postMessage({ conversationId: id, text: "go" });
+
+    const outcomes = await outcomeRecordsOf(id);
+    assert.equal(outcomes.length, 1);
+    assert.equal("supplierDetail" in outcomes[0]!, false);
+  });
+
+  it("injected outcome-append failure on a truncation turn surfaces typed failure and never completes (SC14)", async () => {
+    const hub = makeHub(
+      makeDeps([
+        assistantResult({
+          texts: ["partial answer cut off"],
+          toolCalls: [{ id: "toolu_a", name: "noop", input: {} }],
+          supplierStop: "truncation",
+        }),
+      ])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const spy = vi.spyOn(store, "appendOutcome").mockRejectedValue({
+      kind: "write_failed",
+      conversation_id: id,
+      cause: "injected",
+    } satisfies SessionStoreError);
+    try {
+      await assert.rejects(
+        () => hub.postMessage({ conversationId: id, text: "go" }),
+        (err: unknown) => (err as SessionStoreError).kind === "write_failed"
+      );
+    } finally {
+      spy.mockRestore();
+    }
+    const outcomes = await outcomeRecordsOf(id);
+    assert.equal(outcomes.length, 0);
+    const res = await hub.getSession(id);
+    assert.deepEqual(res.turns[0]!.answer.outcome, { terminal: "unknown" });
+    assert.notEqual(res.turns[0]!.answer.stopReason, "completed");
+  });
+
+  it("output-limit notice rides live and reopened answers byte-identically and never reaches the transcript", async () => {
+    const hub = makeHub(
+      makeDeps([
+        assistantResult({
+          texts: ["partial answer cut off"],
+          toolCalls: [{ id: "toolu_a", name: "noop", input: {} }],
+          supplierStop: "truncation",
+        }),
+      ])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const live = await hub.postMessage({ conversationId: id, text: "go" });
+
+    assert.equal(live.turn.answer.outputLimitNotice, OUTPUT_LIMIT_NOTICE);
+
+    const reopened = await hub.getSession(id);
+    assert.equal(reopened.turns.length, 1);
+    // One wire string for both surfaces: clients render it verbatim.
+    assert.equal(
+      reopened.turns[0]!.answer.outputLimitNotice,
+      live.turn.answer.outputLimitNotice
+    );
+
+    // The notice is a DTO-only projection: no transcript line holds it, so
+    // neither the persisted messages nor any model replay can.
+    const dir = resolveConversationDir({
+      projectDir: sessionDir,
+      conversationId: id,
+    });
+    const raw = await readFile(join(dir, `${id}${SESSION_JSONL_EXT}`), "utf8");
+    assert.equal(raw.includes(OUTPUT_LIMIT_NOTICE), false);
+  });
+
+  it("known non-truncation stop carries no notice on either surface", async () => {
+    const hub = makeHub(
+      makeDeps([assistantResult({ texts: ["no"], supplierStop: "refusal" })])
+    );
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    const live = await hub.postMessage({ conversationId: id, text: "go" });
+
+    assert.equal("outputLimitNotice" in live.turn.answer, false);
+    assert.deepEqual(live.turn.answer.outcome, {
+      terminal: "known",
+      stopReason: "nonSuccessStop",
+      supplierDetail: "refusal",
+    });
+
+    const reopened = await hub.getSession(id);
+    assert.equal("outputLimitNotice" in reopened.turns[0]!.answer, false);
+  });
+
+  it("legacy transcript with no outcome lines: no notice, no stopReason, outcome unknown", async () => {
+    const hub = makeHub(makeDeps([]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          turnCount: 1,
+          messages: [
+            userMsg("q"),
+            { role: "assistant", content: [{ type: "text", text: "a" }] },
+          ],
+        },
+      }),
+    });
+
+    const res = await hub.getSession(id);
+    const answer = res.turns[0]!.answer as unknown as Record<string, unknown>;
+    assert.equal("outputLimitNotice" in answer, false);
+    assert.equal("stopReason" in answer, false);
+    assert.deepEqual(answer["outcome"], { terminal: "unknown" });
   });
 });

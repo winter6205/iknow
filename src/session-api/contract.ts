@@ -4,7 +4,11 @@
  * TurnDto.answer is the harness RunResult projection (TurnAnswerDto);
  * ApiErrorBody is nested under { error: { kind, message, ... } }.
  */
-import type { StopReason, TokenUsage } from "../harness/index.js";
+import type {
+  StopReason,
+  SupplierStopDetail,
+  TokenUsage,
+} from "../harness/index.js";
 import type { FsIsolationMode } from "../harness/sandbox/fs-mode.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { CompactReason } from "../harness/compress/index.js";
@@ -18,7 +22,21 @@ export const MAX_MESSAGE_CHARS = 8000;
  *  messages/trace are never exposed on the wire. */
 export interface TurnAnswerDto {
   readonly finalText: string; // maps RunResult.finalText
-  readonly stopReason: StopReason; // reuses the harness StopReason union (incl. fused)
+  /** Reuses the harness StopReason union (incl. fused). Present on every live
+   *  turn answer and on a reopened turn whose terminal outcome record exists;
+   *  absent when a reopened turn has no terminal record — that state is
+   *  carried by `outcome: { terminal: "unknown" }` (ADR-0126), so history
+   *  never claims a completion it cannot prove. Optional is therefore the
+   *  byte-stable legacy shape: a client reads the turn's terminal state from
+   *  `outcome`, never from the presence of this key. */
+  readonly stopReason?: StopReason;
+  /** ADR-0126: durable terminal-outcome projection of this turn. `known`
+   *  mirrors the persisted outcome record's StopReason; `unknown` = no record
+   *  (legacy history, or a crash before the terminal event). Clients must
+   *  render incompleteness notices from this field, never from the presence of
+   *  assistant text. Absent = the projection had no outcome evidence to
+   *  consult (live turn before persist; pre-ADR-0126 producers). */
+  readonly outcome?: TurnOutcomeView;
   readonly turnCount: number; // maps RunResult.turnCount (starts at 0 per run())
   /** All non-empty assistant thinking texts within the turn, in block order.
    *  Empty thinking skipped; whole field omitted when there is none. */
@@ -79,6 +97,96 @@ export interface TurnAnswerDto {
   readonly apiError?: {
     readonly status?: number;
     readonly message: string;
+  };
+  /**
+   * The turn's output-limit notice: one deterministic English line shown when
+   * the terminal outcome records supplier detail `truncation`. Attached by both
+   * projections (live `toTurnDto` and reopened `projectOutcomeFields`) through
+   * `projectOutputLimitNotice`, and absent as a key everywhere else — same
+   * byte-stable pattern as stopSummary / apiError, so a turn that did not
+   * truncate is byte-identical to one from before this field.
+   *
+   * UI: TUI and Web render this string verbatim and never re-compute the copy,
+   * which is what makes the live and reopened notice identical on both clients.
+   * It is a projection of the outcome, not conversation content: it is never
+   * written into an assistant message nor sent as model input.
+   */
+  readonly outputLimitNotice?: string;
+}
+
+/** ADR-0126: turn-outcome projection. `known` carries the persisted terminal
+ *  StopReason; `unknown` is the absence of terminal evidence (legacy history /
+ *  crash before the terminal event) and is deliberately NOT a StopReason
+ *  member — `unknown` must never be confused with a stop decision. */
+export type TurnOutcomeView =
+  | {
+      readonly terminal: "known";
+      readonly stopReason: StopReason;
+      /** ADR-0126: supplier-stop detail behind `nonSuccessStop`; absent when the
+       *  record carries none (including every outcome written before it). */
+      readonly supplierDetail?: SupplierStopDetail;
+    }
+  | { readonly terminal: "unknown" };
+
+/** Build the `known` side of the outcome view from a settled turn's stop reason
+ *  and (optional) supplier-stop detail. One construction point so the live
+ *  projection, the reopened projection, and the TUI bridge's reopen path hand
+ *  clients the identical shape. An absent detail keeps the key absent
+ *  (byte-stable). */
+export function knownTurnOutcome(
+  stopReason: StopReason,
+  supplierDetail?: SupplierStopDetail
+): TurnOutcomeView {
+  return {
+    terminal: "known",
+    stopReason,
+    ...(supplierDetail !== undefined ? { supplierDetail } : {}),
+  };
+}
+
+/**
+ * The one English notice shown for a turn whose terminal outcome records output
+ * truncation. A deterministic constant rather than per-client copy: the live
+ * turn and a reopened session, on the TUI and on the Web, must render the same
+ * bytes, and no client may re-compute the wording. It states that the response
+ * did not finish, so any committed text is partial, and invites a new
+ * instruction (which starts a new turn — there is no automatic continuation).
+ */
+export const OUTPUT_LIMIT_NOTICE =
+  "The model response hit its output limit and did not finish, so this turn's answer is incomplete. Send a new instruction to continue.";
+
+/** The notice a turn answer carries: present only when the outcome is a KNOWN
+ *  stop whose supplier detail is `truncation`. Any other known stop, and any
+ *  unknown outcome (legacy history with no terminal record), leaves the field
+ *  absent — an unrecorded stop is never described as a truncation. */
+export function projectOutputLimitNotice(
+  outcome: TurnOutcomeView | undefined
+): string | undefined {
+  return outcome !== undefined &&
+    outcome.terminal === "known" &&
+    outcome.supplierDetail === "truncation"
+    ? OUTPUT_LIMIT_NOTICE
+    : undefined;
+}
+
+/**
+ * The answer fields that describe a settled turn's terminal state, assembled in
+ * one place so the live turn (`toTurnDto`) and a reopened turn
+ * (`projectOutcomeFields`) can never drift: a known `stopReason`, the outcome
+ * view derived from it, and — only for output truncation — the notice. A stop
+ * without truncation detail keeps `outputLimitNotice` absent as a key
+ * (byte-stable, same pattern as stopSummary / apiError).
+ */
+export function turnOutcomeFields(
+  stopReason: StopReason,
+  supplierDetail?: SupplierStopDetail
+): Pick<TurnAnswerDto, "stopReason" | "outcome" | "outputLimitNotice"> {
+  const outcome = knownTurnOutcome(stopReason, supplierDetail);
+  const notice = projectOutputLimitNotice(outcome);
+  return {
+    stopReason,
+    outcome,
+    ...(notice !== undefined ? { outputLimitNotice: notice } : {}),
   };
 }
 

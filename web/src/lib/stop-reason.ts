@@ -5,6 +5,7 @@
  * domain may drift as the backend evolves, so the display layer must
  * tolerate unknown values (fail quiet).
  */
+import type { StopReason } from "../api/types";
 
 /** Non-completed stop reason → display label (rendered in quiet mono / warn tone). */
 export const STOP_REASON_LABELS: Record<string, string> = {
@@ -23,4 +24,54 @@ export function stopReasonLabel(
 ): string | null {
   if (!reason) return null;
   return STOP_REASON_LABELS[reason] ?? null;
+}
+
+/**
+ * The warn line under an answer: the hub's own output-limit notice when the
+ * turn carries one, otherwise the stop-reason label.
+ *
+ * The notice string is rendered verbatim — the wire is its only source, so a
+ * live turn and a reopened session show identical bytes and this layer never
+ * re-composes the copy. The hub attaches the field only to a known outcome
+ * whose supplier detail is `truncation`, so no other stop reason can pick it
+ * up; an unknown outcome carries neither field and renders nothing (neither a
+ * truncation notice nor a completed/incomplete label).
+ */
+export function stopNoticeLine(
+  stopReason: string | null | undefined,
+  outputLimitNotice?: string | null
+): string | null {
+  if (outputLimitNotice) return outputLimitNotice;
+  return stopReasonLabel(stopReason);
+}
+
+/**
+ * What the notice line reads off a turn: StopNotice's props, hand-mirrored from
+ * the three TurnAnswerDto fields (this layer cannot import src/).
+ */
+export type StopNoticeInput = {
+  /** Missing → treated as null → not shown. Absent together with
+   *  `outcome.terminal === "unknown"` is the legacy-history case: no label. */
+  stopReason?: StopReason;
+  /** The hub's output-limit notice, shown verbatim in place of the generic
+   *  non-completed label. Missing / empty → the label mapping decides. */
+  outputLimitNotice?: string;
+  /** Missing / ≤ 1 → the "N 轮" ("N turns") count is not shown. */
+  turnCount?: number;
+};
+
+/**
+ * Turn answer → notice input, derived once so the card carries no wire-field
+ * conditionals of its own. An absent answer (in-flight bubble) or an unknown
+ * outcome (the wire carries neither field) yields no fields → nothing shows.
+ */
+export function stopNoticeInput(
+  answer: StopNoticeInput | null | undefined
+): StopNoticeInput {
+  if (answer === null || answer === undefined) return {};
+  return {
+    stopReason: answer.stopReason,
+    outputLimitNotice: answer.outputLimitNotice,
+    turnCount: answer.turnCount,
+  };
 }

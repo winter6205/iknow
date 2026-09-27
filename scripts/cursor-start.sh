@@ -74,7 +74,7 @@ if [ ! -f "$SETTINGS_PATH" ]; then
             "id": "MiniMax-M3",
             "name": "MiniMax-M3",
             "contextWindow": 1000000,
-            "maxTokens": 128000
+            "maxTokens": 131072
           }
         ]
       }

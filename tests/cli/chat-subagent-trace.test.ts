@@ -152,8 +152,11 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
     // (typed `provider_model_not_registered`). The listener port is allocated
     // dynamically, so baseUrl is written into settings only after
     // server.address() reveals it. llmSettingsJson itself accepts no baseUrl
-    // override, so the TEST_LLM_PROVIDER id/apiKeyEnv/models shape is kept and
-    // only baseUrl is repointed at this test's own stub listener.
+    // override, so the TEST_LLM_PROVIDER id/apiKeyEnv shape is kept and baseUrl
+    // is repointed at this test's own stub listener; the model entry adds
+    // `maxTokens: 1024`, the per-route output budget that keeps this fixture's
+    // stream="off" arm legal (the SDK rejects any non-streaming request whose
+    // output budget exceeds 21,333 tokens client-side).
     writeFileSync(
       join(home, ".iknow", "settings.json"),
       JSON.stringify({
@@ -163,6 +166,7 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
             {
               ...TEST_LLM_PROVIDER,
               baseUrl: `http://127.0.0.1:${address.port}/v1`,
+              models: [{ id: "model", maxTokens: 1024 }],
             },
           ],
         },
@@ -176,9 +180,12 @@ describe("CLI chat pipe — unconditional subagent lifecycle trace", () => {
       IKNOW_LLM_STREAM: "off",
       IKNOW_PERMISSION_MODE: "full_auto",
       IKNOW_LLM_TIMEOUT_MS: "5000",
-      IKNOW_LLM_MAX_OUTPUT_TOKENS: "1024",
     };
     delete childEnv.IKNOW_TRACE_OUT;
+    // Retired global output-token knob: a non-empty value fails config load. The
+    // small budget that keeps this fixture's stream="off" arm legal now comes
+    // from the model entry's `maxTokens` above, never from the environment.
+    delete childEnv.IKNOW_LLM_MAX_OUTPUT_TOKENS;
 
     child = spawn(
       process.execPath,

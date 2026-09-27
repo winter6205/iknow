@@ -143,3 +143,26 @@ describe("buildMessageParams — system field (#121 T6 / SC 1)", () => {
     });
   });
 });
+
+/**
+ * The params builder is the last generic hop before the SDK, so it is where a
+ * clamp would silently appear. It must never be one: whatever budget the
+ * effective route resolved is what goes on the wire, including a value above
+ * any documented supplier maximum (the supplier decides, not the harness).
+ */
+describe("buildMessageParams — max_tokens is passed through verbatim (SC15)", () => {
+  function optsWithMaxTokens(maxTokens: number): RealAnthropicAdapterOptions {
+    return { ...makeOpts(), maxTokens };
+  }
+
+  for (const maxTokens of [1, 32_000, 72_000, 131_072, 524_289]) {
+    it(`maxTokens ${maxTokens}（含高于文档上限者）→ params.max_tokens 原样`, () => {
+      const params = buildMessageParams(
+        optsWithMaxTokens(maxTokens),
+        initState([userMsg("hi")]),
+        {}
+      );
+      assert.equal(params.max_tokens, maxTokens);
+    });
+  }
+});

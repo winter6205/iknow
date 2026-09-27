@@ -58,6 +58,13 @@
  *  - top / intermediate layers must be plain objects (arrays / strings, etc. →
  *    drop that layer / field).
  *
+ * One exception to drop-not-throw: an explicit
+ * `llm.providers[].models[].maxTokens` that is not a positive safe integer
+ * throws `LlmBudgetConfigError` instead of being dropped. That field is the
+ * request output budget, and silently discarding it would keep sending requests
+ * under the 32,000-token fallback while the operator believes a configured cap
+ * is in force.
+ *
  * llm.thinking / llm.thinkingEffort share their value domain with env.ts
  * IKNOW_LLM_THINKING(_EFFORT), but fall back by env > settings priority —
  * settings only supplies the default.
@@ -79,6 +86,10 @@ import {
   mergeIsolationCredentials,
   type IknowSettingsIsolationCredentials,
 } from "./isolation-credentials.js";
+import {
+  LLM_LEGACY_MAX_OUTPUT_TOKENS_MIGRATION_MESSAGE,
+  LLM_MAX_TOKENS_EXPECTED_MESSAGE,
+} from "./messages.js";
 
 export type { IknowSettingsIsolationNetwork } from "./isolation-network.js";
 export type {
@@ -97,8 +108,14 @@ export interface IknowSettingsLlmCompress {
  *  - `id`: model routing ID, unique within the provider, non-empty after trim
  *    (reuses `isNonEmptyString`);
  *  - `name?`: display name (non-empty trimmed string);
- *  - `contextWindow?` / `maxTokens?`: context window / max output; finite
- *    positive numbers, same `isPositiveFinite` domain as `IknowSettingsLlmCompress`.
+ *  - `contextWindow?`: drop-not-throw like the rest of this file — a value that
+ *    is not a finite positive number is silently dropped;
+ *  - `maxTokens?`: the **request output budget** sent as `max_tokens` for this
+ *    model entry; when absent, request assembly uses the 32,000-token fallback.
+ *    It is not a supplier hard limit. Explicit values are validated as a
+ *    positive safe integer: `null`, a wrong type, zero, negative, fractional, or
+ *    beyond-safe-integer throws `LlmBudgetConfigError`
+ *    (`model_max_tokens_invalid`) instead of being dropped into that fallback.
  * `id` is required; a missing `id` drops the whole model entry (the provider may
  * still be kept; a provider with an empty array drops itself — see
  * `parseLlmProvider`).
@@ -108,6 +125,77 @@ export interface IknowSettingsLlmProviderModel {
   readonly name?: string;
   readonly contextWindow?: number;
   readonly maxTokens?: number;
+}
+
+/**
+ * Typed configuration error for the request output budget. Two kinds, one
+ * surface: an explicit illegal `models[].maxTokens` value in a settings file
+ * (thrown while parsing that file) and the retired global
+ * `IKNOW_LLM_MAX_OUTPUT_TOKENS` still being configured (thrown by the env
+ * loader, which owns the environment reads).
+ *
+ * Plain-object `satisfies` shape (like `LlmProviderConfigError` /
+ * `WebEnvConfigError`): callers discriminate with `isLlmBudgetConfigError`,
+ * **never** `err instanceof Error`. The payload carries configuration names and
+ * the offending configured value only — never an API key or file content.
+ */
+export type LlmBudgetConfigError =
+  | {
+      kind: "model_max_tokens_invalid";
+      providerId: string;
+      modelId: string;
+      field: "maxTokens";
+      value: unknown;
+    }
+  | {
+      kind: "legacy_max_output_tokens_env";
+      varName: string;
+      value: string;
+    };
+
+/** Output-budget typed-error discriminated guard. */
+export function isLlmBudgetConfigError(
+  err: unknown
+): err is LlmBudgetConfigError {
+  if (err === null || typeof err !== "object") return false;
+  const maybe = err as Record<string, unknown>;
+  if (maybe.kind === "model_max_tokens_invalid") {
+    return (
+      typeof maybe.providerId === "string" &&
+      typeof maybe.modelId === "string" &&
+      maybe.field === "maxTokens" &&
+      Object.prototype.hasOwnProperty.call(maybe, "value")
+    );
+  }
+  if (maybe.kind === "legacy_max_output_tokens_env") {
+    return typeof maybe.varName === "string" && typeof maybe.value === "string";
+  }
+  return false;
+}
+
+/** JSON renders structured values; `JSON.stringify(undefined)` yields undefined. */
+function renderBudgetConfigValue(value: unknown): string {
+  return value === undefined ? "undefined" : JSON.stringify(value);
+}
+
+/**
+ * Renders `LlmBudgetConfigError` text: names the offending model entry (or env
+ * variable) and the `models[].maxTokens` migration target. Copy fragments come
+ * from `messages.ts` so both kinds describe the same field identically.
+ */
+export function formatLlmBudgetConfigError(err: LlmBudgetConfigError): string {
+  if (err.kind === "model_max_tokens_invalid") {
+    return (
+      `model_max_tokens_invalid: ${err.providerId}/${err.modelId} ` +
+      `field ${err.field} = ${renderBudgetConfigValue(err.value)}. ` +
+      LLM_MAX_TOKENS_EXPECTED_MESSAGE
+    );
+  }
+  return (
+    `legacy_max_output_tokens_env: ${err.varName} = ` +
+    `${renderBudgetConfigValue(err.value)}. ` +
+    LLM_LEGACY_MAX_OUTPUT_TOKENS_MIGRATION_MESSAGE
+  );
 }
 
 /**
@@ -721,6 +809,16 @@ function isPositiveFinite(v: unknown): v is number {
   return typeof v === "number" && Number.isFinite(v) && v > 0;
 }
 
+/**
+ * Positive safe integer: value domain of `models[].maxTokens` (the request
+ * output budget). Stricter than `isPositiveFinite` on purpose — a fractional or
+ * beyond-safe-integer token count cannot be sent as `max_tokens` without the
+ * wire value silently differing from the configured one.
+ */
+function isValidModelMaxTokens(v: unknown): v is number {
+  return typeof v === "number" && Number.isSafeInteger(v) && v > 0;
+}
+
 /** Finite positive integer (>= 1 and integral): value domain of maxTurns. */
 function isValidMaxTurns(v: unknown): v is number {
   return (
@@ -808,27 +906,43 @@ export function isFsIsolationMode(value: unknown): value is FsIsolationMode {
 }
 
 /**
- * Parse a single model entry. A non-empty `id` is the only hard requirement; `name` the
- * same; `contextWindow` / `maxTokens` go through `isPositiveFinite` (> 0 finite positive).
- * Illegal fields are dropped; an illegal `id` → drop the whole model entry (return undefined).
+ * Parse a single model entry. A non-empty `id` is the only hard requirement;
+ * `name` / `contextWindow` follow the file's drop-not-throw discipline (an
+ * illegal value drops that field only). `maxTokens` is the exception: an
+ * explicit value must be a positive safe integer or this throws
+ * `LlmBudgetConfigError`; absence is legal and yields no key. An illegal `id` →
+ * drop the whole model entry (return undefined) before any field is validated.
  */
 function parseLlmProviderModel(
-  raw: unknown
+  raw: unknown,
+  providerId: string
 ): IknowSettingsLlmProviderModel | undefined {
   if (!isPlainObject(raw)) return undefined;
   if (!isNonEmptyString(raw.id)) return undefined;
+  const modelId = raw.id.trim();
   const out: {
     id: string;
     name?: string;
     contextWindow?: number;
     maxTokens?: number;
   } = {
-    id: raw.id.trim(),
+    id: modelId,
   };
   if (isNonEmptyString(raw.name)) out.name = raw.name.trim();
   if (isPositiveFinite(raw.contextWindow))
     out.contextWindow = raw.contextWindow;
-  if (isPositiveFinite(raw.maxTokens)) out.maxTokens = raw.maxTokens;
+  if (raw.maxTokens !== undefined) {
+    if (!isValidModelMaxTokens(raw.maxTokens)) {
+      throw {
+        kind: "model_max_tokens_invalid",
+        providerId,
+        modelId,
+        field: "maxTokens",
+        value: raw.maxTokens,
+      } satisfies LlmBudgetConfigError;
+    }
+    out.maxTokens = raw.maxTokens;
+  }
   return out;
 }
 
@@ -873,11 +987,14 @@ function mergeLlmProviders(
   if (user?.providers !== undefined) out.providers = user.providers;
 }
 
-function parseLlmProviderModels(raw: unknown): IknowSettingsLlmProviderModel[] {
+function parseLlmProviderModels(
+  raw: unknown,
+  providerId: string
+): IknowSettingsLlmProviderModel[] {
   if (!Array.isArray(raw)) return [];
   const out: IknowSettingsLlmProviderModel[] = [];
   for (const m of raw) {
-    const parsed = parseLlmProviderModel(m);
+    const parsed = parseLlmProviderModel(m, providerId);
     if (parsed !== undefined) out.push(parsed);
   }
   return out;
@@ -892,7 +1009,9 @@ function parseLlmProvider(raw: unknown): IknowSettingsLlmProvider | undefined {
   ) {
     return undefined;
   }
-  const models = parseLlmProviderModels(raw.models);
+  // The provider's own shape gate runs first: a provider dropped for a bad
+  // id / baseUrl / apiKeyEnv never reaches per-model budget validation.
+  const models = parseLlmProviderModels(raw.models, raw.id.trim());
   if (models.length === 0) return undefined;
   const headers = parseLlmProviderHeaders(raw.headers);
   const out: {

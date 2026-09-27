@@ -150,6 +150,7 @@ import { resolveMcpRoots, type McpRoots } from "../harness/mcp/roots.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
+import type { SessionOutcomeRecord } from "./store/index.js";
 import { resolveConversationTraceFilePath } from "./store/index.js";
 import { readWorkerInFlightToolName } from "./store/index.js";
 import {
@@ -214,10 +215,11 @@ import type {
   RewindTargetsResponse,
   SessionSummary,
   SkillSummaryDto,
+  TurnAnswerDto,
   TurnDto,
   VerifyAnswerView,
 } from "./contract.js";
-import { MAX_MESSAGE_CHARS } from "./contract.js";
+import { MAX_MESSAGE_CHARS, turnOutcomeFields } from "./contract.js";
 import { projectVerifyHumanView } from "./verify-human-view.js";
 import {
   extractRecentUserTasks,
@@ -332,7 +334,7 @@ export function parseGoalCommand(text: string): string | null {
  * builds a fresh one each time), so identity comparison is useless.
  * "settings file touched but content unchanged" must be decided by value
  * across all createAdapterFromEnv inputs: model / apiKey / baseUrl /
- * headers / maxOutputTokens / temperature / stream + thinking controller's
+ * headers / routeMaxTokens / temperature / stream + thinking controller's
  * thinking / thinkingEffort. fallback is unrelated to the adapter but
  * reflects config changes, so it is compared too (element-wise,
  * order-sensitive).
@@ -341,7 +343,7 @@ function sameHotReloadKeyFields(a: LlmEnv, b: LlmEnv): boolean {
   if (a.model !== b.model) return false;
   if (a.apiKey !== b.apiKey) return false;
   if (a.baseUrl !== b.baseUrl) return false;
-  if (a.maxOutputTokens !== b.maxOutputTokens) return false;
+  if (a.routeMaxTokens !== b.routeMaxTokens) return false;
   if (a.temperature !== b.temperature) return false;
   if (a.stream !== b.stream) return false;
   if (a.thinking !== b.thinking) return false;
@@ -560,7 +562,10 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
 /**
  * Project raw AnthropicNativeMessage[] → display-form TurnDto[] for wire.
  * Pairs each user message with its subsequent assistant message.
- * Projection is non-authoritative: stopReason/turnCount are lossy.
+ * Projection is non-authoritative: turnCount is lossy, and stopReason is only
+ * authoritative when `outcomeEvidence` is supplied (ADR-0126) — then it comes
+ * from the turn's persisted terminal outcome record, and a turn with no record
+ * projects `outcome: {terminal:"unknown"}` with no stopReason at all.
  *
  * Also projects thinking/toolCalls per turn (messages between this user
  * query and the next real query message, per `isTurnQuery`). Output is
@@ -587,6 +592,50 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
  * retired.
  */
 
+/** ADR-0126: the durable outcome evidence a history projection may consult —
+ *  the active head chain's event ids (index-aligned with the projected
+ *  messages) plus the terminal outcome recorded per anchor. Obtained from
+ *  `SessionStore.projectTurnOutcomes`. */
+export interface TurnOutcomeEvidence {
+  readonly messageEventIds: ReadonlyArray<string>;
+  readonly outcomes: ReadonlyMap<string, SessionOutcomeRecord>;
+}
+
+/** Answer fields carrying the turn's terminal state, from the persisted
+ *  outcome at `anchorId` when this projection has evidence to consult. Without
+ *  a record the answer keeps `outcome: {terminal:"unknown"}` and omits
+ *  `stopReason` (ADR-0126: absent evidence is not a completion), and no notice
+ *  either — an unrecorded stop is never described as a truncation. The
+ *  output-limit notice rides the same fields, so a reopened turn and a live
+ *  turn hand clients one shape. */
+function projectOutcomeFields(
+  evidence: TurnOutcomeEvidence | undefined,
+  anchorId: string | undefined
+): Pick<TurnAnswerDto, "stopReason" | "outcome" | "outputLimitNotice"> {
+  if (evidence === undefined) {
+    // No ledger evidence at all (a pure message-array caller): pre-ADR-0126
+    // shape, so those projections stay byte-stable.
+    return { stopReason: "completed" };
+  }
+  const recorded =
+    anchorId === undefined ? undefined : evidence.outcomes.get(anchorId);
+  if (recorded === undefined) return { outcome: { terminal: "unknown" } };
+  return turnOutcomeFields(recorded.stopReason, recorded.supplierDetail);
+}
+
+/** The head-chain event id a turn's terminal outcome is anchored to: the last
+ *  event of its message slice. A load may append orphan-tool-use closeout
+ *  messages that have no event of their own, so the index is clamped to the
+ *  evidence chain — and with no evidence chain at all there is no anchor. */
+function outcomeAnchorId(
+  outcomeEvidence: TurnOutcomeEvidence | undefined,
+  sliceEnd: number
+): string | undefined {
+  const ids = outcomeEvidence?.messageEventIds;
+  if (ids === undefined || ids.length === 0) return undefined;
+  return ids[Math.min(sliceEnd - 1, ids.length - 1)];
+}
+
 export function projectMessagesToTurns(
   messages: ReadonlyArray<AnthropicNativeMessage>,
   thinkingMs?: ReadonlyArray<number | null>,
@@ -595,7 +644,12 @@ export function projectMessagesToTurns(
    *  definition that turn's reading; earlier turns' usage is unknowable from
    *  a single ledger). Absent/null → no key anywhere (byte-stable pattern as
    *  thinking/toolCalls/lastUsage). */
-  lastUsage?: TokenUsage | null
+  lastUsage?: TokenUsage | null,
+  /** ADR-0126: terminal outcomes of the active head chain. When present, a
+   *  turn's stopReason comes from the record anchored on its terminal event
+   *  and a turn with no record projects `unknown` instead of a synthesized
+   *  completion. */
+  outcomeEvidence?: TurnOutcomeEvidence
 ): TurnDto[] {
   const mask = createOutputMask(currentSecretValues()).mask;
   const turns: TurnDto[] = [];
@@ -618,11 +672,15 @@ export function projectMessagesToTurns(
       thinkingMs,
       startIndex: i,
     });
+    const outcomeFields = projectOutcomeFields(
+      outcomeEvidence,
+      outcomeAnchorId(outcomeEvidence, end)
+    );
     turns.push({
       query,
       answer: {
         finalText,
-        stopReason: "completed",
+        ...outcomeFields,
         turnCount: turnIndex,
         ...(thinking !== undefined ? { thinking } : {}),
         ...(toolCalls !== undefined ? { toolCalls } : {}),
@@ -1785,6 +1843,10 @@ export class SessionHub {
 
   async getSession(conversationId: string): Promise<GetSessionResponse> {
     const file = await this.store.load(conversationId);
+    // ADR-0126: reopened history is projected against the ACTIVE head chain's
+    // persisted outcomes, so a rewind/reopen can never surface an abandoned
+    // branch's terminal state.
+    const evidence = await this.store.projectTurnOutcomes(conversationId);
     return {
       session: this.summarize({ file }),
       // D2 (tui-display-consistency): pass file.thinkingMs parallel array so
@@ -1794,7 +1856,8 @@ export class SessionHub {
       turns: projectMessagesToTurns(
         file.messages,
         file.thinkingMs,
-        file.lastUsage
+        file.lastUsage,
+        evidence
       ),
     };
   }
@@ -2561,6 +2624,11 @@ export class SessionHub {
       work: async () => {
         const session = await this.store.load(conversationId);
         const before = session.messages;
+        // ADR-0126: compaction re-projects the history it did not change, so it
+        // consults the same persisted outcomes as `getSession` (the store
+        // guarantees those ids are index-aligned with `load`'s messages). Without
+        // them every turn here would come back as a synthesized completion.
+        const evidence = await this.store.projectTurnOutcomes(conversationId);
 
         // Manual /compact is treated as having already passed
         // evaluateCompactTrigger's token gate. The body still reuses the
@@ -2586,7 +2654,12 @@ export class SessionHub {
           // path).
           return {
             session: this.summarize({ file: session }),
-            turns: projectMessagesToTurns(before),
+            turns: projectMessagesToTurns(
+              before,
+              undefined,
+              undefined,
+              evidence
+            ),
             compacted: false,
             reason: REASON_NO_COMPRESS,
             beforeCount: 0,
@@ -2661,7 +2734,12 @@ export class SessionHub {
         if (cancelled) {
           return {
             session: this.summarize({ file: session }),
-            turns: projectMessagesToTurns(before),
+            turns: projectMessagesToTurns(
+              before,
+              undefined,
+              undefined,
+              evidence
+            ),
             compacted: false,
             cancelled: true,
             reason: REASON_NO_COMPRESS,
@@ -2678,7 +2756,12 @@ export class SessionHub {
         if (useCompactMessages && compacted.length >= before.length) {
           return {
             session: this.summarize({ file: session }),
-            turns: projectMessagesToTurns(before),
+            turns: projectMessagesToTurns(
+              before,
+              undefined,
+              undefined,
+              evidence
+            ),
             compacted: false,
             reason: REASON_NO_COMPRESS,
             beforeCount: before.length,
@@ -2704,6 +2787,11 @@ export class SessionHub {
           title: extractTitle(before),
         };
         await this.store.save({ id: conversationId, file: updated });
+        // The save re-plans the log, so the head chain just written is the one
+        // the response projects: its outcome evidence is re-read here rather
+        // than carried over from the pre-compaction ids.
+        const savedEvidence =
+          await this.store.projectTurnOutcomes(conversationId);
         // reason: LLM summary succeeded → 'full_summary' (regardless of the
         // trigger's action, since nextMessages really is SUMMARY_PREAMBLE +
         // summary); placeholder fallback → 'windowed'. SSOT: the helper keeps
@@ -2713,7 +2801,12 @@ export class SessionHub {
         });
         return {
           session: this.summarize({ file: updated }),
-          turns: projectMessagesToTurns(compacted),
+          turns: projectMessagesToTurns(
+            compacted,
+            undefined,
+            undefined,
+            savedEvidence
+          ),
           compacted: true,
           reason,
           beforeCount: before.length,
@@ -2894,7 +2987,14 @@ export class SessionHub {
         }
         return {
           session: this.summarize({ file }),
-          turns: projectMessagesToTurns(file.messages),
+          // ADR-0126: outcomes resolve against the NEW head chain, so the
+          // rewound-away branch's terminal state drops out with its messages.
+          turns: projectMessagesToTurns(
+            file.messages,
+            file.thinkingMs,
+            file.lastUsage,
+            await this.store.projectTurnOutcomes(conversationId)
+          ),
           head: await this.store.readHead(conversationId),
           ...(codeRestore !== undefined ? { codeRestore } : {}),
         };
@@ -3660,7 +3760,36 @@ export class SessionHub {
           root === undefined ? updated : { ...updated, workspaceRoot: root },
       });
     });
+    await this.appendTurnOutcome(conversationId, session, updated, result);
     return true;
+  }
+
+  /** ADR-0126: persist the settled turn's terminal outcome. Anchored on the
+   *  persisted head — the turn's terminal message event — which keeps the
+   *  identity stable for a `/continue` that appended no human message; a
+   *  failure propagates as the store's typed error so the caller never reports
+   *  a turn completed whose terminal record is missing.
+   *
+   *  Skipped when this turn added nothing to the transcript: the head still
+   *  points at the PREVIOUS turn's terminal event, and writing there would
+   *  overwrite that turn's outcome with this one's stop reason. */
+  private async appendTurnOutcome(
+    conversationId: string,
+    prior: SessionFileV1,
+    updated: SessionFileV1,
+    result: RunResult
+  ): Promise<void> {
+    if (updated.messages.length <= prior.messages.length) return;
+    const turnId = await this.store.readHead(conversationId);
+    if (turnId === null) return;
+    await this.store.appendOutcome({
+      id: conversationId,
+      turnId,
+      stopReason: result.stopReason,
+      ...(result.supplierDetail !== undefined
+        ? { supplierDetail: result.supplierDetail }
+        : {}),
+    });
   }
 
   private async consumeDirtyRootOnSave(
@@ -4345,11 +4474,19 @@ export class SessionHub {
     const turnMessages = opts.turnMessages ?? result.messages;
     const thinking = projectThinkingView(turnMessages, mask);
     const toolCalls = projectToolCalls(turnMessages, mask);
+    // A settled turn has terminal evidence by definition, so the live answer
+    // reports the same outcome view a reload projects from the persisted
+    // record — one client contract for both views. The output-limit notice
+    // rides that view, so a truncation is shown identically live and reopened.
+    const outcomeFields = turnOutcomeFields(
+      result.stopReason,
+      result.supplierDetail
+    );
     return {
       query,
       answer: {
         finalText: maskedFinalText,
-        stopReason: result.stopReason,
+        ...outcomeFields,
         turnCount: result.turnCount,
         // T1: optional fields — omitted entirely when undefined (byte-stable
         // for turns without thinking or tool use).

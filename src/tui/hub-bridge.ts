@@ -25,10 +25,13 @@ import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import type { EngineBundle } from "../harness/build-engine.js";
 import type {
   PostMessageResponse,
+  TurnOutcomeView,
   WireThinkingOverride,
 } from "../session-api/contract.js";
+import { knownTurnOutcome } from "../session-api/contract.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 import type { LedgerRewindTarget } from "../session-api/store/index.js";
+import type { TuiLoadedSessionFile } from "./session-state.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type {
@@ -128,6 +131,11 @@ export interface TuiPostResult {
    *  TUI notice renders "API error (status): message" when status is
    *  present, else "API error: message". */
   readonly apiError?: { readonly status?: number; readonly message: string };
+  /** The turn's durable output-limit notice, passed through from the hub's
+   *  answer projection verbatim (absent wire field -> absent field). Rendered
+   *  in the sticky notice lane instead of the generic abnormal-stop copy, so
+   *  the live turn and a reopened session show one identical line. */
+  readonly outputLimitNotice?: string;
 }
 
 /** Rewind result: the post-rewind projection the TUI renders from, plus — only
@@ -166,7 +174,12 @@ export interface TuiBridge {
     conversationId: string
   ) => Promise<TuiPostResult | undefined>;
   readonly listSessions: () => ReturnType<SessionHub["listSessions"]>;
-  readonly loadSessionFile: (conversationId: string) => Promise<SessionFileV1>;
+  /** Read a session file for rendering, plus the terminal outcome of its last
+   *  settled turn (ADR-0126) so a reopened session can show the same durable
+   *  notice the live turn showed. */
+  readonly loadSessionFile: (
+    conversationId: string
+  ) => Promise<TuiLoadedSessionFile>;
   /** Manual compaction (/compact). Returns `{ compacted, cancelled? }`:
    *  `compacted` true = trimming actually happened; false = nothing
    *  compactable (empty session is idempotent) or full failure — the auto
@@ -351,6 +364,31 @@ export interface CreateTuiBridgeOptions {
   readonly yolo?: YoloContext;
 }
 
+/**
+ * The last settled turn's terminal outcome, read from the transcript's own
+ * outcome records (the hub anchors each one on the head event written by that
+ * turn, ADR-0126). Returns undefined when no record is anchored there — the
+ * same unknown state a legacy transcript has — and also on a failed read: the
+ * messages already loaded, and an unreadable outcome must not fail the reopen
+ * it was only meant to annotate.
+ */
+async function lastTurnOutcome(
+  store: SessionStore,
+  conversationId: string
+): Promise<TurnOutcomeView | undefined> {
+  try {
+    const { messageEventIds, outcomes } =
+      await store.projectTurnOutcomes(conversationId);
+    const anchor = messageEventIds[messageEventIds.length - 1];
+    const recorded = anchor === undefined ? undefined : outcomes.get(anchor);
+    return recorded === undefined
+      ? undefined
+      : knownTurnOutcome(recorded.stopReason, recorded.supplierDetail);
+  } catch {
+    return undefined;
+  }
+}
+
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
   // Store namespace keys by projectIdentityRoot, not cwd — mirrors build-engine.
   const projectIdentityRoot = deriveProjectIdentityRoot({
@@ -453,6 +491,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     ...(resp.turn.answer.apiError !== undefined
       ? { apiError: resp.turn.answer.apiError }
       : {}),
+    ...(resp.turn.answer.outputLimitNotice !== undefined
+      ? { outputLimitNotice: resp.turn.answer.outputLimitNotice }
+      : {}),
   });
 
   const bridge: TuiBridge = {
@@ -499,7 +540,15 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
       }
     },
     listSessions: () => hub.listSessions(),
-    loadSessionFile: (conversationId) => store.load(conversationId),
+    loadSessionFile: async (conversationId) => {
+      const file = await store.load(conversationId);
+      const outcome = await lastTurnOutcome(store, conversationId);
+      // Outcome absent = nothing to annotate: the plain file keeps its shape
+      // for every reader that only knows SessionFileV1.
+      return outcome === undefined
+        ? file
+        : { ...file, lastTurnOutcome: outcome };
+    },
     compactSession: async (conversationId, compactOpts) => {
       const res = await hub.compactSession(
         conversationId,

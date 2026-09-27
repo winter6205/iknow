@@ -14,6 +14,14 @@
  *     guards throw "LLM mode needs API key."). The `IKNOW_LLM_API_KEY_ENV` env
  *     path is retired (no longer read); apiKey no longer depends on env names.
  *   - `settings.llm.fallback` / `maxTurns` / `compress` are kept (user-configured).
+ *   - `IKNOW_LLM_MAX_OUTPUT_TOKENS` is retired: any non-empty value (process
+ *     environment or a loaded env file) throws the typed
+ *     `LlmBudgetConfigError` (`legacy_max_output_tokens_env`) pointing the
+ *     operator at `models[].maxTokens`. It is never read as a budget and never
+ *     rewritten into a settings file. A request's output budget is now
+ *     per-route: `llm.routeMaxTokens` / `ModelRouteEnv.maxTokens` carry the
+ *     matched `models[].maxTokens`, and assembly falls back to 32,000 only for
+ *     a route whose entry is silent.
  * Other fields keep the existing `process.env > .env.local > .env > hardcoded defaults`.
  *
  * Never logs secret values.
@@ -26,6 +34,7 @@ import {
   type IknowSettingsLlmProvider,
   type IknowSettingsThinking,
   type IknowSettingsThinkingEffort,
+  type LlmBudgetConfigError,
   DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
 } from "./settings.js";
 import { LLM_MODEL_MISSING_MESSAGE } from "./messages.js";
@@ -33,6 +42,20 @@ import {
   PRODUCT_ROOT_ENV_KEY,
   WORKSPACE_ROOT_ENV_KEY,
 } from "./workspace-root.js";
+
+/**
+ * Output-token fallback request assembly uses when the effective model entry
+ * carries no `models[].maxTokens`. It is a request budget, not evidence of any
+ * supplier's hard maximum.
+ */
+export const DEFAULT_MAX_OUTPUT_TOKENS = 32_000;
+
+/**
+ * Retired global output-token knob. The loader reads it for exactly one
+ * purpose — rejecting a non-empty value with a migration error — and never uses
+ * it as a budget.
+ */
+export const LEGACY_MAX_OUTPUT_TOKENS_ENV_KEY = "IKNOW_LLM_MAX_OUTPUT_TOKENS";
 
 /**
  * Resolved transport triple for an optional provider route — the same
@@ -49,6 +72,15 @@ export interface ModelRouteEnv {
   baseUrl: string;
   apiKey: string;
   headers?: Readonly<Record<string, string>>;
+  /**
+   * Request output budget of the `models[]` entry this route's wire model
+   * matched (`LlmEnv.routeMaxTokens` is the same value on the main route).
+   * **Absent** — never a fallback number — when the route's model has no entry
+   * or that entry omits `maxTokens`; request assembly then falls back to
+   * `DEFAULT_MAX_OUTPUT_TOKENS`. Keeping absence visible means a consumer can
+   * never read this route's silence as another route's cap.
+   */
+  maxTokens?: number;
 }
 
 /** Routing result of `settings.llm.liteModel`. */
@@ -92,6 +124,24 @@ export interface LlmEnv {
    * thinking-override throw "LLM mode needs API key." (no hardcoded fallback).
    */
   apiKey: string | undefined;
+  /**
+   * Output budget of the model entry matched by `settings.llm.model`
+   * (`providers[].models[].maxTokens`, looked up by the route's wire model).
+   * Request assembly reads this and **never** a global value; **absent** when
+   * the matched entry omits `maxTokens`, in which case assembly uses
+   * `DEFAULT_MAX_OUTPUT_TOKENS`. Re-resolved with the route, so selecting
+   * another model (or a configured fallback entry) changes it.
+   */
+  routeMaxTokens?: number;
+  /**
+   * Retired global snapshot, kept only as a required type member until fixture
+   * migration (follow-up ticket): always `DEFAULT_MAX_OUTPUT_TOKENS`, since a
+   * budget belongs to one model entry. Nothing reads it anymore — live budget
+   * resolution uses `routeMaxTokens`, and assembly sites fall back to
+   * `DEFAULT_MAX_OUTPUT_TOKENS` for a route whose entry is silent. The retired
+   * `IKNOW_LLM_MAX_OUTPUT_TOKENS` never feeds it — a non-empty value fails
+   * loading with `LlmBudgetConfigError`.
+   */
   maxOutputTokens: number;
   temperature: number;
   /**
@@ -449,6 +499,13 @@ interface ResolvedLlmTransport {
   readonly baseUrl: string;
   readonly apiKey: string;
   readonly headers: Readonly<Record<string, string>> | undefined;
+  /**
+   * `maxTokens` of the `models[]` entry whose id equals this route's wire model
+   * (`wireModelFromRoute`, i.e. ADR-0094's raw tail); undefined when the
+   * provider lists no such entry or that entry omits the field. Resolution
+   * reports what the entry says and nothing else — no clamping, no fallback.
+   */
+  readonly maxTokens: number | undefined;
 }
 
 function resolveLlmTransport(
@@ -477,23 +534,31 @@ function resolveLlmTransport(
       apiKeyEnv: provider.apiKeyEnv,
     } satisfies LlmProviderConfigError;
   }
+  // Entry lookup on the wire model, not the route literal: the provider prefix
+  // never appears in `models[].id`. Ids are unique within a provider, so the
+  // first match resolves (same non-dedup discipline as the provider registry).
+  const entry = provider.models.find(
+    (m) => m.id === wireModelFromRoute(model).trim()
+  );
   return {
     baseUrl: provider.baseUrl.replace(/\/$/, ""),
     apiKey,
     // headers absent (including empty object — the settings loading layer
     // folds empty maps into field absence) → keep undefined, never write `{}`.
     headers: provider.headers,
+    maxTokens: entry?.maxTokens,
   };
 }
 
 /**
  * Resolve an optional provider route (lite or sub-agent) into a transport triple
- * through the same `resolveLlmTransport` chain the main model uses. An empty /
- * wrong-typed route, or a route whose provider is unregistered or whose api-key
- * env is unset (`LlmProviderConfigError`, recognized only by
- * `isLlmProviderConfigError`), drops the whole key to undefined so the caller
- * falls back — an optional route must never fail-fast anything. Any other throw
- * propagates.
+ * through the same `resolveLlmTransport` chain the main model uses — budget of
+ * the matched model entry included, so a separately routed request carries its
+ * own route's value. An empty / wrong-typed route, or a route whose provider is
+ * unregistered or whose api-key env is unset (`LlmProviderConfigError`,
+ * recognized only by `isLlmProviderConfigError`), drops the whole key to
+ * undefined so the caller falls back — an optional route must never fail-fast
+ * anything. Any other throw propagates.
  */
 function resolveOptionalRoute(
   mergedSettings: IknowSettings,
@@ -515,6 +580,11 @@ function resolveOptionalRoute(
     apiKey: transport.apiKey,
     // headers absent → key not produced (same discipline as LlmEnv.headers).
     ...(transport.headers === undefined ? {} : { headers: transport.headers }),
+    // entry silent → key not produced: assembly falls back per route, so this
+    // route can never inherit the budget of the route it fell out of.
+    ...(transport.maxTokens === undefined
+      ? {}
+      : { maxTokens: transport.maxTokens }),
   };
 }
 
@@ -553,6 +623,19 @@ function spreadSubagentModel(
   model: SubagentModelEnv | undefined
 ): Pick<IknowSubagentEnv, "model"> {
   return model === undefined ? {} : { model };
+}
+
+/**
+ * Produce `{ routeMaxTokens }` only when the matched model entry declares a
+ * budget; a silent entry → `{}` (no key), so the `DEFAULT_MAX_OUTPUT_TOKENS`
+ * fallback stays in one place (assembly) and no other route's number can be
+ * read as this one's cap. Moved verbatim from loadIknowEnv's return so the
+ * conditional spread does not grow its complexity.
+ */
+function spreadRouteMaxTokens(
+  maxTokens: number | undefined
+): Pick<LlmEnv, "routeMaxTokens"> {
+  return maxTokens === undefined ? {} : { routeMaxTokens: maxTokens };
 }
 
 export interface WebEnv {
@@ -1049,6 +1132,30 @@ export function expandPlaceholders(
   return resolved ? out : undefined;
 }
 
+/**
+ * Migration gate for the retired global output-token setting. A non-empty value
+ * anywhere the loader reads env (`process.env` first, then `.env.local` / `.env`)
+ * fails config loading outright: keeping it would silently override every
+ * model entry, and quietly ignoring it would hide a cap the operator believes
+ * is in force. Empty / whitespace-only / unset means "not configured" (the same
+ * trim discipline as `resolveProviderApiKey`). This never writes or rewrites any
+ * settings file — the operator moves the value to `models[].maxTokens` themselves.
+ */
+function assertNoLegacyMaxOutputTokensEnv(file: Record<string, string>): void {
+  const fromProcess = process.env[LEGACY_MAX_OUTPUT_TOKENS_ENV_KEY];
+  const raw =
+    fromProcess !== undefined && fromProcess !== ""
+      ? fromProcess
+      : file[LEGACY_MAX_OUTPUT_TOKENS_ENV_KEY];
+  const value = raw?.trim();
+  if (value === undefined || value === "") return;
+  throw {
+    kind: "legacy_max_output_tokens_env",
+    varName: LEGACY_MAX_OUTPUT_TOKENS_ENV_KEY,
+    value,
+  } satisfies LlmBudgetConfigError;
+}
+
 export function loadIknowEnv(
   cwd: string = process.cwd(),
   settings?: IknowSettings,
@@ -1069,6 +1176,10 @@ export function loadIknowEnv(
     ...parseEnvFile(join(cwd, ".env")),
     ...parseEnvFile(join(cwd, ".env.local")),
   };
+
+  // Retired global knob: fail fast before any value could be used (reads
+  // process.env + the fileMap above; settings files stay untouched).
+  assertNoLegacyMaxOutputTokensEnv(file);
 
   // Model sole source = settings.llm.model literal (no placeholders, no env
   // fallback). Missing → fail-fast throw (no hardcoded fallback).
@@ -1106,14 +1217,13 @@ export function loadIknowEnv(
       // provider that declares apiKeyEnv opts into env; never falls back to
       // the literal here).
       apiKey: transport.apiKey,
-      maxOutputTokens: envPositiveInt({
-        file,
-        key: "IKNOW_LLM_MAX_OUTPUT_TOKENS",
-        // Main-session default is 32000 output tokens (configurable up to 64k).
-        // Billed on actual generation; the cap itself adds no cost. Don't keep
-        // ratcheting it up task by task.
-        fallback: 32_000,
-      }),
+      // Retired global snapshot: kept only as a required type member pending
+      // fixture migration; no reader. The live budget is `routeMaxTokens` below.
+      maxOutputTokens: DEFAULT_MAX_OUTPUT_TOKENS,
+      // Budget of the entry `modelRaw` matched on this route; a silent entry
+      // keeps the key absent, so the 32,000 fallback stays one place (assembly)
+      // and no other route's number can be read as this one's cap.
+      ...spreadRouteMaxTokens(transport.maxTokens),
       // Per-call LLM racing cap (env > settings > 300_000 fallback). Mirrors
       // the maxTurns pattern (envOptionalPositiveInt ?? settings); third layer
       // 5 min: thinking + 32k generations commonly exceed 60s. MCP

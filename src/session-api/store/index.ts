@@ -36,11 +36,13 @@ export { closeoutOrphanToolUses } from "./closeout-projection.js";
 export {
   chainFromHead,
   headChainEvents,
+  isStopReason,
   jsonDeepEqual,
   latestTitleText,
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
+  resolveTurnOutcomes,
   serializeSessionLog,
   SESSION_JSONL_EXT,
   sessionFileToJsonl,
@@ -50,6 +52,7 @@ export {
   type SessionHeaderRecord,
   type SessionJsonlError,
   type SessionJsonlRecord,
+  type SessionOutcomeRecord,
   type SessionTitleRecord,
 } from "./jsonl.js";
 export {

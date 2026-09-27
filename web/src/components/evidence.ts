@@ -1,7 +1,10 @@
 /**
  * Evidence projection types (kept for future wire-field expansion).
- * The current Session API wire (TurnAnswerDto = { finalText, stopReason, turnCount })
- * carries none of these fields; components reserve the shape via optional props.
+ * The current Session API wire (TurnAnswerDto = { finalText, stopReason?,
+ * turnCount, outcome?, outputLimitNotice?, … }) carries none of these fields —
+ * `stopReason` is optional because a turn with no terminal outcome record
+ * reports `outcome: { terminal: "unknown" }` instead; components reserve the
+ * shape via optional props.
  */
 export type GovernanceStatus = "ok" | "stale" | "conflict";
 

@@ -63,6 +63,7 @@ function makeFullEnv(overrides: {
   readonly baseUrl?: string;
   readonly stream?: "on" | "off";
   readonly maxOutputTokens?: number;
+  readonly routeMaxTokens?: number;
   readonly temperature?: number;
   readonly headers?: Readonly<Record<string, string>>;
 }): IknowEnv {
@@ -81,6 +82,7 @@ function makeFullEnv(overrides: {
       // "key omitted → default".
       apiKey: "apiKey" in overrides ? overrides.apiKey : "test-key",
       maxOutputTokens: overrides.maxOutputTokens ?? 128,
+      routeMaxTokens: overrides.routeMaxTokens ?? 128,
       timeoutMs: 5000,
       temperature: overrides.temperature ?? 0,
       thinking: "off",

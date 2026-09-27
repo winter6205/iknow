@@ -69,10 +69,13 @@ export { isWorkspaceRootError, renderWorkspaceRootError };
 // ADR-0093: provider matched but apiKeyEnv unset → `loadIknowEnv` throws a
 // plain object. Same shape as WorkspaceRootError above: it needs a discriminated
 // guard + typed rendering, since `String(err)` would print `[object Object]`
-// (providerId / env name both invisible).
+// (providerId / env name both invisible). The output-budget error
+// (`LlmBudgetConfigError`, thrown by the settings parser and the env loader) is
+// dispatched the same way.
 import {
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
+  type LlmProviderConfigError,
 } from "./config/env.js";
 import { MaxTurnsExceeded, ProtocolError } from "./harness/errors.js";
 import { maxTurnsEnvelope } from "./cli/max-turns.js";
@@ -85,6 +88,9 @@ import {
   loadIknowSettings,
   analyzePlaceholderSyntax,
   resolveFsIsolationMode,
+  formatLlmBudgetConfigError,
+  isLlmBudgetConfigError,
+  type LlmBudgetConfigError,
 } from "./config/settings.js";
 // ADR-0037: the chat entry's worktree isolation host seam, and settings pinned at startup.
 import { SessionStore } from "./session-api/store/index.js";
@@ -116,6 +122,52 @@ import { readProjectDefaultMode } from "./harness/permission/project-settings.js
  * `./config/workspace-root.ts`; this re-export keeps the CLI public API stable.
  */
 
+/**
+ * One-line envelope per LLM config typed error: `error` names the family,
+ * `code` carries the discriminated `kind`, and the remaining fields are that
+ * kind's own payload (never a value-free `String(err)`).
+ */
+function llmProviderErrorPayload(
+  err: LlmProviderConfigError
+): Record<string, unknown> {
+  return err.kind === "provider_model_not_registered"
+    ? {
+        error: "llm_provider_model_not_registered",
+        code: err.kind,
+        model: err.model,
+        message: formatLlmProviderConfigError(err),
+      }
+    : {
+        error: "llm_provider_api_key_missing",
+        code: err.kind,
+        provider: err.providerId,
+        apiKeyEnv: err.apiKeyEnv,
+        message: formatLlmProviderConfigError(err),
+      };
+}
+
+function llmBudgetErrorPayload(
+  err: LlmBudgetConfigError
+): Record<string, unknown> {
+  return err.kind === "legacy_max_output_tokens_env"
+    ? {
+        error: "llm_budget_config",
+        code: err.kind,
+        varName: err.varName,
+        value: err.value,
+        message: formatLlmBudgetConfigError(err),
+      }
+    : {
+        error: "llm_budget_config",
+        code: err.kind,
+        provider: err.providerId,
+        model: err.modelId,
+        field: err.field,
+        value: err.value,
+        message: formatLlmBudgetConfigError(err),
+      };
+}
+
 function printCliError(err: unknown): void {
   if (isWorkspaceRootError(err)) {
     writeErr(
@@ -128,22 +180,11 @@ function printCliError(err: unknown): void {
     return;
   }
   if (isLlmProviderConfigError(err)) {
-    const payload =
-      err.kind === "provider_model_not_registered"
-        ? {
-            error: "llm_provider_model_not_registered",
-            code: err.kind,
-            model: err.model,
-            message: formatLlmProviderConfigError(err),
-          }
-        : {
-            error: "llm_provider_api_key_missing",
-            code: err.kind,
-            provider: err.providerId,
-            apiKeyEnv: err.apiKeyEnv,
-            message: formatLlmProviderConfigError(err),
-          };
-    writeErr(JSON.stringify(payload));
+    writeErr(JSON.stringify(llmProviderErrorPayload(err)));
+    return;
+  }
+  if (isLlmBudgetConfigError(err)) {
+    writeErr(JSON.stringify(llmBudgetErrorPayload(err)));
     return;
   }
   if (isIknowError(err)) {
@@ -181,6 +222,10 @@ function printChatError(err: unknown): void {
   }
   if (isLlmProviderConfigError(err)) {
     writeErr(`错误 [${err.kind}]: ${formatLlmProviderConfigError(err)}`);
+    return;
+  }
+  if (isLlmBudgetConfigError(err)) {
+    writeErr(`错误 [${err.kind}]: ${formatLlmBudgetConfigError(err)}`);
     return;
   }
   if (isIknowError(err)) {
