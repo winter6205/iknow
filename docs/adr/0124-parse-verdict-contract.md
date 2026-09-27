@@ -1,7 +1,9 @@
 # 0124. 解析判定契约：六档分类与 fail-closed 归宿
 
 Date: 2026-09-24
-Status: accepted
+Status: accepted; superseded-by ADR-0127 §Decisions 1–2 for security-relevant uncertainty only
+
+ADR-0127 governs security-relevant uncertainty in an `ok` tree or `unknown-syntax` result, including its `full_auto` disposition. The other parse verdicts and their existing destinations remain in force.
 
 ## Context
 
