@@ -367,6 +367,70 @@ describe("the READY-path verdicts classify", () => {
   });
 });
 
+/**
+ * SC-S3-1's prerequisite: the bare-metachar wall's claim ("an operator-only
+ * body names no command") must arrive as facts on an `ok` tree, because the
+ * ADR-0124 verdict contract fires before any wall reads the tree. The nine
+ * shapes below carry `ERROR` today; each one's leaves are exactly one bare
+ * operator token (measured: `||` surfaces as two `|` tokens, `;;` has `ERROR`
+ * as the root itself).
+ */
+describe("command-less operator bodies are graded ok, not malformed", () => {
+  const OPERATOR_ONLY_BODIES = [
+    ";",
+    ";;",
+    "&&",
+    "|",
+    "||",
+    "&",
+    ">",
+    ">>",
+    "<",
+  ];
+  for (const command of OPERATOR_ONLY_BODIES) {
+    it(`grades ${JSON.stringify(command)} ok with zero command nodes`, () => {
+      const result = parseForSecurity(command);
+      if (result.kind !== "ok") {
+        throw new Error(`expected ok, got ${result.kind}`);
+      }
+      expect(result.commands).toEqual([]);
+      expect(result.words).toEqual([]);
+      expect(result.redirects).toEqual([]);
+      expect(result.substitutions).toEqual([]);
+      expect(result.text).toBe(command);
+      expect(result.nodeTypes["ERROR"]).toBeGreaterThan(0);
+    });
+  }
+
+  it("grades repeated-operator bodies ok: the predicate is structural, not a nine-row list", () => {
+    // Measured: each leaf is still only bare-operator tokens under ERROR.
+    for (const command of ["; ;", ";;;", "&&&", "| |", "> ;"]) {
+      const result = parseForSecurity(command);
+      if (result.kind !== "ok") {
+        throw new Error(
+          `expected ok for ${JSON.stringify(command)}, got ${result.kind}`
+        );
+      }
+      expect(result.commands).toEqual([]);
+    }
+  });
+
+  it("keeps malformed for every error tree that carries a named token", () => {
+    // Measured at this HEAD: the first four place word / command nodes under
+    // or beside the ERROR; the last surfaces a MISSING `"` token, which is
+    // not a bare operator.
+    for (const command of [
+      "; rm -rf x",
+      "echo ; <",
+      "rm -rf / & && %^",
+      "cat <",
+      'echo "unclosed-operator-pin',
+    ]) {
+      expect(parseForSecurity(command).kind).toBe("malformed");
+    }
+  });
+});
+
 describe("the memo cache follows the per-arm table", () => {
   it("answers a stored ok verdict with one construction and the same object", () => {
     const command = "echo memo-shared-parse";

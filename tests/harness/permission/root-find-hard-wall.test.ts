@@ -115,6 +115,13 @@ const DENIED: ReadonlyArray<string> = [
   "cd / && find -name x",
   // subsequent line: a newline splits statements like `;`
   "echo go\ncd / && find .",
+  // SC-S3-2's owned append. The backslash is stripped by the scan fold, so the
+  // command word reads as `find` and its operand as the root. Before T21 this
+  // deny came from the splitter's token run; on the parsed path it must come
+  // from the SAME fold driven by the tree — the escaped word reaches `argv` as
+  // one `WordFact`, `wordSource` unescapes it, and `commandAt` sees a bare
+  // `find /`. Both shapes of it, in both carriers:
+  "f\\ind /",
 ];
 
 /** Commands the wall must NOT deny: same shape, non-root walk root. */

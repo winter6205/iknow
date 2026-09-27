@@ -458,20 +458,19 @@ function valueTokensEaten(
 }
 
 /**
- * True when a `find` segment walks the whole machine. Restated invariant (T4
- * acceptance): `find <root> …` never spawns when `<root>` denotes the
- * filesystem root — with or without predicates such as `-maxdepth N`; the
+ * True when a `find` command's token run walks the whole machine. Restated
+ * invariant (T4 acceptance): `find <root> …` never spawns when `<root>` denotes
+ * the filesystem root — with or without predicates such as `-maxdepth N`; the
  * wall does not wait for a predicate to appear, because the walk is the thing
  * being denied, not its output shape. Roots that are NOT this wall: `.` /
  * `..` / relative paths / `/tmp` and any other non-root absolute path —
  * scoping the tree is the reader's job (ADR-0068; the 300 s bash
  * `timeoutTier: build` is not the control).
  *
- * Whole-command form (`enclosedByRootCd`): `cd / && find .` is the same
- * whole-machine walk with the root hidden in the `cd`, so the caller passes
- * the `cd`-aware decision in. A `cd /` followed by a NON-`find` segment is
- * out of this wall's scope (the walk's repository is what is hard-walled, not
- * `cd` itself).
+ * Whole-command form: `cd / && find .` is the same whole-machine walk with the
+ * root hidden in the `cd`, so the caller passes the `cd`-aware decision in. A
+ * `cd /` followed by a NON-`find` command is out of this wall's scope (the
+ * walk's repository is what is hard-walled, not `cd` itself).
  *
  * Bare `find` with no path operand walks the shell cwd (GNU find; the
  * options-first spelling `find -name x` included), so it is denied exactly
@@ -479,15 +478,24 @@ function valueTokensEaten(
  * is NOT denied — the readonly find-flag table answers for it, same as any
  * other non-root walk.
  */
-function isRootFindSegment(segment: string, cwd: string | undefined): boolean {
-  const tokens = segmentTokens(segment);
+function isRootFindTokens(
+  tokens: ReadonlyArray<string>,
+  cwd: string | undefined,
+  wordsIncomplete: boolean
+): boolean {
   const command = commandAt(tokens);
   // EXIT: not a find segment — the wall does not speak about other commands.
   if (command === undefined || command.name !== "find") return false;
   const operands = commandOperands(tokens, command.index);
   // No path operand: find walks the shell cwd, which is the filesystem root
   // only when a preceding segment moved there (`cd / && find`).
-  if (operands.length === 0) return cwd === "/";
+  if (operands.length === 0) {
+    // EXIT: a run that lost words on the way here (a redirect, see
+    // `RootFindRun`) cannot be proven bare from argv, so the cwd rule stays
+    // unapplied and the shape keeps today's answer.
+    if (wordsIncomplete) return false;
+    return cwd === "/";
+  }
   return operands.some((raw) => operandDenotesRoot(raw, cwd));
 }
 
@@ -590,7 +598,7 @@ interface CwdState {
 }
 
 /**
- * The cwd state a `cd` segment moves to, or `null` when the segment is not a
+ * The cwd state a `cd` command moves to, or `null` when the token run is not a
  * `cd`. Chained `cd`s must be tracked as a path, not a root boolean: `cd / &&
  * cd /tmp && find .` ends outside the root while `cd /tmp && cd .. && find .`
  * ends on it. `cd -` swaps in OLDPWD (`cd / && cd /tmp && cd -` is back on
@@ -601,8 +609,10 @@ interface CwdState {
  * that cannot be read lexically (`~`, `$VAR`, a relative path with no known
  * cwd) clear both fields rather than guess.
  */
-function applyCd(segment: string, state: CwdState): CwdState | null {
-  const tokens = segmentTokens(segment);
+function applyCd(
+  tokens: ReadonlyArray<string>,
+  state: CwdState
+): CwdState | null {
   const command = commandAt(tokens);
   if (command === undefined || command.name !== "cd") return null;
   const operand = cdTargetOperand(tokens, command.index);
@@ -665,21 +675,177 @@ function resolveCdTarget(
  * the shell cwd left-to-right: `cd / && find .` hides the walk root in the
  * `cd`, and only the `cd` sequence can read it back. The cwd starts unknown,
  * so a command that never `cd`s cannot be judged beyond its own operands.
+ *
+ * This is the SEGMENT carrier: it answers wherever the tree cannot speak (the
+ * degrade path, the non-`ok` arms) and `matchRootFindWalkOnParse` answers for
+ * an `ok` parse. Both drive the same fold (`foldRootFind`), so a shape cannot
+ * be judged by two different cwds depending on which carrier reached it.
  */
 function matchRootFindWalk(
   segments: ReadonlyArray<string>
 ): DangerousPatternHit | null {
+  return foldRootFind(segments.map(segmentRun));
+}
+
+/** One splitter segment as a fold run — its full written form is the segment. */
+function segmentRun(segment: string): RootFindRun {
+  return { tokens: segmentTokens(segment), wordsIncomplete: false };
+}
+
+/**
+ * One position of the ordered fold: a command's token run, plus whether those
+ * words are the command's whole written form.
+ *
+ * `wordsIncomplete` is set only by the tree carrier. A redirect is a word of the
+ * command as bash runs it but not a `WordFact`, so a node like
+ * `cd / && find > /dev/null` reaches the fold as the bare one-word run `find`,
+ * which the empty-operand rule below would read as "bare `find` at the cwd" and
+ * deny. Today's run carries the `>` and its target as ordinary tokens, and the
+ * first of them — never a root — ends the search-root run, so today's answer is
+ * allow. The flag suppresses the empty-operand rule for such a run and nothing
+ * else: a run that spells its roots out (`cd / && find . > /`) is still judged
+ * on its operands exactly as the text path judges it.
+ */
+interface RootFindRun {
+  readonly tokens: ReadonlyArray<string>;
+  readonly wordsIncomplete: boolean;
+}
+
+/**
+ * The fold itself, over the ordered token runs of a command sequence: each run
+ * moves the cwd (a `cd`) or is judged (a `find`), and the first root walk ends
+ * the scan — a later segment cannot rescue the intent, and no segment can
+ * un-set a cwd the shell already moved.
+ */
+function foldRootFind(runs: Iterable<RootFindRun>): DangerousPatternHit | null {
   let state: CwdState = { cwd: undefined, oldpwd: undefined };
-  for (const segment of segments) {
-    const moved = applyCd(segment, state);
+  for (const run of runs) {
+    const moved = applyCd(run.tokens, state);
     if (moved !== null) state = moved;
-    if (isRootFindSegment(segment, state.cwd)) {
+    if (isRootFindTokens(run.tokens, state.cwd, run.wordsIncomplete)) {
       // EXIT: reject on the first root-walk find — the whole-machine walk is
       // the intent being denied, so no later segment can rescue the command.
       return { id: "root-find-walk", pattern: "find" };
     }
   }
   return null;
+}
+
+/**
+ * The anonymous node type bash's pipeline negation renders as. Its `!` is a
+ * token Stage 0 counts in `nodeTypes` but publishes in no `argv` and attaches
+ * to no span, so the tree cannot tell the fold which node a negation led — and
+ * `! cd / && find .` is exactly the shape where guessing "the node after the
+ * `!`" would move today's answer.
+ */
+const NEGATED_COMMAND_NODE = "negated_command";
+
+/**
+ * The token `&` that runs a command in the background. Like the negation mark it
+ * is a counted token with no word fact and no span anyone can attribute, and its
+ * whole effect is invisible to the tree: `cd / & find .` executes the `cd` in a
+ * subshell, so the `find` still walks the ORIGINAL cwd, while an ordered read of
+ * the two nodes would arm a root walk the shell never performs. Handing the
+ * shape back to the splitter keeps today's allow — the splitter cannot act on a
+ * backgrounded `cd` either, which is why the shape is allowed at all.
+ */
+const BACKGROUND_LEAD = "&";
+
+/**
+ * The token run one command node contributes to the fold: its argv words in
+ * source order, raw text (quote layer included, backslashes unescaped) exactly
+ * as the segment carrier read them, so `commandAt`'s wrapper fold and
+ * `commandOperands`' "paths must precede expression" run apply unchanged.
+ *
+ * `undefined` abstains, and the abstain arm is one fact: something other than
+ * this node's command word leads the node's own span, so the segment scan named
+ * a different command there and never judged this one — `X=1 find /` (a prefix
+ * `variable_assignment`, which is not argv) and `2>/dev/null find /` (a redirect
+ * hung in front of the word). Stage 3 moves the CARRIER, not the answer: both
+ * shapes are allowed today and stay allowed here, pinned in
+ * `tests/harness/permission/root-find-hard-wall.test.ts`; closing them is a
+ * trigger-semantics flip this stage is not licensed to make (SC-GATES-3 admits
+ * no new deny from a carrier move).
+ */
+function commandTokenRun(
+  cmd: CommandFact,
+  wordsIncomplete: boolean
+): RootFindRun | undefined {
+  const lead = cmd.argv[0];
+  if (lead === undefined) return undefined;
+  if (lead.span.start !== cmd.span.start) return undefined;
+  return { tokens: cmd.argv.map(wordSource), wordsIncomplete };
+}
+
+/**
+ * SC-S3-2's parsed-path carrier: the same ordered fold driven by the parse's
+ * command nodes instead of the splitter's segments.
+ *
+ * Reach is `depth === 0` — the nodes one shell script runs in sequence, which is
+ * the population the segment carrier could actually name. A node inside a
+ * `$( … )` body, a subshell or a `{ …; }` group stays out of the fold's order,
+ * because the segment scan never reached it either: `cd / && (find .)` and
+ * `cd / && echo $(find .)` are allowed today, and reading the nested node here
+ * would arm a walk the wall does not claim (a widening, not a re-labelling).
+ *
+ * Heredoc bodies are spliced in at their own offset, in source order, on the
+ * segment carrier: Stage 0 records a body's span but parses no nodes inside it
+ * (it is another program's source), and the fold has always read those lines.
+ * Dropping them would let a real `cd /` followed by `find .` execute as shell
+ * code through — a relaxation no arm of the floor licenses, since the receiver's
+ * inertness is exactly what the wall's own comment says it cannot judge.
+ *
+ * Two trees hand the whole string back to the splitter: one carrying a negation
+ * (see `NEGATED_COMMAND_NODE`) and one carrying a background `&` (see
+ * `BACKGROUND_LEAD`). Both are counted tokens that reach no word fact and no
+ * attributable span, so a node-level read would have to guess which node the
+ * mark led — and for each shape there is a guess that moves today's answer.
+ */
+function matchRootFindWalkOnParse(
+  parse: SecurityParseOk
+): DangerousPatternHit | null {
+  if (
+    (parse.nodeTypes[NEGATED_COMMAND_NODE] ?? 0) > 0 ||
+    (parse.nodeTypes[BACKGROUND_LEAD] ?? 0) > 0
+  ) {
+    return matchRootFindWalk(splitForDangerousScan(parse.text));
+  }
+  const ordered = rootFindRunsInSourceOrder(parse);
+  ordered.sort((left, right) => left.start - right.start);
+  return foldRootFind(ordered.map((entry) => entry.run));
+}
+
+/** The commands whose own span ends before a redirect they own begins. */
+function trailingRedirectOwners(parse: SecurityParseOk): Set<number> {
+  const owners = new Set<number>();
+  for (const redirect of parse.redirects) {
+    const owner = redirect.ownerCommandIndex;
+    if (owner !== null && redirect.span.start >= parse.commands[owner]?.span.end) {
+      owners.add(owner);
+    }
+  }
+  return owners;
+}
+
+/** Depth-0 command runs plus heredoc-body segment runs, unsorted. */
+function rootFindRunsInSourceOrder(
+  parse: SecurityParseOk
+): Array<{ start: number; run: RootFindRun }> {
+  const trailing = trailingRedirectOwners(parse);
+  const ordered: Array<{ start: number; run: RootFindRun }> = [];
+  for (const cmd of parse.commands) {
+    if (cmd.depth > 0) continue;
+    const run = commandTokenRun(cmd, trailing.has(cmd.index));
+    if (run === undefined) continue;
+    ordered.push({ start: cmd.span.start, run });
+  }
+  for (const body of parse.heredocs) {
+    const text = parse.text.slice(body.bodySpan.start, body.bodySpan.end);
+    for (const segment of splitForDangerousScan(text)) {
+      ordered.push({ start: body.bodySpan.start, run: segmentRun(segment) });
+    }
+  }
+  return ordered;
 }
 
 /**
@@ -869,9 +1035,10 @@ function routeParseVerdict(
  *   - The destructive rules of an `ok` parse are judged off the tree: command
  *     words, declared code operands, and the heredoc bodies the receiver rule
  *     keeps — after the root-find fold, which still owns `find /`. The lexical
- *     `format` gate and the bare-metachar branch still read the text there: the
- *     first is scoped by the splitter rather than by a node, the second is
- *     Stage 3's to move.
+ *     `format` gate still reads the text there (its carrier is the splitter,
+ *     not a node); the bare-metachar branch is driven by the tree — on the
+ *     parsed path the id fires only for a zero-command-node body gated by the
+ *     pure-body scan (see `findDestructiveAfterParse`).
  *   - Each segment is independently normalized (lowercase, backslash strip,
  *     whitespace collapse) and scanned against `DANGEROUS_COMMAND_PATTERNS`.
  *     That scan is quote-blind, and it stays the whole answer wherever the parse
@@ -1531,10 +1698,10 @@ function nestedCodeBombHit(
  * receiver rule keeps, and the structural fork-bomb rule run on the re-parsed
  * bodies of eval / shell-`-c` code operands. The bomb's recognition at the
  * OUTER level is NOT one of these arms — the call site runs it there only past
- * the `isPureMetacharBody` gate, so an argv rule that already denied a shape
- * keeps its own id and the nested arm adds no move this stage does not own.
- * Precedence with the root-find fold (which owns `find /`) is preserved at the
- * call site, which runs the fold first.
+ * the zero-command / pure-body gate, so an argv rule that already denied a
+ * shape keeps its own id and the nested arm adds no move this stage does not
+ * own. Precedence with the root-find fold (which owns `find /`) is preserved
+ * at the call site, which runs the fold first.
  */
 export function findDestructiveOnParse(
   parse: SecurityParseOk
@@ -1608,33 +1775,52 @@ function lexicalFormatHit(command: string): FormatClaim | null {
  * has always used: the ordered root-find fold keeps first claim, because it owns
  * `find / -delete` while the command-word rule owns `find /tmp -delete`; then the
  * tree answers for every destructive id. What stays on the text here is the
- * lexical `format` gate and the bare-metachar branch — the first because its
- * carrier is the splitter rather than the tree, the second because that wall is
- * Stage 3's to move. A body with no command word anywhere is still the
- * bare-metachar's shape, not either of the other two's.
+ * lexical `format` gate — its carrier is the splitter rather than the tree —
+ * and the bare-metachar branch's fallback scan, which Stage 3 re-based on the
+ * tree (`bareBranchAfterParse`).
  */
 function findDestructiveAfterParse(
   command: string,
   parse: SecurityParseOk
 ): DangerousPatternHit | null {
-  const walkHit = matchRootFindWalk(splitForDangerousScan(command));
+  const walkHit = matchRootFindWalkOnParse(parse);
   if (walkHit !== null) return walkHit;
   const format = lexicalFormatHit(command);
   if (format !== null && format.firstClaim === "format") return format.hit;
   const astHit = findDestructiveOnParse(parse);
   if (astHit !== null) return astHit;
   if (format !== null) return format.hit;
-  // Reaching here means every argv rule abstained — which by itself says
-  // nothing about command words; the gate below asks that question on its own.
-  // Where it passes, the body names no command word anywhere, and that is the
-  // one shape where the text roster still speaks with full authority — nothing
-  // about it was licensed away — keeping the precedence it has always had: the
-  // fork bomb's structural recognition, then the segment scan, then the bare
-  // operator noise neither of them claimed.
+  return bareBranchAfterParse(command, parse);
+}
+
+/**
+ * The bare-metachar fall-through of the parsed path, Stage 3's AST-ification.
+ * The bare-metachar id fires only where the `ok` parse yields ZERO command
+ * nodes — the structural reading of "no command has started". Two text facts
+ * stay, each for its own reason: the pure-body scan remains the shape-test
+ * for the whole fall-through, because the corpus disagreement
+ * `FOO=1 <<'EOF'…` (zero command nodes, a command word in the text) shows
+ * the tree fact alone would newly deny it bare `<` — the text behavior wins;
+ * and the fork bomb keeps the pure-body gate alone, because its tree HAS
+ * command nodes (SC-S2-8's note) and the pure-body scan is the only fact that
+ * separates the bare bomb from the ledger-pinned allow `ls; :(){… };:`, whose
+ * `ls` word is what stands between them. Where the tree sees a command the
+ * text scan called pure (`> /dev/null rm`), only the bare id retires; a
+ * per-segment roster deny the same fall-through reports (`2> rm -rf` →
+ * destructive-rm) keeps its full strength — this stage moves the bare
+ * branch, not the roster.
+ */
+function bareBranchAfterParse(
+  command: string,
+  parse: SecurityParseOk
+): DangerousPatternHit | null {
   if (!isPureMetacharBody(command)) return null;
   const bomb = forkBombStructuralHit(parse);
   if (bomb !== null) return bomb;
-  return findTextDangerPattern(command);
+  const textHit = findTextDangerPattern(command);
+  const bareNeedsZeroNodes =
+    parse.commands.length > 0 && textHit?.id === "bare-metachar";
+  return bareNeedsZeroNodes ? null : textHit;
 }
 
 /**

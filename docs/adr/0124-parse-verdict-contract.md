@@ -42,3 +42,24 @@ ADR-0123 定了统一解析地基（tree-sitter 原生绑定、同步 `parseForS
 - 决策过程：`docs/wayfinder/tickets/usp-2-tristate-fail-closed-contract.md`（map `unified-shell-parsing`）。
 - 超时确定性 / stale-state / 解析分歧字符实测：`docs/wayfinder/research/usp-1-parser-survey.md`。
 - 地基形态：ADR-0123；硬墙职责划分：ADR-0068（经 ADR-0123 修正）。
+
+## Amendment (2026-09-27): commandless operator bodies
+
+The Stage 3 bare-metachar work adds one narrow exception to the `ok` /
+`malformed` pair (Decision items 1 and 3): a tree that carries `ERROR` is
+graded `ok` when it names no command anywhere — the root is `program` or
+`ERROR`, and every node is the root itself, an `ERROR` wrapping only
+bare-operator tokens from a closed whitelist (`;`, `;;`, `&&`, `||`, `|`,
+`&`, `>`, `>>`, `<`), or one of those leaf tokens itself
+(`commandlessOperatorBody`, `src/harness/permission/shell-parse.ts`). Such
+input is a syntax error bash rejects at parse time rather than a command
+whose execution behavior is unpredictable, so item 3's stated reason does
+not reach it. The roster rule stands unchanged: `ERROR`/`MISSING` never
+enter `MODELLED_NODE_TYPES`, and any tree naming a word or command node
+still lands `malformed` → hard deny. Because the carve-out is decided
+inside `verdictOfTree` — before any wall reads the tree — walls see an
+`ok` tree with zero command nodes rather than a new verdict state.
+
+Evidence: SC-S3-1 execution record in `specs/hard-wall-ast-migration.md`;
+`tests/harness/permission/bare-metachar-hard-wall.test.ts` and
+`tests/harness/permission/shell-parse.test.ts`.

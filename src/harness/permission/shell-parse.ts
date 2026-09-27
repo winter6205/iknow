@@ -449,6 +449,25 @@ const MODELLED_NODE_TYPES: ReadonlySet<string> = new Set([
   "~",
 ]);
 
+/**
+ * The bare-operator anonymous tokens of the roster above, spelled as the
+ * cursor surfaces them (measured: a bare `||` arrives as two `|` leaves).
+ * The leaf whitelist of `commandlessOperatorBody`; the roster itself is
+ * untouched, because this predicate is the only path by which an `ERROR`
+ * tree is graded `ok`.
+ */
+const BARE_OPERATOR_TOKENS: ReadonlySet<string> = new Set([
+  ";",
+  ";;",
+  "&&",
+  "||",
+  "|",
+  "&",
+  ">",
+  ">>",
+  "<",
+]);
+
 interface VetoRule {
   readonly probe: RegExp;
   readonly reason: (command: string) => string;
@@ -679,11 +698,13 @@ function classify(
 }
 
 function verdictOfTree(tree: ShellTree, command: string): SecurityParseResult {
-  if (tree.rootNode.hasError) {
+  // SC-S3-1's dependency: the bare-metachar wall's claim must be modelled, not an ERROR verdict.
+  const operatorBody = tree.rootNode.hasError && commandlessOperatorBody(tree);
+  if (tree.rootNode.hasError && !operatorBody) {
     return { kind: "malformed", reason: MALFORMED_REASON };
   }
   const facts = readTree(tree);
-  if (facts.unmodelled.length > 0) {
+  if (!operatorBody && facts.unmodelled.length > 0) {
     return {
       kind: "unknown-syntax",
       nodeTypes: facts.nodeTypes,
@@ -697,6 +718,61 @@ function verdictOfTree(tree: ShellTree, command: string): SecurityParseResult {
     nodeTypes: facts.nodeTypes,
     text: command,
   };
+}
+
+/**
+ * True when the tree carries an error but names no command anywhere: the root
+ * is `program` — or, for inputs like `;;`, an `ERROR` — and every node is the
+ * root itself, an `ERROR` that wraps nothing but bare-operator tokens, or a
+ * bare-operator leaf. Whitespace is invisible to the grammar, so the "or
+ * whitespace" leaf clause holds on its own; a `MISSING` node surfaces as its
+ * token type (e.g. `"`), which the whitelist rejects, and any `word`,
+ * `command`, or other named type falls through to `false`, keeping that tree
+ * `malformed`.
+ */
+function commandlessOperatorBody(tree: ShellTree): boolean {
+  // The cursor API only declares `walk`; at runtime `rootNode` is the same
+  // binding node `readFacts` walks with `child`, so it satisfies the wider
+  // fact-node shape the tree itself already carries.
+  const root = tree.rootNode as ShellFactNode;
+  if (root.type !== "program" && root.type !== "ERROR") {
+    return false;
+  }
+  const count = operatorBodyCount(root);
+  return count !== undefined && count > 0;
+}
+
+/**
+ * Operator tokens under the root, or one `ERROR` level below a `program`
+ * root; any other shape answers `undefined`. A bare-operator leaf with no
+ * children is a counted operator.
+ */
+function operatorBodyCount(node: ShellFactNode): number | undefined {
+  let operators = 0;
+  for (let index = 0; index < node.childCount; index += 1) {
+    const child = node.child(index);
+    if (child === null) {
+      return undefined;
+    }
+    if (BARE_OPERATOR_TOKENS.has(child.type)) {
+      if (child.childCount > 0) {
+        return undefined;
+      }
+      operators += 1;
+    } else if (node.type === "program" && child.type === "ERROR") {
+      if (child.childCount === 0) {
+        return undefined;
+      }
+      const under = operatorBodyCount(child);
+      if (under === undefined) {
+        return undefined;
+      }
+      operators += under;
+    } else {
+      return undefined;
+    }
+  }
+  return operators;
 }
 
 interface TreeFacts {

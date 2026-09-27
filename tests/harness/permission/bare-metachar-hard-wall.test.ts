@@ -25,6 +25,7 @@ import {
   findDangerousPattern,
   isDangerousCommand,
 } from "../../../src/harness/permission/hard-walls.js";
+import { parseForSecurity } from "../../../src/harness/permission/shell-parse.js";
 import {
   checkPermission,
   createPermissionPolicy,
@@ -111,6 +112,80 @@ describe("hard-wall: bare-metachar — purely metachar bodies still deny", () =>
       assert.equal(isDangerousCommand(command), true);
     });
   }
+});
+
+// Stage 3 (T20) proof pins: the wall's new driving fact, stated separately
+// from the deny it produces, so a wrong predicate fails here even when the
+// rendered deny still rides the retained text answer.
+describe("AST fact behind the bare branch — the parsed path reads the tree", () => {
+  it("every BARE_HIT shape parses ok with ZERO command nodes (the 12-row table's AST column)", () => {
+    for (const command of BARE_HIT) {
+      const parsed = parseForSecurity(command);
+      assert.equal(parsed.kind, "ok", command);
+      assert.equal(
+        parsed.kind === "ok" ? parsed.commands.length : -1,
+        0,
+        `expected zero command nodes for ${command}`
+      );
+    }
+  });
+
+  it("every NO_HIT shape that parses ok has a command node — the zero-command fact keeps it allowed", () => {
+    for (const command of NO_HIT) {
+      const parsed = parseForSecurity(command);
+      if (parsed.kind !== "ok") continue;
+      assert.ok(
+        parsed.commands.length > 0,
+        `expected at least one command node for ${command}`
+      );
+    }
+  });
+
+  it("divergence (recorded): a redirect-lead real command leaves the bare branch — the tree's command node wins", () => {
+    // `> /dev/null rm` has ONE command node, but the quote-blind splitter
+    // calls the body operator-pure (the first token `> /dev/null` is an
+    // operator lead) and the pre-Stage-3 text gate denied it as
+    // bare-metachar ">". The migrated rule is the iff on the tree fact: a
+    // command has started, so the bare branch does not fire and the shape
+    // falls through to the mode / category default like a plain `rm`. The
+    // roster is not lost there — `2> rm -rf` and
+    // `>/dev/null dd if=/dev/zero of=/dev/sda` still deny from the AST
+    // destructive arms, not from the retired text fall-through.
+    const parsed = parseForSecurity("> /dev/null rm");
+    assert.equal(parsed.kind, "ok");
+    assert.equal(parsed.kind === "ok" ? parsed.commands.length : -1, 1);
+    assert.equal(findDangerousPattern("> /dev/null rm"), null);
+    assert.equal(patternId("2> rm -rf"), "destructive-rm");
+    assert.equal(
+      patternId("> /dev/null dd if=/dev/zero of=/dev/sda"),
+      "destructive-disk"
+    );
+  });
+
+  it("corpus disagreement priced by the ledger: zero command nodes with a text command word does NOT fire bare", () => {
+    // `FOO=1 <<'EOF'…`: the assignment is not a command node, so the tree
+    // says zero — but the text scan says the body carries a command word,
+    // and the floor's rule is that the text behavior wins: the shape keeps
+    // its security-review answer (no pattern hit) instead of newly denying
+    // bare `<` on the AST fact alone.
+    const command = "FOO=1 <<'EOF'\nrm -rf /tmp/x\nEOF";
+    const parsed = parseForSecurity(command);
+    assert.equal(parsed.kind, "ok");
+    assert.equal(parsed.kind === "ok" ? parsed.commands.length : -1, 0);
+    assert.equal(findDangerousPattern(command), null);
+  });
+
+  it("the malformed-tree rescue keeps bare-metachar for a quote-contaminated operator body", () => {
+    // `' ;` is malformed (unclosed quote), not an ok tree, so the zero-command
+    // AST rule does not speak for it; the rescue in front of the `unparseable`
+    // routing keeps its ADR-0068 id.
+    const parsed = parseForSecurity("' ;");
+    assert.equal(parsed.kind, "malformed");
+    assert.deepEqual(findDangerousPattern("' ;"), {
+      id: "bare-metachar",
+      pattern: ";",
+    });
+  });
 });
 
 describe("hard-wall: per-segment rules keep first claim over the bare branch", () => {
