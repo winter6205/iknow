@@ -20,8 +20,8 @@ import assert from "node:assert/strict";
 import {
   findDangerousPattern,
   isDangerousCommand,
-  splitShellSegments,
 } from "../../../src/harness/permission/hard-walls.js";
+import { parseForSecurity } from "../../../src/harness/permission/shell-parse.js";
 import {
   checkPermission,
   createPermissionPolicy,
@@ -366,17 +366,49 @@ describe("hard-wall: root find — executor chain never reaches spawn", () => {
   });
 });
 
-describe("hard-wall: root find — splitShellSegments semantics unchanged", () => {
-  // A peer (isolation worktree gate) consumes this splitter; the root-find
-  // wall must not have moved its boundaries.
-  it("still splits on ; / && / || / | and keeps escaped separators literal", () => {
-    assert.deepEqual(splitShellSegments("cd / && find ."), ["cd /", "find ."]);
-    assert.deepEqual(splitShellSegments("cd /; find ."), ["cd /", "find ."]);
-    assert.deepEqual(splitShellSegments("a | b"), ["a", "b"]);
-    assert.deepEqual(splitShellSegments("r\\m -rf /"), ["r\\m -rf /"]);
+/* SC-S4-6: the former splitter-semantics block is retired with the splitter's
+ * export. The two claims it pinned — an escaped `\;` stays inside ONE command,
+ * and a bare newline is not a boundary that un-joins commands for this wall —
+ * are re-pinned here on the parse, not on segment strings. */
+describe("hard-wall: root find — command-node equivalence for escaped separators and newlines", () => {
+  it("keeps an escaped \\; literal inside one command node", () => {
+    const parsed = parseForSecurity("find . -exec ls {} \\;");
+    assert.equal(parsed.kind, "ok");
+    if (parsed.kind !== "ok") return;
+    // One command, its last argv word still carrying the literal `\;` —
+    // the escape never fabricates a sequence boundary.
+    assert.equal(parsed.commands.length, 1);
+    assert.deepEqual(
+      parsed.commands[0]?.argv.map((word) => word.text),
+      ["find", ".", "-exec", "ls", "{}", "\\;"]
+    );
+    assert.equal(
+      parsed.operators.filter((op) => op.kind === "sequence").length,
+      0
+    );
+    // Same reading for the backslash-escaped command word: one node, and the
+    // destructive scan still sees the whole thing.
+    const escaped = parseForSecurity("r\\m -rf /");
+    assert.equal(escaped.kind, "ok");
+    if (escaped.kind !== "ok") return;
+    assert.equal(escaped.commands.length, 1);
+    assert.equal(escaped.commands[0]?.argv[0]?.text, "r\\m");
+    assert.equal(findDangerousPattern("r\\m -rf /")?.id, "destructive-rm");
   });
 
-  it("does not split on newlines (per-line fold owns that boundary)", () => {
-    assert.deepEqual(splitShellSegments("cd /\nfind ."), ["cd /\nfind ."]);
+  it("does not un-join commands at a bare newline (the one-segment reading survives as facts)", () => {
+    const parsed = parseForSecurity("cd /\nfind .");
+    assert.equal(parsed.kind, "ok");
+    if (parsed.kind !== "ok") return;
+    // The newline is recorded as a bare line break, never as an operator
+    // token, and both commands stay in ONE parse — one shell, so the earlier
+    // `cd /` still sets the cwd the later `find .` walks.
+    assert.equal(parsed.commands.length, 2);
+    assert.equal(parsed.operators.length, 0);
+    assert.deepEqual([...parsed.bareNewlineOffsets], [4]);
+    // The wall's answer for that reading: the root-find fold fires across the
+    // newline, exactly as it did when the fold read one segment.
+    assert.equal(findDangerousPattern("cd /\nfind .")?.id, "root-find-walk");
+    assert.ok(isDangerousCommand("cd /\nfind ."));
   });
 });

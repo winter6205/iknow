@@ -192,3 +192,39 @@ describe("bash 替岗拒绝 — grep 族 / rg 首 token（ADR-0117）", () => {
     assert.ok(text.includes(ROLE_SUBSTITUTION_PREFIX), "拒绝前缀必须原样抵达模型");
   });
 });
+
+/**
+ * T24 (SC-S4-1): the segment population reads the parse facts. A segment
+ * region is text between `;` / `&&` / `||` / `|` operator tokens; only a
+ * region's leading depth-0 command node is named, so substitution bodies
+ * (depth > 0) never enter — `echo $(grep x f)` must stay `undefined`, the
+ * value the text splitter produced today (its firstToken never saw
+ * inside `$( … )`). Pipeline tails stay depth-0 and keep firing.
+ */
+describe("bash 替岗拒绝 — parse facts 区域分段（T24 新钉）", () => {
+  it("echo $(grep x f) → undefined：替换体不是段首节点（今天同值，新钉）", () => {
+    assert.equal(detectBashGrepSubstitution("echo $(grep x f)"), undefined);
+  });
+
+  it("cat f | grep x → grep：管道右节点仍是 depth-0，区域切分不变", () => {
+    assert.equal(detectBashGrepSubstitution("cat f | grep x"), "grep");
+  });
+
+  it("ls; grep x f.txt → grep：分号区域的段首词与今天同判", () => {
+    assert.equal(detectBashGrepSubstitution("ls; grep x f.txt"), "grep");
+  });
+
+  it("|& 不是区域切点：cat f |& grep x 维持今天的沉默（旧拆段 & 残留不判）", () => {
+    assert.equal(detectBashGrepSubstitution("cat f.txt |& grep x"), undefined);
+    assert.equal(detectBashGrepSubstitution("grep x f |& cat"), "grep");
+  });
+
+  it("嵌套范围与否定式前缀不改今天的沉默：(grep x f) / ! grep x f → undefined", () => {
+    assert.equal(detectBashGrepSubstitution("(grep x f)"), undefined);
+    assert.equal(detectBashGrepSubstitution("! grep x f"), undefined);
+  });
+
+  it("前缀赋值领着节点：X=1 grep x f → undefined（firstToken 命名的仍是 X=1）", () => {
+    assert.equal(detectBashGrepSubstitution("X=1 grep x f"), undefined);
+  });
+});

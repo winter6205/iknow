@@ -4,6 +4,7 @@ import type {
   SecurityReviewRequirement,
 } from "./security-review.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
+import { splitShellSegments } from "./text-segments.js";
 import {
   parseForSecurity,
   scanWithLegacyDegrade,
@@ -201,14 +202,92 @@ export function firstToken(command: string): string {
   return basename.toLowerCase();
 }
 
+/**
+ * Allowlist-first gate (SC-S4-2 re-home): the answer comes from the parse on
+ * the `ok` path and from the internal text-segments seam (`text-segments.ts`,
+ * the un-exported splitter) on every non-`ok` verdict — the degrade fold kept
+ * verbatim, so `unknown-syntax` / `malformed` / `aborted` / `over-cap` /
+ * `vetoed` / `parser-unavailable` answer exactly as they did before this PR
+ * (docs/shell-parse-non-ok-consumer-contracts.md).
+ *
+ * The `ok` path carries both facts the old segment fold decided:
+ *   - membership: every depth-0 command unit's first argv word must be an
+ *     `ALLOWED_COMMAND_TOKENS` name (the table itself is unchanged — 4b owns
+ *     where the names live);
+ *   - the second syntactic fact (SC-S4-2's keep): no bare newline / carriage
+ *     return anywhere outside quoted spans and heredoc bodies, which is what
+ *     pins `echo a\nrm -rf /` → `false`, `echo a\nls` → `false` and
+ *     `echo a\rb` → `false` even when every command word is allowlisted.
+ *
+ * Each unit then rides the same quote-blind character checks the fold applied
+ * per segment (`isSegmentAllowed`: redirect exemption, then the backtick /
+ * paren / line-break metachars) over the raw text between fact boundaries —
+ * so punctuation sitting inside quoted or commented DATA still refuses, and
+ * the only answers that move are the four inert-punctuation divergences the
+ * parity battery pins (`shell-parse-segmentation-parity.test.ts`).
+ */
 export function isAllowedCommand(command: string): boolean {
   if (command.length === 0) return false;
+  const parsed = parseForSecurity(command);
+  if (parsed.kind === "ok") {
+    return isAllowedFromParse(parsed);
+  }
+  return isAllowedFromTextFold(command);
+}
+
+function isAllowedFromTextFold(command: string): boolean {
   const segments = splitShellSegments(command);
   if (segments.length === 0) return false;
   for (const segment of segments) {
     if (!isSegmentAllowed(segment)) return false;
   }
   return true;
+}
+
+function isAllowedFromParse(parsed: SecurityParseOk): boolean {
+  // SC-S4-2's second syntactic fact: the grammar consumes a bare line break
+  // without a token, so the refusal rides the derived offsets, not a cut.
+  if (parsed.bareNewlineOffsets.length > 0) return false;
+  if (parsed.bareCarriageReturnOffsets.length > 0) return false;
+  const units = parseBoundedUnits(parsed);
+  // Separator noise with no command text at all (`;`, `|`) — the same shapes
+  // the text fold answered `false` for through its empty-segment guard.
+  if (units.length === 0) return false;
+  for (const node of parsed.commands) {
+    if (node.depth !== 0) continue;
+    const first = node.argv[0];
+    if (first === undefined) return false;
+    if (!ALLOWED_COMMAND_TOKENS.has(firstToken(first.text))) return false;
+  }
+  for (const unit of units) {
+    if (!isSegmentAllowed(unit)) return false;
+  }
+  return true;
+}
+
+/**
+ * The depth-0 command units as raw text: the command string cut at every
+ * list-operator boundary the parse surfaced (`;`, `&&`, `||`, `|`, `|&`, the
+ * terminating `&`), empty pieces dropped — the quote-aware replacement for the
+ * boundaries the text fold computed blind, so a separator inside a quoted
+ * word, a heredoc body, or a comment is no longer a cut. Line breaks are NOT
+ * cuts here; `bareNewlineOffsets` / `bareCarriageReturnOffsets` answer them
+ * above, exactly as `isSegmentAllowed`'s metachar list answered them for the
+ * fold.
+ */
+function parseBoundedUnits(parsed: SecurityParseOk): string[] {
+  const bounds = [...parsed.operators].sort((a, b) => a.span.start - b.span.start);
+  const units: string[] = [];
+  let from = 0;
+  for (const op of bounds) {
+    if (op.span.start < from) continue;
+    units.push(parsed.text.slice(from, op.span.start));
+    from = op.span.end;
+  }
+  units.push(parsed.text.slice(from));
+  return units
+    .map((unit) => unit.trim())
+    .filter((unit) => unit.length > 0);
 }
 
 /**
@@ -2802,48 +2881,12 @@ export function isDangerousCommand(command: string): boolean {
 }
 
 /**
- * Split a command into top-level segments on `;`, `&&`, `||`. Each segment is
- * independently validated against the allowlist / dangerous-pattern checks so
- * compound commands made of read-only tokens (e.g.
- * `ls -la ~/.iknow 2>/dev/null; echo ---; ls | head -30`) are no longer
- * denied wholesale for containing shell metacharacters.
- *
- * Conservative: backslash-escaped separators (`\;`) are kept literal so a
- * command like `r\m -rf /` does NOT split into `r` + `m -rf /` and remain
- * matched by the substring scan in `findDangerousPattern`.
- */
-export function splitShellSegments(command: string): string[] {
-  const segments: string[] = [];
-  let buf = "";
-  for (let i = 0; i < command.length; i += 1) {
-    const ch = command[i];
-    if (ch === "\\" && i + 1 < command.length) {
-      buf += ch + (command[i + 1] ?? "");
-      i += 1;
-      continue;
-    }
-    if (
-      ch === ";" ||
-      (ch === "&" && command[i + 1] === "&") ||
-      (ch === "|" && command[i + 1] === "|") ||
-      ch === "|"
-    ) {
-      segments.push(buf);
-      buf = "";
-      if (command[i + 1] === ch) i += 1;
-      continue;
-    }
-    buf += ch;
-  }
-  if (buf.length > 0) segments.push(buf);
-  return segments.map((s) => s.trim()).filter((s) => s.length > 0);
-}
-
-/**
- * Per-segment allowlist check. Strips redirection tokens (>, >>, <, 2>,
- * file paths after them) before token inspection so the redirect exemption
- * is enforced at the segment boundary. Subshell / command-substitution
- * parens are still rejected because they are matched by
+ * Per-segment allowlist check — the quote-blind character semantics shared by
+ * the two `isAllowedCommand` arms: run per fact-bounded unit on the `ok` path
+ * and per text-fold segment on the degrade path. Strips redirection tokens
+ * (>, >>, <, 2>, file paths after them) before token inspection so the
+ * redirect exemption is enforced at the unit boundary. Subshell /
+ * command-substitution parens are still rejected because they are matched by
  * `findDangerousPattern` — by the parse on the primary path, by the
  * quote-blind scan on the degrade path.
  */

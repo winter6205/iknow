@@ -396,3 +396,60 @@ describe("bash handler — readonly mode wiring", () => {
     }
   });
 });
+
+// SC-S4-1 (T23) pins for the parse-facts admission path. Imports sit here so
+// the append touches zero pre-existing lines.
+import { parseForSecurity } from "../../../../src/harness/permission/shell-parse.ts";
+
+describe("validateReadonlyCommand — SC-S4-1 parse-facts pins (T23)", () => {
+  it("allows find . -name \"-delete\" (quote-bearing operand matches as today)", () => {
+    // The old whitespace tokenizer saw the raw token `"-delete"` (quotes
+    // included) and it missed FIND_DENIED_FLAGS; WordFact.text carries the
+    // same raw spelling, so the answer must stay allow (spec SC-S4-1 rule 3).
+    expectAllow('find . -name "-delete"');
+    // The unquoted twin still denies.
+    expectReject("find . -delete", "find flag");
+  });
+
+  it("rejects a background & read as an OperatorFact (1c)", () => {
+    // `&&` joins (allowed by the pinned `ls && pwd` row), `&` terminates:
+    // the operator fact is what denies now, not a segment-text scan.
+    for (const cmd of ["ls && pwd &", "echo a & ls", "ls |& cat"])
+      expectReject(cmd, "background operator");
+  });
+
+  it("answers a non-ok shape through the text fold exactly as before", () => {
+    // `ls &&` is `malformed` for the parse; the fold's answer is today's:
+    // splitShellSegments consumed the `&&` and the single `ls` segment
+    // allows. Non-`ok` verdicts keep today's answer, add no throw
+    // (docs/shell-parse-non-ok-consumer-contracts.md).
+    const parsed = parseForSecurity("ls &&");
+    assert.ok(parsed.kind !== "ok", `expected non-ok for "ls &&", got ${parsed.kind}`);
+    expectAllow("ls &&");
+  });
+
+  it("keeps the over-cap and bare-newline answers two-sided", () => {
+    const overCap = "echo " + "a".repeat(70 * 1024);
+    assert.equal(parseForSecurity(overCap).kind, "over-cap");
+    expectAllow(overCap); // the gate is not what refuses this in bash.ts.
+
+    // `echo a\nls`: the splitter never cut on newlines (SC-S4-2's B3
+    // correction) and the grammar consumed the break without an operator
+    // token — bareNewlineOffsets is the fact, and the unit spans it exactly
+    // as one segment did, keeping today's first-token answer.
+    const newline = parseForSecurity("echo a\nls");
+    assert.ok(newline.kind === "ok", "echo a\\nls must parse ok for this pin");
+    assert.deepEqual(newline.bareNewlineOffsets, [6]);
+    expectAllow("echo a\nls");
+
+    // Flag tables see tokens across the break, as the old tokenizer did.
+    expectReject("find .\n-delete", "find flag");
+  });
+
+  it("keeps the denials the quote-blind fold made on quoted separators", () => {
+    // A quoted `;` used to split the segment and deny the remainder; the
+    // facts path abstains on the survivor instead of un-denying it.
+    expectReject("echo 'a;b'");
+    expectReject('echo "a;b"');
+  });
+});

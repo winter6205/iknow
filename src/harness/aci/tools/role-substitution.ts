@@ -12,9 +12,22 @@
  *
  * Pure predicates + frozen tables (capability-gate.ts module shape); the
  * bash/grep handlers compose them at their entry points:
- *   - bash arm: any top-level shell segment (splitShellSegments, the same
- *     splitter hard-walls use) whose first token is a grep-family name →
- *     refuse. First-token only — no source-extension heuristics (operator
+ *   - bash arm: on an `ok` security parse, any top-level segment region —
+ *     text between `;` / `&&` / `||` / `|` operator tokens, the parse-facts
+ *     restatement of the segment model the old text splitter computed —
+ *     whose leading depth-0 command node has a first argv word in the
+ *     grep family → refuse. Substitution bodies and nested scopes
+ *     (depth > 0) are out of the population (the old `firstToken` never
+ *     saw inside `$( … )` either), a region whose first content is not a
+ *     command node abstains, and a node led by a non-argv word (a prefix
+ *     assignment, a leading redirect) abstains — the same T21
+ *     `commandTokenRun` semantics the root-find fold carries. Every
+ *     non-`ok` verdict and the pre-parse `vetoed` arm stay SILENT
+ *     (`docs/shell-parse-non-ok-consumer-contracts.md`, SC-S4-1); the one
+ *     admitted relaxation — an `unknown-syntax` command the user then
+ *     approves — is tagged `expected-relaxation` citing ADR-0117's
+ *     not-a-hard-wall scope (SC-S4-7), never waved through.
+ *     First-token only — no source-extension heuristics (operator
  *     constraint; ADR-0117 "Why not 源码扩展名拦 bash").
  *   - grep arm: structure-shaped pattern (definition-syntax table) + no
  *     fallback trajectory evidence → refuse. Evidence is the session
@@ -31,7 +44,14 @@
  *     ctx.messages absent → fail closed (skill.ts precedent).
  */
 
-import { firstToken, splitShellSegments } from "../../permission/hard-walls.js";
+import { firstToken } from "../../permission/hard-walls.js";
+import {
+  parseForSecurity,
+  segmentCutRegions,
+  segmentRegionLeader,
+  type FactSpan,
+  type SecurityParseOk,
+} from "../../permission/shell-parse.js";
 import { ToolExecutionError } from "../../errors.js";
 import { isLspFailureSentinel } from "./lsp.js";
 import type { AnthropicNativeMessage } from "../../model-adapter/types.js";
@@ -166,18 +186,57 @@ export const GREP_NON_CODE_SCOPE_EXTENSIONS: ReadonlyArray<string> =
   ]);
 
 /**
- * Bash arm predicate: return the first grep-family token found in any
- * top-level segment, or undefined. The splitter treats `|` as a segment
- * boundary, so pipeline tails (`cat f | grep x`) are caught too.
+ * Bash arm predicate: return the first grep-family token found leading any
+ * top-level segment region, or undefined. Region = text between `ok`-parse
+ * operator tokens (`;` / `&&` / `||` / `|`), so pipeline tails
+ * (`cat f | grep x`) are caught while a newline inside one region is not a
+ * boundary (the B3b registered divergence, pinned in
+ * `role-substitution-boundaries.test.ts`). A region's leader is its first
+ * depth-0 command node: substitution bodies and nested scopes never lead,
+ * a region whose content before that node is more than whitespace abstains
+ * (a redirect, `!`, or comment led the segment — `firstToken` named that
+ * word, never grep), and a node led by a non-argv word (a prefix
+ * assignment) abstains on the same T21 `commandTokenRun` semantics the
+ * root-find fold carries. The cut set and the leader derivation are the
+ * shared `shell-parse` projection (`segmentCutRegions` /
+ * `segmentRegionLeader`), also used by `bash-read-extract.ts`.
  */
 export function detectBashGrepSubstitution(
   command: string
 ): string | undefined {
-  for (const segment of splitShellSegments(command)) {
-    const token = firstToken(segment);
-    if (GREP_FAMILY_TOKENS.includes(token)) return token;
+  const parse = parseForSecurity(command);
+  // Non-`ok` arm: the gate stays silent for every verdict
+  // (`unknown-syntax` / `malformed` / `aborted` / `over-cap` /
+  // `parser-unavailable`) and the pre-parse `vetoed` — it refuses by
+  // recognizing a segment-leading grep word and sees inside no shape it
+  // cannot parse (SC-S4-1; docs/shell-parse-non-ok-consumer-contracts.md).
+  // No splitter fallback stands behind this answer. The registered
+  // relaxation — an `unknown-syntax` command the user then APPROVES, where
+  // silence replaces a possible recognition — stays tagged
+  // `expected-relaxation` citing ADR-0117's not-a-hard-wall scope
+  // (SC-S4-7), never waved through.
+  if (parse.kind !== "ok") return undefined;
+  for (const region of segmentCutRegions(parse)) {
+    const token = regionLeadingGrep(parse, region);
+    if (token !== undefined) return token;
   }
   return undefined;
+}
+
+/**
+ * The grep-family token leading ONE region, or undefined: the region's
+ * first non-blank content must be a depth-0 command node whose own first
+ * argv word starts that node (both abstention arms keep today's
+ * `firstToken` answer), and that word must name the grep family.
+ */
+function regionLeadingGrep(
+  parse: SecurityParseOk,
+  region: FactSpan
+): string | undefined {
+  const leader = segmentRegionLeader(parse, region);
+  if (leader === undefined) return undefined;
+  const token = firstToken(leader.lead.text);
+  return GREP_FAMILY_TOKENS.includes(token) ? token : undefined;
 }
 
 /** Bash arm refusal text: points only to the proper-role tools. */

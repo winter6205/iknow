@@ -838,3 +838,41 @@ describe("extractSingleReadPath — 正向对照（拒集不得误伤真读形�
     assert.equal(CONTENT_SUPPRESSING_FLAGS.grep?.has("-r") ?? false, false);
   });
 });
+
+/**
+ * T24 (SC-S4-1): the single-unit segmentation reads the parse facts —
+ * "exactly one depth-0 command unit" between operator-token region cuts
+ * replaces `splitShellSegments`' text segments. These pins lock the
+ * multi-line and abstention shapes against the answer the text splitter
+ * produced, so the carrier move cannot quietly retime a verdict.
+ */
+describe("extractSingleReadPath — 多行与弃权形态（parse facts 分段，答案同今天）", () => {
+  it("cat a 换行 cat b：两个 depth-0 命令节点 → 不入账（今天答案）", () => {
+    assert.equal(extractSingleReadPath("cat a\ncat b"), undefined);
+  });
+
+  it("尾随裸换行仍是一个命令 → 照常入账（今天答案）", () => {
+    assert.equal(extractSingleReadPath("cat a.ts\n"), "a.ts");
+  });
+
+  it("尾随分号不是串联：单命令 + 空区域 → 照常入账（今天答案）", () => {
+    assert.equal(extractSingleReadPath("cat a.ts ;"), "a.ts");
+  });
+
+  it("分号两侧都有命令 → 两个区域，链式歧义不入账", () => {
+    assert.equal(extractSingleReadPath("cat a.ts; cat b.ts"), undefined);
+  });
+
+  it("background &：今天的拆段把 & 留在操作数里错位不入账，facts 同样弃权", () => {
+    assert.equal(extractSingleReadPath("cat a.ts &"), undefined);
+  });
+
+  it("尾随注释：注释文本留在命令节点之外 → 弃权（今天的操作数错位同样不入账）", () => {
+    assert.equal(extractSingleReadPath("cat a.ts # done"), undefined);
+  });
+
+  it("前缀赋值 / 首部重定向领着节点：非 argv 词领头的节点一律弃权（T21 commandTokenRun 同语义）", () => {
+    assert.equal(extractSingleReadPath("X=1 cat a.ts"), undefined);
+    assert.equal(extractSingleReadPath("2>/dev/null cat a.ts"), undefined);
+  });
+});

@@ -11,10 +11,21 @@
  * neither returns a path, hence this dedicated small extractor.
  *
  * Decision (returns the path only when ALL hold, else `undefined`):
- *   1. exactly one top-level segment (`;` / `&&` / `||` / `|` all split) —
- *      rules out pipes and chaining;
- *   2. no output/input redirection (`>` `<`), no command substitution
- *      (`` ` `` `$`) inside the segment;
+ *   1. the security parse is `ok` and carries exactly ONE depth-0 command
+ *      unit, with no `;` / `&&` / `||` / `|` operator region around it —
+ *      rules out pipes and chaining (SC-S4-1: the parse facts replace the
+ *      old `splitShellSegments` text segmentation; substitution bodies are
+ *      depth > 0 and never count as the unit);
+ *   2. no redirection (`redirects[]`) and no command substitution
+ *      (`substitutions[]`) on the parse — plus the retained word-text veto
+ *      for `` ` `` / `$` / `<` / `>` inside operand words (see
+ *      `hasRedirectOrSubstitution`);
+ *   2b. every non-`ok` verdict (`unknown-syntax` / `malformed` / `aborted`
+ *      / `over-cap` / `parser-unavailable`) and the pre-parse `vetoed` arm
+ *      record NOTHING — `undefined`, no text fallback
+ *      (`docs/shell-parse-non-ok-consumer-contracts.md`, SC-S4-1: a ledger
+ *      record is an affordance, recording nothing is always the stricter
+ *      side);
  *   3. first token in the whitelist: `cat` / `nl` / `bat` / `batcat` /
  *      `head` / `tail` / `sed -n 'X,Yp'` / `grep` / `egrep` / `fgrep` / `rg`;
  *   4. no "print-then-exit, never touches operands" flags (`--help` /
@@ -42,7 +53,15 @@
  * (`head -n 0 -c 5` prints 5 bytes).
  */
 
-import { firstToken, splitShellSegments } from "../../permission/hard-walls.js";
+import { firstToken } from "../../permission/hard-walls.js";
+import {
+  parseForSecurity,
+  segmentCutRegions,
+  segmentRegionLeader,
+  type CommandFact,
+  type FactSpan,
+  type SecurityParseOk,
+} from "../../permission/shell-parse.js";
 
 /** Whitelisted read-only commands. */
 const READ_COMMANDS: ReadonlySet<string> = Object.freeze(
@@ -768,12 +787,89 @@ function tokenize(segment: string): string[] | undefined {
 }
 
 /**
- * Does the segment contain redirection / command substitution? `<` `>` are
- * always rejected (no redirection), as are `` ` `` and `$` (command
- * substitution / variable expansion — the path is no longer a literal).
+ * Does the unit carry redirection / command substitution in its WORD TEXT?
+ * `<` `>` are always rejected (no redirection), as are `` ` `` and `$`
+ * (command substitution / variable expansion — the path is no longer a
+ * literal).
+ *
+ * This is the text-word arm of the veto; the operator arm is facts-driven
+ * on the `ok` path (`soleReadSegment` reads `redirects[]` /
+ * `substitutions[]` from the parse). The regex stays because a quote layer
+ * hides metacharacters from the facts: `cat 'a<b'` and `cat $(echo a.ts)`
+ * carry `<` / `$` inside the raw word text, and both must stay rejected as
+ * today (`docs/shell-parse-non-ok-consumer-contracts.md`, SC-S4-1's
+ * structural-_plus_-textual veto). The non-`ok` arms never reach this
+ * function — they record nothing outright.
  */
 function hasRedirectOrSubstitution(segment: string): boolean {
   return /[<>`$]/.test(segment);
+}
+
+/**
+ * The single-unit segment the text pipeline may judge, derived from the
+ * parse facts: exactly one depth-0 command, no redirect, no substitution,
+ * no background operator, and no other non-blank text inside the unit's
+ * operator-delimited region (a trailing comment, redirect, or `|&` that
+ * the old segment carried as operand skew abstains here too). A unit led
+ * by a non-argv word — a prefix assignment, a leading redirect — keeps
+ * today's abstention (the same rule `commandTokenRun` carries in
+ * hard-walls.ts): the splitter named that leading word and never judged
+ * this command, so the ledger records nothing. The cut set and the
+ * region-leader derivation are the shared `shell-parse` projection
+ * (`segmentCutRegions` / `segmentRegionLeader`), also used by
+ * `role-substitution.ts`.
+ *
+ * `undefined` = no single-unit read shape.
+ */
+function soleReadSegment(parse: SecurityParseOk): string | undefined {
+  if (hasLedgerVetoFacts(parse)) return undefined;
+  const unit = soleDepth0Command(parse);
+  if (unit === undefined) return undefined;
+  const region = cutRegionCovering(parse, unit.span);
+  if (region === undefined) return undefined;
+  // The leader claims are the unit's own: a depth-0 cut overlapping the
+  // unit's span leaves no covering region (no such shape on an `ok` parse,
+  // and an ambiguity must veto, not guess), and the leader checks carry the
+  // before-blank and argv-leading abstentions.
+  if (segmentRegionLeader(parse, region) === undefined) return undefined;
+  if (parse.text.slice(unit.span.end, region.end).trim() !== "") {
+    return undefined;
+  }
+  return parse.text.slice(unit.span.start, unit.span.end);
+}
+
+/** The facts vetoes: any redirect, substitution, heredoc, or background
+ * operator ends the single-unit read shape. */
+function hasLedgerVetoFacts(parse: SecurityParseOk): boolean {
+  return (
+    parse.redirects.length > 0 ||
+    parse.substitutions.length > 0 ||
+    parse.heredocs.length > 0 ||
+    parse.operators.some((operator) => operator.kind === "background")
+  );
+}
+
+/** The one depth-0 command, or `undefined` when zero or several exist. */
+function soleDepth0Command(parse: SecurityParseOk): CommandFact | undefined {
+  let sole: CommandFact | undefined;
+  for (const command of parse.commands) {
+    if (command.depth !== 0) continue;
+    if (sole !== undefined) return undefined;
+    sole = command;
+  }
+  return sole;
+}
+
+/** The segment-cut region that fully covers `span`, or `undefined` when a
+ * cut falls inside the span. */
+function cutRegionCovering(
+  parse: SecurityParseOk,
+  span: FactSpan
+): FactSpan | undefined {
+  for (const region of segmentCutRegions(parse)) {
+    if (region.start <= span.start && span.end <= region.end) return region;
+  }
+  return undefined;
 }
 
 /**
@@ -781,9 +877,17 @@ function hasRedirectOrSubstitution(segment: string): boolean {
  * Not extractable → `undefined` (caller records nothing).
  */
 export function extractSingleReadPath(command: string): string | undefined {
-  const segments = splitShellSegments(command);
-  if (segments.length !== 1) return undefined;
-  const segment = segments[0]!;
+  const parse = parseForSecurity(command);
+  // Non-`ok` arm: every rejection — `unknown-syntax`, `malformed`,
+  // `aborted`, `over-cap`, `parser-unavailable`, and the pre-parse
+  // `vetoed` — records nothing. No splitter fallback stands behind it
+  // (SC-S4-1; docs/shell-parse-non-ok-consumer-contracts.md): reaching
+  // this function from the ledger path at bash.ts, where no wall
+  // pre-emption runs in front of it, is exactly why `malformed` and the
+  // other verdicts are answered here and not inherited.
+  if (parse.kind !== "ok") return undefined;
+  const segment = soleReadSegment(parse);
+  if (segment === undefined) return undefined;
   if (hasRedirectOrSubstitution(segment)) return undefined;
   const commandName = firstToken(segment);
   if (!READ_COMMANDS.has(commandName)) return undefined;

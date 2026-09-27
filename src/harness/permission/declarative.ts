@@ -33,6 +33,7 @@
 import { homedir } from "node:os";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 
+import { parseForSecurity } from "./shell-parse.js";
 import type { NormalRuleSpec, PermissionDecision } from "./types.js";
 
 /* -----------------------------------------------------------------------------
@@ -429,10 +430,14 @@ function buildBashMatcher(
  * `git status:*` ≡ `git status` optionally followed by a space and anything;
  * `*` anywhere else is a plain wildcard. Returns the full-command predicate.
  *
- * Segmentation is deliberately quote-blind (mirrors
- * `hard-walls.splitShellSegments`' conservative stance): separators inside
- * quotes still split, so such a command simply fails to match — the safe
- * direction for a permission rule.
+ * Segmentation is parse-derived and deliberately quote-blind (SC-S4-3):
+ * on an `ok` verdict the shared parse's statement boundaries supply the
+ * cut set, and a quote-blind char arm re-splits the separators the parse
+ * protects inside quoted spans — so a separator in quotes still splits,
+ * and such a command simply fails to match. That is the safe direction
+ * for a permission rule, and it is this consumer's declared
+ * fail-toward-no-match answer for every non-`ok` verdict as well
+ * (`docs/shell-parse-non-ok-consumer-contracts.md`).
  */
 function compileCommandPattern(
   specifier: string
@@ -469,24 +474,103 @@ function escapeRegexChar(ch: string): string {
 }
 
 /**
- * Split a command on `;` / `&&` / `||` / `|` / `&` / `\n` / `\r`.
+ * Split a command on `;` / `&&` / `||` / `|` / `&` / `|&` / `\n` / `\r`.
  *
- * Intentionally distinct from `hard-walls.splitShellSegments`:
- *  - declarative adds `&` (any-depth `&` between commands), `|&` (treated
- *    as a unit boundary by the spec), and `\n` / `\r` as separators;
- *  - `hard-walls.splitShellSegments` only splits on `;` / `&&` / `||` /
- *    `|` because the dangerous-pattern scan is conservative — keeping
- *    newlines and bare `&` inside a single segment lets existing
- *    substring patterns keep matching commands like `echo a & rm -rf /`.
+ * On an `ok` parse the cut set is the union of two arms, and segments are
+ * the raw text between cuts (each cut consumes its one character; trim and
+ * drop-empty, exactly as the char scan produced them):
+ *  - the facts arm — every statement-boundary offset the shared parse
+ *    publishes (`operators[].span.start`, `bareNewlineOffsets`,
+ *    `bareCarriageReturnOffsets`);
+ *  - the quote-blind arm — every unescaped separator CHARACTER in the text.
+ *    The parse protects separators inside quoted spans (and heredoc bodies,
+ *    comments, arithmetic/case/test scopes) away from the facts arm; this
+ *    arm re-splits exactly those, because preserving the quote-blind ANSWER
+ *    is what keeps `echo "a; rm -rf /" x` a no-match. Dropping the arm
+ *    would make the derivation quote-aware and could flip a refusal into an
+ *    allow (`Bash(echo:*)` would match the single wide segment where the
+ *    fabricated `rm`-led segment refused) — forbidden by SC-S4-3.
  *
- * Reusing the hard-walls splitter here would weaken the spec Does rule
- * that compound commands (`&`, `|&`, newlines) require every segment to
- * match, so the two implementations stay separate. Backslash escapes are
- * kept literal in both; quoted separators are not exempted (mirrors the
- * hard-walls conservative stance — quoted metachars fail to match rather
- * than silently bypass).
+ * Measured over the Stage 2 corpus plus every command literal of
+ * `declarative-rules.test.ts`
+ * (`tests/harness/permission/declarative-parse-facts.test.ts`): the facts
+ * arm is contained in the quote-blind arm — every AST boundary is also a
+ * literal separator character, so no widened AST boundary can make a
+ * compound rule match where the scan refused (SC-S4-3's pre-T26
+ * measurement) — and the arm difference is exactly the protected-span
+ * fabrications the second arm keeps. The union is byte-identical to the
+ * old scan segmentation on every `ok` shape; what moves is the derivation:
+ * the boundaries become a checked parse fact rather than an assumption.
+ *
+ * Intentionally distinct from the dangerous-pattern splitter in
+ * `hard-walls.ts`: declarative adds `&` (any-depth `&` between commands),
+ * `|&` (treated as a unit boundary by the spec), and `\n` / `\r` as
+ * separators; that splitter only cuts `;` / `&&` / `||` / `|` because its
+ * conservative substring patterns must keep matching commands like
+ * `echo a & rm -rf /` inside one segment. Reusing it here would weaken the
+ * spec Does rule that compound commands (`&`, `|&`, newlines) require every
+ * segment to match, so the two implementations stay separate. Backslash
+ * escapes are kept literal in both.
+ *
+ * Any non-`ok` verdict (`unknown-syntax` / `malformed` / `aborted` /
+ * `over-cap` / `parser-unavailable` / `vetoed`) degrades to the char scan
+ * verbatim: no boundary facts exist to derive from, and the scan's
+ * segmentation — fail toward no match — is this consumer's declared answer
+ * for the whole non-`ok` set.
  */
 function splitCommandSegments(command: string): string[] {
+  const parsed = parseForSecurity(command);
+  if (parsed.kind !== "ok") {
+    return scanSplitCommandSegments(command);
+  }
+  const cuts = quoteBlindCutOffsets(command);
+  for (const operator of parsed.operators) cuts.add(operator.span.start);
+  for (const offset of parsed.bareNewlineOffsets) cuts.add(offset);
+  for (const offset of parsed.bareCarriageReturnOffsets) cuts.add(offset);
+  return sliceAtCutOffsets(command, cuts);
+}
+
+/**
+ * The quote-blind arm: every unescaped `;` / `&` / `|` / `\n` / `\r`
+ * offset, inside quotes or out — each separator character is its own cut
+ * (the second character of `&&` / `||` / `|&` cuts only whitespace-then-
+ * nothing and slices to an empty piece, dropped below, mirroring the scan's
+ * empty-buffer skip). Backslash escapes consume their next character and
+ * stay literal text.
+ */
+function quoteBlindCutOffsets(command: string): Set<number> {
+  const cuts = new Set<number>();
+  for (let i = 0; i < command.length; i += 1) {
+    const ch = command[i]!;
+    if (ch === "\\" && i + 1 < command.length) {
+      i += 1;
+      continue;
+    }
+    if (ch === ";" || ch === "&" || ch === "|" || ch === "\n" || ch === "\r") {
+      cuts.add(i);
+    }
+  }
+  return cuts;
+}
+
+/** Slice the raw text between cut offsets; each cut consumes one character. */
+function sliceAtCutOffsets(command: string, cuts: ReadonlySet<number>): string[] {
+  const segments: string[] = [];
+  let from = 0;
+  for (const cut of [...cuts].sort((a, b) => a - b)) {
+    segments.push(command.slice(from, cut));
+    from = cut + 1;
+  }
+  segments.push(command.slice(from));
+  return segments.map((s) => s.trim()).filter((s) => s.length > 0);
+}
+
+/**
+ * The char scan, kept verbatim as the non-`ok` degrade arm (and the oracle
+ * the `ok`-path union is measured against byte-for-byte in
+ * `declarative-parse-facts.test.ts`).
+ */
+function scanSplitCommandSegments(command: string): string[] {
   const segments: string[] = [];
   let buf = "";
   for (let i = 0; i < command.length; i += 1) {

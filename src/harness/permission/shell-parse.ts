@@ -99,6 +99,38 @@ export interface InertFact {
   readonly delimiterQuoted?: boolean;
 }
 
+/**
+ * The six list/pipeline separator tokens the grammar can surface at a
+ * statement boundary. `background` is the `&` that TERMINATES a command
+ * rather than the `&&` that joins two (SC-S4-1 (1c) reads exactly this
+ * distinction); `sequence`/`and`/`or`/`pipe`/`pipe-both` name the rest.
+ */
+export type ListOperatorKind =
+  | "sequence"
+  | "and"
+  | "or"
+  | "background"
+  | "pipe"
+  | "pipe-both";
+
+/**
+ * One separator token the parse read at a statement boundary, with the depth
+ * of its enclosing statement scope and — when the statement adjacent to it
+ * resolves to a plain command node (optionally through one
+ * `redirected_statement` wrapper) — that command's index. A null side is an
+ * abstention, not a claim of absence: the boundary itself is still a fact.
+ * Newlines and carriage returns carry no token in this grammar and therefore
+ * never appear here; `bareNewlineOffsets` / `bareCarriageReturnOffsets` are
+ * the answer for those separators.
+ */
+export interface OperatorFact {
+  readonly kind: ListOperatorKind;
+  readonly span: FactSpan;
+  readonly depth: number;
+  readonly leftCommandIndex: number | null;
+  readonly rightCommandIndex: number | null;
+}
+
 export interface SecurityParseOkFacts {
   readonly words: readonly WordFact[];
   readonly commands: readonly CommandFact[];
@@ -107,6 +139,24 @@ export interface SecurityParseOkFacts {
   readonly redirects: readonly RedirectFact[];
   readonly heredocs: readonly HeredocFact[];
   readonly inert: readonly InertFact[];
+  readonly operators: readonly OperatorFact[];
+  /**
+   * Every `string` / `raw_string` / `ansi_c_string` node span: the quote
+   * state of each site, whether or not the node is an argv word (a case
+   * pattern or a `for` list word is quoted content the argv view does not
+   * carry). Offsets are JS string indices, as in every span here.
+   */
+  readonly quotedSpans: readonly FactSpan[];
+  /**
+   * Offsets of each `\n` / `\r` that sits outside every `quotedSpans` entry
+   * and every heredoc body — the statement separators the grammar consumes
+   * without a token. SC-S4-2's second syntactic fact is answered by the pair
+   * being empty; a consumer that needs the boundary offsets for segmentation
+   * reads them directly. This is the derived-fact arm of the spec's Open
+   * Question: no consumer has to rescan `text` to answer it.
+   */
+  readonly bareNewlineOffsets: readonly number[];
+  readonly bareCarriageReturnOffsets: readonly number[];
 }
 
 export interface SecurityParseOk extends SecurityParseOkFacts {
@@ -147,6 +197,11 @@ export interface SecurityParseUnavailable {
   readonly kind: "parser-unavailable";
 }
 
+/**
+ * The closed verdict set (ADR-0124). Each consumer's declared answer for
+ * every non-`ok` arm — and why a non-`ok` never flattens into an allow — is
+ * recorded in `docs/shell-parse-non-ok-consumer-contracts.md` (SC-S4-1).
+ */
 export type SecurityParseResult =
   | SecurityParseOk
   | SecurityParseUnknownSyntax
@@ -864,6 +919,42 @@ const REDIRECT_NODE_TYPES: ReadonlySet<string> = new Set([
   "herestring_redirect",
 ]);
 
+/**
+ * The scopes whose direct children can hold a statement separator token:
+ * `;` and `&` sit between the statements of their parent scope (a `;`
+ * separates even bare `program` children, while `&&`/`||` first get wrapped
+ * in `list`), `|`/`|&` are pipeline-only. Deliberately NOT scanned:
+ * `case_item` (its `|` alternates patterns and its `;;` terminates a branch —
+ * neither is a list boundary), `test_command`, and every arithmetic or
+ * `[[ ]]` site, where `&`/`|` are operands the segmentation consumers must
+ * not see as separators. All types here are already in the modelled roster.
+ */
+const STATEMENT_SCOPE_TYPES: ReadonlySet<string> = new Set([
+  "compound_statement",
+  "do_group",
+  "for_statement",
+  "if_statement",
+  "list",
+  "pipeline",
+  "program",
+  "subshell",
+  "while_statement",
+]);
+
+const LIST_OPERATOR_KINDS: ReadonlyMap<string, ListOperatorKind> = new Map([
+  [";", "sequence"],
+  ["&&", "and"],
+  ["||", "or"],
+  ["&", "background"],
+]);
+
+const PIPELINE_OPERATOR_KINDS: ReadonlyMap<string, ListOperatorKind> = new Map(
+  [
+    ["|", "pipe"],
+    ["|&", "pipe-both"],
+  ],
+);
+
 type BaseRedirect = Omit<RedirectFact, "bodySpan" | "delimiterQuoted">;
 
 interface FactContext {
@@ -891,6 +982,14 @@ interface DraftSubstitution {
   readonly owner: number | null;
 }
 
+interface DraftOperator {
+  readonly depth: number;
+  readonly kind: ListOperatorKind;
+  readonly leftStart: number | null;
+  readonly rightStart: number | null;
+  readonly span: FactSpan;
+}
+
 interface FactDrafts {
   readonly words: WordFact[];
   readonly commands: CommandFact[];
@@ -901,6 +1000,8 @@ interface FactDrafts {
   readonly redirects: RedirectFact[];
   readonly heredocs: HeredocFact[];
   readonly inert: InertFact[];
+  readonly operators: DraftOperator[];
+  readonly quotedSpans: FactSpan[];
 }
 
 interface FactWalk {
@@ -917,6 +1018,8 @@ function createWalk(text: string): FactWalk {
       expansions: [],
       heredocs: [],
       inert: [],
+      operators: [],
+      quotedSpans: [],
       redirects: [],
       substitutions: [],
       words: [],
@@ -1045,12 +1148,14 @@ function emitNodeFacts(
   ctx: FactContext
 ): void {
   const type = node.type;
+  if (type === "command") {
+    emitCommandFact(walk, node, ctx);
+    return;
+  }
   const owner = REDIRECT_NODE_TYPES.has(type)
     ? redirectOwner(walk, ctx)
     : ctx.owner;
-  if (type === "command") {
-    emitCommandFact(walk, node, ctx);
-  } else if (type === "heredoc_redirect") {
+  if (type === "heredoc_redirect") {
     emitHeredocFacts(walk, node, owner);
   } else if (type === "file_redirect" || type === "herestring_redirect") {
     emitRedirectFact(walk, node, owner);
@@ -1058,8 +1163,35 @@ function emitNodeFacts(
     emitSubstitutionFact(walk, node, owner);
   } else if (EXPANSION_SITE_TYPES.has(type)) {
     emitExpansionFacts(walk, node, owner);
-  } else if (type === "raw_string" || type === "comment") {
+  } else {
+    emitQuotedAndStructureFacts(walk, node, ctx, type);
+  }
+}
+
+/**
+ * The leaf/structure tail of the dispatch: quoted-content spans (the quote
+ * state SC-S4-2's line-break fact is derived against), inert sites, and the
+ * list/pipeline separators of a statement scope.
+ */
+function emitQuotedAndStructureFacts(
+  walk: FactWalk,
+  node: ShellFactNode,
+  ctx: FactContext,
+  type: string
+): void {
+  if (type === "raw_string" || type === "comment") {
     emitInertFact(walk, node, ctx, type);
+    if (type === "raw_string") {
+      walk.drafts.quotedSpans.push(spanOf(node));
+    }
+  } else if (type === "string" || type === "ansi_c_string") {
+    walk.drafts.quotedSpans.push(spanOf(node));
+  } else if (STATEMENT_SCOPE_TYPES.has(type)) {
+    emitOperatorFacts(
+      walk,
+      node,
+      ctx.depth + (DEPTH_CONTAINERS.has(node.type) ? 1 : 0)
+    );
   }
 }
 
@@ -1381,6 +1513,108 @@ function emitInertFact(
   );
 }
 
+/**
+ * One pass over a statement scope's direct children, recording every
+ * separator token the scope's operator table recognizes. The command
+ * adjacency is stored as a start offset and resolved in `finishOperators`,
+ * because the scope is visited before its child commands are emitted.
+ */
+function emitOperatorFacts(
+  walk: FactWalk,
+  node: ShellFactNode,
+  depth: number
+): void {
+  const kinds =
+    node.type === "pipeline" ? PIPELINE_OPERATOR_KINDS : LIST_OPERATOR_KINDS;
+  for (let index = 0; index < node.childCount; index += 1) {
+    const child = node.child(index);
+    if (child === null) {
+      continue;
+    }
+    const kind = kinds.get(child.type);
+    if (kind === undefined) {
+      continue;
+    }
+    walk.drafts.operators.push({
+      depth,
+      kind,
+      leftStart: scanCommandStart(node, index, -1),
+      rightStart: scanCommandStart(node, index, 1),
+      span: spanOf(child),
+    });
+  }
+}
+
+/**
+ * The command the separator at `index` borders, scanned `step` slots at a
+ * time: anonymous keyword tokens (`then`, `do`, a bare `;;` remnant) are
+ * skipped and the first NAMED sibling decides. Resolution descends only
+ * through the shapes that carry the bordered statement directly — a plain
+ * command, one `redirected_statement` wrapper (`sleep 5 > log &`), and the
+ * near edge of a nested `list`/`pipeline` (the left-recursive `a && b && c`
+ * puts `b` inside an inner list). Everything else — `number`, `do_group`, a
+ * subshell pipeline part — abstains: the boundary stays a fact, the
+ * attribution says nothing.
+ */
+function scanCommandStart(
+  node: ShellFactNode,
+  index: number,
+  step: number
+): number | null {
+  for (let at = index + step; at >= 0 && at < node.childCount; at += step) {
+    const sibling = node.child(at);
+    if (sibling === null || !sibling.isNamed) {
+      continue;
+    }
+    return resolveCommandStart(sibling, step);
+  }
+  return null;
+}
+
+function resolveCommandStart(
+  node: ShellFactNode,
+  step: number
+): number | null {
+  if (node.type === "command") {
+    return node.startIndex;
+  }
+  if (node.type === "redirected_statement") {
+    const body = node.childForFieldName("body");
+    return body !== null && body.type === "command" ? body.startIndex : null;
+  }
+  if (node.type === "list" || node.type === "pipeline") {
+    return descendCommandStart(node, step);
+  }
+  return null;
+}
+
+/**
+ * Walks a nested `list`/`pipeline` from the edge the separator borders
+ * (`step` direction) and returns the first command start it can attribute.
+ * The left-recursive `a && b && c` puts `b` inside an inner list, so the
+ * near edge is the only side that carries the bordered statement.
+ */
+function descendCommandStart(
+  node: ShellFactNode,
+  step: number
+): number | null {
+  for (
+    let at = step > 0 ? 0 : node.childCount - 1;
+    at >= 0 && at < node.childCount;
+    at += step
+  ) {
+    const child = node.child(at);
+    if (child === null) {
+      continue;
+    }
+    const resolved = resolveCommandStart(child, step);
+    if (resolved !== null) {
+      return resolved;
+    }
+  }
+  return null;
+}
+
 function finishFacts(walk: FactWalk): SecurityParseOkFacts {
   const drafts = walk.drafts;
   const substitutions = drafts.substitutions.map((site) => ({
@@ -1389,17 +1623,92 @@ function finishFacts(walk: FactWalk): SecurityParseOkFacts {
     ownerCommandIndex: site.owner,
     span: site.span,
   }));
+  const lineBreaks = bareLineBreaks(walk.text, [
+    ...drafts.quotedSpans,
+    ...drafts.heredocs.map((heredoc) => heredoc.bodySpan),
+  ]);
   return {
+    bareCarriageReturnOffsets: lineBreaks.bareCarriageReturnOffsets,
+    bareNewlineOffsets: lineBreaks.bareNewlineOffsets,
     commands: drafts.commands,
     expansions: drafts.expansions,
     heredocs: drafts.heredocs,
     inert: drafts.inert,
+    operators: finishOperators(drafts),
+    quotedSpans: [...drafts.quotedSpans].sort(
+      (left, right) => left.start - right.start
+    ),
     redirects: drafts.redirects,
     substitutions,
     words: [...drafts.words].sort(
       (left, right) => left.span.start - right.span.start
     ),
   };
+}
+
+function finishOperators(drafts: FactDrafts): OperatorFact[] {
+  return [...drafts.operators]
+    .sort((left, right) => left.span.start - right.span.start)
+    .map((draft) => ({
+      depth: draft.depth,
+      kind: draft.kind,
+      leftCommandIndex: commandIndexAtStart(drafts, draft.leftStart),
+      rightCommandIndex: commandIndexAtStart(drafts, draft.rightStart),
+      span: draft.span,
+    }));
+}
+
+function commandIndexAtStart(
+  drafts: FactDrafts,
+  start: number | null
+): number | null {
+  return start === null
+    ? null
+    : drafts.commandIndexByStart.get(start) ?? null;
+}
+
+/**
+ * Offsets of every `\n` / `\r` outside the protected spans — the quoted
+ * sites and heredoc bodies, where such a character is content rather than a
+ * statement separator. A backslash-escaped line break never reaches this
+ * scan: the pre-parse veto refuses that spelling before the parser exists.
+ */
+function bareLineBreaks(
+  text: string,
+  protectedSpans: readonly FactSpan[]
+): {
+  bareNewlineOffsets: readonly number[];
+  bareCarriageReturnOffsets: readonly number[];
+} {
+  const bareNewlineOffsets: number[] = [];
+  const bareCarriageReturnOffsets: number[] = [];
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text.charAt(index);
+    if (char !== "\n" && char !== "\r") {
+      continue;
+    }
+    if (offsetInsideAnySpan(protectedSpans, index)) {
+      continue;
+    }
+    if (char === "\n") {
+      bareNewlineOffsets.push(index);
+    } else {
+      bareCarriageReturnOffsets.push(index);
+    }
+  }
+  return { bareNewlineOffsets, bareCarriageReturnOffsets };
+}
+
+function offsetInsideAnySpan(
+  spans: readonly FactSpan[],
+  offset: number
+): boolean {
+  for (const span of spans) {
+    if (span.start <= offset && offset < span.end) {
+      return true;
+    }
+  }
+  return false;
 }
 
 function firstCommandInside(
@@ -1457,4 +1766,104 @@ function memoEvictIfNeeded(): void {
     }
     memo.delete(oldest.value);
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Segment-region projection (internal seam; Stage 4a review H2)
+ *
+ * One source for the cut set and the region-derivation both `ok`-path
+ * consumers share (`bash-read-extract.ts`'s sole-read answer and
+ * `role-substitution.ts`'s segment-leading grep recognition) — before this
+ * projection the two files carried byte-identical cut sets and
+ * near-identical leader derivations. Never re-exported from a package barrel.
+ * ------------------------------------------------------------------------- */
+
+/**
+ * Operator kinds that delimit a segment region the way the quote-blind text
+ * splitter cut top-level segments. `background` and `pipe-both` are
+ * deliberately absent: the splitter never cut on a bare `&` (so `grep x f &`
+ * stayed one grep-leading segment, and the background shape is its own veto
+ * claim at the consumer), and its `|&` cut consumed only the `|`, leaving an
+ * `&` to lead the next segment where the text `firstToken` answered and
+ * abstained; on the parse a `|&` is one operator token with no `&` residue,
+ * so cutting there would arm a region answer the text path never made.
+ * Leaving it uncut keeps the whole `|&` span inside the unit's region, where
+ * the consumer's leader-blankness claims abstain.
+ */
+export const SEGMENT_CUT_OPERATOR_KINDS: ReadonlySet<ListOperatorKind> =
+  Object.freeze(new Set<ListOperatorKind>(["sequence", "and", "or", "pipe"]));
+
+/**
+ * The text regions between depth-0 segment-cut operators, in start order:
+ * the complement of the cut spans over the parse text, empty regions dropped.
+ */
+export function segmentCutRegions(parse: SecurityParseOk): FactSpan[] {
+  const cuts = parse.operators
+    .filter(
+      (operator) =>
+        operator.depth === 0 &&
+        SEGMENT_CUT_OPERATOR_KINDS.has(operator.kind)
+    )
+    .sort((left, right) => left.span.start - right.span.start);
+  const regions: FactSpan[] = [];
+  let cursor = 0;
+  for (const cut of cuts) {
+    if (cut.span.start > cursor) {
+      regions.push({ start: cursor, end: cut.span.start });
+    }
+    cursor = Math.max(cursor, cut.span.end);
+  }
+  if (cursor < parse.text.length) {
+    regions.push({ start: cursor, end: parse.text.length });
+  }
+  return regions;
+}
+
+/** A region's leading command and its first argv word. */
+export interface SegmentRegionLeader {
+  readonly command: CommandFact;
+  readonly lead: WordFact;
+}
+
+/**
+ * The command leading ONE region, or `undefined` on any abstention arm: no
+ * depth-0 command starts inside the region; non-blank region content before
+ * the leader (a redirect, `!`, or comment led the segment — the text
+ * `firstToken` named that word, never a command name); or a node not started
+ * by its own first argv word (a prefix assignment). This is the parse-facts
+ * restatement of the answer the splitter's `firstToken` gave a segment,
+ * keeping today's silence wherever the text path made no answer or abstained.
+ */
+export function segmentRegionLeader(
+  parse: SecurityParseOk,
+  region: FactSpan
+): SegmentRegionLeader | undefined {
+  const leader = firstCommandInRegion(parse, region);
+  if (leader === undefined) return undefined;
+  if (parse.text.slice(region.start, leader.span.start).trim() !== "") {
+    return undefined;
+  }
+  const lead = leader.argv[0];
+  if (lead === undefined || lead.span.start !== leader.span.start) {
+    return undefined;
+  }
+  return { command: leader, lead };
+}
+
+/** The region's earliest-starting depth-0 command, or `undefined`. */
+function firstCommandInRegion(
+  parse: SecurityParseOk,
+  region: FactSpan
+): CommandFact | undefined {
+  let leader: CommandFact | undefined;
+  for (const command of parse.commands) {
+    if (command.depth !== 0) continue;
+    if (command.span.start < region.start || command.span.start >= region.end) {
+      continue;
+    }
+    if (leader === undefined || command.span.start < leader.span.start) {
+      leader = command;
+    }
+  }
+  return leader;
 }

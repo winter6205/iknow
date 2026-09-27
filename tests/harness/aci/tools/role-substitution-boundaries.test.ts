@@ -235,8 +235,9 @@ describe("#1089 bash arm — accepted escape surface (B1..B3b)", () => {
   });
 
   // B3b — Category B, registered by ADR-0117 after the #1089 boundary matrix
-  // ran: this gate segments on `splitShellSegments` (`;` / `&&` / `||` / `|`),
-  // which does NOT treat a newline as a segment boundary — unlike the ADR-0068
+  // ran: this gate reads command units off the parse (separator facts:
+  // `;` / `&&` / `||` / `|`), which do NOT treat a newline as a unit
+  // boundary — unlike the ADR-0068
   // dangerous-scan face, which splits per line. Locking the divergence, not
   // plugging it: the product bar is majority routing, not airtight enforcement.
   it("B3b [B]: grep after a newline escapes the gate and really executes (newline is not this gate's segment boundary)", async () => {

@@ -715,3 +715,60 @@ describe("Order: deny group precedes allow; first match in same group wins", () 
     );
   });
 });
+
+/* -----------------------------------------------------------------------------
+ * SC-S4-3 (T25): parse-derived segmentation — preserved-answer pins
+ * -------------------------------------------------------------------------- */
+
+describe("SC-S4-3: parse-derived segmentation keeps the quote-blind answer", () => {
+  it('quoted `;` still splits: echo "a; rm -rf /" x does NOT match Bash(echo:*)', () => {
+    // The scan fabricated `echo "a` / `rm -rf /" x` and the fold refused;
+    // a quote-aware facts derivation would have produced ONE wide segment
+    // matching `echo:*` — a denial-of-match to allow flip, forbidden by the
+    // fail-toward-no-match contract. The facts path keeps the fabrication
+    // cut, so the answer stays false.
+    const [rule] = compileOne({ allow: ["Bash(echo:*)"] });
+    assert.equal(
+      rule!.match(makeInput("bash", { command: 'echo "a; rm -rf /" x' })),
+      false
+    );
+  });
+
+  it("backslash-escaped separator stays literal text in its segment", () => {
+    // `echo\;hi` is ONE word — no boundary on either arm (the scan consumes
+    // the escape pair; the parse has no operator there).
+    const [rule] = compileOne({ allow: ["Bash(echo*)"] });
+    assert.equal(
+      rule!.match(makeInput("bash", { command: "echo\\;hi" })),
+      true
+    );
+    const [strict] = compileOne({ allow: ["Bash(echo:*)"] });
+    assert.equal(
+      strict!.match(makeInput("bash", { command: "echo\\;hi" })),
+      false,
+      "the escaped form is one segment `echo\\;hi`, not `echo` + args"
+    );
+  });
+
+  it("bare CR splits on the facts arm (bareCarriageReturnOffsets)", () => {
+    const [rule] = compileOne({ deny: ["Bash(git status:*)"] });
+    assert.equal(
+      rule!.match(makeInput("bash", { command: "git status\rrm -rf /" })),
+      false,
+      "CR must end a segment"
+    );
+  });
+
+  it("non-ok parse degrades to the char scan verbatim", () => {
+    // Unclosed quote → `malformed`: no boundary facts exist, so the scan
+    // runs as it always did and cuts the in-quote `;` — the fabricated `rm`
+    // segment refuses the wide `git *` allow instead of one quote-aware
+    // segment matching it.
+    const [rule] = compileOne({ allow: ["Bash(git *)"] });
+    assert.equal(
+      rule!.match(makeInput("bash", { command: 'git "status; rm' })),
+      false
+    );
+  });
+});
+
