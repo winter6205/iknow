@@ -174,6 +174,46 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Added
 
+- **Protected filesystem and credential effects are refused by every spelling, not just the shell one (issue #1155, spec `effect-boundary-protection`, ADR-0129, 2026-09-28)**:
+  a protected target is refused identically by `rm -f`, by `python3 -c 'import os; os.remove(...)'`,
+  and by any other interpreter the fence admits, because the protection now lives at the
+  bwrap mount and capability boundary rather than in shell-command scanning: the existing
+  sensitive-path roster and the system read-only prefixes became one resolved-target
+  inventory, present targets get read-only binds ordered after every writable bind
+  (kernel EROFS to any program inside the fence), and credential sources additionally get
+  a mount-level cover so a protected credential inside the fence reads as a masked value
+  or as nothing — for the foreground bash tool, background spawns, and the verify
+  executor. A boundary refusal now reports as a boundary refusal: an `[fs_denied]`-prefixed
+  message naming the target _class_ (an SSH private key, a cloud credential file, an
+  environment file) and the fence layer, stating unconditionally that the session cannot
+  remove that target at all, and explicitly not recommending a re-spelling. An
+  exact-file target is masked rather than bound, so its unlink surfaces EBUSY instead of
+  EROFS; that second bounded trigger fires only when the diagnostic names a mask the same
+  fence actually emitted, and unmatched stderr stays byte-identical (issue #1157).
+  Name-pattern rules (`*.pem`, `.env*`, `id_rsa`, …) are materialized per fence assembly
+  over the workspace root resolved by `resolveWorkspaceRoot`, shared by both fs modes and
+  read through the env SSOT rather than raw `process.env`: **12 ms** measured against
+  **4110 ms** for the withdrawn whole-home scope (791,575 entries), which the 2M
+  fail-closed bound would have refused outright on a larger home. The narrowed scope is
+  the only source of that speed — hidden directories, `node_modules` and caches are all
+  walked — and its coverage floor is deliberate and documented: a name match outside the
+  workspace gets nothing physical from the name arm, while the hard-wall's text arm still
+  denies naming it and an explicit concrete target still gets its mount. A protected target
+  absent from the host is skipped with a typed warning that carries the surviving-enforcement
+  count; traversal errors, symlink cycles and escapes, bind-source swaps, and match-count
+  exhaustion are typed refusals at assembly, never partial fences.
+  **The authorized-cleanup receipt mechanism (issues #1156/#1158) was withdrawn, not
+  shipped, and is not part of this release.** A real-bwrap feasibility run proved it could
+  not have worked: `--bind <path> <path>` makes the path a mount point and `unlink` on a
+  mount point returns EBUSY, so the route could never have deleted anything (#1163) — the
+  only shape that did delete was the shape that escalates, granting RW and unmasked access
+  to every sibling credential. Ordinary backups are unaffected: they live in
+  already-authorized writable locations, are removed by ordinary filesystem permissions
+  under either spelling, and cleanup never opens a protected path's parent directory. The
+  spec records the withdrawal visibly — SC9 is tombstoned rather than renumbered away, and
+  the old contract is stated as not fulfilled. ADR-0128 (host read capability across agent
+  tools) shipped alongside.
+
 - **Per-model-route output budgets and an explicit output-limit notice (spec `model-output-truncation`, ADR-0126, 2026-09-27)**:
   each `models[]` entry takes an optional `maxTokens`; the matched route carries it as
   `llm.routeMaxTokens` / `ModelRouteEnv.maxTokens`, and request assembly falls back to
@@ -660,6 +700,19 @@ hardcoded defaults` for those three fields only; other fields unchanged.
   to JSONL head records or the store API. Related ADR-0027 synced.
 
 ### Fixed
+
+- **A protected credential could be read out through an ancestor mount that the read mask never reached (issue #1159, spec `effect-boundary-protection`, ADR-0129, 2026-09-28)**:
+  the credential read mask was computed per direct match, so a filesystem-arm ancestor
+  (a bind of a directory holding the credential) shadowed a name-pattern match below it —
+  `cat` of the secret succeeded. The mount plan is now coordinated so the cover cannot be
+  shadowed, with a before/after real-fence proof and a control that pins the fix does not
+  over-mask. The same pass closed a dead `vanished` warn path — the `realpathSync` ENOENT
+  branch did a bare `continue` one line above the push, so the typed "disappeared between
+  enumeration and bind" diagnostic could never fire (0 hits over 40 racing rounds) — now
+  reachable through a broken-symlink fixture, and closed a roster gap: `.config/gh/` was
+  the only credential subtree root with no hard-wall fragment, where `.ssh`, `.aws`,
+  `.gnupg` and `.kube` all had one; a new completeness test now fails if a roster seed is
+  added without a matching fragment.
 
 - **`todo_write` advertised a flat schema its handler would not accept, and a model repeating itself burned the full retry budget (issue #1136, 2026-09-27)**:
   the tool exposed one schema while the handler enforced per-mode field rules, so a
