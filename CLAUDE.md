@@ -45,7 +45,7 @@
 ## 本机已配
 
 - **本机 key 已配**。`npm run test:real-llm` 可跑。
-- `mcp__aiterm__pty_*` 已配：TUI/REPL 真实交互用它。
+- `mcp__terminalcp__terminalcp` 已配：TUI/REPL 真实交互用它（action 分发：`start` / `stdin` / `stdout` / `stream` / `list` / `stop`）。
 
 ## 网络工具
 
