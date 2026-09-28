@@ -170,6 +170,26 @@ function makeNative(opts: {
   return { role: opts.role, content: [{ type: "text", text: opts.text }] };
 }
 
+/**
+ * Content-gate signal: an inert non-doc source edit. Opens the upstream
+ * verify gate (text-only stubs would now never enter verify) with zero
+ * effect on checkEvidence verdict/reasons (still zero runs → the same
+ * INSUFFICIENT reasons; not a probe flag file → rerun behavior unchanged).
+ */
+function gateSignalMessage(): AnthropicNativeMessage {
+  return {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "gate-edit",
+        name: "edit_file",
+        input: { filePath: "src/app.ts" },
+      },
+    ],
+  };
+}
+
 /** Deterministic run() stub return shape (same as verify-loop.test.ts). */
 function stubRun(opts: {
   readonly text: string;
@@ -180,6 +200,7 @@ function stubRun(opts: {
   const messages: AnthropicNativeMessage[] = [
     ...(opts.priorMessages ?? []),
     makeNative({ role: "user", text: opts.userText }),
+    gateSignalMessage(),
     makeNative({ role: "assistant", text: opts.text }),
   ];
   const stopReason = opts.stopReason ?? "completed";

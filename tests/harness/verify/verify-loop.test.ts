@@ -28,12 +28,24 @@ import {
   DEFAULT_MAX_ROUNDS,
   DEFAULT_TIMEOUT_SEC,
   runVerifyLoop,
+  type ClassifierEnvelope,
+  type RunClassifierFn,
   type RunOutcome,
   type RunVerifyFn,
   type VerifyLoopOptions,
   type VerifyLoopOutcome,
 } from "../../../src/harness/verify/verify-loop.ts";
-import type { VerifyConfig } from "../../../src/harness/verify/types.ts";
+import {
+  REASON_HITL_SKIP_COMPLETION_JUDGE,
+  type VerifyConfig,
+} from "../../../src/harness/verify/types.ts";
+import { projectVerifyHumanView } from "../../../src/session-api/verify-human-view.ts";
+import {
+  isVerifyInjectedText,
+  NOT_RUN_PREFIX,
+} from "../../../src/harness/verify/inject.ts";
+import { isHostInjectedUserText } from "../../../src/harness/agent-status-instruction.ts";
+import { isTuiHiddenUserMessage } from "../../../src/tui/session-state.ts";
 import type {
   AnthropicNativeMessage,
   RunResult,
@@ -73,15 +85,40 @@ const FAIL_OUTPUT = `FAIL  ${FAIL_LINE}\n`;
 const FIXED_INSTRUCTION =
   "Fix the failures above. Do not claim completion until validation passes.";
 
+let gateSeq = 0;
+/**
+ * Content-gate signal: a failing (`exit 1`) bash test-run transcript block.
+ * Opens the gate (a test command was run) while keeping checkEvidence
+ * INSUFFICIENT, so the command path still does its own sandbox rerun. The
+ * loop consumes result.messages as the turn content, so the stub carries it.
+ */
+function gateRunMessage(): AnthropicNativeMessage {
+  const id = `gate-${(gateSeq += 1)}`;
+  return {
+    role: "assistant",
+    content: [
+      { type: "tool_use", id, name: "bash", input: { command: "npm test" } },
+      {
+        type: "tool_result",
+        tool_use_id: id,
+        content: JSON.stringify({ code: 1, stdout: "", stderr: "" }),
+      },
+    ],
+  };
+}
+
 function stubRun(opts: {
   readonly text: string;
   readonly userText: string;
   readonly stopReason?: RunResult["stopReason"];
   readonly priorMessages?: ReadonlyArray<AnthropicNativeMessage>;
+  /** Chit-chat shape: pure text messages, no gate signal (gate tests). */
+  readonly noEvidence?: boolean;
 }): RunOutcome {
   const messages: AnthropicNativeMessage[] = [
     ...(opts.priorMessages ?? []),
     makeNative({ role: "user", text: opts.userText }),
+    ...(opts.noEvidence ? [] : [gateRunMessage()]),
     makeNative({ role: "assistant", text: opts.text }),
   ];
   const stopReason = opts.stopReason ?? "completed";
@@ -108,6 +145,7 @@ function makeRecordingRunFn(
   script: ReadonlyArray<string>,
   opts: {
     readonly stopReasonFor?: (call: number) => RunResult["stopReason"];
+    readonly noEvidence?: boolean;
   } = {}
 ): {
   readonly runFn: VerifyLoopOptions["runFn"];
@@ -129,7 +167,13 @@ function makeRecordingRunFn(
       throw new Error(`scripted runFn exhausted at call ${call}`);
     }
     const stopReason = opts.stopReasonFor?.(call) ?? "completed";
-    return stubRun({ text, stopReason, priorMessages: prior, userText });
+    return stubRun({
+      text,
+      stopReason,
+      priorMessages: prior,
+      userText,
+      noEvidence: opts.noEvidence,
+    });
   };
   return { runFn, calls: () => calls };
 }
@@ -209,7 +253,16 @@ function makeRealRunFn(
       priorMessages: opts?.priorMessages,
     });
     finalTextSink(out.result.finalText);
-    return out;
+    // The stub model answers with text only; simulate that the turn really
+    // ran a failing test command (content-gate signal) by inserting the
+    // transcript before the final claim message.
+    const msgs = out.result.messages;
+    const last = msgs[msgs.length - 1];
+    const messages =
+      last === undefined
+        ? [gateRunMessage()]
+        : [...msgs.slice(0, -1), gateRunMessage(), last];
+    return { result: { ...out.result, messages }, trace: out.trace };
   };
 }
 
@@ -272,7 +325,16 @@ function failN(prefix: string, n: number): SandboxRunResult {
 function canRunSandbox(): boolean {
   const r = spawnSync(
     "bwrap",
-    ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-net", "--", "/bin/true"],
+    [
+      "--ro-bind",
+      "/",
+      "/",
+      "--dev",
+      "/dev",
+      "--unshare-net",
+      "--",
+      "/bin/true",
+    ],
     { stdio: "ignore" }
   );
   return r.status === 0;
@@ -285,6 +347,8 @@ function defaultOptions(over: {
   readonly signal?: AbortSignal;
   readonly trace?: TraceService;
   readonly runVerify?: VerifyLoopOptions["runVerify"];
+  readonly runClassifier?: VerifyLoopOptions["runClassifier"];
+  readonly completionMode?: VerifyLoopOptions["completionMode"];
   readonly cwd?: string;
   readonly userText?: string;
 }): VerifyLoopOptions {
@@ -296,6 +360,12 @@ function defaultOptions(over: {
     ...(over.signal !== undefined ? { signal: over.signal } : {}),
     ...(over.trace !== undefined ? { trace: over.trace } : {}),
     ...(over.runVerify !== undefined ? { runVerify: over.runVerify } : {}),
+    ...(over.runClassifier !== undefined
+      ? { runClassifier: over.runClassifier }
+      : {}),
+    ...(over.completionMode !== undefined
+      ? { completionMode: over.completionMode }
+      : {}),
     cwd: over.cwd ?? process.cwd(),
   };
 }
@@ -929,5 +999,552 @@ describe("边界: 空输出 / exec 启动失败 / 真实沙箱", () => {
     );
     assert.equal(out.outcome, "passed", "沙箱内验证命令 exit 0 → pass");
     assert.equal(out.rounds, 1);
+  });
+});
+
+/* ------------------------------ content gate (upstream verify gate, spec SC6-SC9) ------------------------------ */
+
+describe("内容门: 无可用内容信号的 turn 不进入 verify 子系统", () => {
+  function unusedClassifier(): {
+    readonly runClassifier: RunClassifierFn;
+    readonly calls: () => number;
+  } {
+    let n = 0;
+    const envelope: ClassifierEnvelope = {
+      status: "ok",
+      result: JSON.stringify({
+        kind: "pass",
+        reason: "should never spawn",
+        evidence: [],
+      }),
+      summary: "no",
+    };
+    return {
+      runClassifier: async () => {
+        n += 1;
+        return envelope;
+      },
+      calls: () => n,
+    };
+  }
+
+  it("SC6 缝合点: 闲聊 turn 仍执行 round-1 runFn, 恰一次; 随后 disabled 与未配置逐字节一致", async () => {
+    const { runFn, calls } = makeRecordingRunFn(["今天天气不错"], {
+      noEvidence: true,
+    });
+    let verifyCalled = 0;
+    const gated = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runVerify: async () => {
+          verifyCalled += 1;
+          return { exitCode: 0, stdout: "", stderr: "" };
+        },
+      })
+    );
+    assert.equal(
+      calls().length,
+      1,
+      "round 1 的 runFn 必须执行 (结果是模型真实输出)"
+    );
+    assert.equal(verifyCalled, 0, "门关 → verify.command 已配置也不得执行");
+    assert.equal(gated.enabled, false);
+    assert.equal(gated.outcome, "disabled");
+    assert.equal(gated.rounds, 0);
+    assert.equal(gated.records.length, 0);
+    assert.equal(gated.result.finalText, "今天天气不错");
+    assert.equal(gated.result.stopReason, "completed");
+    // SC8 loop 级: 零记录之外, 历史里没有任何注入信封。
+    const injected = gated.result.messages.some((m) =>
+      m.content.some(
+        (b) =>
+          b.type === "text" &&
+          (b.text.includes("[VALIDATION FAILED]") ||
+            b.text.includes("[VERIFY: rerun needed]"))
+      )
+    );
+    assert.equal(injected, false, "门关 turn 零注入信封");
+    // 与 verifyConfig 缺席的裸 run 逐字节一致 (同一 runFn 形状, command 未配)。
+    const { runFn: bareFn } = makeRecordingRunFn(["今天天气不错"], {
+      noEvidence: true,
+    });
+    const bare = await runVerifyLoop(
+      defaultOptions({ runFn: bareFn, config: { command: "" } })
+    );
+    assert.deepEqual(gated, bare, "门关结果与未配置裸 run 逐字节一致");
+    assert.equal(
+      projectVerifyHumanView(bare),
+      undefined,
+      "门关 turn 无 wire verify 字段"
+    );
+  });
+
+  it("SC9 非 doc 编辑 + 零测试执行: 门开 → 进入 verify → 人类视图诚实 not_run, 永不见 passed", async () => {
+    const messages: AnthropicNativeMessage[] = [
+      makeNative({ role: "user", text: "改 src/foo.ts" }),
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "e1",
+            name: "edit_file",
+            input: { filePath: "src/foo.ts" },
+          },
+        ],
+      },
+      makeNative({ role: "assistant", text: "已改好" }),
+    ];
+    const runFn: VerifyLoopOptions["runFn"] = async () => ({
+      result: {
+        finalText: "已改好",
+        messages,
+        turnCount: 1,
+        stopReason: "completed",
+        lastUsage: null,
+      },
+      trace: EMPTY_TRACE,
+    });
+    const judge = unusedClassifier();
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        config: { command: "" },
+        runClassifier: judge.runClassifier,
+        completionMode: "hitl",
+      })
+    );
+    assert.equal(judge.calls(), 0, "HITL 跳过完成判官");
+    // Loop 侧诚实终态词表：HITL skip 的 EXIT 直出 not_run（不再 passed），
+    // 读时投影同时仍映射 legacy passed+skip 记录（免迁移）。
+    assert.equal(out.outcome, "not_run");
+    assert.equal(out.records.length, 1, "门开 turn 进入 verify 子系统");
+    assert.equal(out.records[0]?.reason, REASON_HITL_SKIP_COMPLETION_JUDGE);
+    assert.equal(out.records[0]?.evidenceVerdict, "EVIDENCE_INSUFFICIENT");
+    assert.deepEqual(
+      projectVerifyHumanView({
+        outcome: out.outcome,
+        rounds: out.rounds,
+        records: out.records,
+      }),
+      { outcome: "not_run", rounds: out.rounds, notRunReason: "insufficient" }
+    );
+  });
+
+  // Same SC9 scenario with the PRODUCTION ACI input key (`path`, per
+  // edit-file.ts / write-file.ts ALLOWED_KEYS): the gate must open on real
+  // code-edit turns, not only on legacy filePath fixtures.
+  it("SC9 生产形态 {input:{path}} edit-only turn: 门开 → INSUFFICIENT → wire not_run + insufficient", async () => {
+    const messages: AnthropicNativeMessage[] = [
+      makeNative({ role: "user", text: "改 src/foo.ts" }),
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "ep1",
+            name: "edit_file",
+            input: { path: "src/foo.ts", old_str: "a", new_str: "b" },
+          },
+        ],
+      },
+      makeNative({ role: "assistant", text: "已改好" }),
+    ];
+    const runFn: VerifyLoopOptions["runFn"] = async () => ({
+      result: {
+        finalText: "已改好",
+        messages,
+        turnCount: 1,
+        stopReason: "completed",
+        lastUsage: null,
+      },
+      trace: EMPTY_TRACE,
+    });
+    const judge = unusedClassifier();
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        config: { command: "" },
+        runClassifier: judge.runClassifier,
+        completionMode: "hitl",
+      })
+    );
+    assert.equal(judge.calls(), 0, "HITL 跳过完成判官");
+    assert.equal(out.outcome, "not_run");
+    assert.equal(out.records.length, 1, "生产形态编辑信号必须开门");
+    assert.equal(out.records[0]?.reason, REASON_HITL_SKIP_COMPLETION_JUDGE);
+    assert.equal(out.records[0]?.evidenceVerdict, "EVIDENCE_INSUFFICIENT");
+    assert.deepEqual(
+      projectVerifyHumanView({
+        outcome: out.outcome,
+        rounds: out.rounds,
+        records: out.records,
+      }),
+      { outcome: "not_run", rounds: out.rounds, notRunReason: "insufficient" }
+    );
+  });
+
+  it("门每轮重评: round-2 消息无信号 → 门关 (禁用结果), 不再跑验证", async () => {
+    let call = 0;
+    const runFn: VerifyLoopOptions["runFn"] = async (userText) => {
+      call += 1;
+      const messages =
+        call === 1
+          ? [
+              makeNative({ role: "user", text: userText }),
+              gateRunMessage(),
+              makeNative({ role: "assistant", text: "w1" }),
+            ]
+          : [
+              // round-2 数组不含任何信号 (prior 被丢弃 — 直接构造当前轮消息)。
+              makeNative({ role: "user", text: userText }),
+              makeNative({ role: "assistant", text: "w2" }),
+            ];
+      return {
+        result: {
+          finalText: call === 1 ? "w1" : "w2",
+          messages,
+          turnCount: 1,
+          stopReason: "completed",
+          lastUsage: null,
+        },
+        trace: EMPTY_TRACE,
+      };
+    };
+    const verify = makeScriptedVerify(
+      expandRounds([{ exitCode: 1, stdout: FAIL_OUTPUT, stderr: "" }])
+    );
+    const out = await runVerifyLoop(
+      defaultOptions({ runFn, runVerify: verify.runVerify })
+    );
+    assert.equal(call, 2, "round 1 门开并 continue");
+    assert.equal(verify.callCount(), 2, "只有 round 1 执行了验证阶梯");
+    assert.equal(out.outcome, "disabled");
+    assert.equal(out.enabled, false);
+    assert.equal(out.records.length, 0);
+  });
+
+  it("门每轮重评: round-2 编辑信号被看见 (round-1 信号是测试执行, round-2 只有编辑)", async () => {
+    let call = 0;
+    const runFn: VerifyLoopOptions["runFn"] = async (userText) => {
+      call += 1;
+      const messages: AnthropicNativeMessage[] =
+        call === 1
+          ? [
+              makeNative({ role: "user", text: userText }),
+              gateRunMessage(),
+              makeNative({ role: "assistant", text: "w1" }),
+            ]
+          : [
+              makeNative({ role: "user", text: userText }),
+              {
+                role: "assistant",
+                content: [
+                  {
+                    type: "tool_use",
+                    id: "e2",
+                    name: "edit_file",
+                    input: { filePath: "src/bar.ts" },
+                  },
+                ],
+              },
+              makeNative({ role: "assistant", text: "w2" }),
+            ];
+      return {
+        result: {
+          finalText: call === 1 ? "w1" : "w2",
+          messages,
+          turnCount: 1,
+          stopReason: "completed",
+          lastUsage: null,
+        },
+        trace: EMPTY_TRACE,
+      };
+    };
+    const verify = makeScriptedVerify(
+      expandRounds([
+        { exitCode: 1, stdout: FAIL_OUTPUT, stderr: "" },
+        { exitCode: 1, stdout: FAIL_OUTPUT, stderr: "" },
+      ])
+    );
+    const out = await runVerifyLoop(
+      defaultOptions({ runFn, runVerify: verify.runVerify })
+    );
+    assert.equal(out.outcome, "failed");
+    assert.equal(out.rounds, 2);
+    assert.notEqual(out.outcome, "disabled", "round-2 的编辑信号必须开门");
+    assert.equal(verify.callCount(), 4, "round 2 照常跑验证阶梯");
+  });
+});
+
+/* ------------------------------ not_run 注入 (spec: 未验证诚实回传) ------------------------------ */
+
+describe("not_run 注入: 未验证终态如实回传模型, 成功路径零注入", () => {
+  /** HITL edit-only turn → checker INSUFFICIENT → HITL skips the judge →
+   *  terminal outcome not_run (the loop's honest vocabulary). */
+  function notRunTurn(): VerifyLoopOptions["runFn"] {
+    return async () => ({
+      result: {
+        finalText: "已改好",
+        messages: [
+          makeNative({ role: "user", text: "改 src/foo.ts" }),
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "e1",
+                name: "edit_file",
+                input: { filePath: "src/foo.ts" },
+              },
+            ],
+          },
+          makeNative({ role: "assistant", text: "已改好" }),
+        ],
+        turnCount: 1,
+        stopReason: "completed",
+        lastUsage: null,
+      },
+      trace: EMPTY_TRACE,
+    });
+  }
+
+  /** Trailing injected verify envelopes carried by a result's message list. */
+  function injectedTexts(
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): ReadonlyArray<string> {
+    return messages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => m.content.map((b) => (b.type === "text" ? b.text : "")))
+      .filter((t) => isVerifyInjectedText(t));
+  }
+
+  it("未验证终态: 恰好一条注入信封, 文案说明未验证并建议跑测试", async () => {
+    const judge = { calls: 0 };
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn: notRunTurn(),
+        config: { command: "" },
+        completionMode: "hitl",
+        runClassifier: async () => {
+          judge.calls += 1;
+          throw new Error("HITL 不得生成判官");
+        },
+      })
+    );
+    assert.equal(judge.calls, 0, "HITL 跳过完成判官");
+    assert.equal(out.outcome, "not_run");
+
+    const texts = injectedTexts(out.result.messages);
+    assert.equal(texts.length, 1, "not_run 终态恰好注入一条信封");
+    const text = texts[0]!;
+    assert.ok(
+      text.startsWith(NOT_RUN_PREFIX),
+      `前缀必须是 ${NOT_RUN_PREFIX}, 实际: ${text.slice(0, 40)}`
+    );
+    // Honest "not verified" meaning, not a pass and not a failure.
+    assert.match(text, /not verified/i);
+    assert.match(text, /not passed and not failed/i);
+    // Suggests running the tests.
+    assert.match(text, /run the project's tests/i);
+    // Never reuses the other envelopes' obligations.
+    assert.equal(text.includes("VALIDATION FAILED"), false);
+    assert.equal(text.includes("[VERIFY: rerun needed]"), false);
+    assert.equal(text.includes("Fix the failures above"), false);
+  });
+
+  it("成功终态 passed: 零注入 (模型已知自己的命令退出 0, 不加噪)", async () => {
+    const deps = makeDeps([
+      assistantResult({
+        texts: ["ran the suite"],
+        toolCalls: [{ id: "g1", name: "bash", input: { command: "npm test" } }],
+        supplierStop: "success",
+      }),
+      assistantResult({
+        texts: ["I fixed it, all tests pass."],
+        toolCalls: [],
+        supplierStop: "success",
+      }),
+    ]);
+    const verify = makeFinalTextVerify({
+      failWhen: (t) => !(t ?? "").includes("fixed"),
+      failOutput: FAIL_OUTPUT,
+    });
+    const runFn = makeRealRunFn(deps, verify.sink);
+    const out = await runVerifyLoop(
+      defaultOptions({ runFn, runVerify: verify.runVerify })
+    );
+    assert.equal(out.outcome, "passed", "证据充分 → passed 终态");
+    assert.equal(out.rounds, 1, "SUFFICIENT 证据单轮短路");
+    // The success terminal injects nothing. (This turn legitimately carries the
+    // earlier round's [VALIDATION FAILED] correction envelope — what must never
+    // appear is the not-verified one.)
+    assert.equal(
+      injectedTexts(out.result.messages).some((t) =>
+        t.startsWith(NOT_RUN_PREFIX)
+      ),
+      false,
+      "passed 终态绝不注入未验证信封"
+    );
+  });
+
+  it("无 verify.command 配置时终态: 信封不编造命令 (classifier 分支的 not_run)", async () => {
+    // VerifyConfig.command is a required string; the classifier branch (the
+    // only producer of not_run) runs with command="" — so THIS is the
+    // "no command configured" shape. The copy must say so rather than invent
+    // one: naming an unrunnable command would be a second, subtler lie.
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn: notRunTurn(),
+        config: { command: "" },
+        completionMode: "hitl",
+        runClassifier: async () => {
+          throw new Error("HITL 不得生成判官");
+        },
+      })
+    );
+    assert.equal(out.outcome, "not_run");
+    const text = injectedTexts(out.result.messages)[0]!;
+    assert.match(text, /no verify command is configured/i);
+    // And it must not borrow the rerun envelope's `  <command>` indents.
+    assert.equal(/\n {2}\S/.test(text), false, "无命令时不得编造命令行");
+  });
+
+  it("注入文案被识别为注入信封 (round-2 过滤不当作模型自撰内容)", async () => {
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn: notRunTurn(),
+        config: { command: "" },
+        completionMode: "hitl",
+        runClassifier: async () => {
+          throw new Error("HITL 不得生成判官");
+        },
+      })
+    );
+    const text = injectedTexts(out.result.messages)[0]!;
+    // Recognition by the producer's own predicate (single SSOT).
+    assert.equal(isVerifyInjectedText(text), true);
+    // Host-injection roster: the outbound projection neutralizes untrusted
+    // user text, so the prefix only survives if the roster knows it.
+    assert.equal(isHostInjectedUserText(text), true);
+    // Leading-whitespace tolerance (same trimStart discipline as the siblings).
+    assert.equal(isVerifyInjectedText(`\n  ${text}`), true);
+    // TUI: never renders as a typed user bubble.
+    assert.equal(isTuiHiddenUserMessage(out.result.messages.at(-1)!), true);
+    // Host-injected stamp, so the anchor is not stripped on the wire
+    // (ADR-0112 Decision 1 invariant 2, same as the failure envelope).
+    assert.equal(out.result.messages.at(-1)!.hostInjected, true);
+  });
+
+  it("模型真的收到该信封 (真实 run(): 下一轮的输入历史含未验证文案)", async () => {
+    // The terminal site returns immediately, so the envelope cannot ride a
+    // next-round priorMessages the way the failure envelope does. This case
+    // pins the real delivery path instead: the host persists result.messages
+    // and the next turn seeds the model from that history. Drive two REAL
+    // run() turns — turn 1 produces the not_run terminal, turn 2 is a fresh
+    // run seeded from turn 1's persisted history — and assert the model
+    // actually READ the text (recorded from the adapter's own input, not from
+    // a builder return value).
+    const seenByModel: string[][] = [];
+    let call = 0;
+    const deps: LoopEngineDeps = {
+      ...makeDeps([]),
+      adapter: {
+        ...makeDeps([]).adapter,
+        async step(state) {
+          call += 1;
+          // Record EVERY user frame the model is actually shown on this call
+          // (not just the last one): the injected envelope sits in history
+          // immediately BEFORE the new query, so a "last user text" probe
+          // would miss it and report a false negative.
+          seenByModel.push(
+            state.messages
+              .filter((m) => m.role === "user")
+              .map((m) =>
+                m.content.map((b) => (b.type === "text" ? b.text : "")).join("")
+              )
+          );
+          if (call === 1) {
+            // Turn 1: an edit-only claim (opens the gate, no test evidence).
+            return assistantResult({
+              texts: ["已改好"],
+              toolCalls: [
+                {
+                  id: "e1",
+                  name: "edit_file",
+                  input: { filePath: "src/foo.ts" },
+                },
+              ],
+            });
+          }
+          return assistantResult({ texts: ["已运行测试"] });
+        },
+      },
+      maxTurns: 4,
+    };
+
+    // runFn delegates to the REAL run() for the first turn; the loop's own
+    // second (nonexistent) round is not reached — not_run terminates.
+    const out = await runVerifyLoop({
+      runFn: async (text, opts) => {
+        const r = await run(text, deps, opts?.signal, {
+          ...(opts?.priorMessages !== undefined
+            ? { priorMessages: opts.priorMessages }
+            : {}),
+        });
+        return { result: r.result, trace: r.trace };
+      },
+      userText: "改 src/foo.ts",
+      config: { command: "" },
+      sessionId: "notrun-seam",
+      completionMode: "hitl",
+      runClassifier: async () => {
+        throw new Error("HITL 不得生成判官");
+      },
+      cwd: process.cwd(),
+    });
+    assert.equal(out.outcome, "not_run");
+
+    // Turn 2: a fresh real run seeded from turn 1's persisted history — the
+    // host hand-off the terminal injection exists for.
+    const turn2 = await run("继续", deps, undefined, {
+      priorMessages: out.result.messages,
+    });
+    assert.equal(turn2.result.stopReason, "completed");
+    // The LAST model call is the one seeded from turn 1's history — that is
+    // where the envelope must be visible.
+    const lastCallFrames = seenByModel[seenByModel.length - 1] ?? [];
+    assert.ok(
+      lastCallFrames.some((t) => isVerifyInjectedText(t)),
+      `模型必须真的读到未验证信封, 实际输入: ${JSON.stringify(seenByModel)}`
+    );
+    assert.ok(
+      lastCallFrames.some((t) => t.startsWith(NOT_RUN_PREFIX)),
+      "模型读到的必须是 [VERIFY: not verified] 前缀的那一条"
+    );
+    // Turn 1 never saw it (it is injected only after that turn terminated) —
+    // the honest boundary, and proof this is not a pre-echoed message.
+    assert.equal(
+      (seenByModel[0] ?? []).some((t) => t.startsWith(NOT_RUN_PREFIX)),
+      false,
+      "注入发生在终态之后, 第一轮模型不得提前看到"
+    );
+  });
+
+  it("非触发 turn 仍零注入 (门关 → 与 not_run 严格区分, 不回归)", async () => {
+    const { runFn, calls } = makeRecordingRunFn(["今天天气不错"], {
+      noEvidence: true,
+    });
+    const gated = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runVerify: async () => ({ exitCode: 0, stdout: "", stderr: "" }),
+      })
+    );
+    assert.equal(gated.outcome, "disabled");
+    assert.equal(calls().length, 1);
+    // Zero verify envelopes of ANY kind — the gate case is transparent, and
+    // strictly distinct from not_run (which means the turn DID enter verify).
+    assert.deepEqual(injectedTexts(gated.result.messages), []);
   });
 });

@@ -1,10 +1,13 @@
 /**
  * Human-facing verify wire projection.
  *
- * Loop outcome may still be `passed` when HITL skips the completion judge
- * after INSUFFICIENT or CONTRADICTED evidence. Humans must not see a
- * "verification passed" verdict for those shapes. SUFFICIENT short-circuit
- * stays on the wire.
+ * The loop may still report `passed` when HITL skips the completion judge
+ * after INSUFFICIENT or CONTRADICTED evidence (and newer loops report the
+ * terminal outcome `not_run` directly). Humans must not see a
+ * "verification passed" verdict for those shapes: both map to the honest
+ * `not_run` outcome, with `notRunReason` discriminating which locked copy
+ * renders. Legacy records (final_outcome=passed + hitl_skip shape) map at
+ * read time — no data migration. SUFFICIENT short-circuit stays `passed`.
  */
 import {
   REASON_HITL_SKIP_COMPLETION_JUDGE,
@@ -26,24 +29,41 @@ export function projectVerifyHumanView(input: {
     input.outcome !== "failed" &&
     input.outcome !== "unstable" &&
     input.outcome !== "escalated" &&
-    input.outcome !== "passed"
+    input.outcome !== "passed" &&
+    input.outcome !== "not_run"
   ) {
     return undefined;
   }
-  if (input.outcome === "passed" && isHitlSkipNotHumanPassed(input.records)) {
-    return undefined;
+  const skipReason = hitlSkipNotRunReason(input.records);
+  if (input.outcome === "not_run") {
+    return {
+      outcome: "not_run",
+      rounds: input.rounds,
+      notRunReason: skipReason ?? "insufficient",
+    };
+  }
+  if (input.outcome === "passed" && skipReason !== undefined) {
+    return {
+      outcome: "not_run",
+      rounds: input.rounds,
+      notRunReason: skipReason,
+    };
   }
   return { outcome: input.outcome, rounds: input.rounds };
 }
 
-function isHitlSkipNotHumanPassed(
+function hitlSkipNotRunReason(
   records: readonly VerifyHumanRecord[]
-): boolean {
+): VerifyAnswerView["notRunReason"] {
   const last = records[records.length - 1];
-  return (
-    last !== undefined &&
-    last.reason === REASON_HITL_SKIP_COMPLETION_JUDGE &&
-    (last.evidenceVerdict === "EVIDENCE_INSUFFICIENT" ||
-      last.evidenceVerdict === "EVIDENCE_CONTRADICTED")
-  );
+  if (last === undefined || last.reason !== REASON_HITL_SKIP_COMPLETION_JUDGE) {
+    return undefined;
+  }
+  if (last.evidenceVerdict === "EVIDENCE_INSUFFICIENT") {
+    return "insufficient";
+  }
+  if (last.evidenceVerdict === "EVIDENCE_CONTRADICTED") {
+    return "contradicted";
+  }
+  return undefined;
 }

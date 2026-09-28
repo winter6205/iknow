@@ -144,12 +144,17 @@ const WEAK_GREEN_PATTERNS: ReadonlyArray<RegExp> = [
   /no test files found/i, // vitest prints "No test files found" (singular test + files)
 ];
 
-/** Four failure-swallowing patterns (hard signal; a command-side hit voids that evidence). */
+/** Six failure-swallowing patterns (hard signal; a command-side hit voids that evidence). */
 const SWALLOWED_PATTERNS: ReadonlyArray<RegExp> = [
   /\|\|\s*true\b/,
   /\|\|\s*exit\s+0\b/,
   /;\s*exit\s+0\b/,
   /--passWithNoTests/,
+  // Pipeline tails: bare `bash -c` carries no `set -o pipefail`, so the
+  // reported exit code is the tail's, not the runner's — masked evidence is
+  // void (the true exit code is not recovered; that stays the pipefail fix).
+  /\|\s*tail\b/,
+  /\|\s*head\b/,
 ];
 
 /** Command-side narrow selection (-k / -t / :: exact path) → weak green. */
@@ -174,7 +179,7 @@ function isWeakGreen(command: string, stdout: string): boolean {
   return hasNarrowSelection(command);
 }
 
-/** Failure swallowed: any of the four patterns in the command text → evidence voided. */
+/** Failure swallowed: any of the six patterns in the command text → evidence voided. */
 function isSwallowed(command: string): boolean {
   return SWALLOWED_PATTERNS.some((p) => p.test(command));
 }
@@ -196,6 +201,57 @@ function isDocOnlyPath(filePath: unknown): boolean {
 }
 
 /**
+ * Target path of an edit_file / write_file tool_use input. The production ACI
+ * schema key is `path` (enforced by ALLOWED_KEYS in the tools themselves);
+ * `filePath` is accepted only for legacy test fixtures. Non-string / absent on
+ * both keys returns undefined — the callers keep their fail-closed handling.
+ */
+function editBlockPath(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const { path, filePath } = input as { path?: unknown; filePath?: unknown };
+  if (typeof path === "string") return path;
+  if (typeof filePath === "string") return filePath;
+  return undefined;
+}
+
+/** The tool_use variant of the content-block union (the walker's payload). */
+type ToolUseBlock = Extract<AnthropicContentBlock, { type: "tool_use" }>;
+
+/** Non-null object test (the walker's guard primitive): malformed messages /
+ *  blocks (null, string, number) fail closed as "no signal", never throw. */
+function isRecord(value: unknown): value is object {
+  return Boolean(value) && typeof value === "object";
+}
+
+/**
+ * The single defensive message→content→block→tool_use walk in this module.
+ * Every tool_use scanner goes through it — malformed shapes fail closed by
+ * being skipped, never by throwing: a non-object message, a non-array
+ * content, a non-object block, a non-tool_use block all contribute no
+ * signal. The handler receives the narrowed block plus its message index (for
+ * windowed scans); returning true short-circuits the walk. Returns whether
+ * any handler call short-circuited.
+ */
+function forEachToolUseBlock(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  handler: (block: ToolUseBlock, messageIndex: number) => boolean | void
+): boolean {
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i];
+    if (!isRecord(message)) continue;
+    const content = message.content;
+    if (!Array.isArray(content)) continue;
+    for (const block of content) {
+      if (!isRecord(block)) continue;
+      const b = block as AnthropicContentBlock;
+      if (b.type !== "tool_use") continue;
+      if (handler(b, i)) return true;
+    }
+  }
+  return false;
+}
+
+/**
  * Staleness check: an edit_file / write_file after the green test turn and
  * before claimIndex, targeting a non-doc-only path → stale. Ordering uses the
  * messages index (never mtime/diff/git). In-bash file mutation (sed -i /
@@ -206,23 +262,13 @@ function hasStaleEdit(
   greenIndex: number,
   claimIndex: number
 ): boolean {
-  for (let i = greenIndex + 1; i < claimIndex; i++) {
-    const message = messages[i];
-    if (!message || typeof message !== "object") continue;
-    const content = message.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const b = block as AnthropicContentBlock;
-      if (b.type !== "tool_use") continue;
-      if (b.name === "edit_file" || b.name === "write_file") {
-        if (!isDocOnlyPath((b.input as { filePath?: unknown })?.filePath)) {
-          return true;
-        }
-      }
-    }
-  }
-  return false;
+  return forEachToolUseBlock(messages, (b, i) => {
+    // Staleness window (greenIndex, claimIndex): the walk visits the whole
+    // array; blocks outside the window are not edits-after-green.
+    if (i <= greenIndex || i >= claimIndex) return;
+    if (b.name !== "edit_file" && b.name !== "write_file") return;
+    return !isDocOnlyPath(editBlockPath(b.input));
+  });
 }
 
 /** Scan forward for the tool_result paired with a tool_use_id (preserveToolPairs guarantees pairing). */
@@ -254,40 +300,70 @@ function extractTestRuns(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): TestRunEvidence[] {
   const runs: TestRunEvidence[] = [];
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i];
-    if (!message || typeof message !== "object") continue;
-    const content = message.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const b = block as AnthropicContentBlock;
-      if (b.type !== "tool_use" || b.name !== "bash") continue;
-      const command = extractCommand(b.input);
-      if (!isTestCommand(command)) continue; // test executions only
-      const result = findToolResult(messages, b.id);
-      const text = result ? toolResultText(result.content) : null;
-      const isError = result ? Boolean(result.is_error) : false;
-      // Marker checks read only the real stdout (stdout field of the
-      // structured JSON); the non-JSON fallback shape treats the whole text
-      // as stdout (defensive).
-      const { stdout } = parseToolResult(
-        isError || text?.startsWith(EXECUTION_FAILED_PREFIX) ? null : text
-      );
-      // Runner + green-summary-line both anchored → framework; greenSummary is equivalent to it.
-      const framework = detectFramework(command, stdout);
-      runs.push({
-        messageIndex: i,
-        command,
-        exitCode: parseExitCode(text, isError),
-        framework,
-        greenSummary: framework !== null,
-        weakGreen: isWeakGreen(command, stdout),
-        swallowed: isSwallowed(command),
-      });
-    }
-  }
+  forEachToolUseBlock(messages, (b, i) => {
+    if (b.name !== "bash") return;
+    const command = extractCommand(b.input);
+    if (!isTestCommand(command)) return; // test executions only
+    const result = findToolResult(messages, b.id);
+    const text = result ? toolResultText(result.content) : null;
+    const isError = result ? Boolean(result.is_error) : false;
+    // Marker checks read only the real stdout (stdout field of the
+    // structured JSON); the non-JSON fallback shape treats the whole text
+    // as stdout (defensive).
+    const { stdout } = parseToolResult(
+      isError || text?.startsWith(EXECUTION_FAILED_PREFIX) ? null : text
+    );
+    // Runner + green-summary-line both anchored → framework; greenSummary is equivalent to it.
+    const framework = detectFramework(command, stdout);
+    runs.push({
+      messageIndex: i,
+      command,
+      exitCode: parseExitCode(text, isError),
+      framework,
+      greenSummary: framework !== null,
+      weakGreen: isWeakGreen(command, stdout),
+      swallowed: isSwallowed(command),
+    });
+  });
   return runs;
+}
+
+/**
+ * CONTRADICTED fact 1: write_file blanks a test file (content ≈ empty —
+ * blank string or empty array). Path via editBlockPath (production `path`
+ * first, legacy `filePath`); malformed input / content shapes → not blanked
+ * (fail-closed).
+ */
+function isBlankedTestFileWrite(b: ToolUseBlock): boolean {
+  if (b.name !== "write_file") return false;
+  const fp = editBlockPath(b.input) ?? "";
+  const content = (b.input as { content?: unknown }).content;
+  const isEmpty =
+    (typeof content === "string" && content.trim() === "") ||
+    (Array.isArray(content) && content.length === 0);
+  return isTestFilePath(fp) && isEmpty;
+}
+
+/**
+ * First non-flag command token that is a real test-file path (token split;
+ * converges on isTestFilePath to avoid substring false hits like
+ * node_modules / vitest). Shared by the rm hard-veto and the bash
+ * mutation soft signal so both agree on the target scan.
+ */
+function findTestFileTarget(command: string): string | undefined {
+  return command
+    .split(/\s+/)
+    .find((t) => t && !t.startsWith("-") && isTestFilePath(t));
+}
+
+/**
+ * CONTRADICTED fact 2: bash `rm` on a test file — feed each rm target token
+ * to isTestFilePath, converging on real test-file path decisions (avoids
+ * substring false hits like node_modules / vitest).
+ */
+function isRmOnTestFile(command: string): boolean {
+  if (!/\brm\b/.test(command)) return false;
+  return findTestFileTarget(command) !== undefined;
 }
 
 /**
@@ -301,37 +377,11 @@ function extractTestRuns(
 function hasContradiction(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): boolean {
-  for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
-    const content = message.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const b = block as AnthropicContentBlock;
-      if (b.type !== "tool_use") continue;
-      if (b.name === "write_file") {
-        const input = b.input as { filePath?: unknown; content?: unknown };
-        const fp = typeof input.filePath === "string" ? input.filePath : "";
-        const c = input.content;
-        const isEmpty =
-          (typeof c === "string" && c.trim() === "") ||
-          (Array.isArray(c) && c.length === 0);
-        if (isTestFilePath(fp) && isEmpty) return true;
-      } else if (b.name === "bash") {
-        const command = extractCommand(b.input);
-        // bash `rm` on a test file: feed each rm target token to
-        // isTestFilePath, converging on real test-file path decisions
-        // (avoids substring false hits like node_modules / vitest).
-        if (/\brm\b/.test(command)) {
-          const target = command
-            .split(/\s+/)
-            .find((t) => t && !t.startsWith("-") && isTestFilePath(t));
-          if (target !== undefined) return true;
-        }
-      }
-    }
-  }
-  return false;
+  return forEachToolUseBlock(messages, (b) => {
+    if (b.name === "write_file") return isBlankedTestFileWrite(b);
+    if (b.name === "bash") return isRmOnTestFile(extractCommand(b.input));
+    return false;
+  });
 }
 
 /** Test-file path heuristic (src/foo.test.ts / tests/* / test_*.py etc.). */
@@ -349,6 +399,43 @@ function isTestFilePath(filePath: string): boolean {
   );
 }
 
+/** New skip/xfail decorator spellings (soft-signal scan over visible input.content). */
+const SKIP_DECORATOR_PATTERN =
+  /(\.skip|\.skipIf|\.xfail|@pytest\.mark\.skip|#\[ignore\]|#\[should_panic\])/;
+
+/**
+ * Bash-side soft signals: git commit --no-verify/-n (skipped pre-commit
+ * checks); rm/sed/mv mutating a test file (aligned with CONTRADICTED:
+ * recorded only when the target passes isTestFilePath, avoiding false hits
+ * like rm dist/bundle.js).
+ */
+function pushBashGamingSignals(command: string, signals: string[]): void {
+  if (/--no-verify|-n\b/.test(command) && /\bgit\s+commit\b/.test(command)) {
+    signals.push("git commit --no-verify/-n (skipped pre-commit checks)");
+  }
+  if (!/\b(rm|sed|mv)\b/.test(command)) return;
+  const target = findTestFileTarget(command);
+  if (target !== undefined) {
+    signals.push("bash file mutation on test file: " + target);
+  }
+}
+
+/**
+ * Edit-side soft signal: a new skip/xfail decorator landing in a test file.
+ * Scans only the visible input.content text, never reads fs (pure-function
+ * discipline). Path via editBlockPath (production `path` first, legacy
+ * `filePath`).
+ */
+function pushEditGamingSignals(b: ToolUseBlock, signals: string[]): void {
+  if (b.name !== "edit_file" && b.name !== "write_file") return;
+  const fp = editBlockPath(b.input) ?? "";
+  const content = (b.input as { content?: unknown }).content;
+  if (!isTestFilePath(fp) || typeof content !== "string") return;
+  if (SKIP_DECORATOR_PATTERN.test(content)) {
+    signals.push("new skip/xfail decorator in test file: " + fp);
+  }
+}
+
 /**
  * Collect gamingSignals soft signals (recorded only, never judged).
  * Count-based signals never accuse: fewer assertions / new skip/xfail /
@@ -358,50 +445,13 @@ function collectGamingSignals(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string[] {
   const signals: string[] = [];
-  for (const message of messages) {
-    if (!message || typeof message !== "object") continue;
-    const content = message.content;
-    if (!Array.isArray(content)) continue;
-    for (const block of content) {
-      if (!block || typeof block !== "object") continue;
-      const b = block as AnthropicContentBlock;
-      if (b.type !== "tool_use") continue;
-      if (b.name === "bash") {
-        const command = extractCommand(b.input);
-        if (
-          /--no-verify|-n\b/.test(command) &&
-          /\bgit\s+commit\b/.test(command)
-        ) {
-          signals.push("git commit --no-verify/-n (skipped pre-commit checks)");
-        }
-        // bash operations mutating a test file itself → soft signal (aligned
-        // with CONTRADICTED: recorded only when the target passes
-        // isTestFilePath, avoiding false hits like rm dist/bundle.js).
-        if (/\b(rm|sed|mv)\b/.test(command)) {
-          const target = command
-            .split(/\s+/)
-            .find((t) => t && !t.startsWith("-") && isTestFilePath(t));
-          if (target !== undefined) {
-            signals.push("bash file mutation on test file: " + target);
-          }
-        }
-      } else if (b.name === "edit_file" || b.name === "write_file") {
-        // New skip/xfail decorator landing in a test file → soft signal.
-        // Scans only the visible input.content text, never reads fs (pure-function discipline).
-        const input = b.input as { filePath?: unknown; content?: unknown };
-        const fp = typeof input.filePath === "string" ? input.filePath : "";
-        if (isTestFilePath(fp) && typeof input.content === "string") {
-          if (
-            /(\.skip|\.skipIf|\.xfail|@pytest\.mark\.skip|#\[ignore\]|#\[should_panic\])/.test(
-              input.content
-            )
-          ) {
-            signals.push("new skip/xfail decorator in test file: " + fp);
-          }
-        }
-      }
+  forEachToolUseBlock(messages, (b) => {
+    if (b.name === "bash") {
+      pushBashGamingSignals(extractCommand(b.input), signals);
+      return;
     }
-  }
+    pushEditGamingSignals(b, signals);
+  });
   return signals;
 }
 
@@ -442,6 +492,37 @@ function computeVerdict(runs: ReadonlyArray<TestRunEvidence>): EvidenceVerdict {
     }
   }
   return "EVIDENCE_INSUFFICIENT";
+}
+
+/**
+ * Upstream content gate: does this turn carry a usable content signal?
+ * Trigger IFF (a test command was run) ∨ (a non-doc source file was edited);
+ * the presence of verify.command alone does NOT open the gate. Pure chit-chat
+ * and doc-only edits (isDocOnlyPath SSOT) never enter the verify subsystem.
+ *
+ * Fail-closed on malformed input via the shared forEachToolUseBlock walk and
+ * the module's helpers: a bash block whose command is missing/non-string
+ * contributes no test signal (extractCommand → "" → isTestCommand false), an
+ * edit block whose path is non-string on both keys (`path` canonical,
+ * `filePath` legacy) is no code edit, and malformed messages / content /
+ * blocks are skipped — they never throw and never positively trigger.
+ */
+export function shouldTriggerVerify(args: {
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+}): boolean {
+  // Public entry: a non-array messages argument is malformed input →
+  // no usable signal (fail-closed; the walk itself assumes an array).
+  if (!Array.isArray(args.messages)) return false;
+  return forEachToolUseBlock(args.messages, (b) => {
+    if (b.name === "bash") {
+      return isTestCommand(extractCommand(b.input));
+    }
+    if (b.name === "edit_file" || b.name === "write_file") {
+      const path = editBlockPath(b.input);
+      return path !== undefined && !isDocOnlyPath(path);
+    }
+    return false;
+  });
 }
 
 /**

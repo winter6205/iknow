@@ -545,6 +545,7 @@ function skipAutoPersistOnLoadError(
  * - `escalated`  → "aborted"
  * - `failed`     → "active"   (result stays active; trace record only)
  * - `unstable`   → "active"   (result stays active; trace record only)
+ * - `not_run`    → "active"   (not verified is not achieved; never "achieved")
  * - `disabled`   → undefined  (no status change; trace record only)
  */
 const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
@@ -553,6 +554,7 @@ const OUTCOME_TO_STATUS: Record<VerifyLoopOutcome, GoalStatus | undefined> = {
   escalated: "aborted",
   failed: "active",
   unstable: "active",
+  not_run: "active",
   disabled: undefined,
 } as const;
 

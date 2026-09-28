@@ -115,6 +115,7 @@ import {
 // Deep import: internal persist-rule helper, deliberately not on the store barrel.
 import { persistedLastUsage } from "../session-api/store/schema.js";
 import { isTurnQuery } from "../session-api/turn-projection.js";
+import { projectVerifyHumanView } from "../session-api/verify-human-view.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import {
   applyGoalAutoContinue,
@@ -1497,6 +1498,18 @@ function chatVerifyFenceOpts(ctx: ChatLineContext): {
   };
 }
 
+/**
+ * Chat verify-report assembly: projects the human view and formats it for
+ * chat in one call. Returns undefined when there is no projectable view
+ * (disabled/aborted shapes).
+ */
+function projectChatVerifyReport(
+  input: Parameters<typeof projectVerifyHumanView>[0]
+): string | undefined {
+  const view = projectVerifyHumanView(input);
+  return view === undefined ? undefined : formatChatVerifyReport(view);
+}
+
 async function runChatQueryLine(
   opts: ProcessChatLineOpts
 ): Promise<ProcessChatLineResult> {
@@ -1658,14 +1671,20 @@ async function runChatQueryLine(
               : "未落checkpoint"
             : undefined;
         const human = !ctx.state.jsonMode;
-        // Surface the verify final verdict (failed/unstable/escalated) to
-        // chat output, so "model claims done but verification didn't pass"
-        // doesn't render as a normal completion. Only the verify branch has
-        // outcome/rounds; the bare run branch has none (no report, behavior
-        // unchanged).
+        // Surface the verify final verdict (failed/unstable/escalated/not_run)
+        // to chat output, so "model claims done but verification didn't pass"
+        // doesn't render as a normal completion. The human projection is the
+        // same read-time mapping the hub wire uses (legacy passed + HITL-skip
+        // shapes project to not_run; the notRunReason is threaded from there,
+        // not re-derived). Only the verify branch has outcome/rounds; the bare
+        // run branch has none (no report, behavior unchanged).
         const verifyReport =
           "outcome" in runOutcome
-            ? formatChatVerifyReport(runOutcome.outcome, runOutcome.rounds)
+            ? projectChatVerifyReport({
+                outcome: runOutcome.outcome,
+                rounds: runOutcome.rounds,
+                records: runOutcome.records,
+              })
             : undefined;
         const baseOutput = human
           ? formatRunHuman({

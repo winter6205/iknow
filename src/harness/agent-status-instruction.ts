@@ -34,6 +34,7 @@ import { isGraphModeText } from "./graph/notification.js";
 import { SUBAGENT_DRAIN_PREFIX } from "./subagent/host-drain.js";
 import {
   EVIDENCE_RERUN_PREFIX,
+  NOT_RUN_PREFIX,
   VALIDATION_FAILED_PREFIX,
 } from "./verify/inject.js";
 import { isSkillIndexDeltaText } from "./skill/index-delta.js";
@@ -85,6 +86,7 @@ export const HOST_INJECTION_LINE_ANCHORS: ReadonlyArray<string> = Object.freeze(
     SUBAGENT_DRAIN_PREFIX,
     VALIDATION_FAILED_PREFIX,
     EVIDENCE_RERUN_PREFIX,
+    NOT_RUN_PREFIX,
   ]
 );
 

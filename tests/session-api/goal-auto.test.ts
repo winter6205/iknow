@@ -66,6 +66,26 @@ describe("decideAutoGoalAfterTurn", () => {
     expect(d.idleCompletedStreak).toBe(0);
   });
 
+  // not_run joins VerifyLoopOutcome; earlyStopDecision is a plain if-chain
+  // with no type-total exhaustiveness, so this arm is pinned by direct
+  // assertion (spec verify-status-contract SC5 / Q-B). The shape below
+  // (completed + no tool_use + streak 2) would otherwise fall through to
+  // the streak computation and stop at 3 — the explicit arm must pass the
+  // streak through UNCHANGED and keep the loop going.
+  it("not_run → continue auto loop, no clear, idle streak unchanged (not reset)", () => {
+    const d = decideAutoGoalAfterTurn({
+      autoTurnsRan: 1,
+      idleCompletedStreak: 2,
+      stopReason: "completed",
+      roundHadToolUse: false,
+      verifyOutcome: "not_run",
+    });
+    expect(d.continueAuto).toBe(true);
+    expect(d.clearGoal).toBe(false);
+    expect(d.idleCompletedStreak).toBe(2);
+    expect(d.autoTurnsRan).toBe(2);
+  });
+
   it("Impossible judge reason → clearGoal, stop", () => {
     const d = decideAutoGoalAfterTurn({
       autoTurnsRan: 0,

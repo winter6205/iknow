@@ -77,12 +77,28 @@ function makeHub(
 ): SessionHub {
   const store = new SessionStore(baseDir, process.cwd());
   const verifyConfig: VerifyConfig = { command: VERIFY_COMMAND };
+  // Each turn is a [bash test attempt, final text] response pair. The attempt
+  // is the content-gate signal: the tool is unregistered in this harness
+  // (registry = noop → tool_not_found result), but the transcript proves a
+  // test command was run, so the turn enters verify. A text-only turn would
+  // be gated out and the fence face would never fire.
   return new SessionHub({
     store,
     workspaceRoot: process.cwd(),
     deps: makeDeps(
-      Array.from({ length: responses }, () =>
-        assistantResult({ texts: ["ok"] })
+      Array.from({ length: responses * 2 }, (_, i) =>
+        i % 2 === 0
+          ? assistantResult({
+              texts: ["running tests"],
+              toolCalls: [
+                {
+                  id: `gate-${i}`,
+                  name: "bash",
+                  input: { command: "npm test" },
+                },
+              ],
+            })
+          : assistantResult({ texts: ["ok"] })
       )
     ),
     verifyConfig,

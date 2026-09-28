@@ -60,7 +60,16 @@ const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
   { role: "assistant", content: [textBlock("implemented")] },
 ];
 
+/**
+ * Gate-open shape: a non-doc source edit with zero test runs — enters verify
+ * (content gate) while checkEvidence stays INSUFFICIENT ("no bash test
+ * execution before claim found").
+ */
 const TEXT_ONLY_MESSAGES: AnthropicNativeMessage[] = [
+  {
+    role: "assistant",
+    content: [writeFile("w01", "src/app.ts", "code")],
+  },
   { role: "assistant", content: [textBlock("implemented but no tests")] },
 ];
 

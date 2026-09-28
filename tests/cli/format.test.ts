@@ -708,58 +708,122 @@ describe("renderThinkingSummary (#T6 thinking 折叠摘要)", () => {
 });
 
 /**
- * formatVerifyReport — the passed success branch.
+ * formatVerifyReport — success + not_run branches over the options object.
  *
- * The parameter union used to be failed/unstable/escalated only (failure-side
- * reports); once passed joined the wire, the chat-session.ts call site's type
- * widened naturally and needs a success label. abort/disabled never reach the
- * wire, so they get no branch.
+ * The parameter used to be positional (outcome, rounds); the not_run outcome
+ * joined the wire union with a notRunReason discriminator, so the signature
+ * widened to the VerifyAnswerView shape — the reason is threaded in, never
+ * re-derived here. abort/disabled never reach the wire, so they get no branch.
  */
-describe("formatVerifyReport — passed 成功态 (T2)", () => {
+describe("formatVerifyReport — passed 成功态 + not_run 判别渲染", () => {
   it("passed → `[验证] 验证通过（N 轮）`", () => {
-    assert.equal(formatVerifyReport("passed", 3), "[验证] 验证通过（3 轮）");
+    assert.equal(
+      formatVerifyReport({ outcome: "passed", rounds: 3 }),
+      "[验证] 验证通过（3 轮）"
+    );
   });
 
   it("failed 文案不变 (backward-compat 回归锚)", () => {
-    assert.match(formatVerifyReport("failed", 1), /^\[验证\] 验证未通过/);
+    assert.match(
+      formatVerifyReport({ outcome: "failed", rounds: 1 }),
+      /^\[验证\] 验证未通过/
+    );
+  });
+
+  it("not_run insufficient → `[验证] 未验证（证据不足）（N 轮）`", () => {
+    assert.equal(
+      formatVerifyReport({
+        outcome: "not_run",
+        rounds: 2,
+        notRunReason: "insufficient",
+      }),
+      "[验证] 未验证（证据不足）（2 轮）"
+    );
+  });
+
+  it("not_run contradicted → `[验证] 未验证（证据冲突）（N 轮）`", () => {
+    assert.equal(
+      formatVerifyReport({
+        outcome: "not_run",
+        rounds: 2,
+        notRunReason: "contradicted",
+      }),
+      "[验证] 未验证（证据冲突）（2 轮）"
+    );
+  });
+
+  it("两个 not_run 文案互不相同(禁止坍缩为一条)", () => {
+    const insufficient = formatVerifyReport({
+      outcome: "not_run",
+      rounds: 1,
+      notRunReason: "insufficient",
+    });
+    const contradicted = formatVerifyReport({
+      outcome: "not_run",
+      rounds: 1,
+      notRunReason: "contradicted",
+    });
+    assert.notEqual(insufficient, contradicted);
   });
 });
 
 /**
- * The chat assembly must not print a green check for HITL small-talk passed.
- * formatVerifyReport("passed") still produces the label (for non-chat callers),
- * but formatChatVerifyReport stays silent on passed — pinning the existing
- * chat-session gate.
+ * The chat assembly must not print a green check for passed. not_run is the
+ * honest not-verified line and must print (SC2 consumer 7: not_run routes
+ * into formatVerifyReport).
  */
-describe("formatChatVerifyReport — chat 不印 passed 绿勾 (SC2)", () => {
+describe("formatChatVerifyReport — chat 不印 passed 绿勾,印 not_run (SC2)", () => {
   it("passed → undefined（不印 `[验证] 验证通过`）", () => {
-    assert.equal(formatChatVerifyReport("passed", 1), undefined);
+    assert.equal(
+      formatChatVerifyReport({ outcome: "passed", rounds: 1 }),
+      undefined
+    );
   });
 
   it("failed / unstable / escalated 仍印报告", () => {
     assert.match(
-      formatChatVerifyReport("failed", 2) ?? "",
+      formatChatVerifyReport({ outcome: "failed", rounds: 2 }) ?? "",
       /^\[验证\] 验证未通过/
     );
     assert.match(
-      formatChatVerifyReport("unstable", 1) ?? "",
+      formatChatVerifyReport({ outcome: "unstable", rounds: 1 }) ?? "",
       /^\[验证\] 验证不稳定/
     );
     assert.match(
-      formatChatVerifyReport("escalated", 4) ?? "",
+      formatChatVerifyReport({ outcome: "escalated", rounds: 4 }) ?? "",
       /^\[验证\] 验证耗尽/
+    );
+  });
+
+  it("not_run → 印对应文案(insufficient / contradicted 各自一条)", () => {
+    assert.equal(
+      formatChatVerifyReport({
+        outcome: "not_run",
+        rounds: 1,
+        notRunReason: "insufficient",
+      }),
+      "[验证] 未验证（证据不足）（1 轮）"
+    );
+    assert.equal(
+      formatChatVerifyReport({
+        outcome: "not_run",
+        rounds: 3,
+        notRunReason: "contradicted",
+      }),
+      "[验证] 未验证（证据冲突）（3 轮）"
     );
   });
 });
 
 /**
- * hub/TUI projection: HITL + INSUFFICIENT + hitl_skip_completion_judge must
- * never put passed (a human-readable green check) on the wire. The SUFFICIENT
- * short-circuit may still pass.
+ * hub/TUI projection: the legacy HITL + INSUFFICIENT/CONTRADICTED +
+ * hitl_skip_completion_judge shape (final_outcome=passed on disk) projects to
+ * the honest not_run at read time — no data migration, no hidden absence.
+ * The SUFFICIENT short-circuit may still pass.
  */
-describe("projectVerifyHumanView — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
-  it("HITL skip + INSUFFICIENT + passed → 字段缺席（无绿勾）", () => {
-    assert.equal(
+describe("projectVerifyHumanView — legacy skip 形状读时投影 not_run (SC2/SC4)", () => {
+  it("legacy: HITL skip + INSUFFICIENT + passed → not_run insufficient", () => {
+    assert.deepEqual(
       projectVerifyHumanView({
         outcome: "passed",
         rounds: 1,
@@ -770,28 +834,12 @@ describe("projectVerifyHumanView — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
           },
         ],
       }),
-      undefined
+      { outcome: "not_run", rounds: 1, notRunReason: "insufficient" }
     );
   });
 
-  it("SC5 无声称点：同一 INSUFFICIENT + skip 形状 → 无绿勾", () => {
-    assert.equal(
-      projectVerifyHumanView({
-        outcome: "passed",
-        rounds: 1,
-        records: [
-          {
-            reason: "hitl_skip_completion_judge",
-            evidenceVerdict: "EVIDENCE_INSUFFICIENT",
-          },
-        ],
-      }),
-      undefined
-    );
-  });
-
-  it("HITL skip + CONTRADICTED + passed → 字段缺席（无绿勾）", () => {
-    assert.equal(
+  it("legacy: HITL skip + CONTRADICTED + passed → not_run contradicted", () => {
+    assert.deepEqual(
       projectVerifyHumanView({
         outcome: "passed",
         rounds: 1,
@@ -802,7 +850,18 @@ describe("projectVerifyHumanView — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
           },
         ],
       }),
-      undefined
+      { outcome: "not_run", rounds: 1, notRunReason: "contradicted" }
+    );
+  });
+
+  it("loop 直出 not_run(无 skip 记录可推)→ 判别字段保守默认 insufficient", () => {
+    assert.deepEqual(
+      projectVerifyHumanView({
+        outcome: "not_run",
+        rounds: 0,
+        records: [],
+      }),
+      { outcome: "not_run", rounds: 0, notRunReason: "insufficient" }
     );
   });
 
@@ -817,19 +876,18 @@ describe("projectVerifyHumanView — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
     );
   });
 
-  it("failed 不受 skip 记录影响，仍上 wire", () => {
-    assert.deepEqual(
-      projectVerifyHumanView({
-        outcome: "failed",
-        rounds: 2,
-        records: [
-          {
-            reason: "hitl_skip_completion_judge",
-            evidenceVerdict: "EVIDENCE_INSUFFICIENT",
-          },
-        ],
-      }),
-      { outcome: "failed", rounds: 2 }
-    );
+  it("failed 不受 skip 记录影响，仍上 wire（不带判别字段）", () => {
+    const view = projectVerifyHumanView({
+      outcome: "failed",
+      rounds: 2,
+      records: [
+        {
+          reason: "hitl_skip_completion_judge",
+          evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+        },
+      ],
+    });
+    assert.deepEqual(view, { outcome: "failed", rounds: 2 });
+    assert.equal("notRunReason" in (view ?? {}), false);
   });
 });

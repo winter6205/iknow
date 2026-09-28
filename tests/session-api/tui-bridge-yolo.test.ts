@@ -76,11 +76,22 @@ afterEach(() => {
 /** Assemble the TUI bridge; the yolo holder is injected optionally. */
 function makeBridge(yolo?: ReturnType<typeof createYoloContext>) {
   const verifyConfig: VerifyConfig = { command: VERIFY_COMMAND };
+  // Each turn is a [bash test attempt, final text] response pair; the attempt
+  // is the content-gate signal (tool unregistered here → tool_not_found, but
+  // the transcript proves a test command ran, so the turn enters verify).
+  // Two pairs are scripted so the flip case can post twice.
+  const gate = (id: string) =>
+    assistantResult({
+      texts: ["running tests"],
+      toolCalls: [{ id, name: "bash", input: { command: "npm test" } }],
+    });
   return createTuiBridge({
     dataDir: baseDir,
     workspaceRoot: baseDir,
     deps: makeDeps([
+      gate("g0"),
       assistantResult({ texts: ["ok"] }),
+      gate("g1"),
       assistantResult({ texts: ["ok"] }),
     ]),
     inflight: createInflightRegistry(),

@@ -34,6 +34,10 @@ const TRACKED_INCLUDE = [
   // #1089 section B: three inductions over the same runner (no means named in
   // the prompt, verbal bash-grep induction, non-TypeScript arm).
   "real-llm/role-substitution-boundaries-real.test.ts",
+  // verify-status-contract (spec SC12): real-model half of the three-value
+  // verify-outcome golden set (offline half + fixtures live under
+  // tests/harness/verify/), HAS_KEY guard — no key → explicit Not run.
+  "real-llm/verify-status-contract.test.ts",
 ];
 
 const LOCAL_ONLY_INCLUDE = [

@@ -4,7 +4,13 @@ import type {
   AnthropicNativeMessage,
 } from "../../../../src/harness/model-adapter/types.js";
 import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.js";
-import { message, textBlock, toolResult, toolUse } from "./_fixtures.js";
+import {
+  message,
+  textBlock,
+  toolResult,
+  toolUse,
+  VITEST_GREEN,
+} from "./_fixtures.js";
 
 /**
  * Exit-code dual-path parsing + fail-closed.
@@ -127,5 +133,71 @@ describe("fail-closed 空输入 / 畸形 (T2 骨架 greenSummary 恒 false)", ()
         stale: expect.any(Boolean),
       })
     );
+  });
+});
+
+describe("pipeline-tail 掩码 → swallowed → INSUFFICIENT, 永不为 SUFFICIENT (SC11)", () => {
+  // `| tail` / `| head`: the sandbox runs bare `bash -c` with no
+  // `set -o pipefail`, so {code: 0} is the tail's exit code, not the runner's.
+  // Evidence condition 4 (not swallowed) widens to void the masked run. The
+  // vitest-runner form below is the shape that used to read SUFFICIENT
+  // (exit 0 + green line + not weak), so the voiding is what fails the case.
+  for (const tail of ["tail -5", "head -5"]) {
+    it(`npx vitest run 2>&1 | ${tail} + code 0 + 绿行 → swallowed → INSUFFICIENT`, () => {
+      const id = `p-${tail.replace(/[^a-z]/g, "")}`;
+      const msgs = transcript([
+        toolUse(id, `npx vitest run 2>&1 | ${tail}`),
+        toolResult(
+          id,
+          JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+        ),
+      ]);
+      const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+      expect(report.runs).toHaveLength(1);
+      expect(report.runs[0].greenSummary).toBe(true);
+      expect(report.runs[0].exitCode).toBe(0);
+      expect(report.runs[0].swallowed).toBe(true);
+      expect(report.verdict).not.toBe("EVIDENCE_SUFFICIENT");
+      expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+    });
+  }
+
+  it("spec 原样命令 npm test 2>&1 | tail -5 → swallowed = true", () => {
+    const msgs = transcript([
+      toolUse("p-npm", "npm test 2>&1 | tail -5"),
+      toolResult(
+        "p-npm",
+        JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+      ),
+    ]);
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].swallowed).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it("管道尾部空格变体 (npx vitest run |tail -1) 同样作废", () => {
+    const msgs = transcript([
+      toolUse("p-sp", "npx vitest run |tail -1"),
+      toolResult(
+        "p-sp",
+        JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+      ),
+    ]);
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].swallowed).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it("非掩码管道 (| cat) 不吞 — 其余证据条件不变 → SUFFICIENT", () => {
+    const msgs = transcript([
+      toolUse("p-cat", "npx vitest run 2>&1 | cat"),
+      toolResult(
+        "p-cat",
+        JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+      ),
+    ]);
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].swallowed).toBe(false);
+    expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
   });
 });

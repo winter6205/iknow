@@ -204,8 +204,8 @@ function unusedJudgeSpy(): {
 }
 
 describe("HITL completion module (plan T1)", () => {
-  it("greeting completed + INSUFFICIENT: spawn = 0, named skip EXIT, StopReason stays completed", async () => {
-    const { runFn } = makeEvidenceRunFn(GREETING_MESSAGES);
+  it("greeting completed: content gate keeps the turn out of verify — zero records, absent projection (SC8)", async () => {
+    const { runFn, calls: runCalls } = makeEvidenceRunFn(GREETING_MESSAGES);
     const { runClassifier, calls } = makeClassifierSpy([
       {
         status: "ok",
@@ -219,13 +219,29 @@ describe("HITL completion module (plan T1)", () => {
     ]);
     const out = await runVerifyLoop(hitlOptions({ runFn, runClassifier }));
     assert.equal(
+      runCalls().length,
+      1,
+      "round 1 的 runFn 照常执行 (结果是模型真实输出)"
+    );
+    assert.equal(
       calls().length,
       0,
       "HITL greeting must not spawn completion judge"
     );
-    assert.equal(out.outcome, "passed");
+    assert.equal(out.outcome, "disabled");
+    assert.equal(out.enabled, false);
+    assert.equal(out.rounds, 0);
     assert.equal(out.result.stopReason, "completed");
-    assert.equal(out.records[0]?.reason, REASON_HITL_SKIP_COMPLETION_JUDGE);
+    assert.equal(out.records.length, 0, "门关 turn 零 VerificationRecord");
+    assert.equal(
+      projectVerifyHumanView({
+        outcome: out.outcome,
+        rounds: out.rounds,
+        records: out.records,
+      }),
+      undefined,
+      "门关 turn 的 wire verify 字段必须缺席"
+    );
   });
 
   it("HITL + SUFFICIENT: still no spawn", async () => {
@@ -269,22 +285,26 @@ describe("HITL completion module (plan T1)", () => {
       "no extra worker round for contradicted"
     );
     assert.notEqual(out.records[0]?.verdict, "true-failure");
-    assert.equal(out.outcome, "passed");
+    assert.equal(
+      out.outcome,
+      "not_run",
+      "HITL CONTRADICTED skip ends the loop with the honest not_run terminal"
+    );
     assert.equal(out.result.stopReason, "completed");
     assert.equal(out.records[0]?.reason, REASON_HITL_SKIP_COMPLETION_JUDGE);
     assert.equal(
       out.records[0]?.evidenceVerdict,
       "EVIDENCE_CONTRADICTED",
-      "HITL CONTRADICTED skip must persist verdict so projection can hide green"
+      "HITL CONTRADICTED skip must persist verdict so the projection maps not_run"
     );
-    assert.equal(
+    assert.deepEqual(
       projectVerifyHumanView({
         outcome: out.outcome,
         rounds: out.rounds,
         records: out.records,
       }),
-      undefined,
-      "HITL CONTRADICTED skip must not wire human 验证通过"
+      { outcome: "not_run", rounds: out.rounds, notRunReason: "contradicted" },
+      "HITL CONTRADICTED skip must wire an honest not_run, never 验证通过"
     );
   });
 
@@ -301,17 +321,21 @@ describe("HITL completion module (plan T1)", () => {
       "no extra worker round for contradicted"
     );
     assert.notEqual(out.records[0]?.verdict, "true-failure");
-    assert.equal(out.outcome, "passed");
+    assert.equal(
+      out.outcome,
+      "not_run",
+      "HITL CONTRADICTED skip (rm shape) ends the loop with the honest not_run terminal"
+    );
     assert.equal(out.result.stopReason, "completed");
     assert.equal(out.records[0]?.reason, REASON_HITL_SKIP_COMPLETION_JUDGE);
     assert.equal(out.records[0]?.evidenceVerdict, "EVIDENCE_CONTRADICTED");
-    assert.equal(
+    assert.deepEqual(
       projectVerifyHumanView({
         outcome: out.outcome,
         rounds: out.rounds,
         records: out.records,
       }),
-      undefined
+      { outcome: "not_run", rounds: out.rounds, notRunReason: "contradicted" }
     );
   });
 

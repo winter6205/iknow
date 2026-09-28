@@ -33,6 +33,7 @@ import type {
   RunResult,
   TokenUsage,
 } from "../harness/index.js";
+import type { VerifyAnswerView } from "../session-api/contract.js";
 import {
   createOutputMask,
   currentSecretValues,
@@ -260,27 +261,27 @@ export function formatRunHuman(opts: FormatRunHumanOpts): string {
 
 /**
  * Chat assembly gate: never print the passed green-check line.
- * Failure triad still uses formatVerifyReport. abort / disabled stay silent.
+ * The failure triad and not_run use formatVerifyReport. abort / disabled
+ * stay silent. Takes the projected wire view so the notRunReason
+ * discriminator is threaded from the projection, not re-derived here.
  */
 export function formatChatVerifyReport(
-  outcome: string,
-  rounds: number
+  view: VerifyAnswerView
 ): string | undefined {
   if (
-    outcome === "failed" ||
-    outcome === "unstable" ||
-    outcome === "escalated"
+    view.outcome === "failed" ||
+    view.outcome === "unstable" ||
+    view.outcome === "escalated" ||
+    view.outcome === "not_run"
   ) {
-    return formatVerifyReport(outcome, rounds);
+    return formatVerifyReport(view);
   }
   return undefined;
 }
 
 /** CLI human verify line. Chat uses formatChatVerifyReport. */
-export function formatVerifyReport(
-  outcome: "failed" | "unstable" | "escalated" | "passed",
-  rounds: number
-): string {
+export function formatVerifyReport(view: VerifyAnswerView): string {
+  const { outcome, rounds } = view;
   const label =
     outcome === "failed"
       ? "验证未通过"
@@ -288,9 +289,13 @@ export function formatVerifyReport(
         ? "验证不稳定（套件干扰）"
         : outcome === "escalated"
           ? "验证耗尽（升级后仍未通过）"
-          : "验证通过";
-  // passed is a legal terminal state and carries no "completion not judged" warning suffix; the other three states keep the existing text.
-  if (outcome === "passed") {
+          : outcome === "not_run"
+            ? view.notRunReason === "contradicted"
+              ? "未验证（证据冲突）"
+              : "未验证（证据不足）"
+            : "验证通过";
+  // passed is a legal terminal state and carries no "completion not judged" warning suffix; not_run is self-explanatory (nothing was judged), the failed family keeps the existing text.
+  if (outcome === "passed" || outcome === "not_run") {
     return `[验证] ${label}（${rounds} 轮）`;
   }
   return `[验证] ${label}（${rounds} 轮）—— 未判完成，结果以验证为准。`;

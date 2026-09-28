@@ -191,11 +191,14 @@ export function turnOutcomeFields(
 }
 
 /** Wire view of the verification loop's final verdict (rounds + outcome)
- *  for UI surfaces. "passed" is a success state; abort / disabled never
+ *  for UI surfaces. "passed" is a success state; "not_run" is the honest
+ *  not-verified state (never a hidden absence); abort / disabled never
  *  enter the wire. */
 export interface VerifyAnswerView {
-  readonly outcome: "failed" | "unstable" | "escalated" | "passed";
+  readonly outcome: "failed" | "unstable" | "escalated" | "passed" | "not_run";
   readonly rounds: number;
+  /** Present iff outcome === "not_run". Carries which locked copy to render. */
+  readonly notRunReason?: "insufficient" | "contradicted";
 }
 
 /** Single thinking text view (redacted_thinking is counted only; its data

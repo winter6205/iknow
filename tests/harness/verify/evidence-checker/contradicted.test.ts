@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import type { AnthropicNativeMessage } from "../../../../src/harness/model-adapter/types.js";
+import type {
+  AnthropicContentBlock,
+  AnthropicNativeMessage,
+} from "../../../../src/harness/model-adapter/types.js";
 import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.js";
 import {
   greenRun,
@@ -44,6 +47,26 @@ describe("CONTRADICTED — write_file 清空测试文件 / bash rm 测试文件"
       message("user", textBlock("task")),
       message("assistant", ...greenRun("g1")),
       message("assistant", toolUse("r1", "rm -f src/foo.test.ts")),
+      message("user", textBlock("done")),
+    ];
+    const report = checkEvidence({ messages: msgs, claimIndex: 3 });
+    expect(report.verdict).toBe("EVIDENCE_CONTRADICTED");
+  });
+
+  // Production ACI schema key is `path` (write-file.ts ALLOWED_KEYS); a
+  // {path}-key blanking of a test file is the real tool-call form and must
+  // reach the CONTRADICTED hard veto, not slip through on the legacy read.
+  it("生产形态 {path} write_file 清空测试文件 → CONTRADICTED", () => {
+    const write = {
+      type: "tool_use",
+      id: "w6",
+      name: "write_file",
+      input: { path: "src/foo.test.ts", content: "" },
+    } as AnthropicContentBlock;
+    const msgs: AnthropicNativeMessage[] = [
+      message("user", textBlock("task")),
+      message("assistant", ...greenRun("g1")),
+      message("assistant", write),
       message("user", textBlock("done")),
     ];
     const report = checkEvidence({ messages: msgs, claimIndex: 3 });

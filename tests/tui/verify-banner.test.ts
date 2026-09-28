@@ -261,6 +261,68 @@ describe("verifyFromWire — wire 形状 runtime 校验", () => {
     }
   });
 
+  test("not_run + 合法 notRunReason → ok(判别字段透传,字节仅 not_run 携带)", () => {
+    expect(
+      verifyFromWire({
+        outcome: "not_run",
+        rounds: 2,
+        notRunReason: "insufficient",
+      })
+    ).toEqual({
+      kind: "ok",
+      verify: { outcome: "not_run", rounds: 2, notRunReason: "insufficient" },
+    });
+    expect(
+      verifyFromWire({
+        outcome: "not_run",
+        rounds: 1,
+        notRunReason: "contradicted",
+      })
+    ).toEqual({
+      kind: "ok",
+      verify: { outcome: "not_run", rounds: 1, notRunReason: "contradicted" },
+    });
+  });
+
+  test("not_run 缺 notRunReason → unavailable(malformed_view)", () => {
+    expect(verifyFromWire({ outcome: "not_run", rounds: 1 })).toEqual({
+      kind: "unavailable",
+      reason: { kind: "malformed_view" },
+    });
+  });
+
+  test("not_run + 未知 notRunReason → unavailable(malformed_view)", () => {
+    expect(
+      verifyFromWire({ outcome: "not_run", rounds: 1, notRunReason: "garbage" })
+    ).toEqual({
+      kind: "unavailable",
+      reason: { kind: "malformed_view" },
+    });
+  });
+
+  test("非 not_run 却带 notRunReason → unavailable(双向耦合)", () => {
+    expect(
+      verifyFromWire({
+        outcome: "passed",
+        rounds: 1,
+        notRunReason: "insufficient",
+      })
+    ).toEqual({
+      kind: "unavailable",
+      reason: { kind: "malformed_view" },
+    });
+    expect(
+      verifyFromWire({
+        outcome: "failed",
+        rounds: 1,
+        notRunReason: "contradicted",
+      })
+    ).toEqual({
+      kind: "unavailable",
+      reason: { kind: "malformed_view" },
+    });
+  });
+
   test("unknown outcome → unavailable(malformed_view)", () => {
     expect(verifyFromWire({ outcome: "bogus", rounds: 1 })).toEqual({
       kind: "unavailable",
@@ -437,10 +499,21 @@ describe("端到端:createTuiBridge.postMessage 透传 verify DTO", () => {
     "verifyConfig 配置 + 验证 exit 0 → TuiPostResult.verify === {outcome:'passed', rounds:1}",
     async () => {
       rmSync(marker, { force: true });
+      // The upstream content gate (spec SC6) closes on a text-only turn, so
+      // the passthrough case must carry a real gate signal: a bash test
+      // command tool_use (tool unregistered here → tool_not_found, but the
+      // transcript proves a test attempt). The turn then runs the REAL
+      // verify path — command round exits 0 → the DTO carries the passed view.
+      const gate = assistantResult({
+        texts: ["running the suite"],
+        toolCalls: [
+          { id: "gv1", name: "bash", input: { command: "npm test" } },
+        ],
+      });
       const bridge = createTuiBridge({
         dataDir,
         workspaceRoot: dataDir,
-        deps: makeDeps([assistantResult({ texts: ["fixed"] })]),
+        deps: makeDeps([gate, assistantResult({ texts: ["fixed"] })]),
         inflight: createInflightRegistry(),
         verifyConfig: { command: passScript },
       });
@@ -475,10 +548,11 @@ describe("接线守卫:app.tsx 接入 verify-banner", () => {
 });
 
 // =============================================================================
-// HITL chit-chat / no claimed completion → the human must not read `验证通过` ("verification passed")
+// HITL chit-chat / no claimed completion → the human reads an honest not_run
+// line (amber), never `验证通过`, never a hidden absence.
 // =============================================================================
-describe("projectVerifyHumanView + banner — HITL 闲聊不打绿勾 (SC2/SC5)", () => {
-  test("HITL skip + INSUFFICIENT → slot none → banner 0 行", () => {
+describe("projectVerifyHumanView + banner — HITL skip 投影 not_run (SC1-SC3)", () => {
+  test("HITL skip + INSUFFICIENT → not_run + 「未验证（证据不足）」1 行 amber", () => {
     const view = projectVerifyHumanView({
       outcome: "passed",
       rounds: 1,
@@ -489,13 +563,21 @@ describe("projectVerifyHumanView + banner — HITL 闲聊不打绿勾 (SC2/SC5)"
         },
       ],
     });
+    expect(view).toEqual({
+      outcome: "not_run",
+      rounds: 1,
+      notRunReason: "insufficient",
+    });
     const slot = verifyFromWire(view);
-    expect(slot).toEqual({ kind: "none" });
-    expect(projectVerifyBanner(slot, "hitl", 80)).toEqual([]);
-    expect(projectVerifyBanner(slot, "auto", 80)).toEqual([]);
+    expect(slot.kind).toBe("ok");
+    const lines = projectVerifyBanner(slot, "hitl", 80);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.text).toBe("⚠ 未验证（证据不足）（1 轮）");
+    expect(lines[0]!.fg).toBe(tuiPalette.running);
+    expect(lines[0]!.text).not.toContain("验证通过");
   });
 
-  test("HITL skip + CONTRADICTED → slot none → 人不读验证通过", () => {
+  test("HITL skip + CONTRADICTED → not_run + 「未验证（证据冲突）」1 行 amber", () => {
     const view = projectVerifyHumanView({
       outcome: "passed",
       rounds: 1,
@@ -506,10 +588,59 @@ describe("projectVerifyHumanView + banner — HITL 闲聊不打绿勾 (SC2/SC5)"
         },
       ],
     });
+    expect(view).toEqual({
+      outcome: "not_run",
+      rounds: 1,
+      notRunReason: "contradicted",
+    });
     const slot = verifyFromWire(view);
-    expect(slot).toEqual({ kind: "none" });
-    expect(projectVerifyBanner(slot, "hitl", 80)).toEqual([]);
-    expect(projectVerifyBanner(slot, "auto", 80)).toEqual([]);
+    expect(slot.kind).toBe("ok");
+    const lines = projectVerifyBanner(slot, "hitl", 80);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.text).toBe("⚠ 未验证（证据冲突）（1 轮）");
+    expect(lines[0]!.fg).toBe(tuiPalette.running);
+    expect(lines[0]!.text).not.toContain("验证通过");
+  });
+
+  test("两个 not_run 变体渲染字符串互不相同(禁止坍缩为一条)", () => {
+    const insufficient = projectVerifyBanner(
+      {
+        kind: "ok",
+        verify: { outcome: "not_run", rounds: 1, notRunReason: "insufficient" },
+      },
+      "hitl",
+      80
+    );
+    const contradicted = projectVerifyBanner(
+      {
+        kind: "ok",
+        verify: { outcome: "not_run", rounds: 1, notRunReason: "contradicted" },
+      },
+      "hitl",
+      80
+    );
+    expect(insufficient).toHaveLength(1);
+    expect(contradicted).toHaveLength(1);
+    expect(insufficient[0]!.text).not.toBe(contradicted[0]!.text);
+  });
+
+  test("loop 直出 not_run(outcome 词表)→ 同 legacy 形状渲染", () => {
+    const view = projectVerifyHumanView({
+      outcome: "not_run",
+      rounds: 2,
+      records: [
+        {
+          reason: "hitl_skip_completion_judge",
+          evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+        },
+      ],
+    });
+    expect(view).toEqual({
+      outcome: "not_run",
+      rounds: 2,
+      notRunReason: "insufficient",
+    });
+    expect(verifyFromWire(view).kind).toBe("ok");
   });
 
   test("HITL SUFFICIENT 短路 passed → 仍显示验证通过", () => {

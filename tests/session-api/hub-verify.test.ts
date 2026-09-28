@@ -51,13 +51,35 @@ import type { VerifyConfig } from "../../src/harness/verify/types.ts";
 function canRunSandbox(): boolean {
   const r = spawnSync(
     "bwrap",
-    ["--ro-bind", "/", "/", "--dev", "/dev", "--unshare-net", "--", "/bin/true"],
+    [
+      "--ro-bind",
+      "/",
+      "/",
+      "--dev",
+      "/dev",
+      "--unshare-net",
+      "--",
+      "/bin/true",
+    ],
     { stdio: "ignore" }
   );
   return r.status === 0;
 }
 
 const text = (t: string) => ({ type: "text" as const, text: t });
+
+/**
+ * Content-gate signal for the stub-model turns: an attempted `npm test` bash
+ * call. The tool is unregistered in this harness (registry = noop), so the
+ * executor records tool_not_found — the transcript still shows a test command
+ * was run, which opens the upstream verify gate (a text-only turn would be
+ * gated out of verify and the verify command would never execute).
+ */
+const gateTestCall = (id: string) => ({
+  id,
+  name: "bash",
+  input: { command: "npm test" },
+});
 
 // -- isolated workdir (cwd for the closed loop's sandbox) ---------------------
 const prevCwd = process.cwd();
@@ -135,7 +157,13 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
       rmSync(markerPath, { force: true });
       const hub = makeHub({
         verifyConfig: { command: passScript },
-        responses: [assistantResult({ texts: ["fixed"] })],
+        responses: [
+          assistantResult({
+            texts: ["ran the suite"],
+            toolCalls: [gateTestCall("v1")],
+          }),
+          assistantResult({ texts: ["fixed"] }),
+        ],
       });
       const { session } = await hub.createSession();
       const res = await hub.postMessage({
@@ -147,7 +175,7 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
       assert.equal(
         existsSync(markerPath),
         true,
-        "配置 verifyConfig 时验证命令应经沙箱执行"
+        "配置 verifyConfig + 门开 turn → 验证命令应经沙箱执行"
       );
     }
   );
@@ -163,7 +191,13 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
       rmSync(markerPath, { force: true });
       const hub = makeHub({
         verifyConfig: { command: passScript },
-        responses: [assistantResult({ texts: ["fixed"] })],
+        responses: [
+          assistantResult({
+            texts: ["ran the suite"],
+            toolCalls: [gateTestCall("v2")],
+          }),
+          assistantResult({ texts: ["fixed"] }),
+        ],
       });
       const { session } = await hub.createSession();
       const res = await hub.postMessage({
@@ -185,12 +219,16 @@ describe("SessionHub postMessage — verify-loop 装配 (T8)", () => {
     "verifyConfig 配置 + 验证真失败 → 注入失败信封 (下轮 priorMessages)",
     async () => {
       rmSync(markerPath, { force: true });
-      // Two stub responses: first run returns (completed) → verify fails →
-      // envelope injected; second run (envelope in priorMessages) returns →
-      // verify still fails → stall stops it.
+      // Two stub runs (one tool attempt each side): first run returns
+      // (completed) → verify fails → envelope injected; second run (envelope
+      // in priorMessages) returns → verify still fails → stall stops it.
       const hub = makeHub({
         verifyConfig: { command: failScript },
         responses: [
+          assistantResult({
+            texts: ["ran the suite"],
+            toolCalls: [gateTestCall("v3")],
+          }),
           assistantResult({ texts: ["fix-1"] }),
           assistantResult({ texts: ["fix-2"] }),
         ],

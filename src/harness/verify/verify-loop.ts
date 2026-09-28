@@ -41,11 +41,12 @@ import type { LoopTrace } from "../loop-trace.js";
 import type { TraceService } from "../trace/index.js";
 import { stampHostInjected } from "../model-adapter/outbound-projection.js";
 import { deriveClaimIndex } from "../last-nonempty-assistant.js";
-import { checkEvidence } from "./evidence-checker.js";
+import { checkEvidence, shouldTriggerVerify } from "./evidence-checker.js";
 import { probeVerifyCommand } from "./command-probe.js";
 import {
   buildClassifierEnvelope,
   buildEvidenceRerunEnvelope,
+  buildNotRunEnvelope,
   buildValidationEnvelope,
   EVIDENCE_RERUN_PREFIX,
   isVerifyInjectedText,
@@ -245,7 +246,13 @@ export interface VerifyLoopOptions {
 }
 
 export type VerifyLoopOutcome =
-  "passed" | "failed" | "unstable" | "escalated" | "aborted" | "disabled";
+  | "passed"
+  | "failed"
+  | "unstable"
+  | "escalated"
+  | "aborted"
+  | "disabled"
+  | "not_run";
 
 export interface VerifyLoopResult {
   /** Final run result (passed, or the last state when the loop stopped). */
@@ -570,6 +577,58 @@ function buildNextPriorMessages(
   return [...filtered, injected];
 }
 
+/**
+ * Terminal `not_run` injection (spec: the not-verified case IS returned to the
+ * model; the success case is NOT).
+ *
+ * Delivery seam: the terminal site returns immediately, so unlike every other
+ * injection there is no next `runFn` call for `priorMessages` to carry the text
+ * into. `result.messages` is instead the durable hand-off — the host persists
+ * it verbatim (conditionalSave / the chat REPL) and the next turn seeds
+ * `priorMessages` from that same persisted history, so the model reads the
+ * envelope on its next turn. Appending (not replacing) keeps the loop's own
+ * `result` byte-identical in every other respect: same finalText, same turn
+ * list, same trace — only one extra trailing user message.
+ *
+ * `buildNextPriorMessages` filtering runs on the NEXT round's injection, so a
+ * stale copy from an earlier round can never accumulate (same convergence
+ * discipline the failure and rerun envelopes rely on).
+ *
+ * Idempotence: the loop terminates on the first `not_run`, so this site runs at
+ * most once; the `filter` is defense-in-depth against a double-append if a
+ * future refactor revisits the terminal with the same outcome.
+ *
+ * Returns `current` UNCHANGED for every other terminal outcome — the `passed`
+ * path deliberately injects nothing (the model already knows its own command
+ * exited 0, and a success envelope would be noise).
+ */
+function appendNotRunInjection(
+  current: RunOutcome,
+  outcome: VerifyLoopOutcome,
+  round: number,
+  maxRounds: number,
+  configCommand: string | undefined
+): RunOutcome {
+  if (outcome !== "not_run") return current;
+  const injected = userTextMessage(
+    buildNotRunEnvelope({
+      round,
+      maxRounds,
+      ...(configCommand !== undefined ? { command: configCommand } : {}),
+    })
+  );
+  const filtered = current.result.messages.filter(
+    (m) => !isInjectedEnvelope(m)
+  );
+  return {
+    ...current,
+    result: {
+      ...current.result,
+      messages: Object.freeze([...filtered, injected]),
+    },
+  };
+}
+
 /** Flag-file candidates for probeVerifyCommand input. */
 const PROBE_FLAG_FILES: ReadonlySet<string> = new Set([
   "pyproject.toml",
@@ -722,6 +781,31 @@ function buildResult(opts: {
   });
 }
 
+/**
+ * Loop terminal outcome at a pass/stop exit. A HITL skip of the completion
+ * judge (produceObservation's named-reason "pass", reached only with
+ * EVIDENCE_INSUFFICIENT / EVIDENCE_CONTRADICTED in hand) ends as an honest
+ * not_run: the loop ran, nothing was verified — the loop's terminal
+ * vocabulary carries the state instead of only the wire projection. The
+ * evidence-backed pass (SUFFICIENT short-circuit / green command round) and
+ * every stop outcome keep decision.finalOutcome. The persisted record still
+ * carries the skip reason + evidenceVerdict, so
+ * projectVerifyHumanView's record-based mapping works for BOTH the new loop
+ * terminal and legacy passed+skip records (migration-free rule stands).
+ */
+function loopTerminalOutcome(
+  finalOutcome: "passed" | "failed" | "unstable" | "escalated",
+  observation: RoundObservation
+): VerifyLoopOutcome {
+  if (
+    finalOutcome === "passed" &&
+    observation.reason === REASON_HITL_SKIP_COMPLETION_JUDGE
+  ) {
+    return "not_run";
+  }
+  return finalOutcome;
+}
+
 /* ------------------------------ classifier branch (fills in when command is absent) ------------------------------ */
 
 /**
@@ -853,6 +937,57 @@ async function runClassifierOnce(opts: {
 /* ------------------------------ main loop (shared by command & classifier) ------------------------------ */
 
 /**
+ * Per-iteration pre-round exits, evaluated in order on the current round's
+ * state: user abort, non-completed stop reason, and the upstream content
+ * gate. Returns undefined when the round may proceed.
+ */
+function preRoundExit(opts: {
+  readonly current: RunOutcome;
+  readonly records: ReadonlyArray<VerificationRecord>;
+  readonly round: number;
+  readonly signal: AbortSignal | undefined;
+}): VerifyLoopResult | undefined {
+  if (opts.signal?.aborted) {
+    return buildResult({
+      current: opts.current,
+      records: opts.records,
+      rounds: opts.round,
+      enabled: true,
+      outcome: "aborted",
+    });
+  }
+  // Only StopReason=completed triggers verification; everything else passes through.
+  if (opts.current.result.stopReason !== "completed") {
+    const outcome: VerifyLoopOutcome =
+      opts.current.result.stopReason === "cancelled" ? "aborted" : "failed";
+    return buildResult({
+      current: opts.current,
+      records: opts.records,
+      rounds: opts.round,
+      enabled: true,
+      outcome,
+    });
+  }
+  // Upstream content gate (pre-stage, re-evaluated every round on the
+  // post-run messages of the current round — a round-2 edit is seen): a
+  // turn without a usable content signal never enters the verify
+  // subsystem, even when verify.command is configured. The no-op result is
+  // the disabled path's exact shape, byte-identical to an unconfigured
+  // bare run; round 1's runFn already ran, so result is the model's real
+  // output.
+  if (!shouldTriggerVerify({ messages: opts.current.result.messages })) {
+    return buildResult({
+      current: opts.current,
+      records: [],
+      rounds: 0,
+      enabled: false,
+      outcome: "disabled",
+    });
+  }
+  return undefined;
+}
+
+/**
  * The loop body (shared by the command and classifier branches).
  * Differences are parameterized by two seams:
  *   - produceObservation: one-round verification output (runVerificationRound vs runClassifierOnce);
@@ -887,27 +1022,13 @@ async function runVerifyLoopBody(opts: {
   let round = 0;
 
   while (true) {
-    if (options.signal?.aborted) {
-      return buildResult({
-        current,
-        records,
-        rounds: round,
-        enabled: true,
-        outcome: "aborted",
-      });
-    }
-    // Only StopReason=completed triggers verification; everything else passes through.
-    if (current.result.stopReason !== "completed") {
-      const outcome: VerifyLoopOutcome =
-        current.result.stopReason === "cancelled" ? "aborted" : "failed";
-      return buildResult({
-        current,
-        records,
-        rounds: round,
-        enabled: true,
-        outcome,
-      });
-    }
+    const exit = preRoundExit({
+      current,
+      records,
+      round,
+      signal: options.signal,
+    });
+    if (exit !== undefined) return exit;
 
     round += 1;
     // Evidence-first pre-stage: before each round's produceObservation run
@@ -1072,12 +1193,22 @@ async function runVerifyLoopBody(opts: {
     void options.trace?.recordVerification(records[records.length - 1]!);
 
     if (decision.kind === "pass" || decision.kind === "stop") {
+      const terminalOutcome = loopTerminalOutcome(
+        decision.finalOutcome,
+        observation
+      );
       return buildResult({
-        current,
+        current: appendNotRunInjection(
+          current,
+          terminalOutcome,
+          round,
+          opts.maxRounds,
+          options.config.command
+        ),
         records,
         rounds: round,
         enabled: true,
-        outcome: decision.finalOutcome,
+        outcome: terminalOutcome,
       });
     }
     if (decision.kind === "escalate") {

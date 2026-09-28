@@ -193,6 +193,12 @@ function earlyStopDecision(
   ) {
     return makeResponse(false, false, autoTurnsRan, input.idleCompletedStreak);
   }
+  // not_run is neither a verified success nor a hard failure: continue the
+  // auto loop, keep the goal, pass the idle streak through unchanged (a
+  // near-threshold streak must not be laundered into a stop next turn).
+  if (input.verifyOutcome === "not_run") {
+    return makeResponse(true, false, autoTurnsRan, input.idleCompletedStreak);
+  }
   return undefined;
 }
 

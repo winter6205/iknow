@@ -9,6 +9,7 @@
  *   escalated → "aborted"
  *   failed    → "active"    (no status change; trace-only)
  *   unstable  → "active"    (no status change; trace-only)
+ *   not_run   → "active"    (never "achieved"; spec verify-status-contract Q-B)
  *   disabled  → undefined   (no status change; trace-only)
  *
  * `applyTransition` runs only when target is a valid forward edge from current
@@ -30,8 +31,8 @@ import { mkdtemp, rm, readFile, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-const { runVerifyLoopMock, setOutcome } = vi.hoisted(() => {
-  let outcome: VerifyLoopOutcome = "passed";
+const { runVerifyLoopMock, setOutcome, setOutcomeSequence } = vi.hoisted(() => {
+  let outcomes: VerifyLoopOutcome[] = ["passed"];
   const fn = vi.fn(
     async (opts: {
       runFn: (
@@ -49,6 +50,13 @@ const { runVerifyLoopMock, setOutcome } = vi.hoisted(() => {
       }>;
     }) => {
       const r = await opts.runFn("whatever", {});
+      // Sequence consumption: shift until the last entry, which repeats.
+      // Static setOutcome stays a one-element sequence (every turn same
+      // outcome, like the pre-not_run fixtures).
+      const outcome =
+        outcomes.length > 1
+          ? (outcomes.shift() as VerifyLoopOutcome)
+          : outcomes[0]!;
       return {
         result: r.result,
         trace: r.trace,
@@ -62,7 +70,10 @@ const { runVerifyLoopMock, setOutcome } = vi.hoisted(() => {
   return {
     runVerifyLoopMock: fn,
     setOutcome: (o: VerifyLoopOutcome) => {
-      outcome = o;
+      outcomes = [o];
+    },
+    setOutcomeSequence: (seq: VerifyLoopOutcome[]) => {
+      outcomes = [...seq];
     },
   };
 });
@@ -249,6 +260,33 @@ describe("goal.status write-back on verify-loop outcome (#458 T5 SC8)", () => {
     const after = await load(id);
     assert.equal(after.goal?.status, "active");
     const rec = await readWritebackGoalRecord(id);
+    assert.equal(rec["status"], "active");
+  });
+
+  // not_run continues the auto loop (SC5/Q-B), so a constant-not_run mock
+  // never idle-stops; the sequence pins turn 1 as the not_run write-back and
+  // lets disabled turns run the loop out. A not_run → "achieved" mapping would
+  // flip the status on turn 1 and no later arm flips it back.
+  it("outcome 'not_run' → goal.status stays 'active' (never 'achieved') + recordGoal writeback(status: active)", async () => {
+    setOutcomeSequence([
+      "not_run",
+      "disabled",
+      "disabled",
+      "disabled",
+      "disabled",
+    ]);
+    const id = "t5-not-run";
+    await seedSession(id, activeGoal);
+    const hub = makeHub();
+    await hub.postMessage({ conversationId: id, text: "test it" });
+    const after = await load(id);
+    assert.equal(
+      after.goal?.status,
+      "active",
+      "not_run must never mark the goal achieved"
+    );
+    const rec = await readWritebackGoalRecord(id);
+    assert.equal(rec["action"], "writeback");
     assert.equal(rec["status"], "active");
   });
 

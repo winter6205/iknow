@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import type { AnthropicNativeMessage } from "../../../../src/harness/model-adapter/types.js";
-import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.js";
+import {
+  checkEvidence,
+  shouldTriggerVerify,
+} from "../../../../src/harness/verify/evidence-checker.js";
 import { message, textBlock, toolResult, toolUse } from "./_fixtures.js";
 
 /**
@@ -128,5 +131,178 @@ describe("fail-closed 歧义 / 残缺 / 空输入 → 非 SUFFICIENT (A8)", () =
       const report = checkEvidence({ messages: msgs, claimIndex: 1 });
       expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
     }
+  });
+});
+
+describe("gate 畸形 message → 无可用信号 → 不开门，不抛 (SC7)", () => {
+  // Every malformed shape below carries a block that WOULD trigger if the
+  // malformed field were readable (a test command text in a non-string
+  // command, a src path in a non-string filePath): the predicate must
+  // resolve each to "no usable signal", never to a positive trigger.
+  const malformedShapes: ReadonlyArray<[string, unknown[]]> = [
+    ["非对象 message (null / string / number)", [null, "not-a-message", 42]],
+    [
+      "非数组 content",
+      [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { role: "assistant", content: "npm test" } as any,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { role: "assistant", content: { filePath: "src/a.ts" } } as any,
+      ],
+    ],
+    [
+      "edit_file filePath=null",
+      [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "e1",
+              name: "edit_file",
+              input: { filePath: null },
+            },
+          ],
+        } as any,
+      ],
+    ],
+    [
+      "write_file filePath 非字符串 (数字)",
+      [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "w1",
+              name: "write_file",
+              input: { filePath: 123 },
+            },
+          ],
+        } as any,
+      ],
+    ],
+    [
+      "edit_file path=null (生产键)",
+      [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "e3",
+              name: "edit_file",
+              input: { path: null },
+            },
+          ],
+        } as any,
+      ],
+    ],
+    [
+      "write_file path 非字符串 (生产键, 数字)",
+      [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "w3",
+              name: "write_file",
+              input: { path: 123 },
+            },
+          ],
+        } as any,
+      ],
+    ],
+    [
+      "edit_file input 缺失",
+      [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "e2", name: "edit_file" }],
+        } as any,
+      ],
+    ],
+    [
+      "bash input.command 缺失",
+      [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        {
+          role: "assistant",
+          content: [{ type: "tool_use", id: "b1", name: "bash", input: {} }],
+        } as any,
+      ],
+    ],
+    [
+      "bash input.command 非字符串 (数组里藏测试命令)",
+      [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "b2",
+              name: "bash",
+              input: { command: ["npm test"] },
+            },
+          ],
+        } as any,
+      ],
+    ],
+    [
+      "content 块非对象",
+      [
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        { role: "assistant", content: ["npm test", null, 7] } as any,
+      ],
+    ],
+  ];
+
+  for (const [name, msgs] of malformedShapes) {
+    it(`${name} → false 且不抛`, () => {
+      let result: boolean | undefined;
+      expect(() => {
+        result = shouldTriggerVerify({
+          messages: msgs as AnthropicNativeMessage[],
+        });
+      }).not.toThrow();
+      expect(result).toBe(false);
+    });
+  }
+
+  it("非数组 messages → false 且不抛", () => {
+    let result: boolean | undefined;
+    expect(() => {
+      result = shouldTriggerVerify({
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        messages: "npm test" as any,
+      });
+    }).not.toThrow();
+    expect(result).toBe(false);
+  });
+
+  it("畸形样本混一条完好信号 → 完好信号照常开门", () => {
+    const msgs = [
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      null as any,
+      message(
+        "assistant",
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        {
+          type: "tool_use",
+          id: "b1",
+          name: "bash",
+          input: { command: 99 },
+        } as any
+      ),
+      message("assistant", toolUse("b2", "npm test")),
+    ];
+    expect(shouldTriggerVerify({ messages: msgs })).toBe(true);
   });
 });

@@ -120,6 +120,36 @@ describe("gamingSignals 软信号只记录, verdict 不变 (SC9)", () => {
     expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
   });
 
+  // Production ACI schema key is `path` (edit-file.ts / write-file.ts
+  // ALLOWED_KEYS): the skip-decorator soft signal must fire on the real
+  // tool-call form, not only on the legacy filePath fixture key.
+  it("生产形态 {path} edit_file 新增 skip 装饰器 → gamingSignals 非空", () => {
+    const edit = {
+      type: "tool_use",
+      id: "w3",
+      name: "edit_file",
+      input: { path: "src/foo.test.ts", content: "it.skip('x', ...)" },
+    } as AnthropicContentBlock;
+    const msgs: AnthropicNativeMessage[] = [
+      message("user", textBlock("task")),
+      message("assistant", edit),
+      message(
+        "assistant",
+        toolUse("g1", "npx vitest run"),
+        toolResult(
+          "g1",
+          JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+        )
+      ),
+      message("user", textBlock("done")),
+    ];
+    const report = checkEvidence({ messages: msgs, claimIndex: 3 });
+    expect(
+      report.gamingSignals.some((s) => s.includes("src/foo.test.ts"))
+    ).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
+  });
+
   it("无软信号时 gamingSignals 为空", () => {
     const msgs = greenWithTail([]);
     const report = checkEvidence({ messages: msgs, claimIndex: 2 });

@@ -80,6 +80,24 @@ function canRunSandbox(): boolean {
 
 // -- isolated workdir (cwd for the closed loop's sandbox) ---------------------
 const prevCwd = process.cwd();
+
+/**
+ * Content-gate signal for the stub turns: an attempted `npm test` bash call.
+ * The tool is unregistered in this harness (registry = noop), so the executor
+ * records tool_not_found — the transcript still proves a test command ran,
+ * which opens the upstream verify gate (a text-only turn is gated out and the
+ * verify command never executes).
+ */
+const gateTestCall = (id: string) => ({
+  id,
+  name: "bash",
+  input: { command: "npm test" },
+});
+const gateTurn = (id: string) =>
+  assistantResult({
+    texts: ["ran the suite"],
+    toolCalls: [gateTestCall(id)],
+  });
 let workDir: string;
 /** Marker the verification script writes, proving the loop really ran the check. */
 let markerPath: string;
@@ -140,7 +158,10 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
     async () => {
       rmSync(markerPath, { force: true });
       const ctx = makeCtx({
-        responses: [assistantResult({ texts: ["answer-ok"] })],
+        responses: [
+          gateTurn("pc-g1"),
+          assistantResult({ texts: ["answer-ok"] }),
+        ],
       });
       Object.assign(ctx, {
         verifyConfig: { command: passScript } satisfies VerifyConfig,
@@ -152,11 +173,23 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
       assert.equal(
         existsSync(markerPath),
         true,
-        "配置 verifyConfig 时验证命令应经沙箱执行"
+        "配置 verifyConfig + 门开 turn → 验证命令应经沙箱执行"
       );
-      // Single-turn pass; history shape identical to the unconfigured case (a passing turn doesn't change the assembly surface).
-      assert.equal(ctx.state.messages.length, 2);
+      // Single-round pass: the history carries the model's own tool roundtrip
+      // and nothing else — a passing turn adds no verify bookkeeping.
+      assert.equal(ctx.state.messages.length, 4);
       assert.equal(ctx.state.messages[1]!.role, "assistant");
+      assert.equal(ctx.state.messages[3]!.role, "assistant");
+      const envelopes = ctx.state.messages.filter(
+        (m) =>
+          m.role === "user" &&
+          m.content.some(
+            (b) =>
+              b.type === "text" &&
+              (b.text as string).includes("[VALIDATION FAILED]")
+          )
+      );
+      assert.equal(envelopes.length, 0, "通过轮不得注入信封");
     }
   );
 
@@ -166,6 +199,7 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
       rmSync(markerPath, { force: true });
       const ctx = makeCtx({
         responses: [
+          gateTurn("pc-g2"),
           assistantResult({ texts: ["fix-attempt-1"] }),
           assistantResult({ texts: ["fix-attempt-2"] }),
         ],
@@ -177,10 +211,11 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
       assert.equal(r.ranQuery, true);
       assert.equal(existsSync(markerPath), true, "验证命令应真实执行");
       // failScript always exits 1 → first-turn failure injects the envelope →
-      // second verify with the same signature stalls → loop stops. History has two assistant messages.
+      // second verify with the same signature stalls → loop stops. History has
+      // three assistant messages (gate roundtrip + the two fix rounds).
       assert.equal(
         ctx.state.messages.filter((m) => m.role === "assistant").length,
-        2
+        3
       );
       const envelopes = ctx.state.messages.filter(
         (m) =>
@@ -271,6 +306,7 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
     rmSync(markerPath, { force: true });
     const ctx = makeCtx({
       responses: [
+        gateTurn("pc-g3"),
         assistantResult({ texts: ["fix-attempt-1"] }),
         assistantResult({ texts: ["fix-attempt-2"] }),
       ],
@@ -321,7 +357,10 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
       chmodSync(probeScript, 0o755);
 
       const ctx = makeCtx({
-        responses: [assistantResult({ texts: ["answer-ws"] })],
+        responses: [
+          gateTurn("pc-g4"),
+          assistantResult({ texts: ["answer-ws"] }),
+        ],
         fsMode: createFsModeContext("workspace"),
       });
       Object.assign(ctx, {
@@ -356,7 +395,10 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
       chmodSync(probeScript, 0o755);
 
       const ctx = makeCtx({
-        responses: [assistantResult({ texts: ["answer-g"] })],
+        responses: [
+          gateTurn("pc-g5"),
+          assistantResult({ texts: ["answer-g"] }),
+        ],
         fsMode: createFsModeContext("global"),
       });
       Object.assign(ctx, {

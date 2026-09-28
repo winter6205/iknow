@@ -54,6 +54,26 @@ const EMPTY_TRACE: LoopTrace = Object.freeze({
   }),
 });
 
+/**
+ * Content-gate signal: an inert non-doc source edit. Opens the upstream
+ * verify gate (the judge-path stubs were pure text, which now never enters
+ * verify) with zero effect on checkEvidence — still no runs, same
+ * INSUFFICIENT reasons, no probe files, no gaming signals.
+ */
+function gateSignalMessage(): AnthropicNativeMessage {
+  return {
+    role: "assistant",
+    content: [
+      {
+        type: "tool_use",
+        id: "gate-edit",
+        name: "edit_file",
+        input: { filePath: "src/app.ts" },
+      },
+    ],
+  };
+}
+
 /** stubRun: deterministic run() stub return shape (same as verify-loop.test.ts). */
 function stubRun(opts: {
   readonly text: string;
@@ -64,6 +84,7 @@ function stubRun(opts: {
   const messages: AnthropicNativeMessage[] = [
     ...(opts.priorMessages ?? []),
     makeNative({ role: "user", text: opts.userText }),
+    gateSignalMessage(),
     makeNative({ role: "assistant", text: opts.text }),
   ];
   const stopReason = opts.stopReason ?? "completed";

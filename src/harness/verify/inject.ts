@@ -9,16 +9,19 @@ export const DEFAULT_MAX_CHARS = 20_000;
 export const VALIDATION_FIXED_INSTRUCTION =
   "Fix the failures above. Do not claim completion until validation passes.";
 
-/** Host-injected verify envelopes (fail / evidence rerun). Model-facing only. */
+/** Host-injected verify envelopes (fail / evidence rerun / not verified).
+ *  Model-facing only. */
 export const VALIDATION_FAILED_PREFIX = "[VALIDATION FAILED]";
 export const EVIDENCE_RERUN_PREFIX = "[VERIFY: rerun needed]";
+export const NOT_RUN_PREFIX = "[VERIFY: not verified]";
 
 /** True when text is a verify-loop envelope, not a user-typed query. */
 export function isVerifyInjectedText(text: string): boolean {
   const t = text.trimStart();
   return (
     t.startsWith(VALIDATION_FAILED_PREFIX) ||
-    t.startsWith(EVIDENCE_RERUN_PREFIX)
+    t.startsWith(EVIDENCE_RERUN_PREFIX) ||
+    t.startsWith(NOT_RUN_PREFIX)
   );
 }
 
@@ -226,5 +229,80 @@ export function buildEvidenceRerunEnvelope(
     `  ${args.command}`
   );
   lines.push(EVIDENCE_RERUN_FIXED_INSTRUCTION);
+  return `${lines.join("\n")}\n`;
+}
+
+/**
+ * Not-verified envelope closing instruction. Deliberately NOT the
+ * VALIDATION_FIXED_INSTRUCTION ("fix the failures"): nothing failed. And
+ * deliberately NOT EVIDENCE_RERUN_FIXED_INSTRUCTION: the rerun envelope names
+ * a concrete command to re-run and asks for a green-summary line. A terminal
+ * `not_run` need not have a command to name at all — the only producer of it
+ * today (the classifier branch) runs with an empty `config.command` — and must
+ * not imply a plain retry is enough. It states the honest fact (nothing was
+ * verified) and asks the model to produce test evidence before claiming
+ * completion again.
+ */
+export const NOT_RUN_FIXED_INSTRUCTION =
+  "This turn is not verified — no test evidence was produced, so do not treat it as passing. Run the project's tests and show the test framework's green-summary line before claiming completion.";
+
+export interface BuildNotRunEnvelopeArgs {
+  readonly round: number;
+  readonly maxRounds: number;
+  /**
+   * The configured `verify.command`, when the loop has one. `not_run` is
+   * reachable with an empty command (the classifier branch, the only producer
+   * today), so this is optional: absent → the envelope names no command and
+   * says so rather than inventing one (a copy naming an unrunnable command
+   * would be a new, subtler lie).
+   */
+  readonly command?: string;
+}
+
+/**
+ * Not-verified envelope builder (verbatim shape below).
+ *
+ * Shape contract:
+ *   [VERIFY: not verified] attempt=N/M
+ *   You reported the task as complete, but this turn produced no verifiable
+ *   test evidence, so the result is not verified — not passed and not failed.
+ *   Run the project's tests and include the test framework's green-summary
+ *   line (e.g. "5 passed" / "Tests: 5 passed") in your next response before
+ *   claiming completion again.
+ *     <command>
+ *   <NOT_RUN_FIXED_INSTRUCTION>
+ *
+ * A DEDICATED envelope rather than an extension of the evidence-rerun one: the
+ * rerun envelope's trigger is weak evidence with a concrete command to re-run,
+ * and its obligation is "run this exact command". A terminal `not_run` has
+ * neither — it ends the loop, so it must report the honest state without
+ * implying the model can simply retry.
+ *
+ * The success case is NEVER injected (spec): the model already knows its own
+ * command exited 0, and injecting it would be noise.
+ */
+export function buildNotRunEnvelope(args: BuildNotRunEnvelopeArgs): string {
+  const command = (args.command ?? "").trim();
+  const lines: string[] = [
+    `${NOT_RUN_PREFIX} attempt=${args.round}/${args.maxRounds}`,
+    "You reported the task as complete, but this turn produced no verifiable",
+    "test evidence, so the result is not verified — not passed and not failed.",
+  ];
+  if (command.length > 0) {
+    lines.push(
+      "Run the project's tests and include the test framework's green-summary",
+      'line (e.g. "5 passed" / "Tests: 5 passed") in your next response before',
+      "claiming completion again:",
+      `  ${command}`
+    );
+  } else {
+    lines.push(
+      "No verify command is configured for this project, so run the project's",
+      "tests yourself and include the test framework's green-summary line",
+      '(e.g. "5 passed" / "Tests: 5 passed") in your next response before',
+      "claiming completion again."
+    );
+  }
+  lines.push(NOT_RUN_FIXED_INSTRUCTION);
   return `${lines.join("\n")}\n`;
 }

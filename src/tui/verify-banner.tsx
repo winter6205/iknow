@@ -3,8 +3,8 @@
  * src/tui/verify-banner.tsx
  *
  * Human-readable end-state banner for the TUI verify loop:
- *   - shown in both HITL and auto modes for the 4 terminal states
- *     passed / failed / unstable / escalated;
+ *   - shown in both HITL and auto modes for the terminal states
+ *     passed / failed / unstable / escalated / not_run;
  *   - missing verify → silent (0 rows, the render shell returns null, no
  *     fake hint);
  *   - malformed wire shape (runtime boundary) → degraded "verification result
@@ -16,7 +16,7 @@
  *     directly, without OpenTUI / React rendering.
  *
  * Glyph discipline: passed ✓ / failed ✗ (established ✓ ✗ ▤ convention from
- * subagent-panel); unstable ⚠ / escalated ⤴. HITL shows the label directly;
+ * subagent-panel); unstable ⚠ / escalated ⤴ / not_run ⚠. HITL shows the label directly;
  * auto prefixes `[auto] ` as a visual marker.
  *
  * Single data source: no second ledger. Banner state lives in app.tsx keyed
@@ -47,7 +47,7 @@ export interface VerifyProjectionError {
 
 /** Discriminated union for the app.tsx state slot (data slot and render
  *  projection converge in the projection function). none = missing verify
- *  (legal state, silent, no render); ok = one of the 4 terminal states;
+ *  (legal state, silent, no render); ok = one of the terminal states;
  *  unavailable = projection failed (degraded "result unavailable" line). */
 export type VerifySlot =
   | { readonly kind: "none" }
@@ -62,11 +62,14 @@ export interface VerifyBannerLine {
   readonly text: string;
 }
 
-// ===== outcome → glyph + label + fg (4-state mapping) =============================
+// ===== outcome → glyph + label + fg (terminal-state mapping) =============================
 //
 // Color basis: passed green (palette.add, same source as add diff lines);
 // failed / escalated red (palette.error, same source as del/error); unstable
-// amber (palette.running, a hint state between running and error).
+// amber (palette.running, a hint state between running and error); not_run
+// amber (palette.running — not verified is neither a pass nor a verified
+// failure). The two not_run rows are keyed by the notRunReason discriminator
+// and must never collapse onto one string.
 //
 // Short-form labels — matching the labels of cli/format.ts formatVerifyReport
 // but without its "not judged complete" warning suffix (the banner is
@@ -84,47 +87,110 @@ const VERIFY_OUTCOME_PRESENTATION = {
     label: "验证耗尽（升级后仍未通过）",
     fg: tuiPalette.error,
   },
+  not_run_insufficient: {
+    glyph: "⚠",
+    label: "未验证（证据不足）",
+    fg: tuiPalette.running,
+  },
+  not_run_contradicted: {
+    glyph: "⚠",
+    label: "未验证（证据冲突）",
+    fg: tuiPalette.running,
+  },
 } as const;
+
+function verifyPresentationKey(
+  view: VerifyAnswerView
+): keyof typeof VERIFY_OUTCOME_PRESENTATION {
+  if (view.outcome !== "not_run") {
+    return view.outcome;
+  }
+  return view.notRunReason === "contradicted"
+    ? "not_run_contradicted"
+    : "not_run_insufficient";
+}
+
+/** Wire outcome allowlist (runtime boundary): narrows a raw outcome to the
+ *  five projectable states; anything else → undefined (the caller degrades). */
+function parseWireOutcome(
+  raw: unknown
+): VerifyAnswerView["outcome"] | undefined {
+  if (
+    raw === "passed" ||
+    raw === "failed" ||
+    raw === "unstable" ||
+    raw === "escalated" ||
+    raw === "not_run"
+  ) {
+    return raw;
+  }
+  return undefined;
+}
+
+/** notRunReason normalization: the two known kinds pass through, anything
+ *  else (absent / garbage) → undefined. The malformed verdict itself is the
+ *  outcome-coupling check in verifyFromWire (spec Q-A: the two are coupled on
+ *  the wire, both violation directions are malformed). */
+function parseNotRunReason(raw: unknown): VerifyAnswerView["notRunReason"] {
+  return raw === "insufficient" || raw === "contradicted" ? raw : undefined;
+}
+
+/** rounds: finite non-negative integer (0 allowed); anything else → undefined. */
+function parseWireRounds(raw: unknown): number | undefined {
+  return typeof raw === "number" && Number.isFinite(raw) && raw >= 0
+    ? raw
+    : undefined;
+}
+
+/** Degraded slot shared by every malformed-shape exit (runtime boundary):
+ *  unavailable + malformed_view, never a throw, never a rendered lie. */
+function malformedVerifySlot(): VerifySlot {
+  return {
+    kind: "unavailable",
+    reason: { kind: "malformed_view" },
+  };
+}
 
 /** Runtime wire-shape validation (runtime boundary): the verify field passed
  *  through postMessage crosses process boundaries and future wire drift, so it
- *  needs checking. Returns VerifySlot. Explicitly accepts outcome ∈ the 4 states
- *  + rounds as a finite non-negative integer; anything else → unavailable rather
- *  than throwing — the upper layer can render degraded without polluting the
- *  React render stack. */
+ *  needs checking. Explicitly accepts outcome ∈ the 5 states + rounds as a
+ *  finite non-negative integer; anything else → unavailable rather than
+ *  throwing — the upper layer can render degraded without polluting the React
+ *  render stack. notRunReason is cross-validated with outcome in both
+ *  directions: "not_run" requires a known reason, and a present reason on any
+ *  other outcome is malformed (the two are coupled on the wire). */
 export function verifyFromWire(raw: unknown): VerifySlot {
   if (raw === undefined || raw === null) {
     return { kind: "none" };
   }
   if (typeof raw !== "object") {
-    return {
-      kind: "unavailable",
-      reason: { kind: "malformed_view" },
-    };
+    return malformedVerifySlot();
   }
   const obj = raw as Record<string, unknown>;
-  const outcome = obj.outcome;
-  if (
-    outcome !== "passed" &&
-    outcome !== "failed" &&
-    outcome !== "unstable" &&
-    outcome !== "escalated"
-  ) {
-    return {
-      kind: "unavailable",
-      reason: { kind: "malformed_view" },
-    };
+  const outcome = parseWireOutcome(obj.outcome);
+  if (outcome === undefined) {
+    return malformedVerifySlot();
   }
-  const rounds = obj.rounds;
-  if (typeof rounds !== "number" || !Number.isFinite(rounds) || rounds < 0) {
-    return {
-      kind: "unavailable",
-      reason: { kind: "malformed_view" },
-    };
+  const rawReason = obj.notRunReason;
+  const notRunReason = parseNotRunReason(rawReason);
+  // Both coupling directions: not_run demands a known kind; every other
+  // outcome forbids a present reason.
+  if (
+    outcome === "not_run" ? notRunReason === undefined : rawReason !== undefined
+  ) {
+    return malformedVerifySlot();
+  }
+  const rounds = parseWireRounds(obj.rounds);
+  if (rounds === undefined) {
+    return malformedVerifySlot();
   }
   return {
     kind: "ok",
-    verify: { outcome, rounds },
+    verify: {
+      outcome,
+      rounds,
+      ...(notRunReason !== undefined ? { notRunReason } : {}),
+    },
   };
 }
 
@@ -143,7 +209,7 @@ export function describeVerifyErrorDetail(err: unknown): string | null {
 
 /** Render projection: slot + mode → display-line array. none → []; ok → 1 line
  *  (terminal-state text); unavailable → 1 line (degraded). auto mode prefixes
- *  `[auto] ` uniformly (4 terminal states and the degraded line alike, so the
+ *  `[auto] ` uniformly (terminal states and the degraded line alike, so the
  *  marker is recognizable at a glance). cols truncation goes through
  *  clipOneLineVisual (CJK counts 2 columns; same as agent-status-line /
  *  subagent-panel). */
@@ -156,11 +222,11 @@ export function projectVerifyBanner(
   const autoPrefix = mode === "auto" ? "[auto] " : "";
   if (slot.kind === "ok") {
     const view = slot.verify;
-    const pres = VERIFY_OUTCOME_PRESENTATION[view.outcome];
+    const pres = VERIFY_OUTCOME_PRESENTATION[verifyPresentationKey(view)];
     const text = `${autoPrefix}${pres.glyph} ${pres.label}（${view.rounds} 轮）`;
     return [{ fg: pres.fg, text: clipOneLineVisual(text, cols) }];
   }
-  // unavailable — auto mode gets the same [auto] prefix (marker consistent with the 4 terminal states).
+  // unavailable — auto mode gets the same [auto] prefix (marker consistent with the terminal states).
   const detail = describeVerifyErrorDetail(slot.reason);
   const suffix = detail === null ? "" : `（${detail}）`;
   const base = "⚠ 验证结果不可用";
