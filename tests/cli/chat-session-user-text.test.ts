@@ -400,3 +400,75 @@ describe("chat-session verify-loop seam: session tmp wiring (ADR-0092 SC12)", ()
     );
   });
 });
+
+describe("chat-session verify fence cwd is the SESSION root, not the process cwd", () => {
+  // `makeDefaultRunVerify` feeds `opts.cwd` to BOTH the fence cwd and the
+  // protected-target name-pattern SCAN SCOPE. The hub entry passes `boundRoot`
+  // here; chat passed `process.cwd()`, so a session launched under
+  // `--workspace-root` / a `.env` root made the verify fence enumerate a
+  // DIFFERENT tree than the bash fence protects — two protection surfaces in
+  // one session. Pinned on the discriminating case: the session root and the
+  // process cwd are different values.
+  it("threads ctx.workspaceRoot, not process.cwd()", async () => {
+    const sessionRoot = await mkdtemp(
+      join(tmpdir(), "iknow-chat-verify-root-")
+    );
+    const id = "chat-verify-cwd-session-root";
+    const ctx: ChatLineContext = {
+      ...makeChatCtx({ id }),
+      workspaceRoot: sessionRoot,
+    };
+    const r = await processChatLine({ line: "Q", ctx });
+    assert.equal(r.ranQuery, true);
+    const opts = getLastVerifyLoopOpts() as { cwd?: unknown } | undefined;
+    assert.ok(opts !== undefined, "runVerifyLoop was not called");
+    assert.equal(
+      opts.cwd,
+      sessionRoot,
+      "verify fence cwd / scan scope must be the session's bound root"
+    );
+    assert.notEqual(
+      sessionRoot,
+      process.cwd(),
+      "fixture guard: the two roots must disagree for this test to discriminate"
+    );
+  });
+
+  it("falls back to engineRoot when the assembly threaded no workspaceRoot", async () => {
+    const engineRoot = await mkdtemp(
+      join(tmpdir(), "iknow-chat-verify-engine-")
+    );
+    const id = "chat-verify-cwd-engine-root";
+    const ctx: ChatLineContext = {
+      ...makeChatCtx({ id }),
+      engineRoot,
+    };
+    const r = await processChatLine({ line: "Q", ctx });
+    assert.equal(r.ranQuery, true);
+    const opts = getLastVerifyLoopOpts() as { cwd?: unknown } | undefined;
+    assert.ok(opts !== undefined, "runVerifyLoop was not called");
+    assert.equal(opts.cwd, engineRoot);
+  });
+
+  it("prefers engineRoot (the live root) over the assembly-time workspaceRoot", async () => {
+    // A worktree rebind rewrites `engineRoot` at the switch point; the
+    // assembly-time `workspaceRoot` still names the pre-rebind root. The
+    // verify fence must follow the LIVE root, or a rebound session's verify
+    // would enumerate the tree it just left.
+    const assemblyRoot = await mkdtemp(
+      join(tmpdir(), "iknow-chat-verify-assembly-")
+    );
+    const liveRoot = await mkdtemp(join(tmpdir(), "iknow-chat-verify-live-"));
+    const id = "chat-verify-cwd-rebind";
+    const ctx: ChatLineContext = {
+      ...makeChatCtx({ id }),
+      workspaceRoot: assemblyRoot,
+      engineRoot: liveRoot,
+    };
+    const r = await processChatLine({ line: "Q", ctx });
+    assert.equal(r.ranQuery, true);
+    const opts = getLastVerifyLoopOpts() as { cwd?: unknown } | undefined;
+    assert.ok(opts !== undefined, "runVerifyLoop was not called");
+    assert.equal(opts.cwd, liveRoot);
+  });
+});

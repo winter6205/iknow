@@ -10,10 +10,10 @@
  * stub runInSandbox), same shape as tests/subagent/bash-mode-channel.test.ts.
  */
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 vi.mock("../../../src/harness/sandbox/index.ts", async (importOriginal) => {
   const actual = await vi.importActual<
@@ -42,6 +42,29 @@ interface CapturedFence {
 }
 
 const captured: CapturedFence[] = [];
+
+/**
+ * The verify cwd IS the name-pattern scan root (specs/effect-boundary-protection
+ * .md "Scan scope"), so it must be a real directory — the inventory refuses an
+ * absent root at assembly rather than assembling a fence whose name arm matched
+ * nothing. These cases never enumerate it, so a scratch dir is the whole cost.
+ */
+const scratchRoots: string[] = [];
+function scratchCwd(prefix: string): string {
+  const root = mkdtempSync(join(tmpdir(), prefix));
+  scratchRoots.push(root);
+  return root;
+}
+function scratchSubdir(root: string, ...segments: string[]): string {
+  const dir = join(root, ...segments);
+  mkdirSync(dir, { recursive: true });
+  return dir;
+}
+afterAll(() => {
+  for (const root of scratchRoots.splice(0)) {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 vi.mocked(sandboxIndex.createBwrapFence)
   .mockReset()
@@ -200,7 +223,7 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
 
   it("fence is driven with the verify cwd and command via runInSandbox", async () => {
     captured.length = 0;
-    const cwd = "/tmp/verify-run-cwd-fixture";
+    const cwd = scratchCwd("t8-scan-verify-run-cwd-fixture-");
     const runVerify = makeDefaultRunVerify({ cwd });
     await runVerify("true", {});
     const fence = captured[0]!;
@@ -223,7 +246,7 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
 describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
   it("egressPolicy 缺省 → 不起 session,fence 不带 egress spec", async () => {
     captured.length = 0;
-    const cwd = "/tmp/verify-egress-none";
+    const cwd = scratchCwd("t8-scan-verify-egress-none-");
     const runVerify = makeDefaultRunVerify({ cwd });
     await runVerify("true", {});
     const fence = captured[0]!;
@@ -245,7 +268,7 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
       dispose: async () => undefined,
     });
     captured.length = 0;
-    const cwd = "/tmp/verify-egress-ok";
+    const cwd = scratchCwd("t8-scan-verify-egress-ok-");
     const runVerify = makeDefaultRunVerify({
       cwd,
       egressPolicy: {
@@ -267,7 +290,7 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
       new Error("relay deps missing")
     );
     captured.length = 0;
-    const cwd = "/tmp/verify-egress-fail";
+    const cwd = scratchCwd("t8-scan-verify-egress-fail-");
     const runVerify = makeDefaultRunVerify({
       cwd,
       egressPolicy: {
@@ -309,7 +332,7 @@ describe("makeDefaultRunVerify — UNBOUND_FENCE 段 (issue 1059)", () => {
 
   it("holder 缺席 → opts 不含 unboundFence 键 (V1 baseline 字节不变)", async () => {
     captured.length = 0;
-    const cwd = "/tmp/verify-unbound-absent";
+    const cwd = scratchCwd("t8-scan-verify-unbound-absent-");
     const runVerify = makeDefaultRunVerify({ cwd });
     await runVerify("true", {});
     assert.equal("unboundFence" in captured[0]!, false);
@@ -324,8 +347,13 @@ describe("makeDefaultRunVerify — UNBOUND_FENCE 段 (issue 1059)", () => {
       captured.length = 0;
       const isBound = _label.startsWith("bound");
       const cwd = isBound
-        ? join("/tmp/verify-unbound-main", ".iknow", "worktrees", "conv-1")
-        : "/tmp/verify-unbound-main";
+        ? scratchSubdir(
+            scratchCwd("t8-scan-verify-unbound-main-"),
+            ".iknow",
+            "worktrees",
+            "conv-1"
+          )
+        : scratchCwd("t8-scan-verify-unbound-main-");
       const runVerify = makeDefaultRunVerify({
         cwd,
         ...(isBound
@@ -339,7 +367,7 @@ describe("makeDefaultRunVerify — UNBOUND_FENCE 段 (issue 1059)", () => {
 
   it("工厂期快照 vintage:闭包造好后翻 holder,本轮 opts 不变 (per-round 快照)", async () => {
     captured.length = 0;
-    const cwd = "/tmp/verify-unbound-vintage";
+    const cwd = scratchCwd("t8-scan-verify-unbound-vintage-");
     let on = true;
     const runVerify = makeDefaultRunVerify({
       cwd,

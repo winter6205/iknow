@@ -1,6 +1,10 @@
 import { mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import {
+  fenceScanScope,
+  protectedFenceWiring,
+} from "../../sandbox/protected-fence-wiring.js";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
@@ -17,6 +21,7 @@ import {
   createFsPolicy,
   createOutputMask,
   currentSecretValues,
+  protectedTargetFenceGuidance,
   renderEgressFailureMessage,
   sshHostKeyFailureGuidance,
   wrapCommandWithInnerBridge,
@@ -27,6 +32,7 @@ import {
   type EgressPolicyInput,
   type EgressSession,
   type EgressViolation,
+  type ProtectedTargetInventory,
 } from "../../sandbox/index.js";
 import {
   FS_ISOLATION_MODE_DEFAULT,
@@ -34,6 +40,10 @@ import {
   type FsModeContext,
 } from "../../sandbox/fs-mode.js";
 import type { YoloContext } from "../../sandbox/yolo.js";
+// Direct module import (not the `sandbox/index.js` barrel): the EBUSY arm of
+// the protected-target feedback is this seam's own consumer, and the barrel's
+// re-export list is owned elsewhere.
+import { protectedTargetEbusyFenceGuidance } from "../../sandbox/protected-target-feedback.js";
 import {
   DEFAULT_MAX_OUTPUT_CODE_POINTS,
   requireBwrap,
@@ -151,6 +161,21 @@ export interface CreateBashToolOptions {
    */
   readonly homeRoot?: string;
   /**
+   * Name-pattern scan scope (specs/effect-boundary-protection.md "Scan
+   * scope"): the workspace directory the fence's name rules enumerate. Frozen
+   * at handler entry next to `homeRoot`, so foreground and background share
+   * one vintage and both fs modes scan the same root.
+   *
+   * Production assembly ALWAYS threads the already-resolved session root
+   * (build-engine `env.workspaceRoot` via the env SSOT, so a `.env` /
+   * `.env.local` configured root rides the same surface as every other
+   * per-root consumer). Absent — an unwired / direct-factory caller — falls
+   * back to `fenceScanScope(<the factory cwd>)`, never to a raw `process.env`
+   * read: the `.env` SSOT is invisible to `process.env`, so such a read would
+   * scan a different tree from the one the rest of the session anchors on.
+   */
+  readonly workspaceRoot?: string;
+  /**
    * Worktree-on-mutate live toggle holder (read-only view, same discipline
    * as the gate's `enabled`). The handler reads it once at entry alongside
    * waveRoot and freezes it for the UNBOUND_FENCE decision — gate ON ∧
@@ -220,15 +245,28 @@ export interface CreateBashToolOptions {
  * fail-loud at the bwrap layer (it must not silently degrade to global
  * mode), so this default matches the production value and the guard only
  * fires when assembly genuinely drops the input.
+ *
+ * `fallbackRoot` is the scan scope for an assembly that threaded no
+ * workspaceRoot: the factory's own cwd, resolved through the shared helper
+ * (never a raw `process.env` read — the `.env` SSOT lives in
+ * `loadIknowEnv`, not in the process environment, so a raw read here would
+ * scan `process.cwd()` for a `.env`-configured session).
  */
-function snapshotFenceInputs(opts: CreateBashToolOptions | undefined): {
+function snapshotFenceInputs(
+  opts: CreateBashToolOptions | undefined,
+  fallbackRoot: string
+): {
   readonly mode: FsIsolationMode;
   readonly homeRoot: string;
+  readonly workspaceRoot: string;
   readonly yolo: boolean;
 } {
   return {
     mode: opts?.fsMode?.get() ?? FS_ISOLATION_MODE_DEFAULT,
     homeRoot: opts?.homeRoot ?? homedir(),
+    // Frozen here, beside homeRoot, so the foreground fence and the
+    // background spawn carry ONE scan-scope vintage.
+    workspaceRoot: opts?.workspaceRoot ?? fenceScanScope(fallbackRoot),
     yolo: opts?.yolo?.get() === true,
   };
 }
@@ -242,6 +280,7 @@ function snapshotFenceInputs(opts: CreateBashToolOptions | undefined): {
 interface FenceSnapshot {
   readonly mode: FsIsolationMode;
   readonly homeRoot: string;
+  readonly workspaceRoot: string;
   readonly tmpDir: string;
   /** UNBOUND_FENCE main checkout frozen at entry (absent = no segment). */
   readonly unboundMainCheckout: string | undefined;
@@ -289,6 +328,7 @@ async function runForegroundBash(
     waveRoot,
     fsMode,
     homeRoot,
+    workspaceRoot,
     tmpDir,
     unboundMainCheckout,
     yolo,
@@ -299,6 +339,15 @@ async function runForegroundBash(
     toolOpts: opts,
     ctx,
   } = args;
+  // The protected-fence pair (inventory + credential read mask) is resolved
+  // ONCE for this call through the single wiring point, against the
+  // entry-frozen homeRoot and workspaceRoot: the fence mount block and the
+  // EROFS boundary-refusal feedback consume the same snapshot, so the message
+  // can only ever describe a refusal the fence actually enforces.
+  const fenceWiring = protectedFenceWiring({
+    homeRoot,
+    workspaceRoot,
+  });
   // start session → build fence → run sandbox → install mask → record
   // ledger → finalize: 6 steps, each an extracted sub-function; this
   // function only orchestrates them in order.
@@ -325,6 +374,7 @@ async function runForegroundBash(
     unboundMainCheckout,
     yolo,
     egressSession: egress.session,
+    fenceWiring,
   });
   const result = await runSandboxDisposingEgress(
     {
@@ -351,6 +401,15 @@ async function runForegroundBash(
     result,
     mask,
     unboundMainCheckout,
+    // ADR-0119: under yolo the fence is retired, so an EROFS here cannot be
+    // the protected-target block refusing — no fence-attributed guidance.
+    protectedTargets: yolo === true ? undefined : fenceWiring.protectedTargets,
+    // EBUSY arm correlation set: the `/dev/null` masks THIS fence emitted.
+    // Under yolo the fence returned bare argv before the boundary block was
+    // assembled, so its list is empty by construction and no EBUSY line can
+    // match — the same guard, riding the fence's own field rather than a
+    // second yolo re-check.
+    exactFileMaskPaths: fence.exactFileMaskPaths,
   });
   if (finalPath.kind === "throw") throw finalPath.throwError;
   return finalPath.envelope;
@@ -366,6 +425,7 @@ interface RunForegroundBashArgs {
   waveRoot: string;
   fsMode: FsIsolationMode;
   homeRoot: string;
+  workspaceRoot: string;
   tmpDir: string;
   /** UNBOUND_FENCE main checkout frozen at entry (undefined = no segment). */
   unboundMainCheckout: string | undefined;
@@ -417,6 +477,11 @@ function buildForegroundFence(args: {
   readonly unboundMainCheckout: string | undefined;
   readonly yolo: boolean;
   readonly egressSession: EgressSession | undefined;
+  /** PROTECTED_TARGETS pair (inventory + read mask) from the
+   *  single wiring point, resolved once at the path entry against the same
+   *  entry-frozen homeRoot for the fence mount block AND the EROFS
+   *  feedback — one snapshot per call, they can never diverge. */
+  readonly fenceWiring: ReturnType<typeof protectedFenceWiring>;
 }): ReturnType<typeof createBwrapFence> {
   const payload = wrapCommandWithInnerBridge(
     args.egressSession?.spec,
@@ -442,6 +507,13 @@ function buildForegroundFence(args: {
     ...(args.egressSession !== undefined
       ? { egress: args.egressSession.spec }
       : {}),
+    // PROTECTED_TARGETS wiring (T7 write block + T8 credential read mask) —
+    // one spread of `protectedFenceWiring`'s bundle, the single wiring point
+    // shared by the foreground / background / verify routes (the drift this
+    // removes was the review finding; the helper resolves the inventory
+    // against the entry-frozen homeRoot). The skip warning stays on the
+    // fence factory's default warn channel.
+    ...args.fenceWiring,
     // ADR-0119: the fence-retirement switch — the spread-guard keeps the
     // non-yolo opts byte-identical; true makes the fence factory emit bare
     // argv (the egress field above is already short-circuited to absent).
@@ -511,6 +583,36 @@ async function recordForegroundRead(
 }
 
 /**
+ * Guard for the protected-target boundary-refusal guidance: only a non-zero
+ * exit with an inventory present can produce a message (yolo passes
+ * `undefined` — no fence, no fence-attributed message). Covers BOTH refusal
+ * arms — the EROFS write refusal and the EBUSY unlink-of-a-mask-point
+ * refusal — hence the boundary-level name, not an errno-level one. Extracted
+ * to keep `finalizeEgressPath` at its baseline complexity (S5 gate).
+ */
+function protectedTargetGuidanceForCall(
+  protectedTargets: ProtectedTargetInventory | undefined,
+  exactFileMaskPaths: readonly string[],
+  result: Awaited<ReturnType<typeof runInSandbox>>
+): string | undefined {
+  if (protectedTargets === undefined || result.exitCode === 0) {
+    return undefined;
+  }
+  const erofs = protectedTargetFenceGuidance(result.stderr, protectedTargets);
+  const ebusy = protectedTargetEbusyFenceGuidance(
+    result.stderr,
+    protectedTargets,
+    exactFileMaskPaths
+  );
+  const messages = [erofs, ebusy].filter(
+    (line): line is string => line !== undefined
+  );
+  // Empty (not "") is the "nothing to annotate" contract: a caller that
+  // appends "" would still mutate the stderr with a stray newline.
+  return messages.length > 0 ? messages.join("\n") : undefined;
+}
+
+/**
  * Violation drain + egressStartError check → typed-failure / ok decision
  * point. Extracted to control `runForegroundBash` complexity (S5 gate).
  * Logic:
@@ -529,6 +631,12 @@ async function finalizeEgressPath(args: {
   readonly result: Awaited<ReturnType<typeof runInSandbox>>;
   readonly mask: ReturnType<typeof createOutputMask> | undefined;
   readonly unboundMainCheckout: string | undefined;
+  /** Protected-target inventory for the boundary-refusal feedback; the
+   *  yolo path passes `undefined` (no fence → no fence-attributed message). */
+  readonly protectedTargets: ProtectedTargetInventory | undefined;
+  /** The `/dev/null` credential masks this fence emitted — the EBUSY arm's
+   *  correlation set. Empty under yolo (the fence never assembled one). */
+  readonly exactFileMaskPaths: readonly string[];
 }): Promise<
   | { readonly kind: "throw"; readonly throwError: ToolExecutionError }
   | {
@@ -547,6 +655,8 @@ async function finalizeEgressPath(args: {
     result,
     mask,
     unboundMainCheckout,
+    protectedTargets,
+    exactFileMaskPaths,
   } = args;
   const violations =
     egressSession !== undefined ? egressSession.violationSink.drain() : [];
@@ -578,9 +688,21 @@ async function finalizeEgressPath(args: {
     unboundMainCheckout !== undefined && result.exitCode !== 0
       ? unboundFenceErofsGuidance(result.stderr)
       : undefined;
-  const guidanceLines = [f4Guidance, erofsGuidance].filter(
-    (line): line is string => line !== undefined
+  // Protected-target boundary refusal: EROFS on a covered path, or EBUSY on
+  // a path this fence masked, gets the class-named boundary refusal (ok-
+  // envelope stderr channel again: no exit-semantics change, no violation
+  // count). Lines resolving to no protected class produce no message — the
+  // result stays byte-identical.
+  const protectedTargetGuidance = protectedTargetGuidanceForCall(
+    protectedTargets,
+    exactFileMaskPaths,
+    result
   );
+  const guidanceLines = [
+    f4Guidance,
+    erofsGuidance,
+    protectedTargetGuidance,
+  ].filter((line): line is string => line !== undefined);
   const effectiveResult =
     guidanceLines.length === 0
       ? result
@@ -874,7 +996,12 @@ export function createBashTool(
       gateOn: opts?.worktreeOnMutate?.get() === true,
       root: waveRoot,
     });
-    const { mode: fsMode, homeRoot, yolo } = snapshotFenceInputs(opts);
+    const {
+      mode: fsMode,
+      homeRoot,
+      workspaceRoot,
+      yolo,
+    } = snapshotFenceInputs(opts, cwd);
     const tmpDir = resolveBashFenceTmp(opts, ctx?.conversationId, () => {
       if (fallbackFenceTmp === undefined) {
         fallbackFenceTmp = mkdtempSync(join(tmpdir(), "iknow-fence-tmp-"));
@@ -908,7 +1035,14 @@ export function createBashTool(
         },
         opts ?? {},
         ctx,
-        { mode: fsMode, homeRoot, tmpDir, unboundMainCheckout, yolo },
+        {
+          mode: fsMode,
+          homeRoot,
+          workspaceRoot,
+          tmpDir,
+          unboundMainCheckout,
+          yolo,
+        },
         effectiveEgressPolicyFactory
       );
     }
@@ -949,6 +1083,7 @@ export function createBashTool(
       waveRoot,
       fsMode,
       homeRoot,
+      workspaceRoot,
       tmpDir,
       unboundMainCheckout,
       yolo,
@@ -1046,6 +1181,7 @@ function buildBackgroundSpawnRequest(args: {
   readonly tmpDir: string;
   readonly fsMode: FsIsolationMode;
   readonly homeRoot: string;
+  readonly workspaceRoot: string;
   readonly unboundMainCheckout: string | undefined;
   readonly yolo: boolean;
   readonly effectiveEgressPolicyFactory:
@@ -1058,6 +1194,7 @@ function buildBackgroundSpawnRequest(args: {
     tmpDir,
     fsMode,
     homeRoot,
+    workspaceRoot,
     unboundMainCheckout,
     yolo,
     effectiveEgressPolicyFactory,
@@ -1084,6 +1221,9 @@ function buildBackgroundSpawnRequest(args: {
     // as the foreground handler (same-source values, no re-reading).
     fsMode,
     homeRoot,
+    // The name-pattern scan scope, same frozen vintage as homeRoot above —
+    // foreground and background materialize over one shared root.
+    workspaceRoot,
     // ADR-0119: the D2-frozen yolo reading (spread-guard: absent =
     // non-yolo, legacy request field set unchanged). manager skips the
     // egress session on it; the spawn factory emits bare argv from it.
@@ -1117,7 +1257,14 @@ async function handleBackground(
   input: BackgroundSpawnInput,
   opts: CreateBashToolOptions,
   ctx: ToolExecutionContext | undefined,
-  { mode: fsMode, homeRoot, tmpDir, unboundMainCheckout, yolo }: FenceSnapshot,
+  {
+    mode: fsMode,
+    homeRoot,
+    workspaceRoot,
+    tmpDir,
+    unboundMainCheckout,
+    yolo,
+  }: FenceSnapshot,
   /** ADR-0097: per-call egress policy — closure-derived, approvalGate
    *  already injected. manager.spawn starts the session during assembly;
    *  absent = no seam. */
@@ -1145,6 +1292,7 @@ async function handleBackground(
       tmpDir,
       fsMode,
       homeRoot,
+      workspaceRoot,
       unboundMainCheckout,
       yolo,
       effectiveEgressPolicyFactory,

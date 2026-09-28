@@ -6,7 +6,7 @@
  * SandboxCmdRecord persistence". A shared factory with the bash tool's
  * assembly semantics removes duplicated fence wiring from verify-loop.
  */
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import type { SandboxCmdRecord, TraceService } from "../trace/index.js";
 import type { YoloContext } from "../sandbox/yolo.js";
 import type {
@@ -20,6 +20,7 @@ import {
   createEgressSession,
   createEnvIsolation,
   createFsPolicy,
+  protectedFenceWiring,
   runInSandbox,
   wrapCommandWithInnerBridge,
 } from "../sandbox/index.js";
@@ -54,6 +55,12 @@ export type RunVerifyFn = (
  * in one session with no signal.
  */
 export function makeDefaultRunVerify(opts: {
+  /**
+   * The verify commands' working directory (fence cwd + workspace-tier
+   * `--bind`). Both production entry points pass the SESSION's bound
+   * workspace root (hub `boundRoot`; chat `ctx.workspaceRoot`), so this is
+   * the root every other fence route scans too.
+   */
   readonly cwd: string;
   /**
    * ADR-0092: session tmp host path for verify commands — the `$TMPDIR`
@@ -191,6 +198,19 @@ export function makeDefaultRunVerify(opts: {
       // Egress seam (per-call fence argv, module-level session).
       // (ADR-0097)
       ...(session !== undefined ? { egress: session.spec } : {}),
+      // PROTECTED_TARGETS wiring (T7 write block + T8 credential read mask) —
+      // same `protectedFenceWiring` bundle as the bash tool foreground /
+      // background: the inventory resolves against the verify homeRoot when
+      // present, else homedir() (the drift review found this route was the
+      // one carrying its own defaults), and the name-pattern scan scope is
+      // `opts.cwd`. That is the SAME root the other routes scan only because
+      // both production entry points thread the session's bound workspace
+      // root here (hub `boundRoot`, chat `ctx.workspaceRoot`) — the fence cwd
+      // and the scan scope are one value by construction, in either fs mode.
+      ...protectedFenceWiring({
+        homeRoot: homeRoot ?? homedir(),
+        workspaceRoot: opts.cwd,
+      }),
       // UNBOUND_FENCE segment — same segment, same order as the bash tool surface.
       ...(unboundMainCheckout !== undefined
         ? {

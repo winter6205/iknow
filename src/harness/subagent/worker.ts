@@ -2260,17 +2260,15 @@ async function assembleAndRunWorker(
     ...(workerEnvelope.role !== undefined ? { role: workerEnvelope.role } : {}),
     // ADR-0019: the worker inherits the parent env SSOT — when the spawning
     // parent set IKNOW_WORKSPACE_ROOT, the worker's fs-policy fence protects
-    // `.iknow` by the same root (same shape as build-engine). Conditional
-    // resolution: with neither flag nor env, don't resolve, keeping the
-    // sandboxRoot fallback (legacy bytes unchanged).
-    ...(env.workspaceRoot !== undefined
-      ? {
-          workspaceRoot: resolveWorkspaceRoot({
-            cwd: process.cwd(),
-            env: { [WORKSPACE_ROOT_ENV_KEY]: env.workspaceRoot },
-          }),
-        }
-      : {}),
+    // `.iknow` by the same root (same shape as build-engine). The resolution is
+    // UNCONDITIONAL from here on: the resolved root is also the name-pattern
+    // scan scope of the worker's fences, and a worker that skipped resolution
+    // in global mode would scan a DIFFERENT root from the parent session —
+    // the same session, two protection surfaces.
+    workspaceRoot: resolveWorkspaceRoot({
+      cwd: process.cwd(),
+      env: { [WORKSPACE_ROOT_ENV_KEY]: env.workspaceRoot },
+    }),
     // The project identity root the parent session passes down via
     // IKNOW_PRODUCT_ROOT (ADR-0037). `env.productRoot` is the env-var-side
     // name (the wire is unchanged); the in-process option surface is called

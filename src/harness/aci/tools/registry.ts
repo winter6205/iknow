@@ -630,6 +630,23 @@ function resolvePreimageRootIdentity(
   return opts.projectIdentityRoot ?? opts.sandboxRoot;
 }
 
+/**
+ * Spread-guard for the bash factory's name-pattern scan scope, shaped like
+ * `yoloHolderSpread`: the "emit the key only when the caller supplied a root"
+ * branch lives here so the `factories` object literal stays branch-free (the
+ * S5 gate counts a per-site ternary).
+ *
+ * Absent must emit NOTHING, not `undefined`: bash's fallback resolver reads
+ * the env SSOT, and an explicit `workspaceRoot: undefined` would still
+ * suppress nothing but would make the option's absence indistinguishable from
+ * an assembly that deliberately passed a root.
+ */
+function workspaceRootSpread(root: string | undefined): {
+  readonly workspaceRoot?: string;
+} {
+  return root !== undefined ? { workspaceRoot: root } : {};
+}
+
 export function createDefaultAciRegistry(
   opts: CreateDefaultAciRegistryOptions
 ): AciRegistry {
@@ -658,11 +675,13 @@ export function createDefaultAciRegistry(
   // read the catalog — the spawn-subagent-tool factory is the true owner of
   // catalog routing.
   const bashMode = opts.bashMode;
-  // ADR-0019 (T4): per-root state anchor. Threaded to read_file so its
-  // `extraReadRoots` admit `<workspaceRoot>/.iknow` at parity with the home
-  // profile. ADR-0092 global mode: bash no longer reads it. Falls back to
-  // sandboxRoot when absent (legacy shape) so existing callers without
-  // per-root state stay byte-identical.
+  // ADR-0019 (T4): per-root state anchor. Two live consumers: read_file's
+  // `extraReadRoots` (admits `<workspaceRoot>/.iknow` at parity with the
+  // home profile) and the bash factory's name-pattern scan scope
+  // (specs/effect-boundary-protection.md "Scan scope") — the latter is
+  // fs-mode-independent, so global and workspace mode enumerate the same
+  // tree. Falls back to sandboxRoot when absent (legacy shape) so existing
+  // callers without per-root state stay byte-identical.
   const workspaceRoot = opts.workspaceRoot ?? sandboxRoot;
   // Switch for todo_write's conditional assembly. Host-injected; build-engine
   // resolves a session-level directory when surface !== "ask" and threads it;
@@ -760,6 +779,11 @@ export function createDefaultAciRegistry(
         // the helper).
         ...yoloHolderSpread(opts.yolo),
         ...(opts.homeRoot !== undefined ? { homeRoot: opts.homeRoot } : {}),
+        // Name-pattern scan scope (specs/effect-boundary-protection.md "Scan
+        // scope"): the registry's own resolved per-root anchor, frozen by the
+        // bash handler next to homeRoot. Absent → bash resolves through the
+        // shared `resolveWorkspaceRoot`, so no site invents a fallback.
+        ...workspaceRootSpread(opts.workspaceRoot),
         // UNBOUND_FENCE holder pass-through (absent = segment never emitted).
         ...(opts.worktreeOnMutate !== undefined
           ? { worktreeOnMutate: opts.worktreeOnMutate }

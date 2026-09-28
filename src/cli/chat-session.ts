@@ -1422,6 +1422,27 @@ function chatPrefetchExcludeIds(ctx: ChatLineContext): Set<string> {
 }
 
 /**
+ * The verify fence's working directory AND its protected-target name-pattern
+ * scan scope — one value by construction, because `makeDefaultRunVerify`
+ * feeds `opts.cwd` to both.
+ *
+ * It is the SESSION's bound workspace root, never `process.cwd()`: the hub
+ * entry passes `boundRoot` to the same option, and the bash fence scans the
+ * session root. A process-cwd verify under `--workspace-root` (or a `.env` /
+ * `.env.local` configured root) would make the verify fence enumerate a
+ * different tree than the bash fence protects — two protection surfaces in
+ * one session, silently.
+ *
+ * `ctx.engineRoot` is preferred: it is rewritten at the worktree-rebind
+ * switch point, so it tracks the LIVE root, whereas `ctx.workspaceRoot` is
+ * the assembly-time resolution. Absent both (unwired ask / test entry) →
+ * `process.cwd()`, the baseline.
+ */
+function chatVerifyCwd(ctx: ChatLineContext): string {
+  return ctx.engineRoot ?? ctx.workspaceRoot ?? process.cwd();
+}
+
+/**
  * Opts the chat verify call site needs to match the bash tool surface
  * (ADR-0092).
  *
@@ -1595,7 +1616,7 @@ async function runChatQueryLine(
                 config: ctx.verifyConfig,
                 sessionId: ctx.state.conversationId ?? "chat",
                 signal: ctx.abortController?.signal,
-                cwd: process.cwd(),
+                cwd: chatVerifyCwd(ctx),
                 // The verify command's fence matches the bash tool surface
                 // (holder read per call; absent → global baseline).
                 ...chatVerifyFenceOpts(ctx),

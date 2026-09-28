@@ -397,7 +397,7 @@ _Avoid_: 每个开关一个 slash；把面板当 loop-engine 热替换；把上�
 **文件系统隔离档（fs isolation mode）**: bash 物理围栏上「能看见 / 能写哪些路径」的档位，与 **PermissionMode** 和 **worktree isolation mode** 正交。默认 **全局档**。ADR-0092 / ADR-0096。
 _Avoid_: 把权限模式当围栏；把 worktree 门禁当 FS 档；第三种产品「沙箱模式」把两层揉成一档
 
-**全局档**: 文件系统隔离关——宿主真路径可读可写；拦写靠权限三层 + **hard-wall**。home 不藏。ADR-0092。
+**全局档**: The default filesystem mode exposes real host paths for reading and writing; the permission chain and **hard-wall** still apply, while only physically protected targets have an interpreter-independent effect boundary. Home remains visible. ADR-0092 / ADR-0129.
 _Avoid_: 默认闭世界；把全局档当成跳过权限链 / 卸 bwrap
 
 **工作区档**: 读偏宽（home 可见）；写 = 活 **taskRoot** + **会话 tmp**；home 其余默认不能写。ADR-0092。
@@ -412,7 +412,7 @@ _Avoid_: 系统 /tmp；一次 bash 一块空 tmpfs；把垫底当仓库；围栏
 **围栏 /tmp 垫底**: 旧名，见 **会话 tmp**。ADR-0074 原「bind 成 `/tmp`」已被 ADR-0092 superseded。
 _Avoid_: 新产品面继续写这个名字当现行合同
 
-**hard-wall**: spawn 前意图过滤器——拦围栏看不见或拦不住的命令意图（毁灭性 rm、真执行的命令替换、敏感路径、fork-bomb），不可被 session grant 覆盖。判定读 **解析判定** 的归宿和 **解析地基** 的语法事实：认的是意图，不是字符出现——"看见 `$(`" 不再是否决理由，内层怎么走由 **递归检查** 定。不是第二套沙箱；换行只作分段符。耐久写只问 `taskRoot`。ADR-0068（命令替换一条经 ADR-0125 收窄）。
+**hard-wall**: A pre-execution shell-intent filter over enumerated syntax; a matched deny cannot be overridden by a session grant, while a clean scan does not certify an interpreter's runtime effects. It is not a second sandbox: protected filesystem and credential effects require a filesystem, process, or controlled-capability boundary. ADR-0068 / ADR-0125 / ADR-0129.
 _Avoid_: 把硬墙当沙箱；用换行/`format` 子串当危险；把"替换字符出现即拒"当现行合同（已退役）；引导把交付物写到 bash `/tmp` tmpfs；把 **替岗拒绝** / 工具选型当硬墙
 
 **解析地基**: 权限决策前的语法级 shell 解析层——tree-sitter 原生绑定、全同步 `parseForSecurity(command)` 单一入口（`shell-parse.ts`），按命令字符串有界缓存，policy/handler 两道门共享一次解析。只供给语法事实（引号内外、替换结构、heredoc 语境），不做 deny 决策；各墙与切分器是它的消费者。ADR-0123。

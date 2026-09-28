@@ -17,7 +17,7 @@
 import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
@@ -39,6 +39,8 @@ const { defaultBackgroundSpawn } =
   await import("../../../src/harness/background/manager.ts");
 const { READ_ONLY_SYSTEM_PATHS, OPTIONAL_HOST_RO_PREFIXES } =
   await import("../../../src/harness/sandbox/fs-policy.ts");
+const { createProtectedTargetInventory, protectedTargetBindPaths, materializeProtectedTargets } =
+  await import("../../../src/harness/sandbox/protected-targets.ts");
 
 function makeFakeChild(pid = 47181) {
   const child = Object.assign(new EventEmitter(), {
@@ -112,25 +114,73 @@ async function driveBackground(
 describe("bash global-mode visibility (ADR-0092 wiring)", () => {
   it("foreground fence binds the host root and never emits a per-root read whitelist", async () => {
     const taskRoot = makeRealDir("bash-global-task-");
-    const tool = createBashTool(taskRoot);
+    // `workspaceRoot` is the frozen name-pattern scan scope; without it the
+    // handler resolves through `resolveWorkspaceRoot`, which on a test run is
+    // `process.cwd()` — the whole repository checkout, walked on every
+    // handler call and again for this test's reference inventory.
+    const tool = createBashTool(taskRoot, { workspaceRoot: taskRoot });
     const argv = await driveForeground(tool, "echo fg");
     assert.ok(
       hasHostRootBind(argv),
       `foreground fence must --bind / /; argv=${JSON.stringify(argv)}`
     );
-    // Only fixed ro-binds of system prefixes (plus optional host prefixes) are
-    // allowed; the closed-world per-root read whitelist (installRoot / git
-    // config) retired with global mode.
+    // Only fixed ro-binds of system prefixes (plus optional host prefixes)
+    // and the protected-target layer (T7 real ro-binds + T8 credential
+    // covers) are allowed; the closed-world per-root read whitelist
+    // (installRoot / git config) retired with global mode.
     const allowedRoBindTargets = new Set<string>([
       ...READ_ONLY_SYSTEM_PATHS,
       ...OPTIONAL_HOST_RO_PREFIXES,
     ]);
-    const strayRoBind = argv.find(
-      (arg, i) =>
-        arg === "--ro-bind" &&
-        !allowedRoBindTargets.has(argv[i + 1] ?? "") &&
-        argv[i + 1] !== taskRoot
+    // NOT SC5 evidence: this test's reference inventory is re-derived with the
+    // very call production makes, so it can only ever agree with itself. The
+    // real SC5 pins live in `bwrap-protected-mounts.test.ts` (argv
+    // byte-identity vs. a no-inventory baseline).
+    //
+    // The scan root must match the tool's own: it does, because both sides
+    // freeze it from `taskRoot` — passing `process.cwd()` here instead made
+    // both the tool and this reference walk the whole repository checkout on
+    // every run, for an allow-list entry that could never match.
+    const inventory = createProtectedTargetInventory({
+      home: homedir(),
+      scanRoot: taskRoot,
+    });
+    // This assembly's materialized name-pattern matches are protected targets
+    // like any concrete entry, so they belong in the allow-list too (#1155);
+    // the retired per-root read whitelist stays retired either way.
+    const materializedDests = materializeProtectedTargets(inventory).targets.map(
+      (b) => b.path
     );
+    const protectedDests = new Set([
+      ...protectedTargetBindPaths(inventory).map((b) => b.path),
+      ...materializedDests,
+    ]);
+    // The read-mask layer only ever emits per-file covers under CREDENTIAL-arm
+    // bind paths, so subtree acceptance is restricted to that arm; the
+    // filesystem arm stays exact-equality only (T7 block).
+    const credentialDests = [
+      ...protectedTargetBindPaths(inventory),
+      ...materializeProtectedTargets(inventory).targets,
+    ]
+      .filter((b) => b.arm === "credential")
+      .map((b) => b.path);
+    const strayRoBind = argv.find((arg, i) => {
+      if (arg !== "--ro-bind") return false;
+      const src = argv[i + 1] ?? "";
+      const dest = argv[i + 2] ?? "";
+      if (allowedRoBindTargets.has(src) || src === taskRoot) return false;
+      if (src === dest && protectedDests.has(src)) return false; // T7 block
+      if (
+        // T8 per-file covers sit UNDER a credential-arm subtree bind (e.g.
+        // ~/.config/gh/config.yml under ~/.config/gh), so dest membership is
+        // subtree coverage, not exact inventory equality.
+        credentialDests.some((p) => dest === p || dest.startsWith(`${p}/`)) &&
+        (src === "/dev/null" || src.includes("protected-credential-cover"))
+      ) {
+        return false; // T8 cover block
+      }
+      return true;
+    });
     assert.equal(
       strayRoBind,
       undefined,
@@ -145,7 +195,7 @@ describe("bash global-mode visibility (ADR-0092 wiring)", () => {
 
   it("system prefixes stay read-only (visible but not writable)", async () => {
     const taskRoot = makeRealDir("bash-global-task2-");
-    const tool = createBashTool(taskRoot);
+    const tool = createBashTool(taskRoot, { workspaceRoot: taskRoot });
     const argv = await driveForeground(tool, "echo ro");
     for (const path of READ_ONLY_SYSTEM_PATHS) {
       assert.notEqual(
@@ -158,10 +208,14 @@ describe("bash global-mode visibility (ADR-0092 wiring)", () => {
 
   it("background fence consumes the SAME host-root token as foreground (D2)", async () => {
     const taskRoot = makeRealDir("bash-global-task3-");
-    const fg = await driveForeground(createBashTool(taskRoot), "echo parity");
+    const fg = await driveForeground(
+      createBashTool(taskRoot, { workspaceRoot: taskRoot }),
+      "echo parity"
+    );
     const bg = await driveBackground({
       command: "echo parity",
       cwd: taskRoot,
+      workspaceRoot: taskRoot,
     });
     assert.ok(hasHostRootBind(fg), "fg must --bind / /");
     assert.ok(hasHostRootBind(bg), "bg must --bind / /");

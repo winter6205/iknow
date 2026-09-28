@@ -1,14 +1,13 @@
 /**
- * registry threads `workspaceRoot` to the read_file factory (review-fix H3).
+ * registry threads `workspaceRoot` to the read_file AND bash factories.
  *
- * ADR-0092 dead-surface review (Round-2 removal): the registry no longer
- * threads `workspaceRoot` to the bash factory — bash's fs-policy has no
- * `home` / `workspaceRoot` surface (no predicate, no per-root mount;
- * global mode binds the host root + system ro-binds). The surviving true
- * proposition: registry threads `workspaceRoot` to the read_file factory
- * as its `extraReadRoots` per-root anchor — `<workspaceRoot>/.iknow` stays
- * reachable at parity with the home profile. `traceReadDir` also resolves
- * under it for the trace read side.
+ * ADR-0092 dead-surface review (Round-2 removal) dropped the bash leg on the
+ * grounds that bash's fs-policy had no per-root mount; the protected-target
+ * work restored it as the fence's NAME-PATTERN SCAN SCOPE
+ * (specs/effect-boundary-protection.md "Scan scope") — a role that has nothing
+ * to do with the fs tier. The read_file leg is unchanged: `<workspaceRoot>/.iknow`
+ * stays reachable at parity with the home profile, and `traceReadDir` resolves
+ * under the same anchor.
  *
  * Module-mock `bash.js` so the registry's named import of `createBashTool`
  * resolves to a spy we control. A module mock (vs `vi.spyOn` on the
@@ -66,10 +65,12 @@ beforeEach(() => {
 });
 
 describe("createDefaultAciRegistry — workspaceRoot threaded to read_file factory (review-fix H3)", () => {
-  it("bash factory no longer receives workspaceRoot (Round-2 dead-surface removal)", () => {
-    // ADR-0092: bash's fs-policy has no home/workspaceRoot surface; the
-    // global fence binds the host root + system ro-binds. workspaceRoot
-    // is still live for read_file's extraReadRoots but not for bash.
+  it("bash factory receives workspaceRoot as the name-pattern scan scope", () => {
+    // The Round-2 dead-surface removal is REVOKED: workspaceRoot was dead for
+    // bash because ADR-0092 global mode has no per-root bind. It is live again
+    // as the name-pattern scan scope (specs/effect-boundary-protection.md "Scan
+    // scope") — which is fs-mode-independent, so global and workspace mode
+    // materialize over the same root.
     createDefaultAciRegistry({
       env: { web: { proxy: undefined, searchUrl: undefined } },
       sandboxRoot: SANDBOX,
@@ -80,14 +81,32 @@ describe("createDefaultAciRegistry — workspaceRoot threaded to read_file facto
     const opts = bashCall[1] as { workspaceRoot?: string } | undefined;
     assert.equal(
       opts?.workspaceRoot,
+      FAKE,
+      "bash freezes this root at handler entry as the fence's scan scope"
+    );
+  });
+
+  it("absent workspaceRoot leaves bash to resolve through resolveWorkspaceRoot", () => {
+    // No site invents a fallback: with no registry-level root, bash resolves
+    // the SAME value the resolver gives every other per-root consumer.
+    createDefaultAciRegistry({
+      env: { web: { proxy: undefined, searchUrl: undefined } },
+      sandboxRoot: SANDBOX,
+    });
+    const bashCall = vi.mocked(createBashTool).mock.calls[0];
+    assert.ok(bashCall, "bash factory should have been invoked");
+    const opts = bashCall[1] as { workspaceRoot?: string } | undefined;
+    assert.equal(
+      opts?.workspaceRoot,
       undefined,
-      "bash factory must not receive workspaceRoot (ADR-0092 global mode)"
+      "the registry adds no key; resolution stays with the shared resolver"
     );
   });
 
   it("bash factory still receives sandboxRoot as the primary sandbox cwd", () => {
-    // Legacy shape: bash is rooted at `sandboxRoot` (its `cwd` parameter).
-    // workspaceRoot is unrelated to bash since the dead-surface removal.
+    // Legacy shape: bash's own `cwd` parameter stays `sandboxRoot`. The
+    // workspaceRoot option is a SEPARATE input — the fence's name-pattern
+    // scan scope, not bash's working directory.
     createDefaultAciRegistry({
       env: { web: { proxy: undefined, searchUrl: undefined } },
       sandboxRoot: SANDBOX,

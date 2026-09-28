@@ -46,6 +46,7 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { createFsModeContext } from "../../src/harness/sandbox/fs-mode.ts";
 import { createMcpManager } from "../../src/harness/mcp/manager.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
+import { WORKSPACE_ROOT_ENV_KEY } from "../../src/config/workspace-root.ts";
 import type {
   McpClientHandle,
   McpManagerOptions,
@@ -296,6 +297,62 @@ describe("buildHarnessEngine — bash factory wiring (ADR-0092)", () => {
     expect(calls.length).toBeGreaterThan(0);
     for (const call of calls) {
       expect(call.opts.fsMode).toBeUndefined();
+    }
+  });
+
+  it("threads the env SSOT root — not raw process.env — to the bash factory", async () => {
+    // The protected-target fence's name-pattern scan scope resolves from the
+    // ENV SSOT (`loadIknowEnv`'s `envOptional`, which merges process.env AND
+    // `.env` / `.env.local`); `config/workspace-root.ts` documents that the
+    // resolver never reads process.env itself — callers DI the Record.
+    //
+    // The regression this pins: the bash fence resolved its scan scope from a
+    // RAW `process.env[IKNOW_WORKSPACE_ROOT]` while read_file / trace / worker
+    // assemblies anchored on `env.workspaceRoot`. A `.env`-configured session
+    // therefore scanned `process.cwd()` in the fence and the configured root
+    // everywhere else — two protection surfaces in one session, silently.
+    //
+    // The two roots are made to DISAGREE on purpose, so the assertion can only
+    // pass if the value reaching the fence came from the env SSOT. Asserting
+    // "the fixture root shows up" would pass under either implementation; this
+    // pins WHICH root, which is the whole defect.
+    const envSsoRoot = await mkdtemp(join(tmpdir(), "iknow-bash-wire-sso-"));
+    const processEnvRoot = await mkdtemp(
+      join(tmpdir(), "iknow-bash-wire-procenv-")
+    );
+    const productRoot = await mkdtemp(
+      join(tmpdir(), "iknow-bash-wire-ssoprod-")
+    );
+    roots.push(envSsoRoot, processEnvRoot, productRoot);
+    const previous = process.env[WORKSPACE_ROOT_ENV_KEY];
+    process.env[WORKSPACE_ROOT_ENV_KEY] = processEnvRoot;
+    try {
+      const built = await buildHarnessEngine({
+        // The env SSOT's workspaceRoot — what `.env` would have produced.
+        // Deliberately NOT `processEnvRoot`.
+        env: { ...makeEnv("sk-test-bash-wire-sso"), workspaceRoot: envSsoRoot },
+        askUser: createNoAskUser(),
+        surface: "ask",
+        userHome: join(productRoot, "home"),
+        cwd: productRoot,
+        workspaceRoot: envSsoRoot,
+        productRoot,
+        skipCountTokens: true,
+      });
+      shutdowns.push(async () => {
+        if (built.shutdown) await built.shutdown();
+      });
+      const calls = engineBashCalls();
+      expect(calls.length).toBeGreaterThan(0);
+      for (const call of calls) {
+        expect(call.opts.workspaceRoot).toBe(envSsoRoot);
+      }
+    } finally {
+      if (previous === undefined) {
+        delete process.env[WORKSPACE_ROOT_ENV_KEY];
+      } else {
+        process.env[WORKSPACE_ROOT_ENV_KEY] = previous;
+      }
     }
   });
 });

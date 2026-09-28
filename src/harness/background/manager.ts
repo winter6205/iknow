@@ -27,7 +27,7 @@
 import { randomBytes } from "node:crypto";
 import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { appendFile, readFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -37,6 +37,8 @@ import {
   createEgressSession,
   createEnvIsolation,
   createFsPolicy,
+  fenceScanScope,
+  protectedFenceWiring,
   wrapCommandWithInnerBridge,
 } from "../sandbox/index.js";
 import type {
@@ -183,6 +185,16 @@ export interface BackgroundSpawnRequest {
    * global tier); not consumed under the global tier.
    */
   readonly homeRoot?: string;
+  /**
+   * Name-pattern scan scope (specs/effect-boundary-protection.md "Scan
+   * scope"): the workspace directory the fence's name rules enumerate, frozen
+   * by the foreground handler from the SAME snapshot vintage as `homeRoot`
+   * above so foreground and background materialize over one shared root. Not
+   * derived from the fs tier — global and workspace mode scan the same place.
+   * Absent (a caller that assembled the request without the handler
+   * snapshot) → `fenceScanScope(<the request cwd>)`.
+   */
+  readonly workspaceRoot?: string;
   /**
    * ADR-0119: --yolo no-sandbox snapshot — a static value passed through from
    * the bash.ts handler-entry per-call snapshot, same vintage as fsMode / homeRoot.
@@ -335,6 +347,22 @@ export interface BackgroundTaskManager {
  * ownership with the host (the manager holds child.handle via the long-lived
  * protocol).
  */
+/**
+ * The scan scope for a spawn request that carried no frozen workspaceRoot (a
+ * caller that did not go through the bash handler's entry snapshot). The
+ * request's own `cwd` is the request's anchor — same source the foreground
+ * fence uses, so a hand-assembled request cannot scan somewhere the caller
+ * never named.
+ *
+ * Module scope, not inline at the call site: the spread-guard form of this
+ * expression is exactly the branch the S5 gate counts, and keeping it out of
+ * `defaultBackgroundSpawn` leaves that function's branch budget to the fence
+ * assembly it actually owns.
+ */
+function backgroundScanScope(req: BackgroundSpawnRequest): string {
+  return req.workspaceRoot ?? fenceScanScope(req.cwd);
+}
+
 export async function defaultBackgroundSpawn(
   req: BackgroundSpawnRequest
 ): Promise<ChildProcess> {
@@ -402,6 +430,16 @@ export async function defaultBackgroundSpawn(
     // manager.spawn is consumed here (socket --bind + spec.env --setenv
     // emitted at the single point by bwrap); absent = fully-offline baseline.
     ...(egressSpec !== undefined ? { egress: egressSpec } : {}),
+    // PROTECTED_TARGETS wiring (T7 write block + T8 credential read mask) —
+    // the same `protectedFenceWiring` bundle the foreground builds from its
+    // frozen inputs: the inventory resolves against the request's homeRoot
+    // when present, else homedir() (same default as the bash handler
+    // snapshot). Background tasks that retire the fence wholesale (yolo
+    // below) never reach the block.
+    ...protectedFenceWiring({
+      homeRoot: homeRoot ?? homedir(),
+      workspaceRoot: backgroundScanScope(req),
+    }),
     // UNBOUND_FENCE segment pass-through — same values, same order as the
     // foreground buildForegroundFence (foreground/background set-equal, G3);
     // absent = segment not emitted, background argv byte-identical.

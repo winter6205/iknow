@@ -132,7 +132,10 @@ const DANGEROUS_COMMAND_PATTERNS: readonly DangerousPatternHit[] =
     { id: "destructive-disk", pattern: "rd /s" },
   ]);
 
-const SENSITIVE_PATH_FRAGMENTS: readonly string[] = Object.freeze([
+// Exported read-only (frozen) so the protected-target inventory test surface
+// can assert roster-name coverage against resolved targets; the roster itself
+// is seeded by, and edited only in, this file.
+export const SENSITIVE_PATH_FRAGMENTS: readonly string[] = Object.freeze([
   ".ssh/",
   ".ssh\\\\",
   "\\.ssh$",
@@ -141,6 +144,7 @@ const SENSITIVE_PATH_FRAGMENTS: readonly string[] = Object.freeze([
   ".gnupg/",
   "\\.gnupg$",
   ".config/gh/",
+  "\\.config/gh$",
   "\\.kube/",
   "\\.kube$",
   ".docker/config.json",

@@ -115,6 +115,14 @@ interface RunOptions {
   readonly homeRoot: string;
   readonly workspaceRoot: string;
   readonly tmpDir: string;
+  /**
+   * Name-pattern scan scope — defaults to `workspaceRoot` (the production
+   * shape: one root per session). A case that DELETES `workspaceRoot` after
+   * assembly passes a surviving directory here, so the inventory's scan arm
+   * still assembles and the case exercises the bind-source failure it is
+   * about rather than tripping the scan-scope refusal first.
+   */
+  readonly scanRoot?: string;
 }
 
 function buildBash(opts: RunOptions): ReturnType<typeof createBashTool> {
@@ -126,6 +134,7 @@ function buildBash(opts: RunOptions): ReturnType<typeof createBashTool> {
     fsMode: opts.fsMode,
     homeRoot: opts.homeRoot,
     tmpDir: opts.tmpDir,
+    workspaceRoot: opts.scanRoot ?? opts.workspaceRoot,
   });
 }
 
@@ -779,6 +788,11 @@ describe("工作区档围栏真实行为 — S2 exception：装配后白名单�
         homeRoot,
         workspaceRoot: taskRoot,
         tmpDir: sessionTmp,
+        // The scan scope is a directory this case does NOT delete: the
+        // inventory refuses a missing scope at assembly (a typed fail-loud of
+        // its own), which would mask the bind-source failure under test.
+        // `homeRoot` survives the rmSync below.
+        scanRoot: homeRoot,
       });
       // Delete the allow-listed root after assembly.
       rmSync(taskRoot, { recursive: true, force: true });

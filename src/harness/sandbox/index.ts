@@ -84,7 +84,40 @@ export {
 } from "./egress/index.js";
 
 export { createBwrapFence, OPTIONAL_HOST_RO_PREFIXES } from "./bwrap.js";
-export type { BwrapFence, BwrapFenceOptions, SeccompProfile } from "./bwrap.js";
+export type {
+  BwrapFence,
+  BwrapFenceOptions,
+  ProtectedTargetSkippedWarning,
+  SeccompProfile,
+} from "./bwrap.js";
+
+export {
+  createProtectedTargetInventory,
+  protectedTargetBindPaths,
+  protectedTargetRoBindArgs,
+} from "./protected-targets.js";
+// The single wiring point for the protected-fence option pair (inventory +
+// credential read mask) shared by every production route.
+export {
+  fenceScanScope,
+  protectedFenceWiring,
+} from "./protected-fence-wiring.js";
+export {
+  describeProtectedTargetClass,
+  protectedTargetErofsGuidance,
+  protectedTargetFenceGuidance,
+} from "./protected-target-feedback.js";
+export type {
+  ProtectedTargetArm,
+  ProtectedTargetBindPath,
+  ProtectedTargetClassId,
+  ProtectedTargetEntry,
+  ProtectedTargetExtra,
+  ProtectedTargetInventory,
+  ProtectedTargetInventoryOptions,
+  ProtectedNamePattern,
+  ProtectedTargetRule,
+} from "./protected-targets.js";
 
 export {
   DEFAULT_MAX_OUTPUT_CODE_POINTS,
