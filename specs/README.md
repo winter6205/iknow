@@ -38,6 +38,7 @@ One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 sta
 - `instruction-authority-projection.md` — instruction-authority outbound projection: host-frame stamping + untrusted translation (#1066; ADR-0112)
 - `transport-continue-persist.md` — transport retry / continue / failure persist
 - `interrupt-frozen-prefix-keep.md` — interrupting a model in flight keeps the frozen prefix (ADR-0108)
+- `verify-status-contract.md` — three honest verify outcomes (`passed` / `not_run` + `notRunReason` / failed family) replacing the `passed`+hide hack, upstream content gate that overrides `verify.command` presence, pipeline-tail (`| tail`/`| head`) evidence voided, trajectory golden set (ADR-0073; hsr-3/hsr-6-stopgap)
 
 ### TUI
 
