@@ -397,7 +397,7 @@ _Avoid_: 每个开关一个 slash；把面板当 loop-engine 热替换；把上�
 **文件系统隔离档（fs isolation mode）**: bash 物理围栏上「能看见 / 能写哪些路径」的档位，与 **PermissionMode** 和 **worktree isolation mode** 正交。默认 **全局档**。ADR-0092 / ADR-0096。
 _Avoid_: 把权限模式当围栏；把 worktree 门禁当 FS 档；第三种产品「沙箱模式」把两层揉成一档
 
-**全局档**: The default filesystem mode exposes real host paths for reading and writing; the permission chain and **hard-wall** still apply, while only physically protected targets have an interpreter-independent effect boundary. Home remains visible. ADR-0092 / ADR-0129.
+**全局档**: The default filesystem mode exposes real host paths for reading and writing; the permission chain and **hard-wall** still apply, while only physically protected targets have an interpreter-independent **effect boundary**. Home remains visible. ADR-0092 / ADR-0129.
 _Avoid_: 默认闭世界；把全局档当成跳过权限链 / 卸 bwrap
 
 **工作区档**: 读偏宽（home 可见）；写 = 活 **taskRoot** + **会话 tmp**；home 其余默认不能写。ADR-0092。
@@ -409,11 +409,23 @@ _Avoid_: 把现行默认说成闭世界；identity 只读 overlay（§9 已 supe
 **会话 tmp**: 每个身份（主会话或一个 worker）在会话文件夹里的宿主目录；模型与 `$TMPDIR` 用这条真路径；不 bind 成 Linux `/tmp`。寿命跟会话文件夹；不是交付落点。ADR-0092（修订 ADR-0074）。
 _Avoid_: 系统 /tmp；一次 bash 一块空 tmpfs；把垫底当仓库；围栏 /tmp 垫底（旧名）；给「按 id 读」另起产品名
 
-**围栏 /tmp 垫底**: 旧名，见 **会话 tmp**。ADR-0074 原「bind 成 `/tmp`」已被 ADR-0092 superseded。
-_Avoid_: 新产品面继续写这个名字当现行合同
+**canonical read policy**: the single read-authorization rule shared by every read-capable ACI tool (`read_file` / `grep` / `glob` / symbol direct-open), replacing the per-tool task-root allowlists; the read-side counterpart of the bwrap fence's read posture. ADR-0128 forbids implementing it as an unguarded `/` read root.
+_Avoid_: "read permission"（那是 ADR-0004 权限中间件，另一层）；"read fence"（那是 bwrap）
 
-**hard-wall**: A pre-execution shell-intent filter over enumerated syntax; a matched deny cannot be overridden by a session grant, while a clean scan does not certify an interpreter's runtime effects. It is not a second sandbox: protected filesystem and credential effects require a filesystem, process, or controlled-capability boundary. ADR-0068 / ADR-0125 / ADR-0129.
+**protected path**: a path in the canonical read policy's frozen protected-path inventory, denied to reads regardless of host reachability. Write-side counterpart is **protected target** — same frozen intent, effect-enforcement layer; the two are distinct frozen lists and must not be merged.
+_Avoid_: 与 **protected target** 合并；与已退役的 fs-policy protected-state 谓词（ADR-0092 退役）混；与写侧 hard-wall 混
+
+**host reach**: the set of paths a read-capable tool may open in a given fs mode. ADR-0092 + ADR-0128: workspace mode does NOT narrow it (only writes tighten); reach widens to ordinary host paths in both modes, minus **protected path**.
+_Avoid_: "workspace read" 当工作区档收窄了它；用「可达 = 全 `/` 无防护」实现
+
+**hard-wall**: A pre-execution shell-intent filter over enumerated syntax; a matched deny cannot be overridden by a session grant, while a clean scan does not certify an interpreter's runtime effects. It is not a second sandbox: protected filesystem and credential effects require a filesystem, process, or controlled-capability **effect boundary**. ADR-0068 / ADR-0125 / ADR-0129.
 _Avoid_: 把硬墙当沙箱；用换行/`format` 子串当危险；把"替换字符出现即拒"当现行合同（已退役）；引导把交付物写到 bash `/tmp` tmpfs；把 **替岗拒绝** / 工具选型当硬墙
+
+**effect boundary**: the interpreter-independent enforcement surface at which a protected filesystem or credential **effect** is refused regardless of command spelling — the bwrap mount layer + process/capability control, distinct from the **hard-wall** (a spelling-sensitive pre-execution guardrail). ADR-0129.
+_Avoid_: 把 effect boundary 当 hard-wall；枚举解释器 API 字符串当防线
+
+**protected target**: an inventory entry held by the **effect boundary**: a filesystem path or credential source that must stay protected across all languages. Read-side counterpart is **protected path** — same frozen intent, read-authorization layer. The agent-created-backup cleanup route is withdrawn (issue #1159), so no spelling of a protected target is removable by the agent.
+_Avoid_: 与 **protected path** 合并成一条；拿 `SENSITIVE_PATH_FRAGMENTS`（命令文本名册）当 domain 概念；把已撤回的 cleanup receipt 当现行合同
 
 **解析地基**: 权限决策前的语法级 shell 解析层——tree-sitter 原生绑定、全同步 `parseForSecurity(command)` 单一入口（`shell-parse.ts`），按命令字符串有界缓存，policy/handler 两道门共享一次解析。只供给语法事实（引号内外、替换结构、heredoc 语境），不做 deny 决策；各墙与切分器是它的消费者。ADR-0123。
 _Avoid_: 读片室；AST 层；把它当第二道墙或让它在解析层做政策；用旧裸子串扫描直接判新语法结构
@@ -594,6 +606,21 @@ _Avoid_: 与闭环「三态判定」混同；调用方自数 PASS 条件；`SUFF
 
 **声称位置**: `checkEvidence` 的窗口右端 = `messages` 数组下标，对准最后一条有非空 text 的 assistant（与 `deriveFinalText` 同一次回扫）；不是 verify 闭环的 `round`。
 _Avoid_: 把验证轮次当 claimIndex；首轮只看 messages[0]
+
+**`not_run` outcome**: `VerifyAnswerView.outcome` 第五值——验证被跳过或判证据不足，人是权威（HITL），不得暗示通过。区别于 `unstable`（套件失败又过）与 wire 上 `verify` 字段缺席（gate 的纯聊天情形）。goal 模式下保守：goal 保持 `active`、auto 循环继续。ADR-0073。
+_Avoid_: 把 `not_run` 当 `unstable`；给 `not_run` 标 achieved；隐藏成 `undefined` 而非命名
+
+**`notRunReason` discriminator**: `VerifyAnswerView` 可选字段，仅在 `outcome === "not_run"` 时在场，区分 `insufficient`（「未验证（证据不足）」）/ `contradicted`（「未验证（证据冲突）」）。wire 上耦合：其它 outcome 带此字段或 `not_run` 缺此字段 = malformed view。
+_Avoid_: 把两值塌成一个串；离开 `not_run` 也带
+
+**upstream verify gate**: 决定一轮是否进入 verify 子系统的内容谓词：(跑了测试命令 ∨ 改了非文档代码)。仅 `verify.command` 在场不开 gate。未触发轮透明（无 record、无 wire 字段、无注入），区别于 `not_run`（进了但无证据）。
+_Avoid_: 配了 verify.command 就每轮验；把 doc-only 编辑当改码触发
+
+**pipeline-masked evidence**: 命令以 `| tail` / `| head` 结尾的测试跑——报告的退出码是管道尾而非测试 runner 的；v1 按 swallowed 处理（fail-closed → INSUFFICIENT），真退出码不恢复（归 pipefail 根治 ticket）。
+_Avoid_: 信任管道尾退出码；把它当充分证据
+
+**doc-only edit**: 目标是 `.md` / `.txt` / `docs/` 下的 `edit_file` / `write_file`；按现有 `isDocOnlyPath`，不算改码，不触发 **upstream verify gate** 也不进 staleness 窗口。
+_Avoid_: 把 doc-only 编辑当改码触发验证；bash 内 `sed -i` 改 md 也算（v1 不追踪 bash 内变更）
 
 **green marker**: 测试框架输出里的通过摘要行（白名单 pytest / jest / vitest / go test / cargo test）；checker 只从框架摘要行读通过数字。
 _Avoid_: 扫描任意 stdout 判绿；白名单外自造框架解析
@@ -890,6 +917,7 @@ _Avoid_: 把平台数值写进桥核；把事实页当 spec
 - **memory_gc vs promote**: GC 是机械减法（TTL / supersede / 超 cap → 软禁）；promote 资格只进入效用所用的 `usage.json`，不把条目装进 `system`（ADR-0044）。GC 不复活 `disabled` 条目
 - **memory_gc vs memory_recall**: 软禁只改 `disabled`；`memory_recall` 必须在打分前丢掉 disabled 条，否则模型仍看到废条（`specs/memory-layer-follow-ups.md`）
 - **stderr 指针 vs 父可见信封**: 信封 summary 只留尾部预览进模型视野；全量诊断在 stderr .log，经指针引用，不进模型
+- **protected path vs protected target**: 同一份冻结意图的两层读法——前者是 **canonical read policy** 的读授权层（拒读），后者是 **effect boundary** 的效果执行层（拒写/拒删跨语言）；两张独立冻结清单、独立 edit authority，不合并。
 - **工具职分 vs hard-wall**: 职分是 bash / grep / 符号工具面各管一职；hard-wall 是围栏拦不住的危险意图。替岗拒绝走 handler，不进硬墙
 - **解析地基 vs hard-wall**: 地基给语法事实（哪段是代码哪段是数据、替换的内外层结构），墙做政策决定（deny/ask）；地基自己不 deny，墙不再各自扫裸文本（ADR-0123）
 - **解析判定 vs hard-wall**: 判定是墙的输入契约（六态 + 前置否决清单），墙只消费判定结果做政策；判定层的"硬拒"（畸形/中止/超容量）发生在墙之前，不可被 grant 覆盖（ADR-0124）
