@@ -34,6 +34,7 @@ import {
   LSP_ACI_META,
   compileValidator,
   createRequestCancellation,
+  documentOpenDenial,
   extractCallHierarchyItems,
   getClientForWorkspaceDetailed,
   isMethodNotFoundSentinel,
@@ -178,6 +179,11 @@ async function withResolvedSymbol<T>(
   if (!client) {
     return renderNoServer(ctx, failure ?? { reason: "no-server" }, file);
   }
+  // The read policy is consulted before the open window: a protected or
+  // undecidable file never enters withDocumentOpen, so no didOpen carries its
+  // bytes (specs/host-read-policy.md SC4 — verdict on the T | string channel).
+  const denial = await documentOpenDenial(ctx, file);
+  if (denial !== null) return denial;
   return client.withDocumentOpen(file, async () => {
     const resolved = await resolveSymbolPosition(
       client,
@@ -382,6 +388,13 @@ function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
           params.file
         );
       }
+      // A `file` anchor means this call will open the document → the read
+      // policy decides first; a workspace-level query without `file` opens
+      // nothing and consults nothing.
+      if (params.file !== undefined) {
+        const denial = await documentOpenDenial(ctx, params.file);
+        if (denial !== null) return denial;
+      }
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       const run = async (): Promise<unknown> => {
@@ -453,6 +466,8 @@ function makeSymbolsOverviewTool(ctx: LspCtx, description: string): AciToolDef {
           params.file
         );
       }
+      const denial = await documentOpenDenial(ctx, params.file);
+      if (denial !== null) return denial;
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       return client.withDocumentOpen(params.file, async () => {

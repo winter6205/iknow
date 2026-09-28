@@ -10,8 +10,10 @@
  *   3. read_file: same vintage — `root` and `<workspaceRoot>/.iknow`
  *      extraReadRoots are computed against the same snapshot; rebinding
  *      mid-handler does NOT mutate the in-flight call's root/extras.
- *   4. read_file: containment preserved — post-rebind, escaping the new
- *      root is still typed-rejected.
+ *   4. read_file: same vintage under the widened host reach (ADR-0128 T4) —
+ *      post-rebind, ordinary outside paths read through the policy arm of the
+ *      current snapshot, protected ones stay refused, and relative names
+ *      never resolve through the stale root.
  *   5. glob: liveTaskRoot flips → next glob call walks the new tree.
  *   6. grep: liveTaskRoot flips → next grep call walks the new tree.
  *   7. Identity-root wiring: when `projectIdentityRoot` differs from the live
@@ -29,7 +31,7 @@
  * assertions hinge on.
  */
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
@@ -217,23 +219,69 @@ describe("read_file T6: D9 — root + extraReadRoots share the same wave snapsho
   });
 });
 
-// ─── 3. read_file: containment preserved post-rebind ─────────────────────
+// ─── 3. read_file: per-call snapshot across the host-reach widening ───────
 
-describe("read_file T6: containment is preserved across rebind", () => {
-  it("post-rebind path-escape is still typed-rejected", async () => {
+describe("read_file T6: same-vintage snapshot under the widened host reach", () => {
+  it("post-rebind ordinary path outside every root reads through the policy arm of THIS call", async () => {
     const rootA = await makeScratch("t6-contain-A-");
     const rootB = await makeScratch("t6-contain-B-");
-    const outside = await makeScratch("t6-contain-out-");
-    await writeFile(join(outside, "secret.txt"), "private\n");
+    const outside = await realpath(await makeScratch("t6-contain-out-"));
+    await writeFile(join(outside, "plain.txt"), "host-ordinary\n");
+
+    const cell: LiveTaskRoot = createLiveTaskRoot(rootA);
+    const tool = createReadFileTool(cell);
+
+    writeLiveTaskRoot(cell, rootB);
+    // ADR-0128 T4: reach is granted by the decideRead allow verdict computed
+    // against this call's root snapshot (rootB) — the read succeeds and never
+    // resolves through the stale rootA vintage.
+    const out = (await tool.handler({
+      path: join(outside, "plain.txt"),
+    })) as string;
+    assert.ok(
+      out.includes("host-ordinary"),
+      `widened post-rebind read: ${out}`
+    );
+  });
+
+  it("post-rebind protected path outside every root is refused by the roster, not by reach", async () => {
+    const rootA = await makeScratch("t6-contain-prot-A-");
+    const rootB = await makeScratch("t6-contain-prot-B-");
+    const outside = await realpath(await makeScratch("t6-contain-prot-out-"));
+    await mkdir(join(outside, ".ssh"), { recursive: true });
+    await writeFile(join(outside, ".ssh", "id_rsa"), "protected\n");
 
     const cell: LiveTaskRoot = createLiveTaskRoot(rootA);
     const tool = createReadFileTool(cell);
 
     writeLiveTaskRoot(cell, rootB);
     await assert.rejects(
-      () => tool.handler({ path: join(outside, "secret.txt") }),
+      () => tool.handler({ path: join(outside, ".ssh", "id_rsa") }),
       (error: unknown) =>
-        error instanceof Error && error.message.includes("outside workspace")
+        error instanceof Error &&
+        /protected-path roster/.test(error.message) &&
+        !/outside workspace/.test(error.message)
+    );
+  });
+
+  it("post-rebind relative names anchor the LIVE root — the old root's tree is not consulted", async () => {
+    const rootA = await makeScratch("t6-vintage-A-");
+    const rootB = await makeScratch("t6-vintage-B-");
+    await writeFile(join(rootA, "only-in-A.txt"), "from-A\n");
+
+    const cell: LiveTaskRoot = createLiveTaskRoot(rootA);
+    const tool = createReadFileTool(cell);
+    writeLiveTaskRoot(cell, rootB);
+
+    // The request is anchored to rootB by decideRead and stays inside the
+    // containment roots of rootB — widening does not resurrect rootA's tree
+    // under a relative name (same root+extras vintage as the D9 pins).
+    await assert.rejects(
+      () => tool.handler({ path: "only-in-A.txt" }),
+      (error: unknown) =>
+        error instanceof Error &&
+        error.message.includes("file not found") &&
+        !error.message.includes(rootA)
     );
   });
 });

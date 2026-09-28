@@ -766,7 +766,7 @@ describe("createDefaultAciRegistry — projectIdentityRoot wiring (grep / glob)"
     expect(globOut).toMatch(/AGENTS\.md/);
   });
 
-  it("OFF wiring: without opts.projectIdentityRoot the registry-assembled grep and glob stay fenced to the engine root and cannot escape to an identity root", async () => {
+  it("OFF wiring: without opts.projectIdentityRoot grep and glob still reach an absolute identity path by policy (ADR-0128)", async () => {
     const repo = join(scratch, "repo");
     const identity = join(scratch, "identity");
     await mkdir(repo, { recursive: true });
@@ -780,12 +780,17 @@ describe("createDefaultAciRegistry — projectIdentityRoot wiring (grep / glob)"
 
     const grep = reg.catalog.get("grep");
     const glob = reg.catalog.get("glob");
-    await expect(
-      grep!.handler({ pattern: "identity guidance", path: identity })
-    ).rejects.toThrow(/path outside workspace/);
-    await expect(
-      glob!.handler({ pattern: "AGENTS.md", path: identity })
-    ).rejects.toThrow(/path outside workspace/);
+    // ADR-0128 host reach: the identity path is an ordinary host path, so the
+    // canonical policy admits it regardless of the passthrough seam. The seam
+    // now governs the relative-name fallback arm, not absolute reach.
+    const grepOut = String(
+      await grep!.handler({ pattern: "identity guidance", path: identity })
+    );
+    expect(grepOut).toMatch(/AGENTS\.md/);
+    const globOut = String(
+      await glob!.handler({ pattern: "AGENTS.md", path: identity })
+    );
+    expect(globOut).toMatch(/AGENTS\.md/);
   });
 });
 

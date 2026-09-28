@@ -49,6 +49,16 @@
  *     file, so rename/documentSymbol would return empty/wrong; leaving the
  *     window didCloses the document, so files are not kept open on the
  *     server between calls.
+ *   - **every direct file open goes through the read policy** (ADR-0128,
+ *     specs/host-read-policy.md SC4), on the same seam and the same channel
+ *     the symbol QUERY family already uses. Two screens, because a rename's
+ *     edit set is chosen by the SERVER rather than by the caller:
+ *     `withResolvedSymbolForMutate` gates `params.file` before entering
+ *     `withDocumentOpen`, and `applyWorkspaceEdit` screens every path the
+ *     server put in the WorkspaceEdit before any read or write — a protected
+ *     or undecidable path returns the sentinel string rather than reaching
+ *     `didOpen` (where bytes enter the server) or the plain `readFile` /
+ *     `writeFile` that follows it.
  */
 import { fileURLToPath } from "node:url";
 import { readFile, writeFile } from "node:fs/promises";
@@ -70,6 +80,7 @@ import {
   DEFAULT_LSP_REQUEST_TIMEOUT_MS,
   compileValidator,
   createRequestCancellation,
+  documentOpenDenial,
   isMethodNotFoundSentinel,
   renderMethodNotFound,
   renderNoServer,
@@ -551,14 +562,28 @@ interface WritePreimageContext extends PreimageThread {
 }
 
 async function applyWorkspaceEdit(
+  ctx: LspCtx,
   edits: ReadonlyArray<TextDocumentEdit>,
   onEdit: ((file: string) => void) | undefined,
   preimage: WritePreimageContext
-): Promise<{
-  readonly writtenFiles: ReadonlyArray<string>;
-  readonly editCount: number;
-}> {
+): Promise<
+  | {
+      readonly writtenFiles: ReadonlyArray<string>;
+      readonly editCount: number;
+    }
+  | string
+> {
   const grouped = groupEditsByPath(edits);
+  // A rename's edit set is chosen by the SERVER, not by the caller: an
+  // ordinary anchor file can drag a protected file into the same change. The
+  // anchor gate in withResolvedSymbolForMutate only sees `params.file`, so the
+  // whole set is screened here — before any read or write, and all-or-nothing,
+  // because a rename that stops at the second file has already mutated the
+  // first.
+  for (const filePath of grouped.keys()) {
+    const denial = await documentOpenDenial(ctx, filePath);
+    if (denial !== null) return denial;
+  }
   const staged: Array<{ readonly filePath: string; readonly next: string }> =
     [];
   let editCount = 0;
@@ -642,6 +667,15 @@ interface ResolvedSymbol {
  * server between calls. The disk write (applyWorkspaceEdit) still happens
  * inside the window, so the notifier's didChange hits the "already open"
  * branch.
+ *
+ * The read policy is consulted BEFORE the window is entered, exactly as the
+ * query family's `withResolvedSymbol` does (specs/host-read-policy.md SC4):
+ * `withDocumentOpen` reads on-disk bytes and sends `didOpen`, so a protected
+ * file that reached it would put its bytes into the server — and
+ * `applyWorkspaceEdit` then reads/writes the same path by plain `readFile` /
+ * `writeFile`, with no second policy in between. The verdict rides the same
+ * `T | string` channel as every other failure on this seam, so it is a
+ * sentinel and never a thrown `ToolExecutionError`.
  */
 async function withResolvedSymbolForMutate<T>(
   ctx: LspCtx,
@@ -654,6 +688,8 @@ async function withResolvedSymbolForMutate<T>(
   if (!client) {
     return renderNoServer(ctx, failure ?? { reason: "no-server" }, file);
   }
+  const denial = await documentOpenDenial(ctx, file);
+  if (denial !== null) return denial;
   return client.withDocumentOpen(file, async () => {
     const resolved = await resolveSymbolPosition(
       client,
@@ -782,10 +818,11 @@ function makeRenameSymbolTool(
                 message: `rename produced no edits (symbol already named "${params.new_name}")`,
               });
             }
-            const applied = await applyWorkspaceEdit(docEdits, onEdit, {
+            const applied = await applyWorkspaceEdit(ctx, docEdits, onEdit, {
               ...preimage,
               call: execCtx,
             });
+            if (typeof applied === "string") return applied;
             return stringifyResult({
               renamed: true,
               symbol_path: target.path,
@@ -856,10 +893,11 @@ function makeReplaceSymbolBodyTool(
               textDocument: { uri: fileURLFromPath(params.file) },
               edits: [{ range, newText: params.new_body }],
             };
-            const applied = await applyWorkspaceEdit([edit], onEdit, {
+            const applied = await applyWorkspaceEdit(ctx, [edit], onEdit, {
               ...preimage,
               call: execCtx,
             });
+            if (typeof applied === "string") return applied;
             return stringifyResult({
               replaced: true,
               symbol_path: target.path,
@@ -945,10 +983,11 @@ function makeInsertSymbolTool(
               textDocument: { uri: fileURLFromPath(params.file) },
               edits: [{ range: { start: anchor, end: anchor }, newText }],
             };
-            const applied = await applyWorkspaceEdit([edit], onEdit, {
+            const applied = await applyWorkspaceEdit(ctx, [edit], onEdit, {
               ...preimage,
               call: execCtx,
             });
+            if (typeof applied === "string") return applied;
             return stringifyResult({
               inserted: true,
               direction: spec.direction,
@@ -1063,10 +1102,11 @@ function makeSafeDeleteSymbolTool(
               textDocument: { uri },
               edits: [{ range, newText: "" }],
             };
-            const applied = await applyWorkspaceEdit([edit], onEdit, {
+            const applied = await applyWorkspaceEdit(ctx, [edit], onEdit, {
               ...preimage,
               call: execCtx,
             });
+            if (typeof applied === "string") return applied;
             return stringifyResult({
               deleted: true,
               symbol_path: target.path,

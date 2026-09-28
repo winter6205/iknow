@@ -6,8 +6,11 @@
  * files on the pad (`<sessionFolder>/fence-tmp`, resolved from an explicit
  * tmpDir or from projectDir+conversationId) are readable even when the pad
  * is outside `~/.iknow` extraReadRoots. Guest literal `/tmp/...` paths are
- * still typed-rejected and never aliased. Legacy factory calls without
- * tmpDir/projectDir are byte-for-byte unchanged.
+ * never aliased onto the pad — since ADR-0128 host reach they are ordinary
+ * host paths decided by the canonical policy on their literal form, so a
+ * missing one is typed-rejected as not-found instead of reach-denied. Legacy
+ * factory calls without tmpDir/projectDir keep pad semantics unchanged and
+ * reach ordinary outside paths through the policy arm.
  */
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
@@ -78,35 +81,47 @@ describe("read_file — session tmp pad as first-class read root", () => {
     assert.equal(result, "     1\tvia session");
   });
 
-  it("worker identity pad reads do not open the parent pad", async () => {
+  it("a worker pad does not fence parent-pad reads, but never aliases them onto the pad (ADR-0128)", async () => {
     const root = await makeScratch("rf-iso-root-");
     const parentPad = await makeScratch("rf-iso-parent-");
     const workerPad = await makeScratch("rf-iso-worker-");
     await writeFile(join(parentPad, "private.txt"), "parent only\n", "utf8");
 
     const workerTool = createReadFileTool(root, { tmpDir: workerPad });
+    // The absolute parent pad is an ordinary host path: reachable through the
+    // canonical policy arm, not because the worker pad admits it.
+    const result = (await workerTool.handler({
+      path: join(parentPad, "private.txt"),
+    })) as string;
+    assert.equal(result, "     1\tparent only");
+    // No aliasing: a bare name still anchors at the live root, never the pad.
     await assert.rejects(
-      () => workerTool.handler({ path: join(parentPad, "private.txt") }),
+      () => workerTool.handler({ path: "private.txt" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
-        error.message.includes("outside workspace")
+        /file not found/.test(error.message)
     );
   });
 
-  it("SC4: reading /tmp/... is typed-rejected and never aliased onto the pad", async () => {
+  it("SC4: reading a literal /tmp path is never aliased onto the pad", async () => {
     const root = await makeScratch("rf-alias-root-");
     const pad = await makeScratch("rf-alias-pad-");
     await writeFile(join(pad, "ok.txt"), "pad original\n", "utf8");
 
+    const guestPath = join(
+      "/tmp",
+      `rf-never-alias-${process.pid}-${Date.now()}.txt`
+    );
     const tool = createReadFileTool(root, { tmpDir: pad });
+    // ADR-0128: the literal /tmp path is decided on its own canonical form —
+    // missing means typed not-found, never a silent redirect to the pad's ok.txt.
     await assert.rejects(
-      () => tool.handler({ path: "/tmp/ok.txt" }),
+      () => tool.handler({ path: guestPath }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
-        error.message.includes("outside workspace")
+        /file not found/.test(error.message) &&
+        !error.message.includes(join(pad, "ok.txt"))
     );
-    // No aliasing: reading a literal /tmp path must not touch or create
-    // files on the pad.
     assert.equal(await readFile(join(pad, "ok.txt"), "utf8"), "pad original\n");
   });
 
@@ -121,17 +136,16 @@ describe("read_file — session tmp pad as first-class read root", () => {
     assert.equal(result, "     1\tdelivery");
   });
 
-  it("legacy factory call without tmpDir/projectDir still rejects paths outside the root", async () => {
+  it("legacy factory call without tmpDir/projectDir reaches ordinary outside paths (ADR-0128)", async () => {
     const root = await makeScratch("rf-legacy-root-");
     const outside = await makeScratch("rf-legacy-outside-");
     await writeFile(join(outside, "secret.txt"), "private\n", "utf8");
 
     const tool = createReadFileTool(root);
-    await assert.rejects(
-      () => tool.handler({ path: join(outside, "secret.txt") }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("outside workspace")
-    );
+    const result = (await tool.handler({
+      path: join(outside, "secret.txt"),
+    })) as string;
+
+    assert.equal(result, "     1\tprivate");
   });
 });

@@ -33,6 +33,7 @@
  *     tsserver / typescript-language-server).
  */
 import { pathToFileURL } from "node:url";
+import { homedir } from "node:os";
 import path from "node:path";
 
 import Ajv from "ajv";
@@ -50,6 +51,7 @@ import { SERVERS } from "../../lsp/server.js";
 import type { LspCtx } from "../../lsp/types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
+import { decideRead } from "../read-policy.js";
 import type { AciToolDef } from "../types.js";
 
 /**
@@ -261,6 +263,58 @@ export function renderMethodNotFound(
  */
 export function renderNoProjectAnchor(ctx: LspCtx): string {
   return `(LSP workspace/symbol has no project anchor under ${ctx.directory}; an empty result from this path is not trustworthy — pass file=<a file inside the project to search> or use get_symbols_overview on a known file)`;
+}
+
+/**
+ * Protected-path sentinel for the symbol/LSP family (specs/host-read-policy.md
+ * SC4): the canonical read policy refused the document open because the path
+ * is on the protected roster. Same rendering style as `renderNoServer` — a
+ * readable string on the `T | string` channel, never a thrown
+ * `ToolExecutionError` — but its own string with its own meaning: distinct
+ * from the no-server / no-root / spawn-failed tiers and from the
+ * no-project-anchor sentinel, whose meanings stay unchanged.
+ */
+export function renderProtectedPathDenial(file: string, why: string): string {
+  return `(read denied for ${file}: protected-path rule — ${why}; the language server was never asked to open this document)`;
+}
+
+/**
+ * Resolution-failure sentinel for the same seam (SC10 / SC13): the path could
+ * not be decided (empty, unusable, dangling, looping), so fail-closed refuses
+ * the open. Named and distinct from the protected-path denial and from every
+ * no-server tier — never thrown, never an untyped crash out of the handler.
+ */
+export function renderResolutionFailureDenial(
+  file: string,
+  why: string
+): string {
+  return `(read denied for ${file}: resolution failure — ${why}; an undecidable path is never opened by the language server)`;
+}
+
+/**
+ * Canonical read-policy verdict for the language server's direct file
+ * opening: call before `client.withDocumentOpen` (the `didOpen` is where the
+ * on-disk bytes enter the server) and return the verdict string verbatim.
+ * `null` means allow — the open proceeds exactly as before.
+ *
+ * Per-call pure evaluation: the policy owns no cross-call state, so N
+ * concurrent callers against one shared refcounted client get independent
+ * verdicts, and a verdict cannot depend on another call for the same file
+ * being in flight. The fs mode is not consulted because both modes are
+ * broadly readable host views (ADR-0092) with the same protected-path roster
+ * answer; the identity roots come from the live task root (rebind-aware cell
+ * first, same vintage discipline as the pool key) and the process home.
+ */
+export async function documentOpenDenial(
+  ctx: LspCtx,
+  file: string
+): Promise<string | null> {
+  const taskRoot = ctx.directoryCell?.read() ?? ctx.directory;
+  const verdict = await decideRead(file, { taskRoot, homeRoot: homedir() });
+  if (verdict.outcome === "allow") return null;
+  return verdict.reason === "protected_path"
+    ? renderProtectedPathDenial(file, verdict.message)
+    : renderResolutionFailureDenial(file, verdict.message);
 }
 
 /**
@@ -570,6 +624,14 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
           params.file
         );
       }
+      // The read policy is consulted before the request-scoped open: a
+      // protected or undecidable file never enters withDocumentOpen, so no
+      // didOpen carries its bytes; the denial rides this family's
+      // T | string channel as a sentinel.
+      if (params.file !== undefined) {
+        const denial = await documentOpenDenial(ctx, params.file);
+        if (denial !== null) return denial;
+      }
       // tsserver builds no project for files it hasn't opened → symbol ops
       // return empty. A request-scoped window wraps didOpen around the whole
       // request (open on entry, close on exit, including throw paths).
@@ -644,6 +706,8 @@ function makeCallHierarchyCallTool(
           params.file
         );
       }
+      const denial = await documentOpenDenial(ctx, params.file);
+      if (denial !== null) return denial;
       // Same as makeOperationTool: the request-scoped window covers both
       // prepare + forward (didOpen spans the whole request, closed on exit).
       // Per-request timeout + abort bridge, same as makeOperationTool.
@@ -784,34 +848,50 @@ export function makeDiagnosticsTool(
         params.file !== undefined ? [params.file] : (params.files ?? []);
       const segments: string[] = [];
       for (const file of targets) {
-        const { client, failure } = await getClientDetailed(ctx, file);
-        if (!client) {
-          segments.push(
-            renderNoServer(ctx, failure ?? { reason: "no-server" }, file)
-          );
-          continue;
-        }
-        // Push diagnostics only arrive while the file is open, so the whole
-        // "open + wait + read" must live inside one request-scoped window —
-        // otherwise didClose drops the diagnostic cache first, and
-        // getDiagnosticsEntry forever returns undefined, rendering an empty
-        // tag.
-        const uri = pathToFileURL(file).href;
-        const items = await client.withDocumentOpen(file, () =>
-          waitForDiagnostics(
-            client,
-            uri,
-            ctx.diagnosticsWaitMs ?? DIAGNOSTICS_WAIT_MS,
-            execCtx?.signal
-          )
-        );
-        segments.push(renderDiagnostics(file, items ?? []));
+        segments.push(await diagnosticsSegment(ctx, file, execCtx));
       }
       // The single-file path is shaped exactly like the old round (one
       // segment, no separator); batch segments join with a blank line.
       return segments.join("\n\n");
     },
   });
+}
+
+/**
+ * One diagnostics round for one file: server lookup, the ADR-0128 read-policy
+ * gate on the document open, then the request-scoped open + wait + read
+ * window. Every outcome — no-server rendering, policy denial rendering, or
+ * the rendered diagnostics — returns as a segment string; the loop in the
+ * handler is pure accumulation.
+ */
+async function diagnosticsSegment(
+  ctx: LspCtx,
+  file: string,
+  execCtx?: ToolExecutionContext
+): Promise<string> {
+  const { client, failure } = await getClientDetailed(ctx, file);
+  if (!client) {
+    return renderNoServer(ctx, failure ?? { reason: "no-server" }, file);
+  }
+  const denial = await documentOpenDenial(ctx, file);
+  if (denial !== null) {
+    return denial;
+  }
+  // Push diagnostics only arrive while the file is open, so the whole
+  // "open + wait + read" must live inside one request-scoped window —
+  // otherwise didClose drops the diagnostic cache first, and
+  // getDiagnosticsEntry forever returns undefined, rendering an empty
+  // tag.
+  const uri = pathToFileURL(file).href;
+  const items = await client.withDocumentOpen(file, () =>
+    waitForDiagnostics(
+      client,
+      uri,
+      ctx.diagnosticsWaitMs ?? DIAGNOSTICS_WAIT_MS,
+      execCtx?.signal
+    )
+  );
+  return renderDiagnostics(file, items ?? []);
 }
 
 /**

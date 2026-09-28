@@ -11,7 +11,11 @@
  *     (existing clamp); the same page budgets also constrain the line
  *     window, and when a budget hits first the tail carries a continuation
  *     hint (line-window semantics unchanged).
- *   - resolve+realpath restricted inside root (symlink escape rejected)
+ *   - host reach via the canonical read policy (ADR-0128): ordinary host
+ *     paths are readable in both fs modes; protected / undecidable paths are
+ *     refused by decideRead before any open. Inside the containment roots
+ *     (live root ∪ extras ∪ session tmp pad) resolution stays the
+ *     realpath-based `resolveWithinRoot` arm unchanged.
  *   - must be a file (directory errors); >1MB rejected with guidance to
  *     grep + offset/limit precise reads
  *   - NUL byte (0x00) detection: binary files rejected
@@ -24,16 +28,15 @@
 
 import { readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { isAbsolute, join } from "node:path";
+import { join } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
-import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import type { LastReadLedgerHost } from "../last-read-ledger.js";
-import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
-import { resolveWithinRoot } from "./helpers.js";
+import type { FsModeContext } from "../../sandbox/fs-mode.js";
+import { decideAndResolveReadReach } from "../read-policy.js";
 
 /** Hard cap for an explicit `limit` (line window); without `limit` the read goes through `MAX_READ_CODE_POINTS`. */
 const MAX_LIMIT = 2000;
@@ -108,48 +111,27 @@ export interface CreateReadFileToolOptions {
   /**
    * ADR-0092 session tmp identity (same semantics as WriteFileOpts.tmpDir):
    * an explicit host pad (tests / worker pad). Present → the pad becomes
-   * read_file's own containment read root instead of relying on `~/.iknow`
-   * extraReadRoots happening to admit it; absent → no extra read root.
+   * read_file's own containment read root instead of relying on the
+   * `~/.iknow` profile extra happening to admit it; absent → no extra read
+   * root.
    */
   readonly tmpDir?: string;
   /** Session project dir; with `ctx.conversationId` → `<sessionFolder>/fence-tmp` pad. */
   readonly projectDir?: string;
+  /**
+   * ADR-0128: fs isolation-mode holder (same pass-through shape as bash).
+   * The handler reads `get()` once per call — same batch-snapshot discipline
+   * as the live-root snapshot. Absent → `global` (V1 baseline). The mode
+   * feeds the canonical read policy's decideRead; both modes answer the same
+   * (the protected-path roster is what refuses).
+   */
+  readonly fsMode?: FsModeContext;
 }
 
 /** `~/.iknow/` — the agent's own profile directory (readUserProfile in the
  *  assembly layer already reads `user.md` from here every turn). */
 function iknowProfileRoot(): string {
   return join(homedir(), ".iknow");
-}
-
-/**
- * Compute the per-call extraReadRoots anchored to the same wave snapshot as
- * `rootAtCall`. Both inputs are passed by the caller so the conditional
- * check uses the LIVE root — not a factory-time closure.
- *
- * Read-only reachability surface:
- *   - `~/.iknow/` (home profile — always)
- *   - `<workspaceRoot>/.iknow` (per-root persona state) when threaded and
- *     distinct from the live root
- *   - `<projectIdentityRoot>` (ADR-0037 identity-root passthrough) when
- *     threaded and distinct from the live root
- *
- * Containment remains the read_file contract: escape is rejected by
- * `resolveWithinRoot` regardless of which extra root admitted the path.
- */
-function computeExtraReadRoots(
-  rootAtCall: string,
-  workspaceRoot: string | undefined,
-  projectIdentityRoot: string | undefined
-): readonly string[] {
-  const extras: string[] = [iknowProfileRoot()];
-  if (workspaceRoot && workspaceRoot !== rootAtCall) {
-    extras.push(join(workspaceRoot, ".iknow"));
-  }
-  if (projectIdentityRoot && projectIdentityRoot !== rootAtCall) {
-    extras.push(projectIdentityRoot);
-  }
-  return Object.freeze(extras);
 }
 
 export function createReadFileTool(
@@ -161,24 +143,27 @@ export function createReadFileTool(
   // this to be allowed by default. Write tools stay cwd-scoped.
   //
   // `root` may be a `LiveTaskRoot` cell. The handler snapshots the cell at
-  // call time and rebuilds `extraReadRoots` against that snapshot, so root
-  // + extras share a single wave vintage — no "root is new, extras are old"
-  // mid-stream mix. Legacy `string` callers keep byte-identical behavior.
+  // call time and hands that snapshot to the shared decide → resolve → decide
+  // flow (`read-policy.ts` `decideAndResolveReadReach`, whose reach step is
+  // `resolveReadReach`, specs/host-read-policy.md SC6),
+  // which rebuilds the extras against it — root + extras share a single wave
+  // vintage, no "root is new, extras are old" mid-stream mix. Legacy
+  // `string` callers keep byte-identical behavior.
   //
   // ADR-0019: when workspaceRoot is threaded, `<workspaceRoot>/.iknow` is
   // added as a second read root so the agent's per-root persona state
   // reaches the same surface as the global home profile. The contract is
-  // reachability-only: extraReadRoots grants traversal through
-  // `resolveWithinRoot`. Write enforcement (the bash channel's `.iknow`
-  // state files becoming `execution_failed`) is the permission chain +
-  // bwrap hard-wall (ADR-0092 global mode binds the host root, system
-  // prefixes read-only; cwd writes are gated by the validator +
+  // reachability-only: the resolver's containment arm grants traversal
+  // through `resolveWithinRoot`. Write enforcement (the bash channel's
+  // `.iknow` state files becoming `execution_failed`) is the permission
+  // chain + bwrap hard-wall (ADR-0092 global mode binds the host root,
+  // system prefixes read-only; cwd writes are gated by the validator +
   // `--ro-bind cwd` EROFS). Read and protection are independent and
   // intentionally so.
   //
   // ADR-0037: projectIdentityRoot threads the read-only identity-root
   // passthrough so rebind doesn't strand AGENTS.md / permissions.toml /
-  // project rules.
+  // project rules; the shared resolver owns the gating.
   return Object.freeze({
     name: "read_file",
     description:
@@ -209,23 +194,22 @@ export function createReadFileTool(
       const params = parseInput(input);
       // Same wave snapshot — root and extras share the snapshot.
       const rootAtCall = readRoot(root);
-      const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, opts);
-      const extraReadRoots = computeExtraReadRoots(
-        rootAtCall,
-        opts?.workspaceRoot,
-        projectIdentityRoot
-      );
-      // ADR-0092: same identity as the write tools' sessionTmpRoot — the
-      // session tmp pad is a first-class containment root for reads too.
-      const sessionTmpRoot = resolveSessionFenceTmp({
-        tmpDir: opts?.tmpDir,
-        projectDir: opts?.projectDir,
+      // ADR-0128 + SC6: one shared flow owner (read-policy.ts
+      // `decideAndResolveReadReach`) decides the request, resolves reach under
+      // that verdict (containment arm byte-identical; outside every root the
+      // allow verdict's canonical path is the target), and re-decides the
+      // resolved path before any bytes are buffered. Protection is positive:
+      // a protected path is refused even where the containment roots would
+      // reach it.
+      const resolved = await decideAndResolveReadReach({
+        tool: "read_file",
+        primaryRoot: rootAtCall,
+        target: params.path,
+        profileRoot: iknowProfileRoot(),
+        // ADR-0092: same identity as the write tools' sessionTmpRoot — the
+        // session tmp pad is a first-class containment root for reads too.
         conversationId: ctx?.conversationId,
-      });
-      const resolved = await resolveReadTarget(rootAtCall, params.path, {
-        extraReadRoots,
-        projectIdentityRoot,
-        sessionTmpRoot,
+        deps: opts,
       });
       let info;
       try {
@@ -269,7 +253,8 @@ export function createReadFileTool(
  * failed read would be recorded as "read", and write_file's non-empty
  * overwrite gate would then be opened by that failed read.
  *
- * Recording key = `resolved` (output of `resolveWithinRoot`), the same
+ * Recording key = `resolved` (output of the shared reach resolver, whose
+ * containment arm is `resolveWithinRoot`), the same
  * source as write_file's `target` (same resolve output), so both sides can
  * hit the same entry.
  */
@@ -290,66 +275,6 @@ function completeRead(
     ?.ledgerFor(deps.ctx?.conversationId)
     ?.record(deps.resolved);
   return body;
-}
-
-function resolveProjectIdentityRoot(
-  root: string,
-  opts: CreateReadFileToolOptions | undefined
-): string | undefined {
-  const projectIdentityRoot = opts?.projectIdentityRoot;
-  if (projectIdentityRoot === undefined) return undefined;
-  if (opts?.allowProjectIdentityRoot === true && !isTaskWorktreePath(root)) {
-    return undefined;
-  }
-  if (opts?.allowProjectIdentityRoot === false) return undefined;
-  return projectIdentityRoot;
-}
-
-/**
- * Relative paths normally resolve against the live task root. If that root is
- * a freshly-created bare worktree and the requested project identity file is
- * absent there, try the explicitly supplied extra read roots as a
- * convenience. Absolute paths continue to use the shared containment helper
- * directly.
- *
- * `sessionTmpRoot` (ADR-0092) rides into containment through the same
- * `resolveWithinRoot` options as the write tools' `sessionTmpRoot` — one
- * identity path, no separate aliasing. The identity-root fallback arm stays
- * pad-free: the pad is anchored to conversationId, not to projectIdentityRoot.
- */
-async function resolveReadTarget(
-  root: string,
-  target: string,
-  roots: {
-    readonly extraReadRoots: readonly string[];
-    readonly projectIdentityRoot: string | undefined;
-    readonly sessionTmpRoot: string | undefined;
-  }
-): Promise<string> {
-  const { extraReadRoots, projectIdentityRoot } = roots;
-  const primary = await resolveWithinRoot(root, target, {
-    extraReadRoots,
-    sessionTmpRoot: roots.sessionTmpRoot,
-  });
-  if (
-    projectIdentityRoot === undefined ||
-    extraReadRoots.length === 0 ||
-    isAbsolute(target)
-  ) {
-    return primary;
-  }
-  try {
-    await stat(primary);
-    return primary;
-  } catch {
-    const candidate = await resolveWithinRoot(projectIdentityRoot, target);
-    try {
-      await stat(candidate);
-      return candidate;
-    } catch {
-      return primary;
-    }
-  }
 }
 
 interface ParsedInput {

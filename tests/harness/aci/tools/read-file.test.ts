@@ -526,19 +526,29 @@ describe("read_file — error paths", () => {
     );
   });
 
-  it("symlink whose real target lies outside root → ToolExecutionError", async () => {
+  it("symlink whose real target lies outside root is readable (ADR-0128 host reach)", async () => {
     const root = await makeScratch("read-file-err-");
     const outside = await makeScratch("read-file-outside-");
     await writeFile(join(outside, "secret.txt"), "private\n");
     await symlink(outside, join(root, "escape"), "dir");
 
+    // Reach widened through the policy decision: the link's canonical target
+    // is an ordinary host path, so decideRead allows and the read succeeds.
+    // (The protected-target half of this matrix is pinned in
+    // host-read-policy.test.ts — alias of a protected target stays refused.)
     const tool = createReadFileTool(root);
-    await assert.rejects(
-      () => tool.handler({ path: "escape/secret.txt" }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("outside workspace")
-    );
+    const out = String(await tool.handler({ path: "escape/secret.txt" }));
+    assert.ok(out.includes("private"), `widened symlink read: ${out}`);
+  });
+
+  it("reads an ordinary file outside the task root (ADR-0128, SC1)", async () => {
+    const root = await makeScratch("read-file-reach-");
+    const outside = await makeScratch("read-file-reach-out-");
+    await writeFile(join(outside, "host.txt"), "host-ordinary\n");
+
+    const tool = createReadFileTool(root);
+    const out = String(await tool.handler({ path: join(outside, "host.txt") }));
+    assert.ok(out.includes("host-ordinary"), `widened absolute read: ${out}`);
   });
 
   it("parent-traversal path → ToolExecutionError", async () => {
@@ -612,5 +622,53 @@ describe("read_file — size/binary guards", () => {
         error instanceof ToolExecutionError &&
         error.message.startsWith("[read_file] binary file rejected: ")
     );
+  });
+});
+
+describe("read_file — protected-path policy refusals (host-read-policy SC2/SC3)", () => {
+  // Fixtures live in per-test mkdtemp trees (never the real HOME): the
+  // protected files sit **under** the allowed root, so a refusal can only
+  // come from the read policy, not from the containment allowlist.
+  async function makeProtectedTree(): Promise<string> {
+    const root = await makeScratch("read-file-policy-");
+    await mkdir(join(root, ".ssh"), { recursive: true });
+    await writeFile(join(root, ".ssh", "id_rsa"), "SECRET-BYTES\n");
+    await writeFile(join(root, ".env"), "SECRET-BYTES\n");
+    await writeFile(join(root, "notes.txt"), "benign\n");
+    await symlink(join(root, ".ssh", "id_rsa"), join(root, "alias.txt"));
+    await symlink(join(root, "notes.txt"), join(root, "benign-link.txt"));
+    return root;
+  }
+
+  it("refuses a protected path with a typed error naming the protected-path roster", async () => {
+    const root = await makeProtectedTree();
+    const tool = createReadFileTool(root);
+    for (const rel of [".ssh/id_rsa", ".env"]) {
+      await assert.rejects(
+        () => tool.handler({ path: rel }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          /protected-path roster/.test(error.message) &&
+          !error.message.includes("SECRET-BYTES")
+      );
+    }
+  });
+
+  it("refuses a symlink alias of a protected target by the same rule", async () => {
+    const root = await makeProtectedTree();
+    const tool = createReadFileTool(root);
+    await assert.rejects(
+      () => tool.handler({ path: "alias.txt" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /protected-path roster/.test(error.message)
+    );
+  });
+
+  it("still reads an ordinary file reached through an ordinary symlink", async () => {
+    const root = await makeProtectedTree();
+    const tool = createReadFileTool(root);
+    const out = (await tool.handler({ path: "benign-link.txt" })) as string;
+    assert.ok(out.includes("benign"), `benign link read: ${out}`);
   });
 });

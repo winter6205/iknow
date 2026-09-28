@@ -61,9 +61,12 @@ export async function nodeScan(input: NodeScanInput): Promise<LineHit[]> {
     // naturally take the shape `../<identity>/x`. Filtering by prefix here
     // would make post-rebinding grep reads silently empty (while the rg path
     // still returns) — the same path argument answered differently depending on
-    // which engine runs. Escapes are already blocked at the entry by
-    // resolveSearchRoot's containment check, and traversal itself only walks
-    // under searchRoot.
+    // which engine runs. Escapes are blocked at the entry: inside the
+    // containment roots by the shared reach resolver's
+    // resolveWithinRoot arm (read-policy.ts `resolveReadReach`), and outside
+    // them only by the canonical policy's allow verdict — the widened arm
+    // never walks an unguarded root. Traversal itself only walks under
+    // searchRoot.
     const relPath = toWorkspaceRelative(input.workspaceRoot, absPath);
     // Paths unrepresentable in the line protocol are skipped outright: a path
     // with `\n` splits its own record into two (see

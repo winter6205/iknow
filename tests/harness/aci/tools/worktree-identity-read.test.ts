@@ -55,7 +55,7 @@ function missingRg(): { spawn: () => never } {
 }
 
 describe("rebound task roots can read the stable project identity root", () => {
-  it("read_file reaches an identity file while a main root remains excluded", async () => {
+  it("read_file reaches an identity file; writes stay excluded", async () => {
     const { repo, task } = await makeRoots();
     const rebound = createReadFileTool(task, { projectIdentityRoot: repo });
     const taskWithoutIdentityPassthrough = createReadFileTool(task);
@@ -65,8 +65,17 @@ describe("rebound task roots can read the stable project identity root", () => {
       String(await rebound.handler({ path: join(repo, "AGENTS.md") })),
       /identity guidance/
     );
-    await assert.rejects(() =>
-      taskWithoutIdentityPassthrough.handler({ path: join(repo, "AGENTS.md") })
+    // ADR-0128 T4: the absolute identity path is an ordinary host path, so it
+    // is readable through the canonical policy even without the identity-root
+    // extra (the passthrough seam now governs the *relative* fallback arm and
+    // the containment-arm vintage, not whether host reads reach at all).
+    assert.match(
+      String(
+        await taskWithoutIdentityPassthrough.handler({
+          path: join(repo, "AGENTS.md"),
+        })
+      ),
+      /identity guidance/
     );
     await assert.rejects(() =>
       write.handler({
@@ -110,7 +119,7 @@ describe("rebound task roots can read the stable project identity root", () => {
     assert.match(globResult, /AGENTS\.md/);
   });
 
-  it("opens the identity root only after the live task root flips", async () => {
+  it("identity-root extras arm opens only after the live task root flips", async () => {
     const { repo, identity, task } = await makeSplitRoots();
     const liveRoot = createLiveTaskRoot(repo);
     const grep = createGrepTool(liveRoot, {
@@ -123,24 +132,34 @@ describe("rebound task roots can read the stable project identity root", () => {
       allowProjectIdentityRoot: true,
     });
 
-    await assert.rejects(() =>
-      grep.handler({ pattern: "identity", path: identity })
+    // Relative identity names fall back to the identity root only once the
+    // live root is a task worktree: pre-flip the extras arm is closed, so
+    // the name resolves against `repo` (where it does not exist).
+    await assert.rejects(() => read.handler({ path: "AGENTS.md" }));
+    const preGrep = String(
+      await grep.handler({ pattern: "identity", path: "AGENTS.md" })
     );
-    await assert.rejects(() =>
-      read.handler({ path: join(identity, "AGENTS.md") })
-    );
+    assert.equal(preGrep, "");
 
     writeLiveTaskRoot(liveRoot, task);
     assert.match(
       String(
         await grep.handler({
           pattern: "identity",
-          path: identity,
+          path: "AGENTS.md",
           output: "content",
         })
       ),
       /AGENTS\.md:1:identity guidance/
     );
+    assert.match(
+      String(await read.handler({ path: "AGENTS.md" })),
+      /identity guidance/
+    );
+    // The absolute identity path, by contrast, reads at BOTH points:
+    // ADR-0128 T4 reach is granted by the canonical policy for ordinary host
+    // paths, independent of the extras-arm gate (which only adds the relative
+    // fallback convenience).
     assert.match(
       String(await read.handler({ path: join(identity, "AGENTS.md") })),
       /identity guidance/
@@ -148,12 +167,17 @@ describe("rebound task roots can read the stable project identity root", () => {
   });
 });
 
-describe("no shape fallback: task-worktree-shaped cwd alone grants no identity-root read", () => {
+describe("no shape fallback: task-worktree-shaped cwd alone grants no identity-root extras arm", () => {
   // Regression (review High): resolveProjectIdentityRoot used to derive
   // mainCheckoutOf(root) purely from a task-worktree-shaped root when no
   // explicit projectIdentityRoot was threaded. That let OFF assembly (SC4)
-  // and worker assembly (spec clause 14) silently widen grep/glob reads.
-  it("grep/glob reject a main-checkout path with allowProjectIdentityRoot: false (OFF surface)", async () => {
+  // and worker assembly (spec clause 14) silently widen the identity-root
+  // extras arm (relative-name fallback). What it never controlled is
+  // ADR-0128 host reach: after T4 the absolute main-checkout path reads
+  // through the canonical policy regardless of the gate — the pin below
+  // therefore distinguishes the two: absolute reach = yes (policy), relative
+  // fallback into the main checkout = no (gate closed, no shape derivation).
+  it("grep/glob reach an absolute main-checkout path by policy, without granting the relative fallback (allowProjectIdentityRoot: false, OFF surface)", async () => {
     const { repo, task } = await makeRoots();
     const grep = createGrepTool(task, {
       spawn: missingRg().spawn,
@@ -168,28 +192,34 @@ describe("no shape fallback: task-worktree-shaped cwd alone grants no identity-r
       },
     });
 
-    await assert.rejects(
-      () => grep.handler({ pattern: "identity", path: repo }),
-      /path outside workspace/
+    const grepOut = String(
+      await grep.handler({ pattern: "identity", path: repo, output: "content" })
     );
-    await assert.rejects(
-      () => glob.handler({ pattern: "AGENTS.md", path: repo }),
-      /path outside workspace/
+    assert.match(grepOut, /AGENTS\.md:1:identity guidance/);
+    const globOut = String(
+      await glob.handler({ pattern: "AGENTS.md", path: repo })
+    );
+    assert.match(globOut, /AGENTS\.md/);
+
+    assert.equal(
+      String(await grep.handler({ pattern: "identity", path: "AGENTS.md" })),
+      "",
+      "relative name must not fall back into the main checkout without an explicit identity-root thread"
     );
   });
 
-  it("grep/glob reject a main-checkout path when allowProjectIdentityRoot is not threaded (worker surface)", async () => {
+  it("grep/glob reach an absolute main-checkout path by policy when allowProjectIdentityRoot is not threaded (worker surface)", async () => {
     const { repo, task } = await makeRoots();
     const grep = createGrepTool(task, { spawn: missingRg().spawn });
     const glob = createGlobTool(task);
 
-    await assert.rejects(
-      () => grep.handler({ pattern: "identity", path: repo }),
-      /path outside workspace/
+    const grepOut = String(
+      await grep.handler({ pattern: "identity", path: repo, output: "content" })
     );
-    await assert.rejects(
-      () => glob.handler({ pattern: "AGENTS.md", path: repo }),
-      /path outside workspace/
+    assert.match(grepOut, /AGENTS\.md:1:identity guidance/);
+    const globOut = String(
+      await glob.handler({ pattern: "AGENTS.md", path: repo })
     );
+    assert.match(globOut, /AGENTS\.md/);
   });
 });

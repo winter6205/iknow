@@ -26,6 +26,7 @@ One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 sta
 - `shell-parse-foundation.md` — Stage 0: the tree-sitter parse foundation as its own module (`parseForSecurity`), the six-verdict contract + pre-parse veto roster, the degrade state machine, and the offline divergence corpus; no wall consumes it yet (ADR-0123 / ADR-0124)
 - `substitution-hard-walls.md` — Stage 1: the substitution walls switch to the ADR-0125 matrix in one atomic cut — recursive inspection of `$(…)`/backtick/`< (…)`, `${var}` split into `parameter-expansion` three buckets by name, the `interpreter-procsub` combo wall, heredoc body classified by receiver, inert text never trips a wall; closes #1132 (ADR-0125; consumes ADR-0124)
 - `hard-wall-ast-migration.md` — Stages 2-4: destructive-rm/disk, bare-metachar and root-find-walk move onto the AST; `splitShellSegments` retired and the three consumers (readonly, read-extract, role-substitution) plus `declarative.ts` re-homed onto the parse; command-name lists collapsed into one roster (ADR-0123/0124/0125)
+- `host-read-policy.md` — one canonical read policy behind `read_file` / `grep` / `glob` (both fs modes), a new path-shaped protected-path roster owned by the read-policy module (distinct from `SENSITIVE_PATH_FRAGMENTS`), symbol direct-file-open routed through the same policy, fail-closed EXIT (ADR-0128; ACR PASS)
 
 ### Harness / state and transport
 

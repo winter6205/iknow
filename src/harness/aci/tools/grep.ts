@@ -28,14 +28,17 @@
  */
 
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute } from "node:path";
+import { resolve } from "node:path";
 
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { assertNoGrepSubstitution } from "./role-substitution.js";
-import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
-import { resolveWithinRoot } from "./helpers.js";
+import type { FsModeContext } from "../../sandbox/fs-mode.js";
+import {
+  decideAndResolveReadReach,
+  matchProtectedPath,
+} from "../read-policy.js";
 import { compilePattern } from "../search/pattern.js";
 import {
   GREP_OUTPUT_VALUES,
@@ -87,6 +90,13 @@ export interface GrepToolDeps {
    * verdict on the rg and Node paths.
    */
   readonly scopeFileLimit?: number;
+  /**
+   * ADR-0128: fs isolation-mode holder (bash's pass-through shape). The
+   * handler reads `get()` once per call — same batch-snapshot discipline as
+   * the root snapshot. Absent → `global` (V1 baseline). Feeds the canonical
+   * read policy; both modes answer the same.
+   */
+  readonly fsMode?: FsModeContext;
 }
 
 interface HandlerInput {
@@ -130,17 +140,30 @@ export function createGrepTool(
     // the frozen tables live in role-substitution.ts.
     assertNoGrepSubstitution(input, ctx?.messages, ctx?.toolUseId);
     const rootAtCall = readRoot(root);
-    const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, deps);
+    // ADR-0128 + SC6: one shared flow owner (read-policy.ts
+    // `decideAndResolveReadReach`) judges the requested search root on the
+    // raw path (pre-resolution) AND its canonical form before either engine
+    // runs; protection is positive — a protected path is refused even where
+    // containment would reach it. The allow verdict is also what widens the
+    // search root past the containment roots: ordinary host paths are
+    // searchable in both modes, and the protected-hit filter still prunes
+    // per-emitted path. grep's containment anchor is the realpath'ed root
+    // while the policy identity anchors on the raw snapshot (liveRoot).
     const resolvedRoot = await realpath(rootAtCall);
-    const compiled = await compileInput(
-      input,
-      resolvedRoot,
-      projectIdentityRoot
-    );
+    const searchRoot = await decideAndResolveReadReach({
+      tool: "grep",
+      primaryRoot: resolvedRoot,
+      liveRoot: rootAtCall,
+      target: readSubPath(input),
+      deps,
+    });
+    const compiled: CompiledInput = {
+      spec: parseQuerySpec(input),
+      searchRoot,
+      workspaceRoot: resolvedRoot,
+    };
 
-    const binaryPath =
-      deps?.engineBinaryPath ??
-      engineBinaryPath(resolveInstallRoot(), process.platform, process.arch);
+    const binaryPath = resolveGrepBinaryPath(deps);
     // Sampling spec: with `also` present, read content lines (the line
     // window needs line numbers to judge).
     const sampleSpec = engineSpecFor(compiled.spec);
@@ -173,13 +196,16 @@ export function createGrepTool(
         : {}),
     });
 
-    const result = await resolveEngineResult({
-      binaryPath,
-      compiled,
-      sampleSpec,
-      spawn: deps?.spawn,
-      signal: ctx?.signal,
-    });
+    const result = filterProtectedHits(
+      await resolveEngineResult({
+        binaryPath,
+        compiled,
+        sampleSpec,
+        spawn: deps?.spawn,
+        signal: ctx?.signal,
+      }),
+      compiled.workspaceRoot
+    );
 
     return renderResult({ spec: compiled.spec, result, readLines });
   };
@@ -300,80 +326,57 @@ async function resolveEngineResult(input: {
   return { kind: "lines", lines };
 }
 
-async function compileInput(
-  input: unknown,
-  workspaceRoot: string,
-  projectIdentityRoot?: string
-): Promise<CompiledInput> {
-  const spec = parseQuerySpec(input);
-  const rawSub = readSubPath(input);
-  const searchRoot = await resolveSearchRoot(
-    workspaceRoot,
-    rawSub,
-    projectIdentityRoot
+/**
+ * Per-emitted-result protection filter (ADR-0128 SC2/SC3, output half):
+ * hits whose workspace-relative path resolves — against the already-canonical
+ * workspace root — onto the protected-path roster are dropped before
+ * rendering, so a protected file under an otherwise-allowed root (a root
+ * that contains `~/.ssh`-shaped trees, a linked directory) never appears in
+ * any output mode and leaks no bytes. Applied to the merged engine result,
+ * so it covers both the pinned rg spawn and the Node degrade walk.
+ */
+function filterProtectedHits(
+  result: EngineResult,
+  workspaceRoot: string
+): EngineResult {
+  if (result.kind === "unavailable") return result;
+  const safe = (relPath: string): boolean =>
+    matchProtectedPath(resolve(workspaceRoot, relPath)) === null;
+  if (result.kind === "lines") {
+    return {
+      kind: "lines",
+      lines: result.lines.filter((hit) => safe(hit.path)),
+    };
+  }
+  if (result.kind === "paths") {
+    return { kind: "paths", paths: result.paths.filter(safe) };
+  }
+  if (result.kind === "counts") {
+    return {
+      kind: "counts",
+      counts: result.counts.filter((count) => safe(count.path)),
+    };
+  }
+  return {
+    kind: "context",
+    groups: result.groups
+      .map((group) => ({
+        entries: group.entries.filter((entry) => safe(entry.path)),
+      }))
+      .filter((group) => group.entries.length > 0),
+  };
+}
+
+/** Pinned engine binary: deps override (test seam) or the install-root path. */
+function resolveGrepBinaryPath(deps?: GrepToolDeps): string | undefined {
+  return (
+    deps?.engineBinaryPath ??
+    engineBinaryPath(resolveInstallRoot(), process.platform, process.arch)
   );
-  return { spec, searchRoot, workspaceRoot };
 }
 
 function readSubPath(input: unknown): string {
   if (input === null || typeof input !== "object") return ".";
   const path = (input as HandlerInput).path;
   return typeof path === "string" ? path : ".";
-}
-
-/**
- * Identity-root read passthrough, gated to mirror `read-file.ts` so the
- * three read-only tools widen by the same trigger.
- *
- * - Explicit `projectIdentityRoot` threaded: returns it iff
- *   `allowProjectIdentityRoot` is `true` AND the live root is already a
- *   task worktree (post-rebind); `allowProjectIdentityRoot === false` is
- *   a hard deny.
- * - No explicit `projectIdentityRoot`: returns `undefined`. There is no
- *   shape-based fallback to a derived main checkout — OFF assembly must get
- *   no extra read root and worker assembly must not widen its tool surface
- *   merely because the root path looks task-worktree-shaped.
- */
-function resolveProjectIdentityRoot(
-  root: string,
-  deps: GrepToolDeps | undefined
-): string | undefined {
-  const projectIdentityRoot = deps?.projectIdentityRoot;
-  if (projectIdentityRoot === undefined) return undefined;
-  if (deps?.allowProjectIdentityRoot === true && !isTaskWorktreePath(root)) {
-    return undefined;
-  }
-  if (deps?.allowProjectIdentityRoot === false) return undefined;
-  return projectIdentityRoot;
-}
-
-/**
- * Keep the normal task-root interpretation first, while making the stable
- * identity root convenient for a relative project file name such as
- * `AGENTS.md` after a rebind.
- */
-async function resolveSearchRoot(
-  workspaceRoot: string,
-  target: string,
-  projectIdentityRoot: string | undefined
-): Promise<string> {
-  const extraRoots =
-    projectIdentityRoot === undefined ? undefined : [projectIdentityRoot];
-  const primary = await resolveWithinRoot(workspaceRoot, target, extraRoots);
-  if (projectIdentityRoot === undefined || isAbsolute(target)) return primary;
-  try {
-    await stat(primary);
-    return primary;
-  } catch {
-    const identityCandidate = await resolveWithinRoot(
-      projectIdentityRoot,
-      target
-    );
-    try {
-      await stat(identityCandidate);
-      return identityCandidate;
-    } catch {
-      return primary;
-    }
-  }
 }

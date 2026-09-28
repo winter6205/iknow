@@ -18,7 +18,19 @@
  * reference-capture approach as client.test.ts), so no real tsserver /
  * vscode-jsonrpc is touched.
  */
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
 
@@ -51,6 +63,10 @@ import {
   isLspFailureSentinel,
   isMethodNotFoundSentinel,
   renderMethodNotFound,
+  renderNoProjectAnchor,
+  renderNoServer,
+  renderProtectedPathDenial,
+  renderResolutionFailureDenial,
 } from "../../../src/harness/aci/tools/lsp.ts";
 import {
   createSymbolQueryToolSet,
@@ -134,6 +150,22 @@ function makeFakeClient(
 }
 
 const ctx = { directory: "/work" };
+
+/**
+ * `advanceTimersByTimeAsync` does not yield real event-loop turns, so the
+ * read-policy canonicalization (real fs, consulted before
+ * `withDocumentOpen`) only settles after the fake-clock advance window —
+ * the handler chain would then register its poll/timeout timers on a frozen
+ * clock. A real thread-pool round-trip plus microtask drains gives the
+ * pending fs callbacks enough real turns to settle before the fake clock
+ * drives the rest of the test.
+ */
+async function settleHandlerIo(): Promise<void> {
+  for (let round = 0; round < 12; round++) {
+    await realpath(process.cwd());
+    for (let hop = 0; hop < 24; hop++) await Promise.resolve();
+  }
+}
 
 function byName(tools: ReadonlyArray<AciToolDef>, name: string): AciToolDef {
   const tool = tools.find((t) => t.name === name);
@@ -855,6 +887,7 @@ describe("initialize handshake failure propagates as tool error (exception)", ()
       const p = byName(tools, "lsp_diagnostics").handler({
         file: "/work/src/a.ts",
       });
+      await settleHandlerIo();
       await vi.advanceTimersByTimeAsync(DIAGNOSTICS_WAIT_MS);
       const out = await p;
       expect(typeof out).toBe("string");
@@ -1184,6 +1217,7 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
       const p = byName(tools, "lsp_diagnostics").handler({
         file: "/work/src/a.ts",
       }) as Promise<string>;
+      await settleHandlerIo();
       await vi.advanceTimersByTimeAsync(250); // 3rd poll hits after two 100ms polls
       const out = await p;
       expect(out).toContain("late err");
@@ -1212,6 +1246,7 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
       const p = byName(tools, "lsp_diagnostics").handler({
         file: "/work/src/a.ts",
       }) as Promise<string>;
+      await settleHandlerIo();
       await vi.advanceTimersByTimeAsync(DIAGNOSTICS_WAIT_MS + 100);
       const out = await p;
       expect(out).toContain('<diagnostics file="/work/src/a.ts">');
@@ -1242,6 +1277,7 @@ describe("lsp_diagnostics wait for first push (plan T3)", () => {
         { file: "/work/src/a.ts" },
         { signal: ac.signal }
       ) as Promise<string>;
+      await settleHandlerIo();
       ac.abort(); // first poll missed → abort ends the wait before the deadline
       await vi.advanceTimersByTimeAsync(100);
       const out = await p;
@@ -1286,6 +1322,7 @@ describe("per-request timeout (plan T1)", () => {
         line: 1,
         character: 0,
       });
+      await settleHandlerIo();
       const expectation = expect(p).rejects.toThrow(
         "[lsp_definition] LSP request textDocument/definition timed out after 20s (cancelled)"
       );
@@ -1418,6 +1455,7 @@ describe("lsp_diagnostics edit-aware wait (B1)", () => {
       const p = byName(tools, "lsp_diagnostics").handler({
         file: "/work/src/a.ts",
       }) as Promise<string>;
+      await settleHandlerIo();
       // Mid-poll: the server re-pushes based on the new content (pushVersion
       // catches up with openVersion).
       await vi.advanceTimersByTimeAsync(150);
@@ -1459,6 +1497,7 @@ describe("lsp_diagnostics edit-aware wait (B1)", () => {
       const p = byName(tools, "lsp_diagnostics").handler({
         file: "/work/src/a.ts",
       }) as Promise<string>;
+      await settleHandlerIo();
       await vi.advanceTimersByTimeAsync(DIAGNOSTICS_WAIT_MS + 100);
       const out = await p;
       expect(out).toContain("stale"); // deadline reached → render what exists
@@ -1486,6 +1525,7 @@ describe("lsp_diagnostics edit-aware wait (B1)", () => {
       const p = byName(tools, "lsp_diagnostics").handler({
         file: "/work/src/a.ts",
       }) as Promise<string>;
+      await settleHandlerIo();
       await vi.advanceTimersByTimeAsync(600);
       const out = await p;
       expect(out).toContain('<diagnostics file="/work/src/a.ts">');
@@ -1583,6 +1623,7 @@ describe("ctx.requestTimeoutMs consumption (B7)", () => {
         line: 1,
         character: 0,
       });
+      await settleHandlerIo();
       const expectation = expect(p).rejects.toThrow(
         "[lsp_definition] LSP request textDocument/definition timed out after 1s (cancelled)"
       );
@@ -2438,5 +2479,538 @@ describe("find_symbol: `[]` means searched-and-absent once an anchor is in play 
     await expect(
       byName(tools, "find_symbol").handler({ query: "Foo" })
     ).rejects.toThrow("Request cancelled");
+  });
+});
+
+// ── canonical read policy on the symbol/LSP direct-file-open seam ──────────
+//
+// Spec host-read-policy.md SC4 / SC10 / SC12 (plan T3): the document open the
+// language server performs (client.withDocumentOpen, which reads on-disk text
+// into didOpen) consults decideRead BEFORE the open is entered. Denials ride
+// the family's T | string channel as readable sentinels — never a thrown
+// ToolExecutionError — with three distinct meanings that must stay
+// distinguishable: protected-path, resolution-failure, and the unchanged
+// no-server / no-project-anchor sentinels. The policy call is real here; only
+// the language server is stubbed by the existing fake client.
+
+const readPolicyScratch: string[] = [];
+
+/** Fixture home (never the real one): roster-hit shapes + one ordinary file. */
+async function makeProtectedFixtureHome(): Promise<string> {
+  const home = await mkdtemp(join(tmpdir(), "iknow-lsp-readpolicy-"));
+  readPolicyScratch.push(home);
+  await mkdir(join(home, ".ssh"), { recursive: true });
+  await writeFile(join(home, ".ssh", "id_rsa"), "SECRET-KEY-BYTES\n");
+  await writeFile(join(home, ".env"), "SECRET=1\n");
+  await mkdir(join(home, "certs"), { recursive: true });
+  await writeFile(join(home, "certs", "server.pem"), "-----BEGIN-----\n");
+  await writeFile(join(home, "ordinary.ts"), "export const x = 1;\n");
+  return home;
+}
+
+afterEach(async () => {
+  while (readPolicyScratch.length > 0) {
+    const dir = readPolicyScratch.pop();
+    if (dir !== undefined)
+      await rm(dir, { recursive: true, force: true, maxRetries: 3 }).catch(
+        () => undefined
+      );
+  }
+});
+
+function expectProtectedDenial(out: unknown, file: string): string {
+  expect(typeof out, `denial for ${file} must be a string`).toBe("string");
+  const text = out as string;
+  expect(text.startsWith(`(read denied for ${file}: protected-path rule`)).toBe(
+    true
+  );
+  expect(text).toContain("protected-path roster");
+  return text;
+}
+
+function expectResolutionDenial(out: unknown, file: string): string {
+  expect(typeof out, `denial for ${file} must be a string`).toBe("string");
+  const text = out as string;
+  expect(text.startsWith(`(read denied for ${file}: resolution failure`)).toBe(
+    true
+  );
+  expect(text).toContain("resolution failure");
+  return text;
+}
+
+describe("read policy on document open — protected paths return the sentinel, never open (SC4)", () => {
+  it("get_symbols_overview on a .env file returns the protected-path sentinel", async () => {
+    const home = await makeProtectedFixtureHome();
+    const file = join(home, ".env");
+    const { client, opened, calls } = makeFakeClient(symbolResponder());
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = await byName(tools, "get_symbols_overview").handler({ file });
+    expectProtectedDenial(out, file);
+    expect(opened).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("find_symbol with a protected `file` anchor returns the sentinel and never opens", async () => {
+    const home = await makeProtectedFixtureHome();
+    const file = join(home, ".ssh", "id_rsa");
+    const { client, opened, calls } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = await byName(tools, "find_symbol").handler({
+      query: "Foo",
+      file,
+    });
+    expectProtectedDenial(out, file);
+    expect(opened).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("resolver-path symbol ops (find_declaration / list_incoming_calls) on a *.pem return the sentinel", async () => {
+    const home = await makeProtectedFixtureHome();
+    const file = join(home, "certs", "server.pem");
+    const { client, opened, calls } = makeFakeClient(symbolResponder());
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    for (const name of ["find_declaration", "list_incoming_calls"] as const) {
+      const out = await byName(tools, name).handler({
+        file,
+        symbol_path: "Foo/bar",
+      });
+      expectProtectedDenial(out, file);
+    }
+    expect(opened).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("coordinate-addressed lsp_* family (position + call-hierarchy) returns the sentinel", async () => {
+    const home = await makeProtectedFixtureHome();
+    const file = join(home, ".ssh", "id_rsa");
+    const { client, opened, calls } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file,
+      line: 1,
+      character: 0,
+    })) as string;
+    expectProtectedDenial(out, file);
+    const multi = (await byName(tools, "lsp_incoming_calls").handler({
+      file,
+      line: 1,
+      character: 0,
+    })) as string;
+    expectProtectedDenial(multi, file);
+    expect(opened).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("lsp_diagnostics / get_diagnostics_for_file refuse a protected file and keep the rest", async () => {
+    const home = await makeProtectedFixtureHome();
+    const protectedFile = join(home, ".env");
+    const ordinaryFile = join(home, "ordinary.ts");
+    const { client, opened } = makeFakeClient(() => undefined);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_diagnostics").handler({
+      files: [protectedFile, ordinaryFile],
+    })) as string;
+    expect(out).toContain(
+      `(read denied for ${protectedFile}: protected-path rule`
+    );
+    expect(out).toContain(`<diagnostics file="${ordinaryFile}">`);
+    // only the ordinary file ever entered the open window
+    expect(opened).toEqual([ordinaryFile]);
+    const single = (await byName(
+      createSymbolQueryToolSetForTest(),
+      "get_diagnostics_for_file"
+    ).handler({ file: protectedFile })) as string;
+    expectProtectedDenial(single, protectedFile);
+  });
+
+  it("a `~` alias of a protected path denies under the fixture HOME", async () => {
+    const home = await makeProtectedFixtureHome();
+    const { client, opened } = makeFakeClient(symbolResponder());
+    mockGetClient.mockResolvedValue(client);
+    const savedHome = process.env.HOME;
+    process.env.HOME = home;
+    try {
+      const tools = createSymbolQueryToolSetForTest();
+      const out = await byName(tools, "get_symbols_overview").handler({
+        file: "~/.ssh/id_rsa",
+      });
+      expect(typeof out).toBe("string");
+      expect(
+        (out as string).startsWith(
+          "(read denied for ~/.ssh/id_rsa: protected-path rule"
+        )
+      ).toBe(true);
+      expect(opened).toEqual([]);
+    } finally {
+      if (savedHome === undefined) delete process.env.HOME;
+      else process.env.HOME = savedHome;
+    }
+  });
+
+  it("an ordinary file keeps today's behavior byte-for-byte (open + request)", async () => {
+    const home = await makeProtectedFixtureHome();
+    const file = join(home, "ordinary.ts");
+    const { client, opened, calls } = makeFakeClient(symbolResponder());
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = await byName(tools, "get_symbols_overview").handler({ file });
+    expect(out).toBe(JSON.stringify(SAMPLE_SYMBOL_TREE, null, 2));
+    expect(opened).toEqual([file]);
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+});
+
+describe("read policy on document open — undecidable paths return the resolution-failure sentinel, never throw (SC10/SC13)", () => {
+  it("empty-string file yields the resolution-failure sentinel instead of an untyped crash", async () => {
+    const { client, opened } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_document_symbol").handler({
+      file: "",
+    });
+    expectResolutionDenial(out, "");
+    expect(out).toContain("empty or separator-only unusable input");
+    expect(opened).toEqual([]);
+  });
+
+  it("whitespace-only file yields the same named sentinel", async () => {
+    const { client, opened } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_document_symbol").handler({
+      file: "   ",
+    });
+    expectResolutionDenial(out, "   ");
+    expect(opened).toEqual([]);
+  });
+
+  it("a dangling symlink is undecidable: sentinel, not a leaked ENOENT", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "iknow-lsp-dangling-"));
+    readPolicyScratch.push(dir);
+    const link = join(dir, "dangling.ts");
+    await symlink(join(dir, "absent-target.ts"), link);
+    const { client, opened, calls } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_hover").handler({
+      file: link,
+      line: 1,
+      character: 0,
+    });
+    expectResolutionDenial(out, link);
+    expect(out).toContain("dangling symlink");
+    expect(opened).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a symlink loop is undecidable: sentinel, not a leaked ELOOP", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "iknow-lsp-loop-"));
+    readPolicyScratch.push(dir);
+    const a = join(dir, "a.ts");
+    const b = join(dir, "b.ts");
+    await symlink(b, a);
+    await symlink(a, b);
+    const { client, opened } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createLspToolSet(ctx);
+    const out = await byName(tools, "lsp_hover").handler({
+      file: a,
+      line: 1,
+      character: 0,
+    });
+    expectResolutionDenial(out, a);
+    expect(out).toContain("symlink loop");
+    expect(opened).toEqual([]);
+  });
+});
+
+describe("sentinel meanings stay distinct (protected ≠ resolution ≠ no-server ≠ no-anchor)", () => {
+  it("the four renderings produce four different strings with their own rule named", () => {
+    const file = "/work/src/a.ts";
+    const protectedSentinel = renderProtectedPathDenial(file, "why-protected");
+    const resolutionSentinel = renderResolutionFailureDenial(
+      file,
+      "why-resolution"
+    );
+    const noServerSentinel = renderNoServer(ctx, { reason: "no-server" }, file);
+    const noAnchorSentinel = renderNoProjectAnchor(ctx);
+    expect(
+      new Set([
+        protectedSentinel,
+        resolutionSentinel,
+        noServerSentinel,
+        noAnchorSentinel,
+      ]).size
+    ).toBe(4);
+    // the existing two meanings are unchanged by this seam
+    expect(noServerSentinel).toMatch(
+      /^\(no LSP server configured for \/work\/src\/a\.ts; supported extensions: /
+    );
+    expect(noAnchorSentinel).toBe(NO_ANCHOR_SENTINEL);
+    expect(protectedSentinel).toContain("protected-path rule");
+    expect(resolutionSentinel).toContain("resolution failure");
+  });
+
+  it("a protected-path denial is not rendered as the no-server sentinel", async () => {
+    const home = await makeProtectedFixtureHome();
+    const file = join(home, ".env");
+    const { client } = makeFakeClient(symbolResponder());
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const out = (await byName(tools, "get_symbols_overview").handler({
+      file,
+    })) as string;
+    expect(out).not.toContain("no LSP server configured");
+    expect(out).not.toContain("no project anchor");
+    expect(out).not.toBe(NO_ANCHOR_SENTINEL);
+  });
+});
+
+describe("read policy on document open — the symbol MUTATE family is gated the same way (SC4)", () => {
+  // The query family consulted the policy at `withResolvedSymbol` before
+  // `withDocumentOpen`; the five mutate tools reached `withDocumentOpen` with
+  // no policy call at all, so `didOpen` carried protected bytes into the server
+  // and `applyWorkspaceEdit` then read/wrote the file by plain path. Same
+  // decision, same channel, same sentinel family.
+  it("every symbol mutate tool returns the protected-path sentinel and never opens the file", async () => {
+    const home = await makeProtectedFixtureHome();
+    const file = join(home, ".ssh", "id_rsa");
+    const before = await readFile(file, "utf8");
+    for (const name of SYMBOL_MUTATE_TOOL_NAMES) {
+      const { client, opened, calls } = makeFakeClient(() => {
+        throw new Error(
+          "a protected file must never reach the language server or the applier"
+        );
+      });
+      mockGetClient.mockResolvedValue(client);
+      const tools = createSymbolMutateToolSetForTest();
+      const out = (await byName(tools, name).handler({
+        ...mutateInput(name),
+        file,
+      })) as string;
+      expectProtectedDenial(out, file);
+      expect(opened, `${name} must not open the document`).toEqual([]);
+      expect(calls, `${name} must not send RPC`).toHaveLength(0);
+    }
+    // No mutation logic runs on a protected path: the bytes are untouched.
+    expect(await readFile(file, "utf8")).toBe(before);
+  });
+
+  it("a protected *.pem and a `.env` are refused by the mutate family too", async () => {
+    const home = await makeProtectedFixtureHome();
+    for (const file of [
+      join(home, ".env"),
+      join(home, "certs", "server.pem"),
+    ]) {
+      const { client, opened, calls } = makeFakeClient(symbolResponder());
+      mockGetClient.mockResolvedValue(client);
+      const tools = createSymbolMutateToolSetForTest();
+      const out = (await byName(tools, "replace_symbol_body").handler({
+        file,
+        symbol_path: "Foo/bar",
+        new_body: "export const x = 1;\n",
+      })) as string;
+      expectProtectedDenial(out, file);
+      expect(opened).toEqual([]);
+      expect(calls).toHaveLength(0);
+    }
+  });
+
+  it("an undecidable mutate path yields the resolution-failure sentinel, not a throw", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "iknow-lsp-mutate-dangling-"));
+    readPolicyScratch.push(dir);
+    const link = join(dir, "dangling.ts");
+    await symlink(join(dir, "absent-target.ts"), link);
+    const { client, opened, calls } = makeFakeClient(symbolResponder());
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolMutateToolSetForTest();
+    const out = (await byName(tools, "safe_delete_symbol").handler({
+      file: link,
+      symbol_path: "Foo",
+    })) as string;
+    expectResolutionDenial(out, link);
+    expect(opened).toEqual([]);
+    expect(calls).toHaveLength(0);
+  });
+
+  it("a cross-file rename that drags a protected file in is refused, and nothing is mutated", async () => {
+    // The edit set is chosen by the SERVER, not by the caller: an ordinary
+    // anchor can drag a protected file into the same change. Gating only
+    // `params.file` therefore missed the second path — and a rename that
+    // stops after writing the first file leaves the workspace half-renamed.
+    const home = await makeProtectedFixtureHome();
+    const anchor = join(home, "ordinary.ts");
+    const protectedFile = join(home, ".env");
+    const anchorBefore = await readFile(anchor, "utf8");
+    const protectedBefore = await readFile(protectedFile, "utf8");
+
+    const crossFileRename = (method: string) =>
+      method === DOCUMENT_SYMBOL
+        ? SAMPLE_SYMBOL_TREE
+        : method === "textDocument/rename"
+          ? {
+              changes: {
+                [pathToFileURL(anchor).toString()]: [
+                  {
+                    range: {
+                      start: { line: 0, character: 13 },
+                      end: { line: 0, character: 14 },
+                    },
+                    newText: "z",
+                  },
+                ],
+                [pathToFileURL(protectedFile).toString()]: [
+                  {
+                    range: {
+                      start: { line: 0, character: 0 },
+                      end: { line: 0, character: 1 },
+                    },
+                    newText: "#",
+                  },
+                ],
+              },
+            }
+          : [];
+    const { client, calls } = makeFakeClient(crossFileRename);
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolMutateToolSetForTest();
+    const out = (await byName(tools, "rename_symbol").handler({
+      file: anchor,
+      symbol_path: "Foo",
+      new_name: "z",
+    })) as string;
+
+    expectProtectedDenial(out, protectedFile);
+    // All-or-nothing: the ordinary anchor is untouched too, even though it is
+    // itself permitted.
+    expect(await readFile(protectedFile, "utf8")).toBe(protectedBefore);
+    expect(await readFile(anchor, "utf8")).toBe(anchorBefore);
+    expect(calls.map((c) => c.method)).toContain("textDocument/rename");
+  });
+
+  it("an ordinary file keeps today's behavior — the gate does not block the happy path", async () => {
+    const home = await makeProtectedFixtureHome();
+    const file = join(home, "ordinary.ts");
+    const { client, opened, calls } = makeFakeClient(symbolResponder());
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolMutateToolSetForTest();
+    // The applier reads the real file by plain path, so an ordinary fixture is
+    // enough to prove the mutation pipeline still runs end to end.
+    const out = (await byName(tools, "replace_symbol_body").handler({
+      file,
+      symbol_path: "Foo",
+      new_body: "export const y = 2;\n",
+    })) as string;
+    expect(opened).toEqual([file]);
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+    expect(out).toContain(file);
+  });
+});
+
+describe("read policy on document open — concurrent calls on one shared client keep independent verdicts (SC12)", () => {
+  it("Promise.all over mixed protected/ordinary + repeated same path matches the single-threaded verdicts, and protected never reaches the open", async () => {
+    const home = await makeProtectedFixtureHome();
+    const ordinaryA = join(home, "ordinary.ts");
+    const protectedA = join(home, ".env");
+    const protectedB = join(home, ".ssh", "id_rsa");
+
+    const { client } = makeFakeClient(symbolResponder());
+    const openedFiles: string[] = [];
+    (client as unknown as { withDocumentOpen: unknown }).withDocumentOpen =
+      async <T>(file: string, fn: () => Promise<T>): Promise<T> => {
+        openedFiles.push(file);
+        return fn();
+      };
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSetForTest();
+    const overview = byName(tools, "get_symbols_overview");
+    const call = (file: string): Promise<unknown> => overview.handler({ file });
+
+    // Single-threaded baselines first.
+    const seqOrdinary = await call(ordinaryA);
+    const seqProtectedA = await call(protectedA);
+    const seqProtectedB = await call(protectedB);
+    expectProtectedDenial(seqProtectedA, protectedA);
+    expectProtectedDenial(seqProtectedB, protectedB);
+    openedFiles.length = 0;
+
+    const concurrent = await Promise.all([
+      call(protectedA),
+      call(ordinaryA),
+      call(protectedB),
+      call(ordinaryA),
+      call(protectedA),
+      call(ordinaryA),
+    ]);
+    expect(concurrent[0]).toBe(seqProtectedA);
+    expect(concurrent[1]).toBe(seqOrdinary);
+    expect(concurrent[2]).toBe(seqProtectedB);
+    expect(concurrent[3]).toBe(seqOrdinary);
+    expect(concurrent[4]).toBe(seqProtectedA);
+    expect(concurrent[5]).toBe(seqOrdinary);
+    // every open that happened was for the ordinary file only; the two
+    // protected paths never entered withDocumentOpen, in any interleaving.
+    expect(new Set(openedFiles)).toEqual(new Set([ordinaryA]));
+    expect(openedFiles).not.toContain(protectedA);
+    expect(openedFiles).not.toContain(protectedB);
+  });
+
+  it("post-widening half: concurrent calls mixing in-root, ordinary outside-taskRoot and protected files keep single-threaded verdicts (SC12, SC5)", async () => {
+    const work = await mkdtemp(join(tmpdir(), "iknow-lsp-sc12-work-"));
+    readPolicyScratch.push(work);
+    const outside = await mkdtemp(join(tmpdir(), "iknow-lsp-sc12-out-"));
+    readPolicyScratch.push(outside);
+    const home = await makeProtectedFixtureHome();
+    const inRoot = join(work, "inside.ts");
+    const outsideOrdinary = join(outside, "ordinary.ts");
+    const protectedFile = join(home, ".env");
+    await writeFile(inRoot, "export const i = 1;\n");
+    await writeFile(outsideOrdinary, "export const o = 1;\n");
+
+    const { client } = makeFakeClient(symbolResponder());
+    const openedFiles: string[] = [];
+    (client as unknown as { withDocumentOpen: unknown }).withDocumentOpen =
+      async <T>(file: string, fn: () => Promise<T>): Promise<T> => {
+        openedFiles.push(file);
+        return fn();
+      };
+    mockGetClient.mockResolvedValue(client);
+    const tools = createSymbolQueryToolSet({ ...ctx, directory: work });
+    const overview = byName(tools, "get_symbols_overview");
+    const call = (file: string): Promise<unknown> => overview.handler({ file });
+
+    const seqIn = await call(inRoot);
+    const seqOut = await call(outsideOrdinary);
+    const seqProtected = await call(protectedFile);
+    expectProtectedDenial(seqProtected, protectedFile);
+    // ADR-0128 widened host reach: the outside-taskRoot ordinary file is
+    // allowed at the symbol seam too — same verdict class as an in-root file.
+    expect(String(seqOut).startsWith("(read denied for")).toBe(false);
+    expect(String(seqIn).startsWith("(read denied for")).toBe(false);
+    openedFiles.length = 0;
+
+    const concurrent = await Promise.all([
+      call(outsideOrdinary),
+      call(protectedFile),
+      call(inRoot),
+      call(outsideOrdinary),
+      call(protectedFile),
+      call(inRoot),
+      call(outsideOrdinary),
+      call(protectedFile),
+      call(inRoot),
+    ]);
+    concurrent.forEach((out, index) => {
+      const expected =
+        index % 3 === 0 ? seqOut : index % 3 === 1 ? seqProtected : seqIn;
+      expect(out, `interleaved call ${index}`).toBe(expected);
+    });
+    expect(new Set(openedFiles)).toEqual(new Set([inRoot, outsideOrdinary]));
+    expect(openedFiles).not.toContain(protectedFile);
   });
 });

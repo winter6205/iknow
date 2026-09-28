@@ -6,7 +6,8 @@
  *  - "**" recursive pattern matches nested files
  *  - "*.ts" matches only files ending .ts (true glob, not substring)
  *  - empty pattern rejected (does not degenerate to "match all")
- *  - search root outside workspace rejected
+ *  - search root outside workspace reachable through the canonical read
+ *    policy (ADR-0128), protected roots still refused by the roster
  *  - limit truncates output (default 200, cap 5000)
  *  - Node fallback path returns the same shape when rg is unavailable
  *  - fallback triggers on the whole unstartable errno set, not just ENOENT
@@ -21,7 +22,15 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  realpath,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
 import { promisify } from "node:util";
@@ -524,22 +533,26 @@ describe("createGlobTool — input validation", () => {
     );
   });
 
-  it("rejects a search root that escapes the workspace", async () => {
+  it("lists an ordinary search root outside the workspace (ADR-0128 host reach)", async () => {
     const root = await makeScratch("glob-escape-");
-    const outside = await makeScratch("glob-escape-out-");
+    const outside = await realpath(await makeScratch("glob-escape-out-"));
     await buildFixtureTree(outside);
 
     const tool = createGlobTool(root);
-    await assert.rejects(
-      tool.handler({ pattern: "**/*.ts", path: outside }),
-      (error: unknown) =>
-        error instanceof Error &&
-        error.name === "ToolExecutionError" &&
-        error.message.includes("outside workspace")
+    const output = String(
+      await tool.handler({ pattern: "**/*.ts", path: outside })
+    );
+    assert.match(output, /index\.ts/);
+    assert.match(output, /helper\.ts/);
+    // Paths stay root-relative: reaching the outside tree shows through the
+    // `..` segments, same shape as the identity-root surface has always had.
+    assert.ok(
+      output.split("\n").every((line) => line.startsWith("../")),
+      `root-relative widened paths: ${output}`
     );
   });
 
-  it("rejects a relative parent traversal that escapes the workspace", async () => {
+  it("a relative parent traversal to an ordinary outside directory is listed (host reach)", async () => {
     const parent = await makeScratch("glob-parent-");
     const root = join(parent, "root");
     await mkdir(root);
@@ -548,10 +561,10 @@ describe("createGlobTool — input validation", () => {
     await writeFile(join(outside, "leak.ts"), "x");
 
     const tool = createGlobTool(root);
-    await assert.rejects(
-      tool.handler({ pattern: "**/*.ts", path: "../outside" }),
-      ToolExecutionError
+    const output = String(
+      await tool.handler({ pattern: "**/*.ts", path: "../outside" })
     );
+    assert.match(output, /leak\.ts/);
   });
 
   it("returns the real file under the workspace when the search root exists", async () => {
@@ -648,3 +661,192 @@ describe("createGlobTool — limit cap", () => {
     assert.ok(lines.length > 0);
   });
 });
+
+// ───────────────────────── protected-path policy (host-read-policy SC2/SC3) ─────────────────────────
+
+describe("glob — protected-path policy enforcement", () => {
+  async function makePolicyTree(prefix: string): Promise<string> {
+    const root = await makeScratch(prefix);
+    await mkdir(join(root, ".ssh"), { recursive: true });
+    await mkdir(join(root, "certs"), { recursive: true });
+    await writeFile(join(root, ".ssh", "id_rsa"), "SSHSECRET\n");
+    await writeFile(join(root, "certs", "server.pem"), "PEMSECRET\n");
+    await writeFile(join(root, ".env"), "ENVSECRET\n");
+    await writeFile(join(root, "notes.txt"), "benign\n");
+    await symlink(join(root, ".ssh", "id_rsa"), join(root, "alias.txt"));
+    return root;
+  }
+
+  /**
+   * Node walker form: the pinned binary path is missing, so collection runs
+   * walkAndMatch — which enumerates dotfiles and must therefore lean on the
+   * policy filter for leaks.
+   */
+  it("walker form never emits protected paths and refuses a protected search root", async () => {
+    const root = await makePolicyTree("glob-policy-walk-");
+    const deps: GlobToolDeps = {
+      engineBinaryPath: join(root, "__no_such_engine__", "rg"),
+    };
+    const output = await gather({ root, pattern: "**", deps });
+    for (const leak of ["id_rsa", "server.pem", ".env"]) {
+      assert.ok(!output.includes(leak), `listing leaked ${leak}: ${output}`);
+    }
+    assert.ok(output.includes("notes.txt"), `benign file lost: ${output}`);
+
+    for (const path of [
+      ".ssh",
+      ".env",
+      join(root, "certs", "server.pem"),
+      "alias.txt",
+    ]) {
+      await assert.rejects(
+        () => toolHandlerFor(root, deps)({ pattern: "*", path }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          /protected-path roster/.test(error.message) &&
+          !/outside workspace|not a file/.test(error.message)
+      );
+    }
+  });
+
+  /**
+   * Widened root half (ADR-0128 T4): the same no-leak invariant on a search
+   * root **outside** the live task root — reach was granted by the policy's
+   * allow verdict, the per-emission filter still drops protected paths under
+   * it, and naming a protected entry there is refused by the roster (never
+   * as an escape).
+   */
+  it("walker form on a widened outside root leaks nothing and refuses protected names", async () => {
+    const taskRoot = await makeScratch("glob-policy-widened-task-");
+    const outside = await realpath(
+      await makeScratch("glob-policy-widened-tree-")
+    );
+    await mkdir(join(outside, ".ssh"), { recursive: true });
+    await writeFile(join(outside, ".ssh", "id_rsa"), "SSHSECRET\n");
+    await writeFile(join(outside, ".env"), "ENVSECRET\n");
+    await writeFile(join(outside, "notes.txt"), "benign\n");
+    await symlink(join(outside, ".ssh", "id_rsa"), join(outside, "alias.txt"));
+
+    const deps: GlobToolDeps = {
+      engineBinaryPath: join(taskRoot, "__no_such_engine__", "rg"),
+    };
+    const output = await gather({
+      root: taskRoot,
+      pattern: "**",
+      path: outside,
+      deps,
+    });
+    for (const leak of ["id_rsa", ".env", "alias.txt"]) {
+      assert.ok(
+        !output.includes(leak),
+        `widened listing leaked ${leak}: ${output}`
+      );
+    }
+    assert.ok(
+      output.includes("notes.txt"),
+      `benign widened file lost: ${output}`
+    );
+
+    for (const path of [
+      join(outside, ".ssh"),
+      join(outside, ".env"),
+      join(outside, "alias.txt"),
+    ]) {
+      await assert.rejects(
+        () => toolHandlerFor(taskRoot, deps)({ pattern: "*", path }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          /protected-path roster/.test(error.message) &&
+          !/outside workspace|not a file/.test(error.message)
+      );
+    }
+  });
+
+  /**
+   * Real pinned rg half of the widened-root matrix: traversal of the outside
+   * tree answers from the vendor binary; protected entries are dropped by
+   * the same per-emission filter the Node walker uses (its filter position is
+   * pinned engine-independent by the canned-output test below).
+   */
+  const pinnedEngine = engineBinaryPath(
+    resolveInstallRoot(),
+    process.platform,
+    process.arch
+  );
+  const enginePresent = pinnedEngine !== undefined && existsSync(pinnedEngine);
+
+  it.skipIf(!enginePresent)(
+    "real rg on a widened outside root leaks no protected paths",
+    async () => {
+      const taskRoot = await makeScratch("glob-policy-widened-rg-task-");
+      const outside = await realpath(
+        await makeScratch("glob-policy-widened-rg-tree-")
+      );
+      await mkdir(join(outside, ".ssh"), { recursive: true });
+      await writeFile(join(outside, ".ssh", "id_rsa"), "SSHSECRET\n");
+      await writeFile(join(outside, ".env"), "ENVSECRET\n");
+      await writeFile(join(outside, "notes.txt"), "benign\n");
+
+      const output = await gather({
+        root: taskRoot,
+        pattern: "**",
+        path: outside,
+      });
+      for (const leak of ["id_rsa", ".env", "SSHSECRET", "ENVSECRET"]) {
+        assert.ok(
+          !output.includes(leak),
+          `real-rg widened listing leaked ${leak}: ${output}`
+        );
+      }
+      assert.ok(
+        output.includes("notes.txt"),
+        `benign widened file lost: ${output}`
+      );
+    }
+  );
+
+  /**
+   * rg-output form: the seam stands in for the spawned engine, so the filter
+   * position on the engine-merged result list is what this pins — paths that
+   * a real rg (with --hidden during traversal) could hand back are dropped.
+   */
+  it("canned rg output is filtered before sorting / limiting", async () => {
+    const root = await makePolicyTree("glob-policy-rg-");
+    const canned = [
+      "notes.txt",
+      ".ssh/id_rsa",
+      ".env",
+      "certs/server.pem",
+    ].join("\n");
+    const output = await gather({
+      root,
+      pattern: "**",
+      deps: { spawnRg: async () => ({ stdout: canned, stderr: "" }) },
+    });
+    assert.equal(output, "notes.txt");
+  });
+
+  it("symlink alias as search root is refused; ordinary chains stay listable", async () => {
+    const root = await makePolicyTree("glob-policy-link-");
+    await mkdir(join(root, "realdir"));
+    await writeFile(join(root, "realdir", "ok.txt"), "o\n");
+    await symlink(join(root, "realdir"), join(root, "dirlink"));
+    const deps: GlobToolDeps = {
+      engineBinaryPath: join(root, "__no_such_engine__", "rg"),
+    };
+    await assert.rejects(
+      () => toolHandlerFor(root, deps)({ pattern: "*", path: "alias.txt" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /protected-path roster/.test(error.message)
+    );
+    const out = await gather({ root, pattern: "*.txt", path: "dirlink", deps });
+    assert.ok(out.includes("ok.txt"), `benign chain listing: ${out}`);
+  });
+});
+
+function toolHandlerFor(root: string, deps: GlobToolDeps) {
+  return createGlobTool(root, deps).handler as (
+    input: unknown
+  ) => Promise<unknown>;
+}

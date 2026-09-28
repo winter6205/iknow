@@ -269,8 +269,10 @@ function collectViaSeam(
  * rebinding) → this yields a `..`-shaped path, and rg searches it as
  * "workspace-relative with `..`". The Node scan matches: it does **not**
  * remove `..`-prefixed entries (see `node-scan.ts`), so both engines' read
- * surfaces agree. Escapes are blocked at the entry by `resolveSearchRoot`'s
- * containment check.
+ * surfaces agree. Escapes are blocked at the entry: inside the containment
+ * roots by the shared reach resolver's `resolveWithinRoot` arm (read-policy.ts
+ * `resolveReadReach`), and outside them only by the canonical policy's allow
+ * verdict — the widened arm carries no unguarded root.
  */
 function toSearchPath(workspaceRoot: string, searchRoot: string): string {
   const rel = relative(workspaceRoot, searchRoot).split("\\").join("/");

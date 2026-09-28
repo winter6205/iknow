@@ -20,7 +20,8 @@
  *   - never recorded in the last-read ledger: this factory takes no ledger
  *     parameter (only read_file and whitelisted bash are ledger subjects,
  *     ADR-0084);
- *   - deliberately narrower than read_file's resolveReadTarget: no
+ *   - deliberately narrower than read_file's shared reach resolution
+ *     (`resolveReadReach`): no
  *     `projectIdentityRoot` read-only passthrough — only the
  *     `resolveWithinRoot` workspace fence, fail-closed.
  */

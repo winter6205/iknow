@@ -653,12 +653,12 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
     );
   });
 
-  it("injects sandboxRoot into the read_file tool (out-of-root rejected)", async () => {
+  it("injects sandboxRoot into the read_file tool (relative anchoring proves the root; ordinary out-of-root is decided by policy)", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-build-engine-root-"));
     const outside = await mkdtemp(join(tmpdir(), "iknow-build-engine-out-"));
     try {
       // An explicit sandboxRoot must agree with resolveMcpRoots' workspaceRoot;
-      // passed as the same root, the ACI FS fence still rejects out-of-root paths.
+      // passed as the same root, relative names anchor at it — not at cwd.
       const { deps } = await buildHarnessEngine({
         env: makeEnv("sk-test-passthrough-2"),
         askUser: createNoAskUser(),
@@ -667,21 +667,37 @@ describe("buildHarnessEngine (SSOT passthrough)", () => {
         productRoot: root,
       });
 
-      const [result] = await deps.executor.executeAll([
+      const results = await deps.executor.executeAll([
         {
           id: "sandbox-read",
           name: "read_file",
           input: { path: join(outside, "victim.txt") },
         },
+        {
+          id: "relative-anchor",
+          name: "read_file",
+          input: { path: "relative-victim.txt" },
+        },
       ]);
+      const [outsideResult, relativeResult] = results;
 
-      // read-only category → permission allows; the soft sandbox itself must
-      // reject the path since it lies outside `root`. If sandboxRoot were not
-      // injected (default process.cwd()), this path would be rejected too,
-      // but the assertion proves the tool was built with the explicit root.
-      expect(result.kind).toBe("execution_failed");
-      if (result.kind === "execution_failed") {
-        expect(result.message).toMatch(/path outside workspace/);
+      // ADR-0128 host reach: an ordinary path outside the root is no longer
+      // reach-denied by the tool fence — the canonical policy allows it, so a
+      // missing victim is reported as not-found (it never existed on disk).
+      expect(outsideResult.kind).toBe("execution_failed");
+      if (outsideResult.kind === "execution_failed") {
+        expect(outsideResult.message).toMatch(/file not found/);
+        expect(outsideResult.message).not.toMatch(/outside workspace/);
+      }
+      // read-only category → permission allows. If sandboxRoot were not
+      // injected the relative name would anchor at process.cwd() instead;
+      // the not-found message carrying the root-joined path proves the tool
+      // was built with the explicit root.
+      expect(relativeResult.kind).toBe("execution_failed");
+      if (relativeResult.kind === "execution_failed") {
+        expect(relativeResult.message).toContain(
+          join(root, "relative-victim.txt")
+        );
       }
     } finally {
       await removeTmpTree(root);

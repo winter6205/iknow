@@ -317,11 +317,11 @@ export interface CreateDefaultAciRegistryOptions {
    * the symbol-tool path.
    */
   readonly lspCtx?: LspCtx;
-  /** ADR-0019 (T4): per-root state anchor. Threaded into read_file so its
-   *  `extraReadRoots` admit `<workspaceRoot>/.iknow` at parity with the home
-   *  profile (the agent's per-root persona state). ADR-0092 global mode: not a
-   *  bind root; bash no longer threads it (no predicate, no per-root mount).
-   *  Defaults to `sandboxRoot` (legacy shape) when absent. */
+  /** ADR-0019 (T4): per-root state anchor. Threaded into the trace dir, the
+   *  shared read reach resolver's extras (which admit `<workspaceRoot>/.iknow`
+   *  at parity with the home profile — the agent's per-root persona state), and
+   *  the bash factory's name-pattern scan scope. ADR-0092 global mode: not a
+   *  bind root. Defaults to `sandboxRoot` (legacy shape) when absent. */
   readonly workspaceRoot?: string;
   /** ADR-0037: project identity root — the stable read-only root handed to
    *  `read_file` / `grep` / `glob` when the session isolation switch is ON.
@@ -675,13 +675,13 @@ export function createDefaultAciRegistry(
   // read the catalog — the spawn-subagent-tool factory is the true owner of
   // catalog routing.
   const bashMode = opts.bashMode;
-  // ADR-0019 (T4): per-root state anchor. Two live consumers: read_file's
-  // `extraReadRoots` (admits `<workspaceRoot>/.iknow` at parity with the
-  // home profile) and the bash factory's name-pattern scan scope
-  // (specs/effect-boundary-protection.md "Scan scope") — the latter is
-  // fs-mode-independent, so global and workspace mode enumerate the same
-  // tree. Falls back to sandboxRoot when absent (legacy shape) so existing
-  // callers without per-root state stay byte-identical.
+  // ADR-0019 (T4): per-root state anchor. Three live consumers: the trace dir
+  // (`<workspaceRoot>/trace`), the shared read reach resolver's extras (admits
+  // `<workspaceRoot>/.iknow` at parity with the home profile), and the bash
+  // factory's name-pattern scan scope (specs/effect-boundary-protection.md
+  // "Scan scope") — the last is fs-mode-independent, so global and workspace
+  // mode enumerate the same tree. Falls back to sandboxRoot when absent (legacy
+  // shape) so existing callers without per-root state stay byte-identical.
   const workspaceRoot = opts.workspaceRoot ?? sandboxRoot;
   // Switch for todo_write's conditional assembly. Host-injected; build-engine
   // resolves a session-level directory when surface !== "ask" and threads it;
@@ -743,6 +743,23 @@ export function createDefaultAciRegistry(
   // skill_search was removed; see ADR-0046).
   // Key order must match ACI_TOOLSET_NAMES item by item (Gate 3): memory_*
   // before tool_search, skill at the tail.
+  //
+  // SC6: single threading owner for the three read-path tool factories'
+  // shared policy seam — identity root + its gate + the fs-mode holder
+  // (absent keys keep the legacy shapes; `allowProjectIdentityRoot` false
+  // and absent behave the same for a read surface with no identity root
+  // threaded).
+  const readToolPolicyThreading = () => ({
+    ...(opts.projectIdentityRoot !== undefined
+      ? { projectIdentityRoot: opts.projectIdentityRoot }
+      : {}),
+    allowProjectIdentityRoot: opts.projectIdentityRoot !== undefined,
+    ...(opts.fsMode !== undefined ? { fsMode: opts.fsMode } : {}),
+  });
+  // Read-path root: `liveTaskRoot ?? sandboxRoot` instead of the frozen
+  // sandboxRoot (cell absent / never rebound → fall back to sandboxRoot,
+  // byte-identical to the pre-rebind shape).
+  const readToolRoot = () => opts.liveTaskRoot ?? sandboxRoot;
   const factories: Record<string, () => AciToolDef> = {
     bash: () =>
       createBashTool(sandboxRoot, {
@@ -799,25 +816,24 @@ export function createDefaultAciRegistry(
           ? { askApproval: opts.askApproval }
           : {}),
       }),
-    // Read-path tool factories take `liveTaskRoot ?? sandboxRoot` instead of
-    // the frozen sandboxRoot (cell absent / never rebound → fall back to
-    // sandboxRoot, byte-identical to the pre-rebind shape). The factory
-    // handler reads the cell once per call to get a snapshot, same vintage
-    // as read_file's extraReadRoots. glob / grep read per call likewise.
+    // Read-path tool factories: `readToolRoot()` takes `liveTaskRoot ??
+    // sandboxRoot` instead of the frozen sandboxRoot (cell absent / never
+    // rebound → fall back to sandboxRoot, byte-identical to the pre-rebind
+    // shape), and `readToolPolicyThreading()` is the single SC6 threading
+    // owner for the three read tools' shared seam (identity root + its gate
+    // + the fs-mode holder). The handlers read the cell once per call to get
+    // a snapshot, same vintage as the shared reach resolver's extras; glob /
+    // grep read per call likewise.
     //
     // The formerly-dead projectIdentityRoot seam is now genuinely consumed:
-    // read-file.ts admits it into extraReadRoots (ADR-0037: identity-root
-    // read-through). This layer still passes it via a spread guard, and
-    // after rebind the identity-root files stay reachable (same vintage).
+    // the shared read-policy reach resolver admits it into the containment
+    // root set (ADR-0037: identity-root read-through), gated by
+    // allowProjectIdentityRoot in the threading helper. After rebind the
+    // identity-root files stay reachable (same vintage).
     read_file: () =>
-      createReadFileTool(opts.liveTaskRoot ?? sandboxRoot, {
+      createReadFileTool(readToolRoot(), {
         workspaceRoot,
-        ...(opts.projectIdentityRoot !== undefined
-          ? { projectIdentityRoot: opts.projectIdentityRoot }
-          : {}),
-        ...(opts.projectIdentityRoot !== undefined
-          ? { allowProjectIdentityRoot: true }
-          : {}),
+        ...readToolPolicyThreading(),
         // ADR-0092: the read surface shares the same session tmp identity as
         // write/edit (pass-through shape identical to write_file / edit_file
         // below).
@@ -827,20 +843,8 @@ export function createDefaultAciRegistry(
         // pages) are booked in — the admission source for the write gate.
         lastReadLedger,
       }),
-    grep: () =>
-      createGrepTool(opts.liveTaskRoot ?? sandboxRoot, {
-        ...(opts.projectIdentityRoot !== undefined
-          ? { projectIdentityRoot: opts.projectIdentityRoot }
-          : {}),
-        allowProjectIdentityRoot: opts.projectIdentityRoot !== undefined,
-      }),
-    glob: () =>
-      createGlobTool(opts.liveTaskRoot ?? sandboxRoot, {
-        ...(opts.projectIdentityRoot !== undefined
-          ? { projectIdentityRoot: opts.projectIdentityRoot }
-          : {}),
-        allowProjectIdentityRoot: opts.projectIdentityRoot !== undefined,
-      }),
+    grep: () => createGrepTool(readToolRoot(), readToolPolicyThreading()),
+    glob: () => createGlobTool(readToolRoot(), readToolPolicyThreading()),
     // write_file / edit_file read the live taskRoot. Gate unwipped ⇒ cell
     // initial value = sandboxRoot, byte-identical to today; the handler
     // reads the cell once and resolve + write within the same handler share

@@ -20,17 +20,21 @@
  * substring" which `*` / `**` / `?` covers.
  */
 
-import { readdir, realpath, stat } from "node:fs/promises";
-import { isAbsolute, relative, sep } from "node:path";
+import { readdir, realpath } from "node:fs/promises";
+import { relative, resolve, sep } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
-import { isTaskWorktreePath } from "../../isolation/worktree-gate.js";
 import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
+import type { FsModeContext } from "../../sandbox/fs-mode.js";
+import {
+  decideAndResolveReadReach,
+  matchProtectedPath,
+} from "../read-policy.js";
 import {
   engineBinaryPath,
   isEngineUnstartable,
 } from "../search/engine-manifest.js";
-import { resolveWithinRoot, spawnWithStopSignal } from "./helpers.js";
+import { spawnWithStopSignal } from "./helpers.js";
 import type { AciToolDef } from "../types.js";
 
 /** Default result budget; matches the model-facing "pages" expectation. */
@@ -75,6 +79,13 @@ export interface GlobToolDeps {
    * OFF assembly sets this false to preserve the historical read boundary.
    */
   readonly allowProjectIdentityRoot?: boolean;
+  /**
+   * ADR-0128: fs isolation-mode holder (bash's pass-through shape). The
+   * handler reads `get()` once per call — same batch-snapshot discipline as
+   * the root snapshot. Absent → `global` (V1 baseline). Feeds the canonical
+   * read policy; both modes answer the same.
+   */
+  readonly fsMode?: FsModeContext;
 }
 
 /**
@@ -132,14 +143,26 @@ export function createGlobTool(
       // cell flips inside the handler do not leak into this call. With no
       // cell, fall back to the root captured at factory time (legacy parity).
       const rootAtCall = readRoot(root);
-      const projectIdentityRoot = resolveProjectIdentityRoot(rootAtCall, deps);
+      const target = subPath ?? ".";
 
-      // 1. Resolve + contain the search root. Throws on escape.
-      const searchRoot = await resolveSearchRoot(
-        rootAtCall,
-        subPath ?? ".",
-        projectIdentityRoot
-      );
+      // ADR-0128 + SC6: one shared flow owner (read-policy.ts
+      // `decideAndResolveReadReach`) judges the requested search root on the
+      // raw path (pre-resolution) AND its canonical form before any walk or
+      // spawn; protection is positive — a protected path is refused even
+      // where containment would reach it. The allow verdict is also what
+      // widens the search root past the containment roots: ordinary host
+      // directories are discoverable in both modes, and the per-emission
+      // filter still drops protected paths under any root, widened or not.
+
+      // 1. Resolve the search root: containment arm inside the roots,
+      //    policy-authorized host path outside them. Throws on escape only
+      //    where the policy did not authorize the reach.
+      const searchRoot = await decideAndResolveReadReach({
+        tool: "glob",
+        primaryRoot: rootAtCall,
+        target,
+        deps,
+      });
 
       // 2. Resolve real paths so rg-internal symlinks don't desync us.
       const realRoot = await realpath(rootAtCall);
@@ -162,11 +185,16 @@ export function createGlobTool(
         signal: ctx?.signal,
       });
 
-      // 4. Prepend the search-root prefix so paths are root-relative, then
-      //    sort lexicographically and truncate to `limit`.
+      // 4. Prepend the search-root prefix so paths are root-relative, drop
+      //    any emitted path that resolves onto the protected-path roster
+      //    (per-emission half of ADR-0128 SC2/SC3: a protected file under an
+      //    otherwise-allowed root never appears — applied to the merged
+      //    result list, so it covers both the rg path and the Node walker),
+      //    then sort lexicographically and truncate to `limit`.
       const rootRelative = rawPaths
         .map((p) => joinPosix(searchPrefix, p))
-        .filter((p) => p.length > 0);
+        .filter((p) => p.length > 0)
+        .filter((p) => matchProtectedPath(resolve(realRoot, p)) === null);
 
       rootRelative.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
 
@@ -175,65 +203,6 @@ export function createGlobTool(
       return trimmed.length === 0 ? EMPTY_RESULT : trimmed.join("\n");
     },
   };
-}
-
-/**
- * Identity-root read passthrough, gated to mirror `read-file.ts` so the
- * three read-only tools widen by the same trigger.
- *
- * - Explicit `projectIdentityRoot` threaded: returns it iff
- *   `allowProjectIdentityRoot` is `true` AND the live root is already a
- *   task worktree (post-rebind); `allowProjectIdentityRoot === false` is
- *   a hard deny. Threading an explicit root without a rebind is the
- *   "OFF assembly / pre-rebind main checkout" surface and returns
- *   `undefined` so the live-root fence stays intact.
- * - No explicit `projectIdentityRoot`: returns `undefined`. There is no
- *   shape-based fallback to a derived main checkout — OFF assembly must get
- *   no extra read root (byte-identical to the historical read boundary) and
- *   worker assembly must not widen its tool surface merely because the root
- *   path looks task-worktree-shaped.
- */
-function resolveProjectIdentityRoot(
-  root: string,
-  deps: GlobToolDeps | undefined
-): string | undefined {
-  const projectIdentityRoot = deps?.projectIdentityRoot;
-  if (projectIdentityRoot === undefined) return undefined;
-  if (deps?.allowProjectIdentityRoot === true && !isTaskWorktreePath(root)) {
-    return undefined;
-  }
-  if (deps?.allowProjectIdentityRoot === false) return undefined;
-  return projectIdentityRoot;
-}
-
-/**
- * Keep the normal task-root interpretation first, while making the stable
- * identity root convenient for a relative project directory after a rebind.
- */
-async function resolveSearchRoot(
-  workspaceRoot: string,
-  target: string,
-  projectIdentityRoot: string | undefined
-): Promise<string> {
-  const extraRoots =
-    projectIdentityRoot === undefined ? undefined : [projectIdentityRoot];
-  const primary = await resolveWithinRoot(workspaceRoot, target, extraRoots);
-  if (projectIdentityRoot === undefined || isAbsolute(target)) return primary;
-  try {
-    await stat(primary);
-    return primary;
-  } catch {
-    const identityCandidate = await resolveWithinRoot(
-      projectIdentityRoot,
-      target
-    );
-    try {
-      await stat(identityCandidate);
-      return identityCandidate;
-    } catch {
-      return primary;
-    }
-  }
 }
 
 /* -------------------------------------------------------------------------- */

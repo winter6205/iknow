@@ -1878,32 +1878,58 @@ describe("grep — 空 / 非法输入", () => {
   });
 });
 
-describe("grep — search root containment", () => {
-  it("父目录穿越逃逸被 typed 拒绝", async () => {
-    const root = await makeScratch("grep-root-");
-    const tool = createGrepTool(root);
+describe("grep — search root reach (ADR-0128 host reach)", () => {
+  it("parent traversal to an ordinary outside directory is searched", async () => {
+    const parent = await makeScratch("grep-parent-");
+    const root = join(parent, "root");
+    await mkdir(root);
+    const sibling = join(parent, "sibling");
+    await mkdir(sibling);
+    await writeFile(join(sibling, "hit.txt"), "outside-needle\n", "utf8");
 
-    await assert.rejects(
-      () => tool.handler({ pattern: "foo", path: "../escape" }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("outside workspace")
+    const tool = createGrepTool(root);
+    const out = String(
+      await tool.handler({
+        pattern: "outside-needle",
+        path: "../sibling",
+        output: "content",
+      })
+    );
+    assert.ok(
+      out.includes("outside-needle"),
+      `widened parent traversal: ${out}`
     );
   });
 
-  it("symlink 指向 workspace 之外被 typed 拒绝", async () => {
+  it("parent traversal to a protected path is refused by the roster, not by containment", async () => {
+    const parent = await makeScratch("grep-parent-prot-");
+    const root = join(parent, "root");
+    await mkdir(root);
+    const sibling = join(parent, "sibling");
+    await mkdir(join(sibling, ".ssh"), { recursive: true });
+    await writeFile(join(sibling, ".ssh", "id_rsa"), "SSHNEEDLE\n", "utf8");
+
+    const tool = createGrepTool(root);
+    await assert.rejects(
+      () => tool.handler({ pattern: "SSHNEEDLE", path: "../sibling/.ssh" }),
+      (error: unknown) =>
+        error instanceof ToolExecutionError &&
+        /protected-path roster/.test(error.message) &&
+        !/outside workspace/.test(error.message)
+    );
+  });
+
+  it("a symlink pointing outside the workspace is searched through its ordinary target", async () => {
     const root = await makeScratch("grep-symlink-");
     const outside = await makeScratch("grep-outside-");
     await writeFile(join(outside, "secret.ts"), "secret hit\n", "utf8");
     await symlink(outside, join(root, "escape"), "dir");
 
     const tool = createGrepTool(root);
-    await assert.rejects(
-      () => tool.handler({ pattern: "hit", path: "escape" }),
-      (error: unknown) =>
-        error instanceof ToolExecutionError &&
-        error.message.includes("outside workspace")
+    const out = String(
+      await tool.handler({ pattern: "hit", path: "escape", output: "content" })
     );
+    assert.ok(out.includes("secret hit"), `widened symlink root: ${out}`);
   });
 });
 
@@ -2129,4 +2155,119 @@ describe("grep — SC5 大仓范围闸", () => {
     );
     assert.match((result as { message: string }).message, /too large/);
   });
+});
+
+// ───────────────────────── protected-path policy (host-read-policy SC2/SC3) ─────────────────────────
+
+describe("grep — protected-path policy enforcement (both engines)", () => {
+  /**
+   * Protected fixtures live under the allowed root (mkdtemp stand-in HOME),
+   * so a refusal can only come from the read policy — never from the
+   * containment allowlist or the pinned rg's hidden-file defaults.
+   */
+  async function makePolicyTree(prefix: string): Promise<string> {
+    const root = await makeScratch(prefix);
+    await mkdir(join(root, ".ssh"), { recursive: true });
+    await mkdir(join(root, ".aws"), { recursive: true });
+    await writeFile(join(root, ".ssh", "id_rsa"), "SSHSECRET\n");
+    await writeFile(join(root, ".aws", "credentials"), "AWSSECRET\n");
+    await writeFile(join(root, ".env"), "ENVSECRET\n");
+    await writeFile(join(root, "notes.txt"), "benign-needle\n");
+    await symlink(join(root, ".ssh", "id_rsa"), join(root, "alias.txt"));
+    return root;
+  }
+
+  for (const engine of ENGINES) {
+    it(`protected search root → typed refusal naming the roster (engine=${engine.name})`, async () => {
+      const root = await makePolicyTree(`grep-policy-root-${engine.name}-`);
+      const tool = toolFor(root, engine.name);
+      for (const path of [
+        ".env",
+        ".ssh",
+        join(root, ".aws", "credentials"),
+        "alias.txt",
+      ]) {
+        await assert.rejects(
+          () => tool.handler({ pattern: "needle", path }),
+          (error: unknown) =>
+            error instanceof ToolExecutionError &&
+            /protected-path roster/.test(error.message) &&
+            !/file not found|outside workspace|is a directory/.test(
+              error.message
+            )
+        );
+      }
+    });
+
+    it(`protected hits under an allowed root never appear in any output mode (engine=${engine.name})`, async () => {
+      const root = await makePolicyTree(`grep-policy-leak-${engine.name}-`);
+      const tool = toolFor(root, engine.name);
+      for (const output of ["paths", "content", "count"]) {
+        const secret = String(
+          await tool.handler({
+            pattern: "SECRET|needle",
+            output,
+            head_limit: 2000,
+          })
+        );
+        for (const leak of ["SECRET", "id_rsa", "credentials", ".env"]) {
+          assert.ok(
+            !secret.includes(leak),
+            `${output} leaked ${leak}: ${secret}`
+          );
+        }
+        assert.ok(
+          secret.includes("notes.txt"),
+          `${output} lost the benign hit: ${secret}`
+        );
+      }
+    });
+
+    /**
+     * Post-widening half (ADR-0128 T4): the same no-leak invariant on a
+     * search root **outside** every containment root — the widened rg walk /
+     * Node traversal must still drop protected entries per emitted path, and
+     * naming one directly is refused by the roster (never by reach).
+     */
+    it(`a widened root outside containment leaks no protected entries (engine=${engine.name})`, async () => {
+      const taskRoot = await makeScratch(
+        `grep-policy-widened-task-${engine.name}-`
+      );
+      const outside = await makePolicyTree(
+        `grep-policy-widened-tree-${engine.name}-`
+      );
+      const tool = toolFor(taskRoot, engine.name);
+      for (const output of ["paths", "content", "count"]) {
+        const secret = String(
+          await tool.handler({
+            pattern: "SECRET|needle",
+            output,
+            path: outside,
+            head_limit: 2000,
+          })
+        );
+        for (const leak of ["SECRET", "id_rsa", "credentials", ".env"]) {
+          assert.ok(
+            !secret.includes(leak),
+            `${output} leaked ${leak}: ${secret}`
+          );
+        }
+        assert.ok(
+          secret.includes("notes.txt"),
+          `${output} lost the benign widened-root hit: ${secret}`
+        );
+      }
+      await assert.rejects(
+        () =>
+          tool.handler({
+            pattern: "SSHSECRET",
+            path: join(outside, ".ssh", "id_rsa"),
+          }),
+        (error: unknown) =>
+          error instanceof ToolExecutionError &&
+          /protected-path roster/.test(error.message) &&
+          !/outside workspace/.test(error.message)
+      );
+    });
+  }
 });
