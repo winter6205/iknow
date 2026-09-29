@@ -4,14 +4,15 @@ External-capability measurement of the iknow harness driving
 `minimax-cn/MiniMax-M3.1-Flash-Preview` over
 `terminal-bench/terminal-bench-2-1`, under ADR-0130 eval state.
 
-**Headline: 5 trials carry a model-attributable result — 4 passes and 1 fail,
-across 4 distinct tasks and 3 difficulty bands (easy, medium and hard), each at
-n=1 for its task.** That is not a pass rate and not a capability estimate — **do
-not divide: "4 of 5" over five different tasks means nothing.** What it
-establishes is that `setup() -> install() -> run() -> verifier` completes
-reliably, that the harness can both pass and fail a task's own tests, and that
-a **hard** task can be passed. **ADR-0130 §5: every number below is eval state
-and is named as such. None of it is evidence about the fence.**
+**Headline: all 7 pilot tasks have been run; 6 of them carry a
+model-attributable result — 4 passes and 2 fails, across 6 distinct tasks and
+3 difficulty bands (easy, medium and hard), each at n=1 for its task.** That is
+not a pass rate and not a capability estimate — **do not divide: "4 of 6" over
+six different tasks means nothing.** What it establishes is that `setup() ->
+install() -> run() -> verifier` completes reliably, that the harness can both
+pass and fail a task's own tests, and that a **hard** task can be passed. The
+final table is §8.5. **ADR-0130 §5: every number below is eval state and is
+named as such. None of it is evidence about the fence.**
 
 > **Correction (2026-09-29, post-#1167).** The first version of this note
 > claimed **"2 scored trials, both reward 0.0, 0/2"** and attributed
@@ -332,13 +333,13 @@ launched with a deliberate environment change** rather than a timing
 accident, and it produced the first results that survive re-reading: **three
 valid passes**, plus the cause of every broken measurement in §4.
 
-| task                | difficulty | reward  | tests ran? | turn_count | stop        | evidence                            |
-| ------------------- | ---------- | ------- | ---------- | ---------- | ----------- | ----------------------------------- |
-| `password-recovery` | **hard**   | **1.0** | **YES**    | 18         | `completed` | `2 passed in 0.09s`, ctrf `2/2`     |
-| `polyglot-c-py`     | medium     | **1.0** | **YES**    | 18         | `completed` | `1 passed in 0.19s`, ctrf `1/1`     |
-| `prove-plus-comm`   | easy       | **1.0** | **YES**    | 17         | `completed` | `4 passed in 0.45s`, ctrf `4/4`     |
-| `dna-assembly`      | hard       | —       | **NO**     | —          | —           | `install()` failed: nvm.sh download |
-| `crack-7z-hash`     | medium     | see §9  | —          | —          | —           | see §9                              |
+| task                | difficulty | reward  | tests ran? | turn_count | stop                 | evidence                            |
+| ------------------- | ---------- | ------- | ---------- | ---------- | -------------------- | ----------------------------------- |
+| `password-recovery` | **hard**   | **1.0** | **YES**    | 18         | `completed`          | `2 passed in 0.09s`, ctrf `2/2`     |
+| `polyglot-c-py`     | medium     | **1.0** | **YES**    | 18         | `completed`          | `1 passed in 0.19s`, ctrf `1/1`     |
+| `prove-plus-comm`   | easy       | **1.0** | **YES**    | 17         | `completed`          | `4 passed in 0.45s`, ctrf `4/4`     |
+| `dna-assembly`      | hard       | —       | **NO**     | —          | —                    | `install()` failed: nvm.sh download |
+| `crack-7z-hash`     | medium     | 0.0     | **YES**    | 40         | `max_turns_exceeded` | `2 failed in 0.10s`, ctrf 0/2       |
 
 **Each of the three passes was checked three independent ways**, because the
 recurring failure in this pilot has been a reward that means nothing:
@@ -1094,30 +1095,43 @@ markers, because a reward that never executed tests is not a score.
 | `polyglot-c-py`              | medium     | **1.0**     | **YES**    | **valid pass**                        | `1 passed in 0.19s`, ctrf 1/1       |
 | `password-recovery`          | **hard**   | **1.0**     | **YES**    | **valid pass**                        | `2 passed in 0.09s`, ctrf 2/2       |
 | `adaptive-rejection-sampler` | medium     | 0.0         | **YES**    | **valid fail** (not a harness fault)  | `3 failed, 6 passed in 2.17s`       |
-| `crack-7z-hash`              | medium     | see note    | —          | see note below                        |                                     |
+| `crack-7z-hash`              | medium     | 0.0         | **YES**    | **valid fail** (not a harness fault)  | `2 failed in 0.10s`, ctrf 0/2       |
 | `dna-assembly`               | hard       | —           | **NO**     | **not obtained** — verifier never ran | `install()` failed: nvm.sh download |
 
-**Six of seven tasks have a valid result. Five are passes; the single valid
-fail is a genuine model failure, not an environment artifact** — its verifier
-ran 9 tests to completion and the agent's R implementation was wrong
-(`Non-numeric argument to mathematical function` in its own density function).
+**All 7 pilot tasks have now been run, and 6 of them carry a valid result: 4
+passes and 2 fails.** Both fails are genuine model failures, not environment
+artifacts — in each the verifier ran every test to completion and the agent's
+output was simply wrong:
+
+- `adaptive-rejection-sampler` — the agent's R `ars()` raised
+  `Non-numeric argument to mathematical function` inside its own density
+  function; 3 of 9 tests failed.
+- `crack-7z-hash` — `test_solution_file` failed with `Solution file
+/app/solution.txt does not exist`, and `test_solution_content` raised
+  `FileNotFoundError`. The agent exhausted all 40 turns
+  (`iknow_error: max_turns_exceeded`) without producing the file. ctrf
+  `{'tests': 2, 'passed': 0, 'failed': 2}`, `reward.txt = 0`.
 
 **Do not compute a rate from this table.** The tasks were not sampled, they are
-n=1 each, and four of the five passes came from two batches run minutes apart
-under identical conditions. The correct reading is narrower: **the eval-state
-harness path works end to end, and the model can solve easy, medium and hard
-tasks under it.**
+n=1 each, and four of the passes came from two batches run minutes apart under
+identical conditions. The correct reading is narrower: **the eval-state harness
+path works end to end, the model solves some easy/medium/hard tasks and fails
+others, and both outcomes are measurable.**
 
-Two further cautions on this table:
+Three further cautions on this table:
 
-- **`overfull-hbox` and `prove-plus-comm` are both `easy` and both 4/4**;
-  the model-attributable pass count is therefore **not** independent evidence
-  across 5 tasks — it is 4 tasks, one of which is a second easy task.
+- **`overfull-hbox` and `prove-plus-comm` are both `easy` and both 4/4**; the
+  pass count is therefore **not** independent evidence across 4 passing tasks —
+  it is 4 tasks, one of which is a second easy task.
+- **Both valid fails hit the 40-turn cap**, as did
+  `adaptive-rejection-sampler`. That is suggestive of a turn budget too low for
+  these tasks, but **n=1 each and no retained trajectories** (§8), so it is a
+  hypothesis, not a finding.
 - **`dna-assembly` has never been measured on its merits.** Its two recorded
   failures are both environmental (§3.3, §3.4). It is the one pilot task with
   no model evidence in either direction.
 
-**What is still absent from this pilot:** 87 of the 89 tasks in
+**What is still absent from this pilot:** 82 of the 89 tasks in
 `terminal-bench/terminal-bench-2-1` have never been attempted, and no task has
 been run at n>1. The capability question #1167 poses is not answered by this
 table; see §9.
@@ -1129,12 +1143,13 @@ and item 3 is discharged with it** — §4.1a identified the root cause and
 verified the fix, and the model-attributable count went from 2 to 5 without
 any adapter change.
 
-1. **Re-run the tasks that never reached a verifier.** The mechanism is fixed
-   (`--ae` + `--ve`, §4.1a) and three tasks have now produced valid passes in
-   one batch (§3.4), so this is no longer a research item — it is running the
-   remaining pilot tasks. What still blocks a rate is **breadth and n**: 5
-   model-attributable results now exist, spread over 4 distinct tasks and 3
-   difficulty bands, each at n=1.
+1. **Run the remaining 82 tasks, and raise n above 1.** The mechanism is fixed
+   (`--ae` + `--ve`, §4.1a) and all 7 pilot tasks have now been run, 6 with
+   valid results, so this is no longer a research item — it is scale. What
+   blocks a rate is **breadth and n**: 6 model-attributable results exist,
+   spread over 6 tasks and 3 difficulty bands, each at n=1. `dna-assembly` is
+   the one pilot task still unmeasured, and needs a re-run now that the
+   mechanism is fixed.
 2. **A task image with a new-enough C++ runtime** (Debian 13 / Ubuntu 24.04
    base) for the Debian-based tasks. The largest blocker to breadth; not an
    adapter change. Note this is already clear of the 7-task pilot — all 7 are
