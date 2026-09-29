@@ -4,14 +4,15 @@ External-capability measurement of the iknow harness driving
 `minimax-cn/MiniMax-M3.1-Flash-Preview` over
 `terminal-bench/terminal-bench-2-1`, under ADR-0130 eval state.
 
-**Headline: all 7 pilot tasks have been run; 6 of them carry a
-model-attributable result — 4 passes and 2 fails, across 6 distinct tasks and
-3 difficulty bands (easy, medium and hard), each at n=1 for its task.** That is
-not a pass rate and not a capability estimate — **do not divide: "4 of 6" over
-six different tasks means nothing.** What it establishes is that `setup() ->
-install() -> run() -> verifier` completes reliably, that the harness can both
-pass and fail a task's own tests, and that a **hard** task can be passed. The
-final table is §8.5. **ADR-0130 §5: every number below is eval state and is
+**Headline: 42 of the 89 dataset tasks have been attempted; 18 carry a
+model-attributable result — 6 passes and 12 fails — across 18 distinct tasks and
+all three difficulty bands, each at n=1 for its task.** That is
+not a pass rate and not a capability estimate — **do not divide: "6 of 18"
+over eighteen different tasks means nothing.** What it establishes is that
+`setup() -> install() -> run() -> verifier` completes reliably, that the
+harness can both pass and fail a task's own tests, and that a **hard** task can
+be passed. Tables: §8.5 (the 7-task pilot, all valid) and §8.6 (the full run,
+all four verdict classes). **ADR-0130 §5: every number below is eval state and is
 named as such. None of it is evidence about the fence.**
 
 > **Correction (2026-09-29, post-#1167).** The first version of this note
@@ -1084,19 +1085,94 @@ Stated plainly, so this note is not over-read.
 
 ## 8.5 The 7-task pilot, final table
 
+Batches `iknow-v7-proxy` … `iknow-v9-se-batch1`, `iknow-v10-se-batch2` and the
+`iknow-seq-*` sequential queues, all with `--ae` + `--ve` proxy injection
+(§4.1a) and, from `iknow-v10` on, `--ak trace_out=true`.
+
+**The validity rule used throughout.** A reward counts only when **all three**
+hold:
+
+1. `verifier/ctrf.json` exists — ctrf is written **only** when pytest runs to
+   completion, so this is the load-bearing signal, not the reward file;
+2. `verifier/test-stdout.txt` carries a real `N passed` / `N failed` line;
+3. the count of `uvx: command not found` / `Failed to connect` /
+   `Connection timed out` / `network timeout` markers is zero.
+
+Harbor writes `reward.txt = 0` when the verifier cannot install its tooling,
+so **a reward file alone is not evidence**. This rule was load-bearing: it
+caught `torch-tensor-parallelism`, which wrote `reward = 0.0` with **no
+`ctrf.json` at all** because the verifier timed out downloading a 1.8 GB torch
+stack. Read on the reward alone it would have been recorded as a model failure.
+
+| verdict      | n   | what it means                                                                                |
+| ------------ | --- | -------------------------------------------------------------------------------------------- |
+| **VALID**    | 18  | verifier ran the tests; the reward is a score (6 pass, 12 fail)                              |
+| **ENV**      | 15  | image cannot clear the `GLIBCXX_3.4.31` floor; agent never ran, no model evidence either way |
+| **BROKEN**   | 2   | reward written but tests never executed (uv download timeouts)                               |
+| **UNPULLED** | 9   | the image could not be pulled at all; verdict not yet known                                  |
+
+### The six valid passes
+
+| task                | difficulty | evidence                       |
+| ------------------- | ---------- | ------------------------------ |
+| `overfull-hbox`     | easy       | `4 passed in 40.18s`           |
+| `prove-plus-comm`   | easy       | `4 passed in 0.45s`, ctrf 4/4  |
+| `polyglot-c-py`     | medium     | `1 passed in 0.19s`, ctrf 1/1  |
+| `git-leak-recovery` | medium     | `5 passed, 1 warning in 0.25s` |
+| `password-recovery` | **hard**   | `2 passed in 0.09s`, ctrf 2/2  |
+| `polyglot-rust-c`   | **hard**   | `1 passed in 0.94s`, ctrf 1/1  |
+
+**Two of the six are `hard`.** Together with the twelve valid fails this is
+the first evidence in this pilot that the harness is not confined to the easy
+tier in either direction. It is still n=1 per task and **is not a pass rate**.
+
+### The image constraint is Debian 12, not "Debian"
+
+The C++ floor is a property of the **image**, and it is a clean split:
+
+| base                     | measured `GLIBCXX` ceiling | outcome  |
+| ------------------------ | -------------------------- | -------- |
+| Ubuntu 24.04 (noble)     | `3.4.33`                   | runs     |
+| **Debian 13 (trixie)**   | `3.4.33`                   | **runs** |
+| **Debian 12 (bookworm)** | `3.4.30`                   | blocked  |
+
+`build-pmars` and `winning-avg-corewars` are Debian and **do** run, while
+`headless-terminal` is nominally Ubuntu and **does not** — so the usable
+predicate is the measured ceiling, never the base-image name. The requirement
+comes from the bundled `tree-sitter` linux-x64 prebuild, whose highest
+undefined symbol is `GLIBCXX_3.4.31` (verified with `strings` on the shipped
+`prebuilds/linux-x64/tree-sitter.node`); `tree-sitter-bash` needs only
+`3.4.21`. §9 item 2's earlier phrasing, "Debian-based tasks", was too broad
+and is corrected here.
+
+### A measurement trap, recorded
+
+The 9 `UNPULLED` rows were first recorded as "the image has no readable
+`libstdc++`". **That reading was wrong.** The precheck's `docker run` could not
+obtain the image at all, because the docker daemon reaches Docker Hub only
+through the proxy, and the proxy was down: `CONNECT tunnel established,
+response 200`, then `TLS alert, decode error` /
+`unexpected eof while reading` on the handshake. **An empty probe result means
+"probe could not run", not "probe found nothing"** — the same confusion as the
+`apt-get install` timeout in §4.1a, and the reason those 9 tasks are labelled
+`UNPULLED` rather than `ENV`.
+
+## 8.6 The full run: 42 tasks attempted, 18 valid results
+
 This is the table #1167 asks for. Every row was checked against its own
 `verifier/test-stdout.txt` for a pytest summary line and for broken-installer
 markers, because a reward that never executed tests is not a score.
 
-| task                         | difficulty | best reward | tests ran? | verdict                               | evidence                            |
-| ---------------------------- | ---------- | ----------- | ---------- | ------------------------------------- | ----------------------------------- |
-| `overfull-hbox`              | easy       | **1.0**     | **YES**    | **valid pass**                        | `4 passed in 40.18s`                |
-| `prove-plus-comm`            | easy       | **1.0**     | **YES**    | **valid pass**                        | `4 passed in 0.45s`, ctrf 4/4       |
-| `polyglot-c-py`              | medium     | **1.0**     | **YES**    | **valid pass**                        | `1 passed in 0.19s`, ctrf 1/1       |
-| `password-recovery`          | **hard**   | **1.0**     | **YES**    | **valid pass**                        | `2 passed in 0.09s`, ctrf 2/2       |
-| `adaptive-rejection-sampler` | medium     | 0.0         | **YES**    | **valid fail** (not a harness fault)  | `3 failed, 6 passed in 2.17s`       |
-| `crack-7z-hash`              | medium     | 0.0         | **YES**    | **valid fail** (not a harness fault)  | `2 failed in 0.10s`, ctrf 0/2       |
-| `dna-assembly`               | hard       | —           | **NO**     | **not obtained** — verifier never ran | `install()` failed: nvm.sh download |
+| task                         | difficulty | best reward | tests ran? | verdict                              | evidence                      |
+| ---------------------------- | ---------- | ----------- | ---------- | ------------------------------------ | ----------------------------- |
+| `overfull-hbox`              | easy       | **1.0**     | **YES**    | **valid pass**                       | `4 passed in 40.18s`          |
+| `prove-plus-comm`            | easy       | **1.0**     | **YES**    | **valid pass**                       | `4 passed in 0.45s`, ctrf 4/4 |
+| `polyglot-c-py`              | medium     | **1.0**     | **YES**    | **valid pass**                       | `1 passed in 0.19s`, ctrf 1/1 |
+| `password-recovery`          | **hard**   | **1.0**     | **YES**    | **valid pass**                       | `2 passed in 0.09s`, ctrf 2/2 |
+| `adaptive-rejection-sampler` | medium     | 0.0         | **YES**    | **valid fail** (not a harness fault) | `3 failed, 6 passed in 2.17s` |
+| `crack-7z-hash`              | medium     | 0.0         | **YES**    | **valid fail** (not a harness fault) | `2 failed in 0.10s`, ctrf 0/2 |
+| `dna-assembly`               | hard       | 0.0         | **YES**    | **valid fail** (not a harness fault) | `1 failed in 0.12s`, ctrf 0/1 |
+| `write-compressor`           | hard       | 0.0         | **YES**    | **valid fail** (not a harness fault) | `3 failed in 0.38s`, ctrf 0/3 |
 
 **All 7 pilot tasks have now been run, and 6 of them carry a valid result: 4
 passes and 2 fails.** Both fails are genuine model failures, not environment
