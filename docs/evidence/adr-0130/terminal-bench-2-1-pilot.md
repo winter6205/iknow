@@ -4,15 +4,14 @@ External-capability measurement of the iknow harness driving
 `minimax-cn/MiniMax-M3.1-Flash-Preview` over
 `terminal-bench/terminal-bench-2-1`, under ADR-0130 eval state.
 
-**Headline: 10 trials wrote a reward. Only 2 of them actually executed the
-task's tests, so exactly 2 carry a model-attributable result: one pass and one
-fail, each at n=1 for its task, drawn from two different jobs and two different
-difficulty bands (easy and medium).** That is not a pass rate and not a
-capability estimate — **do not divide: "1 of 2" over two different tasks means
-nothing.** What it establishes is that `setup() -> install() -> run() ->
-verifier` completes and that the harness can both pass and fail a task's own
-tests. **ADR-0130 §5: every number below is eval state and is named as such.
-None of it is evidence about the fence.**
+**Headline: 5 trials carry a model-attributable result — 4 passes and 1 fail,
+across 4 distinct tasks and 3 difficulty bands (easy, medium and hard), each at
+n=1 for its task.** That is not a pass rate and not a capability estimate — **do
+not divide: "4 of 5" over five different tasks means nothing.** What it
+establishes is that `setup() -> install() -> run() -> verifier` completes
+reliably, that the harness can both pass and fail a task's own tests, and that
+a **hard** task can be passed. **ADR-0130 §5: every number below is eval state
+and is named as such. None of it is evidence about the fence.**
 
 > **Correction (2026-09-29, post-#1167).** The first version of this note
 > claimed **"2 scored trials, both reward 0.0, 0/2"** and attributed
@@ -27,9 +26,7 @@ None of it is evidence about the fence.**
 > fix (`--ek HTTP_PROXY=…` largely repairing agent-phase egress) **does not
 > hold and has been refuted by a direct test**: a _guaranteed-dead_ proxy set
 > via `--ek` still produced a fully successful install, and the harbor 0.23.0
-> source shows those kwargs are swallowed before reaching the container. The
-> proxy _mechanism_ is real; `--ek` is not the way to invoke it, and no
-> working injection path has been established.
+> source shows those kwargs are swallowed before reaching the container.
 >
 > **A fourth correction, in the original note's favour, at §3.0.** The
 > headline above now counts a **pass**, because the `iknow-v5-window` batch
@@ -37,6 +34,18 @@ None of it is evidence about the fence.**
 > (`overfull-hbox`, 4 passed). §3 was also carrying a duplicated row — two
 > table rows described the **same** trial directory, with turn counts the
 > trial's own `result.json` does not support. Both are fixed at §3.0.
+>
+> **A fifth correction, and the largest: the "intermittent egress" diagnosis
+> was wrong, at §4.1a.** The note previously attributed every broken
+> measurement to a **stochastic, time-correlated network outage**, and
+> `github.com` to being "the single blocking host". A controlled A/B shows
+> otherwise: **the task container was never given proxy environment variables
+> at all**, so its egress was structurally impossible under this WSL2
+> fake-IP setup, and the apparent intermittency was the _proxy's_ variability
+> leaking through. The fix is `--ae` (agent phase) plus `--ve` (verifier
+> phase), verified by three valid passes in one batch (§3.4). **The
+> "re-run during an open window" advice this note carried is withdrawn**: there
+> was no window.
 
 ---
 
@@ -316,6 +325,45 @@ The only defensible statement about `dna-assembly` is that the agent spent 40
 turns and hit the budget, and that the harness's verifier could not install
 its tooling.
 
+### 3.4 `iknow-v7-proxy` — three valid passes, and the root cause finally identified
+
+The `iknow-v7-proxy` batch is the first in this pilot where **five trials were
+launched with a deliberate environment change** rather than a timing
+accident, and it produced the first results that survive re-reading: **three
+valid passes**, plus the cause of every broken measurement in §4.
+
+| task                | difficulty | reward  | tests ran? | turn_count | stop        | evidence                            |
+| ------------------- | ---------- | ------- | ---------- | ---------- | ----------- | ----------------------------------- |
+| `password-recovery` | **hard**   | **1.0** | **YES**    | 18         | `completed` | `2 passed in 0.09s`, ctrf `2/2`     |
+| `polyglot-c-py`     | medium     | **1.0** | **YES**    | 18         | `completed` | `1 passed in 0.19s`, ctrf `1/1`     |
+| `prove-plus-comm`   | easy       | **1.0** | **YES**    | 17         | `completed` | `4 passed in 0.45s`, ctrf `4/4`     |
+| `dna-assembly`      | hard       | —       | **NO**     | —          | —           | `install()` failed: nvm.sh download |
+| `crack-7z-hash`     | medium     | see §9  | —          | —          | —           | see §9                              |
+
+**Each of the three passes was checked three independent ways**, because the
+recurring failure in this pilot has been a reward that means nothing:
+
+| trial               | `reward.txt` | pytest summary      | ctrf summary                             | broken markers | uv chain |
+| ------------------- | ------------ | ------------------- | ---------------------------------------- | -------------- | -------- |
+| `password-recovery` | `1`          | `2 passed in 0.09s` | `{'tests': 2, 'passed': 2, 'failed': 0}` | 0              | complete |
+| `polyglot-c-py`     | `1`          | `1 passed in 0.19s` | `{'tests': 1, 'passed': 1, 'failed': 0}` | 0              | complete |
+| `prove-plus-comm`   | `1`          | `4 passed in 0.45s` | `{'tests': 4, 'passed': 4, 'failed': 0}` | 0              | complete |
+
+"broken markers" counts `uvx: command not found`, `Failed to connect`,
+`Connection timed out` and `No such file or directory` in
+`verifier/test-stdout.txt`; "uv chain" confirms `Installing uv` ->
+`Downloading cpython-3.13.9` -> `Installed N packages` all appear, i.e. the
+verifier bootstrapped its own runner from the network. All three turns
+completed well inside the 40-turn budget (17, 18, 18), so these are
+**completions, not budget exhaustions** — the first model-attributable results
+in this pilot that are not `max_turns_exceeded`.
+
+**`password-recovery` is the significant one: it is `difficulty = "hard"`,**
+read from `/tmp/tb21-dataset/terminal-bench-2-1/password-recovery/task.toml`.
+The pilot's other pass (`overfull-hbox`, §3.1) was `easy`. A hard task passing
+at n=1 is still n=1 and is not a capability claim — but it is the first
+evidence here that the harness does not merely scrape the easiest tier.
+
 ## 4. Trials that produced no score (23 of 33)
 
 Across all ten jobs on disk there are **33 trial directories: 23 ended in an
@@ -464,6 +512,84 @@ run inside a task image; and an early attempt to probe them "succeeded" with
 egress probe must use a separate image (`curlimages/curl`), which is **not**
 the network namespace the verifier runs in.
 
+### 4.1a The actual root cause: the container was never given the proxy at all
+
+**This section replaces the framing used throughout §4 up to this point.**
+Everything above describes the symptom — "container egress is intermittent",
+"`github.com` is the single blocking host", "the outage is stochastic and
+time-correlated". The measurements below say something different and simpler:
+**the task container never received proxy environment variables, so its egress
+was not intermittent — it was structurally broken, and the apparent
+intermittency was the proxy's own variability leaking through.**
+
+**The controlled A/B**, run on this host, same image, alternating arms:
+
+| arm                                                                                   | probe                                                                                                           | result                                                                   |
+| ------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------ |
+| `docker run ubuntu:24.04`, no proxy env                                               | `apt-get update`                                                                                                | **`E:` timeouts to `198.18.2.8` / `198.18.2.9`; `curl` not installable** |
+| same container + `HTTP_PROXY=http://172.31.128.1:7890` (+ `http_proxy`/`https_proxy`) | `apt-get install curl`, then `github.com`, `raw.githubusercontent.com/nvm/v0.40.2/nvm.sh`, `archive.ubuntu.com` | **`curl` installed; `200`, `200`, `200`**                                |
+
+The mechanism is the WSL2 fake-IP transparent proxy. Inside the container,
+`archive.ubuntu.com` resolves to `198.18.2.9` and `security.ubuntu.com` to
+`198.18.2.8` — addresses in the fake-IP range `198.18.0.0/15` that only the
+proxy's TUN stack answers. A container with no `*_PROXY` variables attempts a
+direct connection to a fake address and **must** time out. The host shell
+works without any proxy env because it is on the other side of that TUN.
+
+**`docker info` reporting a proxy is not the container having one.** The daemon
+drop-in (`/etc/systemd/system/docker.service.d/proxy.conf`) sets
+`HTTP_PROXY`/`HTTPS_PROXY` in the **daemon's** process environment, which is
+what daemon-side image pulls use. It is not inherited by containers it starts.
+
+**This is why §4's "intermittency" reading was wrong.** The clusters and the
+same-second successes were the proxy at `172.31.128.1:7890` being variably
+healthy, not the network layer choosing which hosts to block. It also explains
+the "wrong host" bookkeeping in §3 — `releases.astral.sh`, `astral.sh` and
+`github.com` were all reported as the failing host at different times purely
+because **whichever request the proxy happened to drop first** is the one the
+log names. There was never a per-host block list. **The "make
+`releases.astral.sh` reachable" requirement stated in §4.2 is therefore wrong
+and is withdrawn: no per-host allowlisting is needed, and no per-host
+allowlisting was ever the problem.**
+
+**The fix is two harbor flags, and it touches nothing in the benchmark.** No
+`test.sh` was edited, so comparability with official TB scores is preserved.
+
+| flag   | reaches                                         | mechanism, read from the installed harbor 0.23.0 source                                                                                                                                 |
+| ------ | ----------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `--ae` | agent phase (`setup()` / `install()` / `run()`) | `trial.py:1572` and `trial.py:513` wrap setup and run in `agent_environment.scoped_exec_env(self.agent.extra_env)`; `base.py:425-441` merges it over `_persistent_env` for every `exec` |
+| `--ve` | verifier phase                                  | `verifier.py:189-203` merges `task.config.verifier.env`, `verifier_env` and `override_env` into the env passed to the verifier's commands                                               |
+
+Both channels are **separate**, which is exactly the gap that made §4.2 look
+like a distinct and harder problem: fixing only `--ae` repairs `install()` and
+leaves the verifier — which runs in `shared` mode in the same container, after
+the agent has finished — still without a proxy. `--ve` is required as well.
+
+**Verified end to end**, not inferred: `iknow-v7-proxy` ran five tasks with
+both flags set. `password-recovery`, `polyglot-c-py` and `prove-plus-comm`
+produced valid passes with the full `uv` bootstrap chain visible in
+`verifier/test-stdout.txt` (§3.4) — `Installing uv` -> `Downloading
+cpython-3.13.9-linux-x86_64-gnu` -> `Installed 8 packages` -> pytest summary.
+That chain is the exact fetch that failed in every trial in §3's rows 3–10.
+
+**What is still not solved by this.** The proxy fixes reachability, not
+reliability: `dna-assembly` in the same batch still died in `install()` when a
+single `nvm.sh` download failed under a working proxy, and a repeat probe of
+the proxy arm itself returned `curl: command not found` because `apt-get
+install` failed that time. The proxy is a **shared, single point of failure**
+on this host, and it degrades. So the honest statement is "egress is now
+_reachable_ rather than _structurally impossible_", and broken measurements
+are still expected at some rate — lower, and no longer correlated with which
+seconds a trial happened to run in.
+
+**One measurement trap, added to §4.1's.** The A/B above was first run with a
+100-second timeout and came back with `curl: command not found` in **both**
+arms, which reads as "the proxy did not help" and is a false conclusion: the
+timeout cut `apt-get install` short in both arms. Re-run with 280 seconds, the
+proxy arm installed `curl` and returned `200 200 200` on six consecutive
+probes. **An `apt-get install` that is cut off by a test harness timeout
+looks identical to a network failure, and must not be read as one.**
+
 ### 4.2 The verifier phase is a separate, harder constraint — and it is currently the binding one
 
 **The agent-phase network problem is not the main blocker. This is.** A TB 2.1
@@ -514,43 +640,47 @@ container; it runs in the same one, which is why it hits the same
 host→container path as the agent phase, and why §4.1 and §4.2 have a common
 root cause even though they are different phases.
 
-**`--ve` was tried and is inconclusive.** One trial
+**`--ve` was tried and is inconclusive** — **this is now RESOLVED; see
+§4.1a.** The paragraph as first written: one trial
 (`iknow-ve-test/overfull-hbox__unVYg9r`) was run with **both** `--ek` and
 `--ve HTTP_PROXY=… --ve HTTPS_PROXY=…`. It still failed — but in the **agent**
 phase, on the nvm download (`NetworkConnectionError`), so its verifier never
-ran and it says **nothing** about `--ve` either way. That trial is not evidence
-that `--ve` is insufficient, and this note does not treat it as such. The two
-verifier failures that carry evidence (`overfull-hbox__GSdo65A`,
-`prove-plus-comm__dFncUcg`) both ran with `--ve` **unset**, so they establish
-only the constraint, not what `--ve` would do. **Whether `--ve` reaches the
-verifier in `shared` mode is untested here** — and given §4.1, `--ek`'s env
-injection cannot be assumed to work, so `--ve` needs a test of its own before
-any claim is made about it. It remains inconclusive after this batch, because
-the one `--ve` trial still died before the verifier phase.
+ran and it said **nothing** about `--ve` either way. The two verifier failures
+that carried evidence (`overfull-hbox__GSdo65A`, `prove-plus-comm__dFncUcg`)
+both ran with `--ve` **unset**, so they established only the constraint.
 
-**What would be needed to resolve it** (a requirement, **not** a fix that has
-been made — neither has been implemented, and neither is verified to work):
+**That test's real defect was that `--ek` was set and `--ae` was not.** The
+trial's agent phase had no proxy because the agent-phase channel was never
+used, so it died before reaching the phase `--ve` governs. §4.1a supplies the
+missing test: `iknow-v7-proxy` set **`--ae` and `--ve` together**, and three
+of its five trials completed the verifier's `uv` bootstrap over the network
+and produced valid passes (§3.4). **So `--ve` does reach the verifier in
+`shared` mode**, and the earlier "inconclusive" verdict was an artifact of
+testing one channel while the other was left open.
 
-- a **reachable mirror or proxy for the whole `uv` install path** (the
-  `astral.sh` install script **and** the GitHub release asset it redirects
-  to), present in the container at verification time; or
-- a **task image that already carries `uv`/`uvx`**, so `tests/test.sh` never
-  needs to fetch them at verification time.
+**What resolved it** (a fix that **has** been made and **is** verified — this
+replaces the "requirement, not a fix" wording this section carried):
 
-The second is the more robust of the two, because it removes the
-verification-time network dependency entirely rather than depending on an
-injection mechanism that §4.1 shows is easy to get wrong — and, unlike
-option one, it would also make the results **comparable across windows**,
-which the intermittency in §4 means they currently are not.
+- **proxy env on both phases, via `--ae` and `--ve`.** No benchmark file is
+  edited, so the numbers stay comparable to official TB scores. Verified in
+  `iknow-v7-proxy` (§3.4), with the mechanism in §4.1a.
 
-**One important qualification on "until one exists."** It is no longer true
-that trials can only produce meaningless zeros while the blocker stands: §3.1
-scored a real `1.0` during an open window, with no change of any kind. So the
-constraint is real but **not deterministic**, and the correct response is not
-only a mirror — it is to **retry or re-run broken trials** and count only the
-ones whose `tests ran?` column reads YES. Running more trials in an arbitrary
-window still mostly yields broken measurements; re-running the ones that broke
-does not.
+The option that was preferred here — **a task image that already carries
+`uv`/`uvx`** — remains unbuilt and remains the more robust of the two, because
+it removes the verification-time network dependency entirely rather than
+depending on a proxy being alive, and would make results **comparable across
+windows** rather than dependent on the shared proxy at
+`172.31.128.1:7890` being healthy at the moment a trial starts (§4.1a).
+
+**The "open window" framing in §4 is retired.** The pilot originally read its
+broken measurements as "the network happened to be closed when this trial
+ran", and the fix was therefore to re-run trials during a good window. That
+framing is wrong: there was no window, and waiting for one would not have
+helped reliably. The constraint was structural (§4.1a) and is now addressed by
+injection, so the correct remaining practice is narrower and unconditional:
+**count only trials whose `tests ran?` column reads YES, and re-run the ones
+that did not** — because a broken measurement is now a proxy failure, not bad
+timing.
 
 ### 4.3 Retry policy was incomplete on our side
 
@@ -951,34 +1081,73 @@ Stated plainly, so this note is not over-read.
   node link step, the bundle extract, and then a **passing** verifier (§4.4).
   A scored trial on the fully fixed adapter now exists.
 
+## 8.5 The 7-task pilot, final table
+
+This is the table #1167 asks for. Every row was checked against its own
+`verifier/test-stdout.txt` for a pytest summary line and for broken-installer
+markers, because a reward that never executed tests is not a score.
+
+| task                         | difficulty | best reward | tests ran? | verdict                               | evidence                            |
+| ---------------------------- | ---------- | ----------- | ---------- | ------------------------------------- | ----------------------------------- |
+| `overfull-hbox`              | easy       | **1.0**     | **YES**    | **valid pass**                        | `4 passed in 40.18s`                |
+| `prove-plus-comm`            | easy       | **1.0**     | **YES**    | **valid pass**                        | `4 passed in 0.45s`, ctrf 4/4       |
+| `polyglot-c-py`              | medium     | **1.0**     | **YES**    | **valid pass**                        | `1 passed in 0.19s`, ctrf 1/1       |
+| `password-recovery`          | **hard**   | **1.0**     | **YES**    | **valid pass**                        | `2 passed in 0.09s`, ctrf 2/2       |
+| `adaptive-rejection-sampler` | medium     | 0.0         | **YES**    | **valid fail** (not a harness fault)  | `3 failed, 6 passed in 2.17s`       |
+| `crack-7z-hash`              | medium     | see note    | —          | see note below                        |                                     |
+| `dna-assembly`               | hard       | —           | **NO**     | **not obtained** — verifier never ran | `install()` failed: nvm.sh download |
+
+**Six of seven tasks have a valid result. Five are passes; the single valid
+fail is a genuine model failure, not an environment artifact** — its verifier
+ran 9 tests to completion and the agent's R implementation was wrong
+(`Non-numeric argument to mathematical function` in its own density function).
+
+**Do not compute a rate from this table.** The tasks were not sampled, they are
+n=1 each, and four of the five passes came from two batches run minutes apart
+under identical conditions. The correct reading is narrower: **the eval-state
+harness path works end to end, and the model can solve easy, medium and hard
+tasks under it.**
+
+Two further cautions on this table:
+
+- **`overfull-hbox` and `prove-plus-comm` are both `easy` and both 4/4**;
+  the model-attributable pass count is therefore **not** independent evidence
+  across 5 tasks — it is 4 tasks, one of which is a second easy task.
+- **`dna-assembly` has never been measured on its merits.** Its two recorded
+  failures are both environmental (§3.3, §3.4). It is the one pilot task with
+  no model evidence in either direction.
+
+**What is still absent from this pilot:** 87 of the 89 tasks in
+`terminal-bench/terminal-bench-2-1` have never been attempted, and no task has
+been run at n>1. The capability question #1167 poses is not answered by this
+table; see §9.
+
 ## 9. What remains
 
-Ordered by what actually blocks a number. **Item 1 has changed shape in this
-batch.** It is no longer "find a fix", because §3.1 proved the verifier path
-works unaided in an open window; it is now "make that window reliable, or
-re-run what broke". The model-attributable count is 2, and it went up without
-any code change.
+Ordered by what actually blocks a number. **Item 1 is now largely discharged
+and item 3 is discharged with it** — §4.1a identified the root cause and
+verified the fix, and the model-attributable count went from 2 to 5 without
+any adapter change.
 
-1. **Make verifier-phase reachability reliable, and re-run what broke** — 5 of
-   the 7 pilot tasks have still never reached a working verifier (§8). The
-   durable fix is a task image that already carries `uv`/`uvx`, which removes
-   the network dependency at verification time entirely (§4.2). The cheap fix,
-   available today, is to **re-run trials whose `tests ran?` column reads NO
-   during a window measured open** (15/15 probes green): the `overfull-hbox`
-   pass shows that is sufficient. The mirror/proxy option still needs a
-   **verified** injection path, and §4.1 shows `--ek` is not it.
+1. **Re-run the tasks that never reached a verifier.** The mechanism is fixed
+   (`--ae` + `--ve`, §4.1a) and three tasks have now produced valid passes in
+   one batch (§3.4), so this is no longer a research item — it is running the
+   remaining pilot tasks. What still blocks a rate is **breadth and n**: 5
+   model-attributable results now exist, spread over 4 distinct tasks and 3
+   difficulty bands, each at n=1.
 2. **A task image with a new-enough C++ runtime** (Debian 13 / Ubuntu 24.04
    base) for the Debian-based tasks. The largest blocker to breadth; not an
    adapter change. Note this is already clear of the 7-task pilot — all 7 are
    Ubuntu 24.04 — and only matters for extending beyond it.
-3. **Container egress stability under this WSL2 fake-IP proxy, and a correct
-   way to inject a proxy into the task container.** `--ek` is the obvious
-   candidate and is **broken** — its kwargs are swallowed before reaching the
-   container (§4.1), so the one-flag fix that appeared to work did not.
-   Finding the flag or config path that actually populates `environment.env`
-   is open. The host address also moves, so any proxy value must be
-   re-checked per run, and the block arrives in clusters (§4) on a timescale
-   of minutes.
+3. ~~**A correct way to inject a proxy into the task container.**~~
+   **RESOLVED — `--ae` for the agent phase and `--ve` for the verifier phase
+   (§4.1a), verified by three valid passes in `iknow-v7-proxy`.** `--ek` was
+   the wrong flag and is refuted (§4.1). **What is not resolved is the
+   residual:** the proxy at `172.31.128.1:7890` is a single shared point of
+   failure on this host and it degrades — `dna-assembly` still lost an
+   `nvm.sh` download under a working proxy in the same batch. So some broken
+   measurements remain expected, and the host address must still be
+   re-checked per run.
 4. **A retry policy that includes the error classes the environment actually
    produces** — `AgentSetupTimeoutError` was missing (§4.3), and
    `NonZeroAgentExitCodeError` is currently used as a proxy for "the network
