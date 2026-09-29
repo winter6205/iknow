@@ -4,12 +4,39 @@ External-capability measurement of the iknow harness driving
 `minimax-cn/MiniMax-M3.1-Flash-Preview` over
 `terminal-bench/terminal-bench-2-1`, under ADR-0130 eval state.
 
-**Headline: 2 scored trials, both reward 0.0, 0/2 passing.** With n=2 this is
-not a capability estimate. It is a first end-to-end proof that
-`setup() -> install() -> run() -> verifier` completes, plus the first real
-harness behavior observed inside a task container. **ADR-0130 §5: every number
-below is eval state and is named as such. None of it is evidence about the
-fence.**
+**Headline: 10 trials wrote a reward. Only 2 of them actually executed the
+task's tests, so exactly 2 carry a model-attributable result: one pass and one
+fail, each at n=1 for its task, drawn from two different jobs and two different
+difficulty bands (easy and medium).** That is not a pass rate and not a
+capability estimate — **do not divide: "1 of 2" over two different tasks means
+nothing.** What it establishes is that `setup() -> install() -> run() ->
+verifier` completes and that the harness can both pass and fail a task's own
+tests. **ADR-0130 §5: every number below is eval state and is named as such.
+None of it is evidence about the fence.**
+
+> **Correction (2026-09-29, post-#1167).** The first version of this note
+> claimed **"2 scored trials, both reward 0.0, 0/2"** and attributed
+> `adaptive-rejection-sampler` to a `3 failed, 6 passed` verifier run. Reading
+> the retained verifier logs back shows the opposite for that trial: it
+> **never executed its tests**. The `3 failed, 6 passed` line belongs to a
+> **different trial of the same task**, in a different job, that had not yet
+> been identified. The corrected counts and the trial-by-trial evidence are in
+> §3; two further details are corrected at §3.0.
+>
+> **A third correction, in the other direction, at §4.1.** The reported proxy
+> fix (`--ek HTTP_PROXY=…` largely repairing agent-phase egress) **does not
+> hold and has been refuted by a direct test**: a _guaranteed-dead_ proxy set
+> via `--ek` still produced a fully successful install, and the harbor 0.23.0
+> source shows those kwargs are swallowed before reaching the container. The
+> proxy _mechanism_ is real; `--ek` is not the way to invoke it, and no
+> working injection path has been established.
+>
+> **A fourth correction, in the original note's favour, at §3.0.** The
+> headline above now counts a **pass**, because the `iknow-v5-window` batch
+> added the first trial whose verifier actually ran to completion
+> (`overfull-hbox`, 4 passed). §3 was also carrying a duplicated row — two
+> table rows described the **same** trial directory, with turn counts the
+> trial's own `result.json` does not support. Both are fixed at §3.0.
 
 ---
 
@@ -31,6 +58,38 @@ fence.**
 
 The bundle size and sha256 above are re-measured on the artifact still on this
 machine (`stat -c %s` / `sha256sum /tmp/iknow-bundle.tgz`) and match the run.
+
+**One correction to this table's scope.** `ade657f2e` is the commit for the
+**`iknow-pilot-v2`** job. The **two model-attributable trials** (§3.1, §3.2)
+are from **two different jobs** — the earlier `iknow-e2e-fixed` and the later
+`iknow-v5-window` — and they do **not** carry the same adapter state. The
+`install()` logs show exactly which fixes were in the working tree at each
+moment:
+
+| job                                            | node resolution in `install()`                                | `GLIBCXX` ceiling probe                                                                                           |
+| ---------------------------------------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `iknow-e2e-first` (07:02Z, the misattribution) | `NODE_BIN="$(command -v node \|\| true)"` — **old**           | absent                                                                                                            |
+| `iknow-e2e-fixed` (07:18Z, **scored trial 1**) | `ln -sf /root/.nvm/versions/node/v22.23.3/bin/node` — **new** | **absent**                                                                                                        |
+| `iknow-pilot-v2` (10:08Z)                      | new                                                           | **present**                                                                                                       |
+| `iknow-v5-window` (13:34Z, **scored trial 2**) | new                                                           | **present** — and it ran: `libstdc++ already provides GLIBCXX_3.4.31 (ceiling GLIBCXX_3.4.33); no install issued` |
+
+So scored trial 1 (`adaptive-rejection-sampler`, §3.2) already carries the
+**node fix** (`68a3f0843`, committed 16:05, developed in the working tree
+before the 07:18Z re-run) but **not** the C++-runtime fix (`17b0c8ed7`,
+committed 18:07, i.e. after that trial). Scored trial 2 (`overfull-hbox`,
+§3.1, 13:34Z) carries **both**, and its `trial.log` records the `GLIBCXX`
+probe executing and correctly short-circuiting. **This resolves the caveat §8
+previously carried**: the only remaining model-attributable trial on the fully
+fixed adapter is the `overfull-hbox` pass.
+
+**The two scored trials therefore do not share an adapter state**, which is a
+second reason — alongside being different tasks — not to compare or combine
+them. The two adapter fixes are both **required and committed** (§7)
+regardless of either trial's outcome: `68a3f0843` exists because the 07:02Z
+trial died at install on `node: command not found` **and was misreported as
+`IKnowGlibcRequiredError`** on an image that satisfies the requirement, and
+`17b0c8ed7` exists because Debian-12 images cannot clear `GLIBCXX_3.4.31` at
+all. Neither depends on a scored trial's outcome.
 
 ## 2. What this run does not measure
 
@@ -61,29 +120,161 @@ and a human reference solution. The reward is pass/fail on final state. So
 reward 0.0 says "the final state did not satisfy the verifier"; it does not
 rank, grade, or score partially, and there is no graded axis behind it.
 
-**n=2.** Every taxonomy reading in §5 is grounded in the observed behavior of
-these two trials and nothing wider. It is a receipt for two runs, not a
+**A `reward: 0.0` is not automatically a model score.** Harbor writes
+`verifier/reward.txt` whenever the verifier phase terminates, and this
+harness's verifiers **install their own tooling first** (see §4.2). When that
+install cannot reach its upstream host, the task's tests **never execute** and
+harbor still records `0`. Such a trial is a **broken measurement, not a failed
+one**, and it is excluded from every rate in this note. §3 separates the two by
+reading the verifier log, not the reward file.
+
+**n=1 model-attributable, per task.** Every taxonomy reading in §5 is grounded
+in the observed behavior of the 2 trials in §3.1 and §3.2 and nothing wider.
+They are 2 receipts from 2 different tasks, not a sample of 2. Neither is a
 rate.
 
-## 3. Scored trials (n=2, both hard)
+## 3. Trials that wrote a reward (10), and the 2 that are model scores
 
-| task                                        | difficulty | reward | turn_count | iknow_error          | agent_exec |
-| ------------------------------------------- | ---------- | ------ | ---------- | -------------------- | ---------- |
-| `terminal-bench/adaptive-rejection-sampler` | hard       | 0.0    | 40         | `max_turns_exceeded` | 878s       |
-| `terminal-bench/dna-assembly`               | hard       | 0.0    | 40         | `max_turns_exceeded` | 1512s      |
+**Read this table's last column before any number below it.** `tests ran?` is
+decided by the verifier log, not by the reward file. A `NO` there means the
+reward is **not attributable to the model** and is excluded from every rate in
+this note.
 
-Both runs died in the loop, **not at install**: `turn_count` reached the 40-turn
-budget, and the harness reported `max_turns_exceeded`. Both install-time probes
-were green (§1), so the native-addon and node paths cleared before the model
-ever took a turn.
+| #   | task                         | job                    | difficulty | reward  | tests ran? | turn_count | stop                 | evidence                          |
+| --- | ---------------------------- | ---------------------- | ---------- | ------- | ---------- | ---------- | -------------------- | --------------------------------- |
+| 1   | `adaptive-rejection-sampler` | `iknow-e2e-fixed`      | **medium** | 0.0     | **YES**    | 40         | `max_turns_exceeded` | `3 failed, 6 passed in 2.17s`     |
+| 2   | `overfull-hbox`              | `iknow-v5-window`      | **easy**   | **1.0** | **YES**    | 40         | `max_turns_exceeded` | `4 passed in 40.18s`              |
+| 3   | `dna-assembly`               | `iknow-pilot-v2`       | hard       | 0.0     | **NO**     | 40         | `max_turns_exceeded` | `line 19: uvx: command not found` |
+| 4   | `adaptive-rejection-sampler` | `iknow-pilot-v2`       | medium     | 0.0     | **NO**     | (none)     | (metadata `null`)    | `line 19: uvx: command not found` |
+| 5   | `overfull-hbox`              | `iknow-pilot-v4-proxy` | easy       | 0.0     | **NO**     | 40         | `max_turns_exceeded` | `line 24: uvx: command not found` |
+| 6   | `prove-plus-comm`            | `iknow-proxy-test`     | easy       | 0.0     | **NO**     | 22         | `completed`          | `line 19: uvx: command not found` |
+| 7   | `prove-plus-comm`            | `iknow-pilot-7`        | easy       | 0.0     | **NO**     | (none)     | (metadata `null`)    | `line 19: uvx: command not found` |
+| 8   | `prove-plus-comm`            | `iknow-v5-window`      | easy       | 0.0     | **NO**     | 16         | `completed`          | `line 19: uvx: command not found` |
+| 9   | `polyglot-c-py`              | `iknow-v5-window`      | medium     | 0.0     | **NO**     | 40         | `max_turns_exceeded` | `line 18: uvx: command not found` |
+| 10  | `password-recovery`          | `iknow-v5-window`      | hard       | 0.0     | **NO**     | 32         | `completed`          | `line 18: uvx: command not found` |
 
-**Attribution fields.** Harbor reported `exception_info: null` for the second
-run and `AgentTimeoutError` for the first. Trial metadata carried
-`eval_state: true`, `permission_mode: full_auto`, `turn_count: 40`,
-`iknow_error: max_turns_exceeded` — the ADR-0130 §5 fields, so these two
-numbers are attributable to the posture they were produced under.
+**Rows 3–10 all end the same way**, and it is not a test result:
 
-### 3.1 `adaptive-rejection-sampler`
+```
+downloading uv 0.9.5 x86_64-unknown-linux-gnu
+curl: (28) Failed to connect to github.com port 443 after 135298 ms: Couldn't connect to server
+failed to download https://github.com/astral-sh/uv/releases/download/0.9.5/uv-x86_64-unknown-linux-gnu.tar.gz
+/tests/test.sh: line 10: /root/.local/bin/env: No such file or directory
+/tests/test.sh: line 19: uvx: command not found
+```
+
+`uvx` is how the task's `tests/test.sh` runs pytest. The install of `uv` that
+precedes it could not reach its download host, so the tests never started.
+**Eight of the ten rewards are broken measurements**, and only the two
+`tests ran? = YES` rows are model scores. The mechanism is §4.2.
+
+**A detail worth recording, because it changes the shape of the blocker:** the
+failing host is **not always `releases.astral.sh`**. `tests/test.sh` fetches
+`https://astral.sh/uv/0.9.5/install.sh`, which redirects to a
+**GitHub release asset**; the redirect target is what actually times out. The
+host observed in each log:
+
+| job / trial                                                           | host that failed to connect |
+| --------------------------------------------------------------------- | --------------------------- |
+| `iknow-proxy-test`, `iknow-pilot-v4-proxy`                            | `releases.astral.sh`        |
+| `iknow-pilot-7`, `iknow-pilot-v2` (ARS)                               | `astral.sh`                 |
+| `iknow-pilot-v2` (`dna-assembly`), all three `iknow-v5-window` breaks | **`github.com`**            |
+
+So a "fix `releases.astral.sh`" plan is too narrow: §4.2's requirement is a
+reachable path to **both** the install script and the GitHub release asset it
+redirects to.
+
+**`prove-plus-comm` is the most-run task here and has never been verified.**
+It appears in 4 of the 10 reward-writing trials (rows 6, 7, 8) across three
+jobs, three of them finishing cleanly (`stop_reason: completed` at 22, 16
+turns, and one with no metadata at all after a `NonZeroAgentExitCodeError`).
+The clean completions with a `plus_comm.vo` the agent reports as compiled are
+**agent-side** facts and real, but they are not scores.
+
+### 3.0 Corrections to the correction
+
+The first version of this note was wrong in ways that a re-read corrects — in
+the same direction, in the opposite direction, and once in the table's own
+arithmetic. Stated plainly so a later reader does not inherit them:
+
+1. **The `3 failed, 6 passed` run is not the `iknow-pilot-v2` trial.** That
+   trial's verifier log ends `uvx: command not found` and its
+   `agent_result.metadata` is `null` — the agent phase was cut off by
+   `AgentTimeoutError` before the ADR-0130 fields were ever written. The
+   `3 failed, 6 passed` log belongs to `iknow-e2e-fixed/…__cU77yyL`, an
+   **earlier** run of the same task (07:18Z vs 10:08Z) whose metadata does
+   carry `turn_count: 40`, `iknow_error: max_turns_exceeded` and
+   `eval_state: true`. The corrected claim is that **one** trial ran its tests,
+   not that two did — the count is unchanged, but the trial behind it is a
+   different one, and **the two `max_turns_exceeded` runs of
+   `adaptive-rejection-sampler` are therefore not a matched pair**: same task,
+   same turn budget, same stop reason, opposite verifier outcomes, one
+   measurement and one broken measurement. A reader must not compare them.
+2. **`adaptive-rejection-sampler` is `difficulty = "medium"`, not `hard`.**
+   Read from `/tmp/tb21-dataset/terminal-bench-2-1/adaptive-rejection-sampler/task.toml`
+   (`[metadata] difficulty = "medium"`, `expert_time_estimate_min = 180.0`).
+   `dna-assembly` and `password-recovery` are genuinely `hard`;
+   `overfull-hbox` and `prove-plus-comm` are `easy`; `polyglot-c-py` and
+   `crack-7z-hash` are `medium`.
+3. **The previous §3 table duplicated one trial and invented two turn counts.**
+   It listed `iknow-pilot-7/prove-plus-comm` twice — rows 3 and 6, the second
+   annotated with the same trial id `__WC6A9MM` as the first — and gave that
+   single trial both `19 turns / completed` and `19 turns / completed`. There is
+   **one** `prove-plus-comm` trial directory in `iknow-pilot-7`, its
+   `result.json` records `exception_info.exception_type =
+"NonZeroAgentExitCodeError"`, and its `agent_result.metadata` is `null`, so
+   **no turn count and no stop reason exist for it at all**. The corrected
+   row is row 7 above. This is why the reward-writing count moved 6 → 10 while
+   the trial total moved 28 → 33 (§4.2): the new batch added 5 trials and 4
+   rewards, and one previously double-counted row was removed.
+
+### 3.1 `overfull-hbox` — the one model-attributable **pass**
+
+`iknow-v5-window/overfull-hbox__T2FxRE5`, `reward.txt = 1`, and the verifier
+log carries a real pytest summary for the first time in this pilot:
+
+```
+11  downloading uv 0.9.5 x86_64-unknown-linux-gnu
+13  installing to /root/.local/bin
+16  everything's installed!
+...
+87  ============================== 4 passed in 40.18s ==============================
+```
+
+`verifier/ctrf.json` names all four: `test_input_file_matches`,
+`test_compilation_successful`, `test_no_overfull_hboxes`,
+`test_main_synonyms_not_modified` — i.e. the four constraints the instruction
+actually imposes. **`uvx` installed and pytest ran, so this reward is taken at
+face value; it is the only one in this note that is.**
+
+**What did not go the way the pass implies.** The agent hit the turn budget
+_and_ the session was killed by the hard wall:
+
+| field                                                                                                                                          | value                | source                |
+| ---------------------------------------------------------------------------------------------------------------------------------------------- | -------------------- | --------------------- |
+| `agent_result.metadata.turn_count`                                                                                                             | 40                   | `result.json`         |
+| `agent_result.metadata.iknow_error`                                                                                                            | `max_turns_exceeded` | `result.json`         |
+| `agent_result.metadata.permission_mode`                                                                                                        | `full_auto`          | `result.json`         |
+| `agent_result.metadata.eval_state`                                                                                                             | `true`               | `result.json`         |
+| `[violation] session killed: tier=mid tool=bash message=[permission_denied] [hard_wall] dangerous command: sensitive path targeted by command` | 1 occurrence         | `agent/iknow-ask.txt` |
+
+So the precise statement is: **the model exhausted the 40-turn budget and
+still delivered work the task's own tests accept.** Those are independent
+facts, and the pass is the one that matters — "ran out of turns" and "did the
+work" are not the same event, and here only the second one is scored. The
+verifier, not the agent, decided the outcome.
+
+**And a second harness finding, new in this batch (§6.2):** this trial's deny
+is a **different hard-wall rule** from §6's. Its text is `dangerous command:
+sensitive path targeted by command` with **no `id=` and no `pattern=`** — it
+is the `commandContainsSensitivePath` branch of
+`classifyDangerousExecute` (`src/harness/permission/hard-walls.ts:2899-2902`),
+not the `verdict=malformed` parse branch. It is **not** the same false
+positive, and it is **not** shown to be a false positive at all: the offending
+command text was not retained, so whether the deny was correct cannot be
+determined from what survives.
+
+### 3.2 `adaptive-rejection-sampler` — the one model-attributable **fail**
 
 **6 of 9 verifier tests passed.** Passing: the `ars` function exists; a test
 function is present; modularity; error handling; input validation;
@@ -96,41 +287,272 @@ Failing, by test:
   was not emitted.
 - **Required sample files absent.**
 
-Both 40-turn runs on this task died inside the loop, not during install. The
-function was written and four of five quality dimensions were met; what was not
-met is runtime correctness on the sampler and the output contract.
+The run died inside the loop, not during install: `turn_count` reached the
+40-turn budget and the harness reported `max_turns_exceeded` (`agent_exec`
+878s). The function was written and four of five quality dimensions were met;
+what was not met is runtime correctness on the sampler and the output contract.
 
-### 3.2 `dna-assembly`
+**This is one medium task. It is a receipt, not a rate.**
 
-PCR fragments, sizes, overhangs and a 3591-bp circular assembly were all
-simulated, and the structural checks passed. The final sequence did **not**
-exactly match the target, and the last debugging round was cut off by the turn
-budget (`agent_exec` 1512s — 1.7x the other task's, i.e. this task spent
-substantially more of its wall clock inside the loop before the cap).
+### 3.3 `dna-assembly` — the reward is not the model's
 
-## 4. Unscored: environment, not harness (12 trials, 0 rewards)
+The original note described this trial's failure mode as "PCR fragments
+simulated, structural checks passed, final sequence mismatched, cut off at the
+turn budget." **That description came from the agent's own stop summary, not
+from test execution.** The summary is real and is quoted in
+`agent/iknow-ask.txt`; it is a self-report by the model about its own work.
+The trial's verifier log ends `uvx: command not found` — **the tests never
+ran**. So:
 
-These produced **zero scores and zero model turns**. They are recorded so the
-2/89 coverage in §3 is not read as an agent result.
+- the agent-side facts (`turn_count: 40`, `max_turns_exceeded`, `agent_exec`
+  1512s — 1.7x the `overfull-hbox` trial's, i.e. this task spent more of its
+  wall clock inside the loop) are real and stand;
+- the model's self-report of what it achieved is **not** verifier evidence and
+  is not repeated here as a finding;
+- the `0.0` is **not attributable to the model**, and the reported pass rate
+  for this task does not exist.
 
-### 4.1 Container egress is intermittent
+The only defensible statement about `dna-assembly` is that the agent spent 40
+turns and hit the budget, and that the harness's verifier could not install
+its tooling.
 
-20 sequential probes from a plain container: **16/20 succeeded (80%)**. Failures
-arrive **in clusters**, not uniformly — e.g. probes 9, 10, 12, 18 failed within
-one run. Host egress was **100% throughout**, including runs with the proxy env
-vars unset, so the fault is specific to the **host→container path** under this
-WSL2 fake-IP proxy setup, not to the network itself.
+## 4. Trials that produced no score (23 of 33)
 
-Consequences observed:
+Across all ten jobs on disk there are **33 trial directories: 23 ended in an
+exception before scoring, 10 wrote a reward, and they cover 10 distinct
+tasks.** The 23 non-scoring trials are recorded here so the 2
+model-attributable results in §3 are not read as agent results, and so the two
+environment constraints that produced them are named as **requirements, not as
+fixes that have been made**.
 
-- `NetworkConnectionError` on `apt-get update` and on the nvm install script.
-- `AgentSetupTimeoutError` (360s) on one task.
+Exception types across the 33 trials, from each `result.json`:
 
-**Every failure occurred in `install()`.** In all five trials of the final
-retry job the `agent/` directory was completely empty: no model turns were
-billed, and the model never ran.
+| exception type              | count |
+| --------------------------- | ----- |
+| `NetworkConnectionError`    | 15    |
+| `NonZeroAgentExitCodeError` | 6     |
+| `IKnowGlibcRequiredError`   | 2     |
+| `AgentTimeoutError`         | 1     |
+| `AgentSetupTimeoutError`    | 1     |
+| (none — scored normally)    | 8     |
 
-### 4.2 Retry policy was incomplete on our side
+**The dominant one is network, and it is measured to be intermittent rather
+than binary.** This is the single most important thing to add in this batch,
+because it changes how every other number here may be read.
+
+| batch             | trials | agent-phase network failures                 | verifier-phase network failures |
+| ----------------- | ------ | -------------------------------------------- | ------------------------------- |
+| earlier jobs      | 28     | 15 × `NetworkConnectionError` in `install()` | 5 broken verifiers              |
+| `iknow-v5-window` | 5      | **0** in the 4 that got past install         | **3** of those same 4           |
+
+The v5 batch ran with **no proxy flags at all** (its `config.json` carries no
+`environment` block and no `HTTP_PROXY`/`HTTPS_PROXY`/`172.31.*` string
+anywhere), during a window when the network was measured open — 15/15 probes
+green, `releases.astral.sh` included, which had been the verifier blocker in
+every earlier batch. The 4 trials that reached the agent phase (§4.6) record
+**zero** `Failed to connect` / `NetworkConnectionError` / `SSL_ERROR` lines in
+their `trial.log`. Only the 5th trial, at install, hit `github.com`.
+
+**This needs stating carefully, because "the network was open" is not the same
+as "the network stopped blocking."** The v5 window was open **for the agent
+phase**: all 4 trials that got past install ran without a single network error.
+But **3 of those 4 then lost their verifier to the same block anyway** (§4.6)
+— the `uv` download inside `test.sh` failed on `github.com`. So the v5 batch
+still lost 4 of 5 trials to the network, just at a different phase than the
+earlier batches did. What genuinely changed is narrower than "the outage
+closed":
+
+- **the agent phase stopped failing** (0/4, vs 15/28 across earlier jobs), and
+- **the block lifted for one trial's verifier** (§3.1's pass), which is what
+  produced the pilot's only model-attributable success.
+
+**And the intermittency is directly visible inside this one batch.** The same
+job, the same image, the same `test.sh`, the same flags, and minutes apart:
+`overfull-hbox` installed `uv` and passed 4 tests, while its three siblings
+timed out fetching the identical asset. No variable changed between them except
+which seconds they ran in. That is the clearest evidence in this note that the
+block is **stochastic and time-correlated**, not a property of any
+configuration.
+
+**"Open" is not a stable state, and neither is "closed."** The same day
+produced 16/20 with failures in clusters and 20/20 with no proxy set; the
+proxy host address itself moved (`172.31.128.1` -> `172.31.143.85`, §4.1). So
+the correct statement is: **this environment intermittently blocks container
+egress, in clusters, on a timescale of minutes**, in both the agent phase and
+the verifier phase. Nothing here is a fixed property of the host.
+
+**The consequence for reading results is the important part:** because the
+block is stochastic, **outcomes across batches are not comparable unless the
+trial actually reached the verifier.** A task that scored 0.0 in a blocked
+window and 1.0 in an open window is not evidence that the model "sometimes
+passes" — it is evidence that the same task is only measurable in an open
+window. Only the 2 trials whose `tests ran?` column reads YES are comparable
+to each other, and even they are n=1 on different tasks (§3).
+
+### 4.1 Container egress is intermittent — and the `--ek` "fix" is **not** what it was taken to be
+
+**The original 16/20 vs 8/8 probe is real, but the conclusion drawn from it
+does not hold, and a direct test refutes it.** Recorded here as a correction,
+because the obvious reading of those two numbers is wrong.
+
+| arm               | command                                | result                                                                                         |
+| ----------------- | -------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| without proxy env | 20 sequential `curl -sS --max-time 20` | **16/20 (80%)** succeeded; failures **in clusters** (e.g. probes 9, 10, 12, 18 within one run) |
+| with proxy env    | 8 sequential `curl -sS --max-time 20`  | **8/8 (100%)**; `apt-get update` exited 0                                                      |
+
+The tempting conclusion is that `harbor run --ek HTTP_PROXY=… --ek
+HTTPS_PROXY=…` injects the proxy into the task container and fixes the agent
+phase as a pure CLI configuration. **That is not established, and the direct
+test says it is false.**
+
+**Decisive test.** A proxy pointed at a guaranteed-dead endpoint
+(`--ek HTTP_PROXY=http://127.0.0.1:1 --ek HTTPS_PROXY=http://127.0.0.1:1`).
+If the vars reached the container, **every** egress call would fail. Instead the
+install completed normally:
+
+```bash
+# dead proxy via --ek, harbor run --install-only, prove-plus-comm
+Total runtime: 1m 11s
+ek-dead2 exception: None
+# ...trial.log shows nvm install + bundle extract both "Command outputs captured"
+```
+
+**If `--ek` were reaching the container, this run could not have succeeded.**
+It is the same behavior as a run with no `--ek` at all. The success of the
+`--ek` job in the trial table is therefore **not** attributable to `--ek`.
+
+**Mechanism, read from the installed harbor 0.23.0 source.** `--ek` populates
+`config["environment"]["kwargs"]` (`harbor/cli/jobs.py:1730-1732`). The
+environment factory then spreads those into the environment constructor as
+bare `**config.kwargs` (`harbor/environments/factory.py:346-353`), while the
+value that actually becomes container env is a **different** field,
+`persistent_env=config.env` (`factory.py:350`). `BaseEnvironment.__init__`
+accepts `**kwargs` and **never reads it** except to pop the deprecated
+`suppress_override_warnings` — it does not merge kwargs into
+`_persistent_env`. `_startup_env()` (`base.py:286-293`), which is what writes
+`services.main.environment` (`docker/__init__.py:20-26`), is built from
+`task_env_config.env` and `_persistent_env` only. So `--ek` kwargs land in a
+parameter that is **swallowed**. Harbor's own source says as much: the comment
+at `base.py:59` calls `--ek` "an interim fix … per-job configurability
+(`environment.kwargs` / `--ek`) is a planned follow-up".
+
+**What survives, and what does not:**
+
+- **Survives:** container egress on this host is unreliable, and the
+  original 16/20-with-clusters observation stands as a snapshot of a flaky
+  path. A same-day re-measurement returned **20/20 with no proxy set** and
+  **8/8 with** it, so neither ratio is a stable property of this machine. The
+  WSL2 host address also moved during the day (`172.31.128.1` ->
+  `172.31.143.85`) and the proxy was listening only on the old address, so any
+  hard-coded proxy value goes stale silently.
+- **Does not survive:** "`--ek` fixes the agent phase" / "this is a harbor CLI
+  configuration, no adapter change needed". **The proxy mechanism is real and
+  does work when the vars are genuinely present in the container** — verified
+  directly: from a task image, `apt-get update` through
+  `HTTP_PROXY=http://172.31.128.1:7890` exits 0, and the proxy is reachable
+  from the container network. But **`--ek` is not the way to set it**, because
+  `--ek` does not deliver the vars. Setting container env needs a path that
+  populates `environment.env` (`persistent_env`), not `environment.kwargs` —
+  a harbor config change, and **not verified to work here**. This note makes
+  **no** claim that the agent phase is fixed, in either direction.
+
+**A measurement trap, recorded so the probe is not repeated wrongly:** the
+`alexgshaw/*:20251031` task images ship **no HTTP client at all**
+(`curl`, `wget`, `python3`, `python` all absent), so an egress probe cannot
+run inside a task image; and an early attempt to probe them "succeeded" with
+`0/20` only because `curl` was missing, not because the network failed. Any
+egress probe must use a separate image (`curlimages/curl`), which is **not**
+the network namespace the verifier runs in.
+
+### 4.2 The verifier phase is a separate, harder constraint — and it is currently the binding one
+
+**The agent-phase network problem is not the main blocker. This is.** A TB 2.1
+task's `tests/test.sh` bootstraps its own runner: it `curl`s the `uv` install
+script from `astral.sh` and only then runs pytest. The verifier runs **in the
+task container**, and from there that fetch is **unreachable** in this
+environment. So the install fails, `uvx` is never on `PATH`, the task's tests
+**never execute**, and harbor still writes `reward.txt = 0`.
+
+That is the mechanism behind **8 of the 10 rewards in §3**. It is a
+**benchmark-harness / environment constraint**, and it is **not** the same
+constraint as §4.1: there the agent's own `install()` failed; here the
+**verification** phase failed, after the agent had already finished and, in
+three cases, after it had completed cleanly.
+
+**The blocker is GitHub, not only Astral — this batch corrected the target.**
+The `uv` install script's own download step is what fails, and the log names a
+**different host per trial** (§3's table): `releases.astral.sh` in two earlier
+trials, `astral.sh` in two, and **`github.com` in the three v5 breaks**,
+where the asset fetch is
+`https://github.com/astral-sh/uv/releases/download/0.9.5/uv-…tar.gz`. In
+§3.1's passing trial the same fetch **succeeded** in an open window
+(`downloading uv 0.9.5` -> `installing to /root/.local/bin` -> `4 passed`).
+So the requirement is not "make `releases.astral.sh` reachable" — it is "make
+the whole install path reachable", which spans `astral.sh` **and** the GitHub
+release assets it redirects to.
+
+**The one trial that proves this is solvable at all.** `overfull-hbox` in
+`iknow-v5-window` ran the identical `test.sh`, on the identical image, in the
+same job as three trials that broke — and its `uv` install and pytest run both
+succeeded. Nothing was changed between them: no image, no flags, no adapter.
+**The only difference was which trials happened to run while egress was
+open**, which is the strongest evidence in this note that the blocker is the
+environment's stochastic egress and not the harness. It also means the
+constraint is **already lifted by waiting**, intermittently, with no code
+change — which is why §4's intermittency finding and this section are the
+same finding.
+
+**How the verifier runs matters for any fix, and it is `shared` mode.** All
+10 reward-writing trials, including the 8 that broke, record
+`verifier_environment_mode: "shared"` (`result.json`). Harbor's
+`resolve_trial_network_plan`
+(`harbor/trial/network_policy.py:166-169`) sets, for `SHARED`,
+`verifier_env_baseline = None` and
+`verifier_phase_baseline = agent_env_baseline` — so the verifier's env
+baseline **is the agent's container env**. The verifier is not a separate
+container; it runs in the same one, which is why it hits the same
+host→container path as the agent phase, and why §4.1 and §4.2 have a common
+root cause even though they are different phases.
+
+**`--ve` was tried and is inconclusive.** One trial
+(`iknow-ve-test/overfull-hbox__unVYg9r`) was run with **both** `--ek` and
+`--ve HTTP_PROXY=… --ve HTTPS_PROXY=…`. It still failed — but in the **agent**
+phase, on the nvm download (`NetworkConnectionError`), so its verifier never
+ran and it says **nothing** about `--ve` either way. That trial is not evidence
+that `--ve` is insufficient, and this note does not treat it as such. The two
+verifier failures that carry evidence (`overfull-hbox__GSdo65A`,
+`prove-plus-comm__dFncUcg`) both ran with `--ve` **unset**, so they establish
+only the constraint, not what `--ve` would do. **Whether `--ve` reaches the
+verifier in `shared` mode is untested here** — and given §4.1, `--ek`'s env
+injection cannot be assumed to work, so `--ve` needs a test of its own before
+any claim is made about it. It remains inconclusive after this batch, because
+the one `--ve` trial still died before the verifier phase.
+
+**What would be needed to resolve it** (a requirement, **not** a fix that has
+been made — neither has been implemented, and neither is verified to work):
+
+- a **reachable mirror or proxy for the whole `uv` install path** (the
+  `astral.sh` install script **and** the GitHub release asset it redirects
+  to), present in the container at verification time; or
+- a **task image that already carries `uv`/`uvx`**, so `tests/test.sh` never
+  needs to fetch them at verification time.
+
+The second is the more robust of the two, because it removes the
+verification-time network dependency entirely rather than depending on an
+injection mechanism that §4.1 shows is easy to get wrong — and, unlike
+option one, it would also make the results **comparable across windows**,
+which the intermittency in §4 means they currently are not.
+
+**One important qualification on "until one exists."** It is no longer true
+that trials can only produce meaningless zeros while the blocker stands: §3.1
+scored a real `1.0` during an open window, with no change of any kind. So the
+constraint is real but **not deterministic**, and the correct response is not
+only a mirror — it is to **retry or re-run broken trials** and count only the
+ones whose `tests ran?` column reads YES. Running more trials in an arbitrary
+window still mostly yields broken measurements; re-running the ones that broke
+does not.
+
+### 4.3 Retry policy was incomplete on our side
 
 A retry job with `-r 3 --retry-include NetworkConnectionError --retry-include
 NonZeroAgentExitCodeError` consumed **12 retries and produced zero scores**. One
@@ -139,7 +561,7 @@ in the include list, so harbor declined to retry it. Recorded as our gap, not
 the harness's: the include list did not cover the error class the environment
 actually produced.
 
-### 4.3 Debian-12 task images are unscorable with this bundle — image constraint, not adapter
+### 4.4 Debian-12 task images are unscorable with this bundle — image constraint, not adapter
 
 Task images are **not uniform**. Debian 12-based images (`fix-git`,
 `cobol-modernization`, `nginx-request-logging` among those probed) ship
@@ -164,34 +586,111 @@ ceilings: `prove-plus-comm`, `overfull-hbox`, `crack-7z-hash`,
 `polyglot-c-py`, `adaptive-rejection-sampler`, `password-recovery`,
 `dna-assembly` all report `GLIBCXX_3.4.33`.
 
+**This fix is now confirmed to work in a real scored trial.** §3.1's
+`overfull-hbox` trial's `trial.log` line 3 reads
+`libstdc++ already provides GLIBCXX_3.4.31 (ceiling GLIBCXX_3.4.33); no
+install issued` — the `17b0c8ed7` probe ran, correctly decided no install was
+needed, and the trial went on to `install()` -> `run()` -> a **passing**
+verifier. This is the first end-to-end confirmation that the
+`setup() -> install() -> run() -> verifier` path completes **with both
+adapter fixes in place**, which §8 previously listed as outstanding.
+
+### 4.6 The `iknow-v5-window` batch in full — and why 4 of 5 rewards are not scores
+
+The batch ran with **no proxy flags** and direct egress, in a window where the
+network was measured open (15/15 probes green). Its five trials, with the
+evidence each verdict rests on:
+
+| trial                        | difficulty | `reward.txt` | pytest summary in verifier log | broken markers                                    | verdict                                            |
+| ---------------------------- | ---------- | ------------ | ------------------------------ | ------------------------------------------------- | -------------------------------------------------- |
+| `overfull-hbox__T2FxRE5`     | easy       | `1`          | `4 passed in 40.18s` (line 87) | 0                                                 | **valid, model-attributable, PASS**                |
+| `prove-plus-comm__kaHKYby`   | easy       | `0`          | none                           | 2 (`uvx: command not found`, `env: No such file`) | broken measurement                                 |
+| `polyglot-c-py__w8TtZ6n`     | medium     | `0`          | none                           | 2 (same)                                          | broken measurement                                 |
+| `password-recovery__ohB94RP` | hard       | `0`          | none                           | 2 (same)                                          | broken measurement                                 |
+| `crack-7z-hash__m99zdqH`     | medium     | **absent**   | n/a                            | n/a                                               | install-phase failure, `NonZeroAgentExitCodeError` |
+
+**4 of 5 wrote a reward; only 1 of those 4 executed the task's tests.** This is
+the whole point of §3's `tests ran?` column, restated on a fresh batch: a
+`reward.txt` is evidence that the verifier phase _terminated_, not that it
+_judged anything_. Each verdict above was read from the files —
+`result.json`, `verifier/reward.txt`, `verifier/test-stdout.txt` — by grepping
+the verifier log for a pytest summary line and for broken-installer markers,
+not by reading the reward.
+
+**The fifth trial died before the verifier and is not in the reward count at
+all.** `crack-7z-hash__m99zdqH` has **no `verifier/reward.txt`**: its
+`result.json` records
+`exception_info.exception_type = "NonZeroAgentExitCodeError"`, and
+`exception.txt` shows the failure inside `install()`, at the nvm step —
+`fatal: unable to access 'https://github.com/nvm-sh/nvm.git/': Failed to
+connect to github.com port 443 after 133991 ms`. This is the **agent-phase**
+constraint of §4.1, not the verifier one, and it is the batch's only network
+error.
+
 ## 5. Analysis: Execution / Coherence / Verification
 
-Grounded **only** in the two trials in §3, at n=2. The TB paper's three axes
-are used as the vocabulary; nothing wider is claimed.
+Grounded **only** in the trials in §3, and for the model-attributable reading
+**only** in §3.1 and §3.2, at n=1 each. The TB paper's three axes are used as
+the vocabulary; nothing wider is claimed.
 
-### Execution — partial evidence
+### Execution — two observations, and only where a verifier ran
 
-Both trials demonstrate real command execution reaching task state: files were
-written, tests were written, PCR fragments and a 3591-bp circular assembly were
-simulated, structural checks passed. The failure in both cases is **not** an
+The failing scored trial demonstrates real command execution reaching task
+state: `/app/ars.R` was written and sourced, and the failure is **not** an
 off-PATH executable or a command that failed to take effect (TB's top
-execution failure, 24.1% in the paper's census). `adaptive-rejection-sampler`'s
-`Non-numeric argument to mathematical function` is a **runtime correctness**
-failure inside a command that did run. `dna-assembly` reached a final state that
-was close but not exact.
+execution failure, 24.1% in the paper's census).
+`adaptive-rejection-sampler`'s `Non-numeric argument to mathematical function`
+is a **runtime correctness** failure inside a command that did run.
+
+**The `dna-assembly` evidence is withdrawn from this section.** The earlier
+version read the agent's self-reported "structural checks passed, final sequence
+mismatched" as an execution-axis observation. That text is the model's own stop
+summary, not a verifier result, and the task's tests never ran (§3.2). An
+agent's account of its own work is not evidence about what the verifier saw.
 
 **This run therefore gives no evidence for or against the paper's headline
-execution failure mode** — the only two tasks attempted do not fail that way,
-which is a property of the sample, not a measurement of the rate.
+execution failure mode** — of the two tasks whose verifier ran, one fails that
+way and one does not, which is a property of a 2-sample, not a measurement of
+the rate.
+
+**A positive execution observation, from the other scored trial.**
+`overfull-hbox` (§3.1) is the first trial in this pilot where the model
+produced state the task's own tests accept, and it did so by actually
+**compiling LaTeX**: the passing test set includes
+`test_compilation_successful` and `test_no_overfull_hboxes`, plus
+`test_main_synonyms_not_modified` and `test_input_file_matches` — i.e. the
+model both ran the real toolchain to convergence and stayed inside the edit
+constraint the instruction imposed. That is command execution reaching task
+state in the strongest available sense, and it is worth recording precisely
+because the failing trial's execution error is of a different kind
+(runtime correctness inside a program that ran).
 
 ### Coherence — one observation, and it is a harness observation
 
-Both runs consumed the **entire 40-turn budget**. For `dna-assembly` the last
-debugging round was cut off by that budget; for `adaptive-rejection-sampler`
-the loop was still going at 40. Whether the model was looping or making slow
-progress is **not distinguishable from these two trials** — the transcripts
-that would separate those were not retained. This is recorded as "hit the
-budget twice", not as a recovery-rate number.
+Both model-attributable trials consumed the **entire 40-turn budget** and
+reported `max_turns_exceeded`, and so did `dna-assembly` and the `overfull-hbox`
+trial from `iknow-pilot-v4-proxy`. Whether the model was looping or making slow
+progress is **not distinguishable** — the per-turn transcripts that would
+separate those were not retained. This is recorded as "hit the budget", not as
+a recovery-rate number.
+
+**The passing trial makes this sharper, not softer.** `overfull-hbox` reached
+40 turns and still scored 1.0, and its own retained stop summary says the
+work was complete before the budget ran out ("The modified document compiled
+successfully with 0 overfull boxes, 0 errors, and 5 pages") and that the model
+was spending the remaining turns on a _cosmetic_ improvement it had already
+satisfied. So "hit the turn budget" is **not** a predictor of failure here, and
+it is **not** a proxy for looping. The correct reading of
+`iknow_error: max_turns_exceeded` is "the run was truncated at 40 turns",
+full stop — whether the truncation cost anything is a separate question that
+this trial answers **no**.
+
+**Counter-observations remain, and they are agent-side fact, not scores:**
+`prove-plus-comm` **completed** at 22 turns (`iknow-proxy-test`) and at 16
+turns (`iknow-v5-window`), and `password-recovery` completed at 32 turns, all
+with `stop_reason: completed` and all well under the budget. So the sample
+contains both behaviours, and no claim is made about whether those completed
+runs were correct — none of their verifiers ran.
 
 ### Verification — no evidence
 
@@ -200,25 +699,27 @@ on `adaptive-rejection-sampler`. The harness's own three-value verify outcome
 (`passed` / `not_run` / failed family) is a **model-visible prompt surface** and
 is **not exercised by Terminal-Bench 2.1 at all**: TB scores final state with
 programmatic tests, and its verifier is the task's, not ours. Nothing about our
-verify-status honesty contract is measured by these two trials. That surface
+verify-status honesty contract is measured by any of these trials. That surface
 remains covered only by its own golden set.
 
 ### 5.1 Failure taxonomy mapped onto harness subsystems
 
-For each subsystem, either an observation **from these two trials**, or an
+For each subsystem, either an observation **from these trials**, or an
 explicit statement that it was not exercised and why.
 
-| subsystem            | observation from this run                                                                                                                                                                                                                                                                                                          |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| **hard-wall**        | **Exercised — one fail-closed false positive.** See §6. The deny's message is `pattern="verdict=malformed"`, i.e. "the bash parser could not produce a clean tree" (typically an unclosed quote), carrying **nothing about the command's content being dangerous**. At least three such denies occurred in the first scored trial. |
-| **permission chain** | Not exercised as a denial. `full_auto` granted what was asked of it in both trials; no `permission_denied` from the ask path was recorded. The `[permission_denied]` line in §6 is the hard-wall's own prefix, not a separate permission-chain stop.                                                                               |
-| **bash fence**       | **Out of scope by construction.** The bwrap fence retires wholesale in eval state (ADR-0130 §2), so no number here measures it. What remains is the which-tree axis, and writes did land on the task root — but with n=2 and no controlled comparison, that is an observation, not a measurement.                                  |
-| **verify status**    | **Not exercised, and not measurable by TB.** See §5 — the task's own verifier replaced ours; our three-value outcome surface is a prompt surface TB does not touch.                                                                                                                                                                |
-| **tool selection**   | Weakly exercised: the model used `bash` and, on `adaptive-rejection-sampler`, wrote a test function. Whether the **right** tool was chosen against the available alternatives is **not recoverable** from these two trials — no per-turn tool-choice trace was retained.                                                           |
+| subsystem            | observation from this run                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **hard-wall**        | **Exercised twice, and the two denies are different rules.** (a) In the `iknow-e2e-fixed` `adaptive-rejection-sampler` trial, a **fail-closed false positive**: the deny is `pattern="verdict=malformed"`, i.e. "the bash parser could not produce a clean tree" (typically an unclosed quote), carrying **nothing about the command's content being dangerous**; at least three such denies occurred (§6). (b) In the `iknow-v5-window` `overfull-hbox` trial, **one** deny of a different class — `dangerous command: sensitive path targeted by command`, with no `id=`/`pattern=`, from the `commandContainsSensitivePath` branch. Whether that one was a false positive is **not determinable**; the command text was not retained (§6.2).                                                    |
+| **permission chain** | Not exercised as a denial. `full_auto` granted what was asked of it in every trial; no `permission_denied` from the ask path was recorded. The `[permission_denied]` prefix on both §6 and §6.2's lines is the hard-wall's own prefix, not a separate permission-chain stop. The trace of `prove-plus-comm` also shows a write denied as out-of-workspace (`path outside workspace: /workspace/plus_comm.v not under /root/iknow`), which is the which-tree axis, not a permission-chain denial.                                                                                                                                                                                                                                                                                                   |
+| **bash fence**       | **Out of scope by construction.** The bwrap fence retires wholesale in eval state (ADR-0130 §2), so no number here measures it. What remains is the which-tree axis, and writes did land on the task root (`overfull-hbox` edited `/app/input.tex` and the task's own test for that passed) — but with 2 scored trials, no controlled comparison and a different adapter state on each, that is an observation, not a measurement.                                                                                                                                                                                                                                                                                                                                                                 |
+| **verify status**    | **Not exercised, and not measurable by TB.** See §5 — the task's own verifier replaced ours; our three-value outcome surface is a prompt surface TB does not touch.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| **tool selection**   | Weakly exercised: the model used `bash` and, on `adaptive-rejection-sampler`, wrote a test function. Whether the **right** tool was chosen against the available alternatives is **not recoverable** — no per-turn tool-choice trace was retained for either scored trial, and the one thing §3.1's retained output does show is the model **building a batching evaluator to drive `pdflatex` through many candidate substitutions per run**, i.e. choosing a tool strategy rather than editing blindly. The one trial that _did_ retain a full trace (`iknow-proxy-test/prove-plus-comm`) shows `bash` alongside `glob`, `grep` and `write_file`, with two denials for using `bash` where `grep`/a directory walk belonged; it is a single unverified run, so it is an illustration, not a rate. |
 
-## 6. The one harness finding: a hard-wall false positive
+## 6. Harness finding 1: a hard-wall false positive
 
-Observed in the first scored trial (`adaptive-rejection-sampler`):
+Observed in `iknow-e2e-fixed/adaptive-rejection-sampler__cU77yyL` — the same
+trial the original note called "the first scored trial", and the same text; the
+finding is unchanged, only the trial's identity in §3 has been corrected:
 
 ```
 [violation] session killed: tier=mid tool=bash message=[permission_denied] [hard_wall] dangerous command pattern matched (id=unparseable, pattern="verdict=malformed")
@@ -273,19 +774,80 @@ token-matching vetoes in code. A trajectory set cannot observe a decision this
 code makes on its own. **Its home is this evidence note**, and the finding is
 deliberately not registered as a gap in that table.
 
+### 6.2 Harness finding 2: a **different** hard-wall deny, in the passing trial
+
+The `overfull-hbox` trial that produced the pilot's only **pass** carries its
+own hard-wall denial (`agent/iknow-ask.txt`):
+
+```
+[violation] session killed: tier=mid tool=bash message=[permission_denied] [hard_wall] dangerous command: sensitive path targeted by command
+```
+
+**This is not §6's finding, and it must not be folded into it.** Three
+differences, all verifiable:
+
+|                              | §6 (`adaptive-rejection-sampler`)                                                 | §6.2 (`overfull-hbox`)                                                            |
+| ---------------------------- | --------------------------------------------------------------------------------- | --------------------------------------------------------------------------------- |
+| message                      | `dangerous command pattern matched (id=unparseable, pattern="verdict=malformed")` | `dangerous command: sensitive path targeted by command`                           |
+| carrying `id=` / `pattern=`? | yes                                                                               | **no**                                                                            |
+| source branch                | `findDangerousPattern` -> parse verdict `malformed`                               | `commandContainsSensitivePath` (`src/harness/permission/hard-walls.ts:2899-2902`) |
+| classification               | a **parse** failure, carrying nothing about the command's content                 | a **content** verdict: the command named a sensitive path                         |
+
+The source is explicit that this is a distinct second branch of the same
+decision function, placed after the redirect exemption so that
+`echo x > /etc/shadow` is still denied:
+
+```ts
+if (commandContainsSensitivePath(command)) {
+  return "dangerous command: sensitive path targeted by command";
+}
+```
+
+**Verdict: undetermined, and deliberately not called a finding.** A
+sensitive-path deny on a benchmark task is **plausibly correct** — many task
+instructions involve writing under paths the wall treats as sensitive, and the
+LaTeX task in particular hands the model a document tree. Whether this deny
+was a false positive **cannot be decided from what was retained**: the
+container was deleted and `agent/iknow-ask.txt` holds the banner, this line,
+and the stop summary — no command text, and no per-turn trace. Guessing either
+way would be exactly the error this note has already had to correct twice.
+
+**What is nonetheless worth recording:** the wall fired in **both**
+model-attributable trials — the one that passed and the one that failed. Two
+observations of a hard-wall denial in two trials is not a rate, but it does
+establish that the wall is **actively firing on this task set**, which is the
+precondition ADR-0130 §2 named. And it sharpens §6's own blast-radius note: the
+kill threshold is 3 mid-tier violations **counted across all hard-wall rules**,
+not 3 of one rule, so a task can accumulate denies from two different branches
+and trip the kill on a mix.
+
+**The pass is not diminished by this, and should not be read as diminished.**
+The session was killed by the wall, yet the trial still scored `1.0`: the work
+the model had already committed to disk satisfied all four of the task's tests.
+That is a fact about the harness's ordering — the verifier judges final state,
+not whether the session was killed — and it is the reason §3.1 states the
+outcome as two independent facts (budget exhausted, work accepted) rather than
+as a compromised single event.
+
 ## 7. Adapter defects found and fixed
 
 Both committed; both were found by running real trials, not by reading code.
+**Neither conclusion is softened by the §3 corrections** — and §4.4 now adds
+positive confirmation: the C++-runtime probe ran in the `overfull-hbox` trial
+that scored `1.0`, decided no install was needed on a `GLIBCXX_3.4.33` image,
+and the trial continued to a passing verifier.
 
 ### `68a3f0843` — node resolved from an unsourced shell; smoke-test misattribution
 
 `_ensure_node` resolved node with `command -v node` in a shell that had **not
 sourced nvm**, so the `ln -sf` was silently skipped and every later bare `exec`
-saw no node. A scored trial died at install with
+saw no node. A trial died at install with
 `bash: line 1: node: command not found`, and it was **misreported as
 `IKnowGlibcRequiredError`** on an Ubuntu 24.04 / glibc 2.39 image — an image
-that satisfies the requirement. The node binary is now located from the nvm
-tree's own layout and never from an ambient PATH.
+that satisfies the requirement. (That trial is `iknow-e2e-first`, which
+recorded **no reward at all**; the original note called it "a scored trial",
+which is wrong on both counts — see §3.0.) The node binary is now located from
+the nvm tree's own layout and never from an ambient PATH.
 
 The same commit split the smoke-test **attribution**: a failure-text matcher
 was matching the dynamic loader's `"No such file or directory"` and
@@ -318,47 +880,118 @@ least one named test).
 
 Stated plainly, so this note is not over-read.
 
-- **No capability number.** 2 scored trials, both hard, both 0.0. There is no
-  mean reward, no per-difficulty band, no per-category breakdown, and no
-  comparison against any other agent. #1167's report item asked for those; **at
-  n=2 they would be fabricated**, so they are omitted rather than estimated.
-- **No breadth.** 87 of 89 tasks were not attempted. 12 further trials produced
-  zero scores for the environment reasons in §4.
+- **No capability number, and only 2 trials carry a model-attributable
+  result.** 10 trials wrote a reward; in 8 of them the task's tests never
+  executed (§3, §4.2). **Exactly 2 trials ran their tests**: one scored 0.0 on
+  a **medium** task (`adaptive-rejection-sampler`) and one scored **1.0** on an
+  **easy** task (`overfull-hbox`). **These two must not be divided.** They are
+  different tasks, from different jobs, in different difficulty bands, at n=1
+  each, with a 40-turn budget hit in both. "1 of 2" is not a pass rate, not a
+  50%, and not a capability estimate — it is two receipts of opposite sign.
+  Presenting it as any of those would be the same class of error this note has
+  already corrected twice. There is no mean reward, no per-difficulty band
+  (one observation per band, in bands that differ), no per-category
+  breakdown, and no comparison against any other agent. #1167's report item
+  asked for those; **at n=1 per task they would be fabricated**, so they are
+  omitted rather than estimated.
+- **No breadth.** 79 of 89 tasks were not attempted (33 trials across 10 jobs,
+  10 distinct tasks). 23 trials produced no score for the environment reasons
+  in §4. **All 7 pilot tasks have now been attempted, but only 2 of the 7 have
+  ever reached a working verifier**; the other 5
+  (`prove-plus-comm`, `crack-7z-hash`, `polyglot-c-py`, `password-recovery`,
+  `dna-assembly`) are unmeasured, every trial of each having been lost to a
+  broken verifier or a pre-verifier install failure. That is the shape of the
+  remaining work: **5 of the 7 pilot tasks need one trial in an open network
+  window each**, not a new harness capability.
+- **No cross-batch comparability.** Because the environment's egress block is
+  intermittent and arrives in clusters (§4), a trial's outcome is conditioned
+  on which window it ran in. Two batches of the same task are **not**
+  comparable unless both reached the verifier. This is why §3.0 calls the two
+  `adaptive-rejection-sampler` runs a non-matched pair, and why the
+  `iknow-v5-window` pass cannot be read as "the model sometimes passes".
+- **No verifier evidence beyond the 2 trials.** The other 8 rewards measure a
+  verifier that could not install `uvx` (§4.2), not the model.
 - **No retry-policy effectiveness.** 12 retries were consumed and produced
-  zero scores; the policy itself was incomplete (§4.2), so the number measures
+  zero scores; the policy itself was incomplete (§4.3), so the number measures
   our config, not harbor's retry logic.
+- **No verified proxy fix.** The proxy mechanism works when the vars are
+  genuinely in the container, but **no way of injecting them has been shown to
+  work** — `--ek` is refuted by a dead-proxy test (§4.1) and `--ve` remains
+  untested and inconclusive (§4.2). Agent-phase egress is therefore **not**
+  claimed as solved. The v5 batch's clean network was **not** a proxy
+  achievement: it ran with no proxy flags at all and simply landed in an open
+  window.
 - **No background / subagent / verify-sandbox-run evidence.** Structurally
   absent (§2).
 - **No fence evidence.** Retired in eval state (§2).
 - **No verify-status evidence.** Not reachable from TB at all (§5).
 - **No tool-selection rate.** Per-turn traces were not retained for either
-  scored trial.
-- **No loop diagnosis.** Both runs hit the 40-turn cap; whether that is the
-  model looping or making slow progress is not distinguishable from what was
-  retained.
-- **No hard-wall false-positive _rate_.** One observation in one trial, with
-  the command text unrecoverable. The mechanism is pinned by repo tests; the
-  benchmark-specific rate is unmeasured.
-- **The offending command is not recovered and is not guessed** (§6).
-- **Post-fix `install()` in a real container.** Both adapter fixes are
-  unit-tested and the `_ensure_cpp_runtime` step was exercised against live
-  containers (see `scripts/harbor/README.md`), but the full harbor-driven
-  `setup() -> install() -> run() -> verifier` sequence has completed **once**,
-  on the pre-fix bundle.
+  model-attributable trial.
+- **No loop diagnosis, and `max_turns_exceeded` is not a failure signal.**
+  Both model-attributable trials hit the 40-turn cap, and one of them **passed
+  anyway** (§3.1, §5 Coherence). The stopped-at-budget observation is
+  independent of the outcome, and the retained per-turn transcripts that would
+  separate looping from slow progress were not kept. Runs that completed
+  cleanly under budget (`prove-plus-comm` at 22 and 16 turns,
+  `password-recovery` at 32) were all unverified, so they carry no evidence
+  either way.
+- **No hard-wall false-positive _rate_, and the second deny is unclassified.**
+  §6 is one observation in one trial; §6.2 is a **different** wall rule in the
+  other trial whose correctness cannot be determined without the command text.
+  Both command texts are unrecoverable. The mechanisms are pinned by repo
+  tests; the benchmark-specific rates are unmeasured.
+- **The offending commands are not recovered and are not guessed** (§6, §6.2).
+- ~~**Post-fix `install()` in a real container.**~~ **This is now satisfied and
+  withdrawn from this list.** It previously read that the full harbor-driven
+  `setup() -> install() -> run() -> verifier` sequence had never run to
+  completion with both adapter fixes in place, because the one scored trial
+  predated the C++-runtime fix. The `iknow-v5-window/overfull-hbox` trial
+  contradicts that: its `trial.log` shows the `GLIBCXX` probe running and
+  correctly short-circuiting (`no install issued`, ceiling `3.4.33`), the nvm
+  node link step, the bundle extract, and then a **passing** verifier (§4.4).
+  A scored trial on the fully fixed adapter now exists.
 
 ## 9. What remains
 
-1. **A task image with a new-enough C++ runtime** (Debian 13 / Ubuntu 24.04
-   base) for the Debian-based tasks. This is the single largest blocker to
-   breadth and it is not an adapter change.
-2. **Container egress stability** under this WSL2 fake-IP proxy (80% success, in
-   clusters). Until this is resolved, most attempts die in `install()` and
-   cannot score.
-3. **A retry policy that includes the error classes the environment actually
-   produces** — `AgentSetupTimeoutError` was missing (§4.2).
-4. **Retain per-turn trajectories** for scored trials. Both the loop diagnosis
-   and the tool-selection reading above are lost for want of it.
-5. **A run wide enough to report a number.** The report item in #1167 is
+Ordered by what actually blocks a number. **Item 1 has changed shape in this
+batch.** It is no longer "find a fix", because §3.1 proved the verifier path
+works unaided in an open window; it is now "make that window reliable, or
+re-run what broke". The model-attributable count is 2, and it went up without
+any code change.
+
+1. **Make verifier-phase reachability reliable, and re-run what broke** — 5 of
+   the 7 pilot tasks have still never reached a working verifier (§8). The
+   durable fix is a task image that already carries `uv`/`uvx`, which removes
+   the network dependency at verification time entirely (§4.2). The cheap fix,
+   available today, is to **re-run trials whose `tests ran?` column reads NO
+   during a window measured open** (15/15 probes green): the `overfull-hbox`
+   pass shows that is sufficient. The mirror/proxy option still needs a
+   **verified** injection path, and §4.1 shows `--ek` is not it.
+2. **A task image with a new-enough C++ runtime** (Debian 13 / Ubuntu 24.04
+   base) for the Debian-based tasks. The largest blocker to breadth; not an
+   adapter change. Note this is already clear of the 7-task pilot — all 7 are
+   Ubuntu 24.04 — and only matters for extending beyond it.
+3. **Container egress stability under this WSL2 fake-IP proxy, and a correct
+   way to inject a proxy into the task container.** `--ek` is the obvious
+   candidate and is **broken** — its kwargs are swallowed before reaching the
+   container (§4.1), so the one-flag fix that appeared to work did not.
+   Finding the flag or config path that actually populates `environment.env`
+   is open. The host address also moves, so any proxy value must be
+   re-checked per run, and the block arrives in clusters (§4) on a timescale
+   of minutes.
+4. **A retry policy that includes the error classes the environment actually
+   produces** — `AgentSetupTimeoutError` was missing (§4.3), and
+   `NonZeroAgentExitCodeError` is currently used as a proxy for "the network
+   blocked the install", which it is not: `crack-7z-hash__m99zdqH` is a
+   network failure wearing that class (§4.6).
+5. **Retain per-turn trajectories** for scored trials. The loop diagnosis, the
+   tool-selection reading, and the §6.2 classification of the sensitive-path
+   deny are all lost for want of it — and §6.2 is the one that would turn an
+   undetermined deny into a finding.
+6. **A run wide enough to report a number.** The report item in #1167 is
    _partially_ delivered: the harness, the adapter, and the measurement
-   procedure are working end to end; the capability estimate is not, and needs
-   items 1 and 2 first.
+   procedure are working end to end and have now produced both a pass and a
+   fail; the capability estimate is not, and needs items 1 and 5 first. **The
+   binding limit on any rate is n=1 per task, not the environment** — even a
+   perfect run of all 89 tasks once would give n=1 everywhere, so re-runs per
+   task are required, not just breadth.
