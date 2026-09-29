@@ -10,12 +10,19 @@ top-level objects rather than assuming the whole stream is JSON, and the
 
 import json
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Literal
 
 PayloadKind = Literal["answer", "error_envelope", "none"]
 
 _ANSWER_MARKER_KEYS = ("finalText", "stopReason")
+# iknow's own warn-once notice when the JSONL trace writer cannot write
+# (src/harness/trace/jsonl.ts `recordFailure`). It arrives on stderr, which the
+# adapter merges into stdout with `2>&1`, so it lands in the very stream this
+# module parses. Detecting it is what separates "a trace was requested and
+# retained" from "a trace was requested and silently lost" — the pilot report's
+# recurring failure was never knowing which one had happened.
+_TRACE_WRITE_FAILURE_NOTICE = "[JsonlTraceService] write failed:"
 # How far past a `{` the open-token lookahead may walk over whitespace.
 _LOOKAHEAD_LIMIT = 64
 _USAGE_KEYS = (
@@ -57,18 +64,23 @@ class ParsedRun:
     error_code: str | None = None
     error_message: str | None = None
     run_state: str | None = None
+    trace_write_failed: bool = False
 
 
 def parse_iknow_ask_output(output: str) -> ParsedRun:
     """Parse merged ask output into a ParsedRun; never raises on bad input."""
     payloads = _json_objects(output)
+    # Read off every payload, not just the one that classifies the run: the
+    # trace-write notice is orthogonal to the answer, and a capped or errored
+    # run still loses its trace the same way.
+    trace_write_failed = _TRACE_WRITE_FAILURE_NOTICE in output
     answer = _last_payload(payloads, _is_answer)
     if answer is not None:
-        return _answer_run(answer)
+        return replace(_answer_run(answer), trace_write_failed=trace_write_failed)
     envelope = _last_payload(payloads, _is_error_envelope)
     if envelope is not None:
-        return _envelope_run(envelope)
-    return ParsedRun(kind="none")
+        return replace(_envelope_run(envelope), trace_write_failed=trace_write_failed)
+    return ParsedRun(kind="none", trace_write_failed=trace_write_failed)
 
 
 def _is_answer(payload: dict[str, Any]) -> bool:

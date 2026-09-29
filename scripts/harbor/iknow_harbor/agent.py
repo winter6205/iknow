@@ -50,11 +50,32 @@ EVAL_STATE_FLAG = "--eval-state"
 # iknow puts in the ask JSON to name the state the number came from.
 EVAL_STATE_RUN_LABEL = "eval_state"
 
+# iknow's own env var for the same concern, which `src/cli/trace-root.ts:29`
+# honors with *path* semantics. Not this adapter's `Env` fallback — see the
+# `trace_out` field. Named here so the exclusion is assertable rather than a
+# comment that can drift.
+TRACE_OUT_ENV = "IKNOW_TRACE_OUT"
+# Mirrors the `--trace-out` flag in src/cli/parse-args.ts.
+TRACE_OUT_FLAG = "--trace-out"
+
 _REMOTE_BUNDLE = PurePosixPath("/tmp/iknow-bundle.tgz")
 _INSTALL_DIR_NAME = "iknow"
 _SETTINGS_DIR_NAME = ".iknow"
 _OUTPUT_FILENAME = "iknow-ask.txt"
+# `--trace-out` is a *directory* in the ask entry, not the file it looks like:
+# src/harness/trace/jsonl.ts:192-197 joins the conversation id onto it, so a
+# trial's records land at `<dir>/<conversationId>.jsonl`. The directory is
+# therefore named once and shared, and the file name is left to iknow — the
+# conversation id is a random UUID the adapter never sees.
+_TRACE_DIRNAME = "trace"
 _MAX_TURNS_ERROR = "max_turns_exceeded"
+# Prints one word naming what is actually on disk in the trace dir, for the
+# post-run probe. POSIX sh only: no `find`, no `stat`, no `[[ ]]`. An unmatched
+# glob expands to itself literally, so the "no file" case is a comparison
+# against the pattern rather than a missing-argument read.
+_TRACE_PROBE_PRESENT = "present"
+_TRACE_PROBE_EMPTY = "empty"
+_TRACE_PROBE_ABSENT = "absent"
 
 _NODE_VERSION_PROBE = (
     "process.exit(Number(process.versions.node.split('.')[0]) >= "
@@ -276,6 +297,29 @@ class IKnowOptions(InstalledAgentOptions):
         ge=1,
         description="--max-turns for `iknow ask`. Omitted = iknow's default.",
     )
+    trace_out: bool = Field(
+        default=False,
+        description=(
+            "Retain the per-turn trajectory as a trial artifact. Off by default: "
+            "the pilot (docs/evidence/adr-0130/terminal-bench-2-1-pilot.md §8) "
+            "scored two model-attributable trials with no per-turn record kept, "
+            "which left the loop diagnosis and the tool-selection reading "
+            "unavailable, and left a second hard-wall deny's correctness "
+            "'undetermined' because the offending command text was never "
+            "captured. With it on, `ask` writes the JSONL trace under the agent "
+            "log dir, which harbor copies to `agent/trace/<conversationId>.jsonl` "
+            "in the trial directory — the per-turn llm_call / tool_call / turn "
+            "records the ask JSON's own `trace` key deliberately drops. "
+            "Declared without an `Env` fallback, unlike `permission_mode` / "
+            "`eval_state`, and the difference is load-bearing: harbor's env "
+            "fallback is not scoped to `--ae` but falls through to the host "
+            "process environment (harbor/agents/base.py:178-181), and "
+            "IKNOW_TRACE_OUT is a *shipped iknow variable with path semantics* "
+            "that src/cli/trace-root.ts:29 already honors. As a boolean option it "
+            "would be a name collision, and a bare host export would silently "
+            "rewrite a pilot-baseline trial's argv and log-dir tree."
+        ),
+    )
 
 
 def _nvm_version_major(path: str) -> int | None:
@@ -478,12 +522,18 @@ class IKnowAgent(BaseInstalledAgent):
         self.logger.debug(f"Running iknow ask: {command}")
         result = await environment.exec(command=command, env=self._runtime_env(options))
         parsed = parse_iknow_ask_output(result.stdout or "")
+        # Read the trace dir while the container is still alive. It is the only
+        # moment the question is answerable, and it is the question `results.json`
+        # otherwise leaves open: the ask JSON carries no turn-by-turn record, so
+        # a metadata dict that says only "a trace was requested" cannot tell a
+        # retained trajectory from an absent one.
+        trace_state = await self._probe_trace_dir(environment, options)
         if _is_capped_turn_run(parsed, result.return_code):
             self.logger.warning(
                 "iknow hit its turn budget; scoring the partial run instead of "
                 "erroring the trial"
             )
-            context.metadata = _run_metadata(parsed, options)
+            context.metadata = _run_metadata(parsed, options, trace_state)
             return
         if result.return_code != 0:
             raise self._classify_exec_error(command, result)
@@ -493,7 +543,49 @@ class IKnowAgent(BaseInstalledAgent):
                 f"{self._truncate_output(result.stdout)}"
             )
         self._assert_run_state_named(parsed, options)
-        _apply_to_context(parsed, context, options)
+        _apply_to_context(parsed, context, options, trace_state)
+
+    async def _probe_trace_dir(
+        self, environment: BaseEnvironment, options: IKnowOptions
+    ) -> str | None:
+        """Name what the trace dir actually holds: present / empty / absent.
+
+        `None` when tracing was not requested — the third value is not a
+        failure, it is the default, and conflating the two is the bug.
+
+        The three states are the whole point. iknow's own warn-once notice
+        covers a writer that *tried* and failed, but a run that never got far
+        enough to write anything — a missing API key, a settings error, an
+        addon that failed to load — leaves the directory empty and prints no
+        notice at all, so a parse of the output stream cannot see it. Both of
+        those are measured: a real `ask --trace-out` with no API key produced
+        the provider envelope, exit 1, and a trace dir holding zero files.
+
+        So the directory is read here, in the container, while it still exists.
+        `test -s` (size > 0) rather than existence: a zero-byte `.jsonl` means
+        the writer opened the file and the run then died, which is not a
+        trajectory either, and a reader must not be handed it as one.
+        """
+        if not options.trace_out:
+            return None
+        result = await environment.exec(command=_trace_probe_command(_trace_out_dir()))
+        observed = (result.stdout or "").strip()
+        if observed not in (
+            _TRACE_PROBE_PRESENT,
+            _TRACE_PROBE_EMPTY,
+            _TRACE_PROBE_ABSENT,
+        ):
+            # An unreadable probe is not a passing probe. Defaulting to the
+            # pessimistic reading is what keeps the metadata from claiming a
+            # trajectory the adapter did not confirm.
+            self.logger.warning(
+                "could not read the iknow trace directory %s (got %r); "
+                "recording the trial as having no usable trace",
+                _trace_out_dir(),
+                observed,
+            )
+            return _TRACE_PROBE_ABSENT
+        return observed
 
     def _assert_run_state_named(
         self, parsed: ParsedRun, options: IKnowOptions
@@ -928,13 +1020,79 @@ class IKnowAgent(BaseInstalledAgent):
         log_dir = EnvironmentPaths.agent_dir.as_posix()
         max_turns = f" --max-turns {options.max_turns}" if options.max_turns else ""
         eval_state = f" {EVAL_STATE_FLAG}" if options.eval_state else ""
+        # The trace dir is created here rather than left to iknow's own
+        # deferred `mkdirSync` (src/harness/trace/jsonl.ts:222): that mkdir is
+        # inside a writer that is only reached on the *first* record, and the
+        # writer is swapped out wholesale by anything that injects its own, so
+        # an adapter that relied on it would be relying on a detail two layers
+        # down. The parent already exists either way, since `tee` needs it.
+        dirs = [log_dir]
+        trace_out = ""
+        if options.trace_out:
+            dirs.append(_trace_out_dir())
+            trace_out = f" {TRACE_OUT_FLAG} {shlex.quote(_trace_out_dir())}"
         return (
             "set -o pipefail; "
-            f"mkdir -p {shlex.quote(log_dir)} && cd {self._install_dir(home)} && "
+            f"mkdir -p {' '.join(shlex.quote(d) for d in dirs)} && "
+            f"cd {self._install_dir(home)} && "
             f"node ./dist/cli.js ask {shlex.quote(instruction)} --json{eval_state}"
-            f"{max_turns} 2>&1 </dev/null | tee "
+            f"{max_turns}{trace_out} 2>&1 </dev/null | tee "
             f"{shlex.quote(log_dir)}/{_OUTPUT_FILENAME}"
         )
+
+
+def _trace_probe_command(directory: str) -> str:
+    """The post-run probe: name what the trace dir holds, in one word.
+
+    A parameter, not a hardcoded path, so a test can point the very same command
+    at a fixture directory and run it in a real shell — the empty case is a
+    filesystem state, and a stubbed `exec` asserts the string, not the state.
+
+    POSIX sh only, and `-s` rather than `-e`, on purpose:
+
+    - An unmatched glob expands to itself *literally* (`sh -c 'set -- /no/*.jsonl'`
+      yields `/no/*.jsonl`), so "the dir exists but holds no trace" needs no
+      `[ -e "$f" ]` guard and cannot be read as a file. The glob is outside the
+      quotes and the path inside, which is what keeps a directory with a space
+      in its name working.
+    - `-s` is size > 0, so a zero-byte `.jsonl` — the writer opened the file
+      and the run then died — is not counted as a retained trajectory.
+    """
+    quoted = shlex.quote(directory)
+    return (
+        f"for f in {quoted}/*.jsonl; do "
+        f'if [ -s "$f" ]; then echo {_TRACE_PROBE_PRESENT}; exit 0; fi; '
+        f"done; "
+        f'if [ -d {quoted} ]; then echo {_TRACE_PROBE_EMPTY}; '
+        f"else echo {_TRACE_PROBE_ABSENT}; fi"
+    )
+
+
+def _trace_out_dir() -> str:
+    """The container path `--trace-out` is handed, as a *directory*.
+
+    Inside the agent log dir rather than a harbor artifact entry, and the two
+    facts that decide that:
+
+    - The log dir is already mounted from the trial directory and already
+      collected, whole, by `_download_agent_logs` (trial.py:573-593) — no
+      `artifacts:` config, and no separate `download_dir` round trip, is needed
+      for a file the agent itself writes. A `--artifact` entry would buy a
+      manifest row and a flat `artifacts/logs/agent/trace/` mirror of the very
+      same bytes.
+    - `/logs/artifacts/` is reserved for artifacts re-materialized into a
+      *separate* verifier environment (`ArtifactHandler.upload_artifacts`,
+      artifact_handler.py:169-214), and this trace is evidence for reading the
+      agent's run, not an input to the verifier.
+
+    Harbor's `include_logs` / `exclude_logs` (trial.py:603-609, the dispatch
+    inside `_download_role_logs`) therefore govern it like every other agent
+    log, with no extra configuration.
+
+    One definition, not two: the command and the trial metadata must name the
+    same path, and a reader of `results.json` compares the two.
+    """
+    return f"{EnvironmentPaths.agent_dir.as_posix()}/{_TRACE_DIRNAME}"
 
 
 def _is_capped_turn_run(parsed: ParsedRun, return_code: int) -> bool:
@@ -945,13 +1103,34 @@ def _is_capped_turn_run(parsed: ParsedRun, return_code: int) -> bool:
     )
 
 
-def _run_metadata(parsed: ParsedRun, options: IKnowOptions) -> dict[str, Any]:
+def _run_metadata(
+    parsed: ParsedRun, options: IKnowOptions, trace_state: str | None = None
+) -> dict[str, Any]:
     # ADR-0130 reporting invariant: an eval-state number must name its state, so
     # the posture lands on the trial record, not only in the launch command.
     metadata: dict[str, Any] = {
         "permission_mode": options.permission_mode,
         "eval_state": options.eval_state,
     }
+    if options.trace_out:
+        # The *directory* the trial asked for, not a file: `--trace-out` writes
+        # `<dir>/<conversationId>.jsonl` and the conversation id is a random
+        # UUID minted inside the container, so naming a file here would assert
+        # a path the adapter never saw. Recorded so a reader of `results.json`
+        # can tell "no trace was retained" from "the trace was never requested".
+        metadata["trace_out"] = _trace_out_dir()
+        # What actually landed, read out of the container before it was torn
+        # down. The three states are the point: a run that never wrote a record
+        # (no API key, a settings error, an addon that would not load) produces
+        # no notice on the output stream, so without this key `trace_out` reads
+        # as "a trajectory is here" for a trial that has none.
+        metadata["trace_state"] = trace_state or _TRACE_PROBE_ABSENT
+    if parsed.trace_write_failed:
+        # A trace that could not be written is not an error the trial failed
+        # for — iknow warns once and answers anyway, and the answer is still
+        # scoreable. It does mean the trajectory this trial was launched to
+        # retain is absent, which must not be read as "nothing went wrong".
+        metadata["trace_write_failed"] = True
     if parsed.error_code is not None:
         metadata["iknow_error"] = parsed.error_code
     if parsed.turn_count is not None:
@@ -960,7 +1139,10 @@ def _run_metadata(parsed: ParsedRun, options: IKnowOptions) -> dict[str, Any]:
 
 
 def _apply_to_context(
-    parsed: ParsedRun, context: AgentContext, options: IKnowOptions
+    parsed: ParsedRun,
+    context: AgentContext,
+    options: IKnowOptions,
+    trace_state: str | None = None,
 ) -> None:
     usage = parsed.usage
     if usage is not None:
@@ -971,7 +1153,7 @@ def _apply_to_context(
         context.n_input_tokens = (usage.input_tokens or 0) + cached + creation
         context.n_cache_tokens = cached
         context.n_output_tokens = usage.output_tokens
-    metadata = _run_metadata(parsed, options)
+    metadata = _run_metadata(parsed, options, trace_state)
     if parsed.stop_reason is not None:
         metadata["stop_reason"] = parsed.stop_reason
     context.metadata = metadata

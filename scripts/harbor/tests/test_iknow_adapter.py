@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import shlex
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -11,33 +13,43 @@ from harbor.agents.installed.base import (
     ModelNotFoundError,
     NonZeroAgentExitCodeError,
 )
+from harbor.agents.options import Env
 
 from iknow_harbor import IKnowAgent
+from iknow_harbor import agent as agent_module
 from iknow_harbor.agent import (
     _CXX_RUNTIME_INSTALLS,
     _GLIBCXX_CEILING_PROBE,
     _MAX_TURNS_ERROR,
     _NODE_MARKER,
+    _TRACE_DIRNAME,
+    _TRACE_PROBE_ABSENT,
+    _TRACE_PROBE_EMPTY,
+    _TRACE_PROBE_PRESENT,
     EVAL_STATE_ENV,
     EVAL_STATE_FLAG,
     EVAL_STATE_RUN_LABEL,
     MINIMAX_API_KEY_ENV,
     PERMISSION_MODE_ENV,
     REQUIRED_GLIBCXX,
+    TRACE_OUT_ENV,
+    TRACE_OUT_FLAG,
     IKnowCppRuntimeTooOldError,
     IKnowEvalStateUnsupportedError,
     IKnowGlibcRequiredError,
     IKnowInstallError,
     IKnowNodeUnavailableError,
+    IKnowOptions,
     IKnowRunStateMismatchError,
     _cxx_runtime_install,
     _glibcxx_at_least,
     _glibcxx_ceiling,
     _glibcxx_probe_command,
     _run_metadata,
+    _trace_probe_command,
     render_iknow_settings,
 )
-from iknow_harbor.ask_output import ParsedRun
+from iknow_harbor.ask_output import ParsedRun, parse_iknow_ask_output
 
 MODEL_ROUTE = "minimax-cn/MiniMax-M3.1-Flash-Preview"
 
@@ -280,6 +292,21 @@ def _run_probe(candidates) -> subprocess.CompletedProcess:
         # The exit code is the thing under test, not an accident to raise on.
         check=False,
     )
+
+
+def _run_trace_probe(probe: str, trace_dir: Path) -> str:
+    """Run the trace probe against a real directory and return its one word."""
+    result = subprocess.run(
+        ["bash", "-c", f"set -o pipefail; {probe}"],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, (
+        f"the trace probe must exit 0 whatever the directory holds; got "
+        f"{result.returncode}: {result.stderr}"
+    )
+    return result.stdout.strip()
 
 
 # The verdict a real shell produces for the adapter's production probe on the
@@ -1293,3 +1320,454 @@ class TestRunStateLabel:
             "eval_state": True,
             "turn_count": 3,
         }
+
+
+# The container path the adapter hands `--trace-out`, and the answer iknow's
+# JSON carries alongside it. Both are observed shapes, not guesses: the JSON is
+# verbatim from a real `iknow ask --json --eval-state --trace-out` run against a
+# loopback model stub, and the flag's directory semantics are
+# src/harness/trace/jsonl.ts:192-197.
+ANSWER_JSON = (
+    '{"finalText":"done","stopReason":"completed","turnCount":3,'
+    '"lastUsage":{"inputTokens":5,"outputTokens":3,'
+    '"cacheCreationInputTokens":null,"cacheReadInputTokens":null},'
+    '"runState":"eval_state"}'
+)
+# iknow's warn-once notice when the JSONL writer cannot write, observed on the
+# merged stream of the same run pointed at a regular file.
+TRACE_WRITE_FAILURE_NOTICE = (
+    "[JsonlTraceService] write failed: Error: ENOTDIR: not a directory, "
+    "mkdir '/logs/agent/trace/blobs'\n"
+)
+TRACE_WRITE_FAILURE_OUTPUT = TRACE_WRITE_FAILURE_NOTICE + ANSWER_JSON
+# A capped run prints the max-turns envelope and no answer at all, so the
+# fixture is the notice plus the envelope — not the answer, which would win the
+# parser's answer-over-envelope precedence and stop the run from being capped.
+TRACE_WRITE_FAILURE_CAPPED_OUTPUT = (
+    TRACE_WRITE_FAILURE_NOTICE + '{"error":"max_turns_exceeded","turnsRan":40}'
+)
+
+
+class TestTraceOutCarrier:
+    """Per-turn trajectories, retained as a trial artifact and only on request.
+
+    The pilot report (§8) names what their absence cost: the loop diagnosis for
+    the scored trials, the tool-selection reading, and the classification of a
+    second hard-wall deny whose command text was never captured. The option is
+    therefore off by default — a scripted run must behave byte-for-byte as it
+    did — and on only when a trial asks for it.
+    """
+
+    def _subject(self, tmp_path, **kwargs) -> IKnowAgent:
+        subject = IKnowAgent(
+            logs_dir=tmp_path,
+            model_name=MODEL_ROUTE,
+            bundle_path="/tmp/iknow-bundle.tgz",
+            **kwargs,
+        )
+        subject._extra_env = {MINIMAX_API_KEY_ENV: "test-key"}
+        return subject
+
+    def test_the_flag_is_absent_by_default(self, tmp_path):
+        subject = self._subject(tmp_path)
+
+        command = subject._ask_command("q", subject.options, home="/root")
+
+        assert TRACE_OUT_FLAG not in command
+        assert subject.options.trace_out is False
+        # The pre-existing command is unchanged: the trace dir is not created
+        # and the metadata carries no trace key, so a default run is byte-for-byte
+        # the one the pilot measured.
+        assert "mkdir -p /logs/agent &&" in command
+        assert "trace" not in _run_metadata(ParsedRun(kind="answer"), subject.options)
+
+    def test_the_flag_reaches_argv_with_the_agent_log_dir_path(self, tmp_path):
+        subject = self._subject(tmp_path, trace_out=True)
+
+        command = subject._ask_command("q", subject.options, home="/root")
+
+        assert f"{TRACE_OUT_FLAG} /logs/agent/{_TRACE_DIRNAME}" in command
+        assert subject.options.trace_out is True
+
+    def test_the_flag_travels_on_argv_and_no_env_is_forwarded(self, tmp_path):
+        # Same discipline as the eval-state posture: a flag on the command line,
+        # never an env var. IKNOW_TRACE_OUT is the *adapter option's* fallback
+        # for `--ae`; iknow reads it, but the adapter must not inject it, or a
+        # host var would silently turn tracing on for a trial that did not ask
+        # for it (src/cli/trace-root.ts:27-37 reads the same var).
+        subject = self._subject(tmp_path, trace_out=True)
+
+        runtime_env = subject._runtime_env(subject.options)
+
+        assert TRACE_OUT_ENV not in runtime_env
+        assert TRACE_OUT_FLAG in subject._ask_command(
+            "q", subject.options, home="/root"
+        )
+
+    def test_the_parent_directory_is_created_before_the_ask_runs(self, tmp_path):
+        # iknow's own mkdir is deferred to the first record and lives behind an
+        # injectable writer, so the adapter creates the parent itself rather
+        # than depend on a detail two layers down. The mkdir must precede the
+        # `cd`, and must name the trace dir as its own -p argument.
+        subject = self._subject(tmp_path, trace_out=True)
+
+        command = subject._ask_command("q", subject.options, home="/root")
+
+        assert "mkdir -p /logs/agent /logs/agent/trace && cd /root/iknow &&" in command
+        # Two arguments, not one joined path: `-p a b` is what creates both.
+        mkdir_args = command.split("mkdir -p ", 1)[1].split(" &&", 1)[0].split(" ")
+        assert mkdir_args == ["/logs/agent", f"/logs/agent/{_TRACE_DIRNAME}"]
+
+    def test_the_emitted_command_creates_the_trace_dir_in_a_real_shell(self, tmp_path):
+        """The emitted string, run by a real shell — not asserted as a string.
+
+        The `mkdir -p` half and the argv split are two different failure modes:
+        a command that names the right path but creates no directory leaves
+        iknow to fail its first record write, and a command that creates the
+        directory but hands `--trace-out` two argv tokens makes the parser
+        consume the next flag as the path. Running the produced command is what
+        distinguishes them. A stub `node` stands in for the CLI, so nothing
+        here needs a model or a network.
+        """
+        root = Path(tmp_path) / "fake-root"
+        install = root / "root" / "iknow"
+        bindir = root / "bin"
+        for directory in (install, bindir):
+            directory.mkdir(parents=True)
+            directory.chmod(0o777)
+        stub = bindir / "node"
+        stub.write_text(
+            "#!/bin/sh\n"
+            'prev=""; dir=""\n'
+            'for arg in "$@"; do\n'
+            '  if [ "$prev" = "--trace-out" ]; then dir="$arg"; fi\n'
+            '  prev="$arg"\n'
+            "done\n"
+            'if [ -z "$dir" ]; then echo "no --trace-out on argv" >&2; exit 3; fi\n'
+            'case "$dir" in /*) ;; *) echo "path split: $dir" >&2; exit 4;; esac\n'
+            'mkdir -p "$dir" && : > "$dir/probe.jsonl"\n'
+            "exit 0\n"
+        )
+        stub.chmod(0o755)
+        log_dir = root / "logs" / "agent"
+
+        subject = self._subject(tmp_path, trace_out=True)
+        command = subject._ask_command("q", subject.options, home=str(root / "root"))
+        # The command carries absolute container paths; rewriting only the
+        # /logs prefix and the home leaves every other byte — the quoting, the
+        # flag order, the pipe — exactly as the adapter produced it.
+        real = command.replace("/logs/agent", log_dir.as_posix())
+        proc = subprocess.run(
+            ["bash", "-c", real],
+            capture_output=True,
+            text=True,
+            cwd=str(root),
+            env={"PATH": f"{bindir}:{os.environ['PATH']}"},
+        )
+
+        assert proc.returncode == 0, proc.stdout + proc.stderr
+        assert (log_dir / _TRACE_DIRNAME / "probe.jsonl").is_file()
+        assert (log_dir / "iknow-ask.txt").is_file()
+
+    @pytest.mark.parametrize(
+        ("path", "quoted"),
+        [
+            ("/logs/agent/trace", False),
+            ("/logs/agent/with space", True),
+            ("/logs/agent/trace;touch /tmp/pwned", True),
+            ("/logs/agent/tr'ace", True),
+        ],
+    )
+    def test_the_trace_path_is_quoted_safely(self, tmp_path, monkeypatch, path, quoted):
+        # The path is built from EnvironmentPaths, not operator input, so the
+        # realistic case is the benign one; the injection cases assert the
+        # property that holds either way — a path with a space or a shell
+        # metacharacter still arrives as one argv token, and is never spliced
+        # into the command unquoted.
+        monkeypatch.setattr(agent_module, "_trace_out_dir", lambda: path)
+        subject = self._subject(tmp_path, trace_out=True)
+
+        command = subject._ask_command("q", subject.options, home="/root")
+
+        token = command.split(f"{TRACE_OUT_FLAG} ", 1)[1].split(" 2>&1", 1)[0]
+        assert (token != path) is quoted
+        if quoted:
+            assert token == shlex.quote(path)
+        # And the shell agrees: the token survives `bash -c` as one argument.
+        read = subprocess.run(
+            ["bash", "-c", f"for a in {token}; do printf '%s\\n' \"$a\"; done"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert read.stdout.rstrip("\n") == path
+
+    def test_the_requested_dir_lands_on_the_trial_metadata(self, tmp_path):
+        subject = self._subject(tmp_path, trace_out=True)
+
+        metadata = _run_metadata(
+            ParsedRun(kind="answer", turn_count=3),
+            subject.options,
+            trace_state=_TRACE_PROBE_PRESENT,
+        )
+
+        # A directory, not a file: the file is `<dir>/<conversationId>.jsonl`
+        # and the conversation id is minted inside the container, so naming a
+        # file here would assert a path the adapter never saw.
+        assert metadata == {
+            "permission_mode": "full_auto",
+            "eval_state": False,
+            "trace_out": f"/logs/agent/{_TRACE_DIRNAME}",
+            "trace_state": _TRACE_PROBE_PRESENT,
+            "turn_count": 3,
+        }
+
+    def test_a_run_that_never_wrote_a_trace_says_so(self, tmp_path):
+        # The gap the review found: a real `ask --trace-out` with no API key
+        # printed the provider envelope, exited 1, and left the trace dir
+        # holding zero files — with no notice on the output stream, so the
+        # parse alone cannot see it. Without this key the record reads as
+        # "a trajectory is here" for a trial that has none.
+        subject = self._subject(tmp_path, trace_out=True)
+        context = SimpleNamespace(
+            metadata=None, n_input_tokens=0, n_cache_tokens=0, n_output_tokens=0
+        )
+        environment = _NodePathEnvironment(
+            {
+                'printf %s "$HOME"': ("/root", "", 0),
+                "dist/cli.js ask": (
+                    '{"error":"llm_provider_api_key_missing",'
+                    '"code":"provider_api_key_missing"}',
+                    "",
+                    1,
+                ),
+                # No `*.jsonl` on disk — the zero-file directory.
+                "/logs/agent/trace/*.jsonl": (_TRACE_PROBE_EMPTY, "", 0),
+            }
+        )
+
+        with pytest.raises(Exception):
+            asyncio.run(subject.run("q", environment, context))
+
+        # The run raised (a missing key is a real trial error), so the receipt
+        # is asserted where the caller can still see it: on the capped branch,
+        # which is the one path out of run() that returns without raising.
+        state = asyncio.run(
+            subject._probe_trace_dir(environment, subject.options)
+        )
+        metadata = _run_metadata(
+            ParsedRun(kind="none"), subject.options, trace_state=state
+        )
+        assert metadata["trace_state"] == _TRACE_PROBE_EMPTY
+        assert "trace_write_failed" not in metadata
+
+    @pytest.mark.parametrize(
+        ("probe_stdout", "expected"),
+        [
+            (_TRACE_PROBE_PRESENT, _TRACE_PROBE_PRESENT),
+            (_TRACE_PROBE_EMPTY, _TRACE_PROBE_EMPTY),
+            (_TRACE_PROBE_ABSENT, _TRACE_PROBE_ABSENT),
+            # An unreadable probe must never read as a present trajectory.
+            ("", _TRACE_PROBE_ABSENT),
+            ("something else entirely", _TRACE_PROBE_ABSENT),
+        ],
+    )
+    def test_the_probe_reports_the_directory_state(
+        self, tmp_path, probe_stdout, expected
+    ):
+        subject = self._subject(tmp_path, trace_out=True)
+        environment = _StubEnvironment(stdout=probe_stdout)
+
+        state = asyncio.run(
+            subject._probe_trace_dir(environment, subject.options)
+        )
+
+        assert state == expected
+
+    def test_the_probe_is_skipped_when_tracing_was_not_requested(self, tmp_path):
+        # `absent` is not a synonym for `off`: without this the metadata would
+        # claim every default trial lost a trace it never asked for.
+        subject = self._subject(tmp_path, trace_out=False)
+        environment = _StubEnvironment(stdout=_TRACE_PROBE_PRESENT)
+
+        state = asyncio.run(
+            subject._probe_trace_dir(environment, subject.options)
+        )
+
+        assert state is None
+        assert environment.commands == []
+        metadata = _run_metadata(ParsedRun(kind="answer"), subject.options, state)
+        assert "trace_state" not in metadata
+        assert "trace_out" not in metadata
+
+    def test_the_probe_reads_the_directory_in_a_real_shell(self, tmp_path):
+        # The three states are filesystem states, so they are established on a
+        # real filesystem by the very command the adapter runs — not by
+        # asserting the probe string. Same builder as `_run_probe`, because the
+        # point is that the emitted text does the right thing on disk.
+        root = tmp_path / "agent-log"
+        trace_dir = root / _TRACE_DIRNAME
+        probe = _trace_probe_command(trace_dir.as_posix())
+
+        assert _run_trace_probe(probe, trace_dir) == _TRACE_PROBE_ABSENT
+
+        trace_dir.mkdir(parents=True)
+        assert _run_trace_probe(probe, trace_dir) == _TRACE_PROBE_EMPTY
+
+        (trace_dir / "empty.jsonl").write_bytes(b"")
+        assert _run_trace_probe(probe, trace_dir) == _TRACE_PROBE_EMPTY, (
+            "a zero-byte .jsonl means the writer opened the file and the run "
+            "then died; -s is what keeps it from counting as a trajectory"
+        )
+
+        (trace_dir / "real.jsonl").write_text('{"record_type":"llm_call"}\n')
+        assert _run_trace_probe(probe, trace_dir) == _TRACE_PROBE_PRESENT
+
+    def test_the_probe_survives_a_directory_name_with_a_space(self, tmp_path):
+        # The container path has no space, but the command is quoted and must
+        # not be quietly relying on that.
+        root = tmp_path / "agent log"
+        trace_dir = root / _TRACE_DIRNAME
+        trace_dir.mkdir(parents=True)
+        (trace_dir / "real.jsonl").write_text("{}\n")
+
+        probe = _trace_probe_command(trace_dir.as_posix())
+
+        assert _run_trace_probe(probe, trace_dir) == _TRACE_PROBE_PRESENT
+
+    def test_a_lost_trace_write_is_reported_and_does_not_fail_the_run(self, tmp_path):
+        # A trace that cannot be written must not cost the trial its answer:
+        # iknow warns once and keeps going, and the run is still scoreable. But
+        # "scoreable" must not be read as "the trajectory was retained", so the
+        # loss is recorded on the trial record. Driven through run(), not
+        # through the parser alone, so the whole path is covered: a lost trace
+        # that instead raised would fail this with an exception.
+        subject = self._subject(tmp_path, trace_out=True, eval_state=True)
+        context = SimpleNamespace(
+            metadata=None, n_input_tokens=0, n_cache_tokens=0, n_output_tokens=0
+        )
+        environment = _NodePathEnvironment(
+            {
+                'printf %s "$HOME"': ("/root", "", 0),
+                "dist/cli.js ask": (TRACE_WRITE_FAILURE_OUTPUT, "", 0),
+            }
+        )
+
+        asyncio.run(subject.run("q", environment, context))
+
+        assert context.metadata is not None
+        assert context.metadata["trace_write_failed"] is True
+        assert context.metadata["trace_out"] == f"/logs/agent/{_TRACE_DIRNAME}"
+        assert context.metadata["eval_state"] is True
+        assert context.metadata["stop_reason"] == "completed"
+
+    def test_a_trace_write_failure_reaches_the_trial_metadata(self, tmp_path):
+        subject = self._subject(tmp_path, trace_out=True)
+
+        parsed = parse_iknow_ask_output(TRACE_WRITE_FAILURE_OUTPUT)
+        metadata = _run_metadata(parsed, subject.options)
+
+        assert parsed.kind == "answer", "a failed trace write is not a failed run"
+        assert parsed.turn_count == 3
+        assert metadata["trace_write_failed"] is True
+        assert metadata["trace_out"] == f"/logs/agent/{_TRACE_DIRNAME}"
+
+    def test_a_clean_run_does_not_claim_a_trace_write_failure(self, tmp_path):
+        subject = self._subject(tmp_path, trace_out=True)
+
+        parsed = parse_iknow_ask_output(ANSWER_JSON)
+        metadata = _run_metadata(parsed, subject.options)
+
+        assert parsed.trace_write_failed is False
+        assert "trace_write_failed" not in metadata
+
+    def test_the_capped_turn_path_keeps_the_trace_receipt(self, tmp_path):
+        # The pilot's two scored trials both hit the turn cap, so the capped
+        # branch is the one that has to carry the receipt: it returns early,
+        # before the answer assertions, and is the path a per-turn diagnosis
+        # most needs.
+        subject = self._subject(tmp_path, trace_out=True)
+        context = SimpleNamespace(
+            metadata=None, n_input_tokens=0, n_cache_tokens=0, n_output_tokens=0
+        )
+        environment = _NodePathEnvironment(
+            {
+                'printf %s "$HOME"': ("/root", "", 0),
+                "dist/cli.js ask": (TRACE_WRITE_FAILURE_CAPPED_OUTPUT, "", 1),
+            }
+        )
+
+        asyncio.run(subject.run("q", environment, context))
+
+        assert context.metadata["trace_out"] == f"/logs/agent/{_TRACE_DIRNAME}"
+        assert context.metadata["trace_write_failed"] is True
+        assert context.metadata["iknow_error"] == _MAX_TURNS_ERROR
+
+    def test_the_flag_composes_with_eval_state_and_max_turns(self, tmp_path):
+        # `--trace-out` is a value-taking option on the `ask` entry and
+        # `--eval-state` is accepted alongside it (verified against the real
+        # parser, which returns both with no rejection). If a future posture
+        # change made the pair incoherent, this is the test that should fail —
+        # but today the trial that most needs its trajectory retained is an
+        # eval-state trial, so they must combine.
+        subject = self._subject(tmp_path, trace_out=True, eval_state=True, max_turns=40)
+
+        command = subject._ask_command("q", subject.options, home="/root")
+
+        assert f"--json {EVAL_STATE_FLAG} --max-turns 40" in command
+        assert (
+            f"--max-turns 40 {TRACE_OUT_FLAG} /logs/agent/{_TRACE_DIRNAME}" in command
+        )
+
+
+# The two shapes a developer plausibly has exported. `1` is what a developer who
+# used iknow interactively would have (iknow's own IKNOW_TRACE_OUT takes a
+# *path*, so any prior use left a path behind); both are here because the two
+# shapes fail differently, and the path shape is the one that used to raise.
+_TRACE_OUT_HOST_EXPORTS = ("1", "/tmp/some/path")
+
+
+@pytest.mark.parametrize("exported", _TRACE_OUT_HOST_EXPORTS)
+def test_a_host_trace_out_export_cannot_turn_tracing_on(tmp_path, monkeypatch, exported):
+    """No `Env` fallback: the host environment cannot reach this option.
+
+    Harbor's env fallback is not scoped to `--ae` — `get_env` falls through to
+    `os.environ` (harbor/agents/base.py:178-181) — so an `Env` annotation here
+    made a *host* variable sufficient to change a trial. Measured, with the
+    annotation in place: `IKNOW_TRACE_OUT=1` and no kwarg gave
+    `trace_out == True`, rewriting the argv and the log-dir tree of a run
+    configured to be the pilot-measured baseline; `IKNOW_TRACE_OUT=/tmp/some/path`
+    raised `ValueError: ... trace_out: Input should be a valid boolean` before
+    any container started. The name collision is why the fallback had to go
+    rather than be tightened: iknow ships IKNOW_TRACE_OUT as a *path* variable
+    (src/cli/trace-root.ts:29), so it cannot also be this option's boolean.
+
+    Monkeypatching `os.environ` puts the variable in the real lookup harbor
+    reads, which is the behavior under test; the same two values are also
+    exported for real in `IKNOW_TRACE_OUT=... pytest` (see the module docstring
+    note in the PR body), because a stubbed environment lookup would not
+    exercise harbor's `extra_env.get(key) or os.environ.get(key)`.
+    """
+    monkeypatch.setenv(TRACE_OUT_ENV, exported)
+
+    subject = agent(tmp_path)
+
+    assert subject.options.trace_out is False
+    assert TRACE_OUT_FLAG not in subject._ask_command(
+        "q", subject.options, home="/root"
+    )
+    assert TRACE_OUT_ENV not in subject._runtime_env(subject.options)
+
+
+def test_the_option_carries_no_env_fallback_at_all():
+    """The structural half of the fix: the annotation is simply absent.
+
+    Asserted through the schema rather than only through behavior, so a future
+    edit that re-adds `Env(...)` fails here even if a coupled behavior test
+    happened to survive it.
+    """
+    metadata = list(IKnowOptions.model_fields["trace_out"].metadata)
+
+    assert not any(isinstance(item, Env) for item in metadata), (
+        f"trace_out must not declare an Env fallback; got {metadata}"
+    )

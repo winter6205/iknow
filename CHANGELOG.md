@@ -174,6 +174,38 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Added
 
+- **Harbor adapter: `--ak trace_out=true` retains the per-turn trajectory as a trial
+  artifact (2026-09-29)**:
+  the adapter previously kept only the merged `ask` stream, so the Terminal-Bench pilot
+  scored two model-attributable trials with no per-turn record and named what that cost
+  (`docs/evidence/adr-0130/terminal-bench-2-1-pilot.md` §8): the loop diagnosis for both
+  scored trials, any tool-selection rate, and the classification of a second hard-wall
+  deny whose correctness stayed "undetermined" because the offending command text was
+  never captured. With it on, `ask` receives `--trace-out /logs/agent/trace` and writes
+  its JSONL trace there. Off by default, so a scripted run is byte-for-byte the one the
+  pilot measured. Three things the option is shaped around, each measured against a real
+  `ask` run rather than read off the flag name: the flag takes a **directory** and writes
+  `<dir>/<conversationId>.jsonl` with a container-minted UUID, so the adapter records the
+  directory and never claims a filename it has not seen; it **composes with
+  `--eval-state`** (the real parser returns both with no rejection), which are exactly
+  the trials whose diagnosis is wanted; and a trace write that **fails** warns once and
+  answers anyway, so the adapter parses that notice and records
+  `trace_write_failed: true` on the trial rather than letting a lost trajectory read as
+  a clean run. No harbor `--artifact` entry is involved — `/logs/agent/` is already
+  collected whole by `_download_agent_logs`, and `/logs/artifacts/` is reserved for
+  inputs re-materialized into a separate verifier environment. The option carries **no
+  `Env` fallback**, unlike `permission_mode` / `eval_state`: harbor's env lookup falls
+  through to the host process environment, so a fallback would let a bare
+  `IKNOW_TRACE_OUT=1` rewrite a pilot-baseline trial's argv, and `IKNOW_TRACE_OUT` is
+  already a shipped iknow variable with _path_ semantics, so it is also a name
+  collision. Because iknow prints no notice at all when a run never got far enough to
+  write a record (measured: no API key → the provider envelope, exit 1, and a trace dir
+  with zero files), the adapter reads the directory in the container after `run()` and
+  records `trace_state` — `present` / `empty` / `absent`, with the key simply absent
+  when tracing was not requested — so a reader of `results.json` can never mistake a
+  missing trajectory for a retained one. The probe tests `-s` (size > 0), so a
+  zero-byte `.jsonl` from a run that died mid-write is not read as a trace.
+
 - **Protected filesystem and credential effects are refused by every spelling, not just the shell one (issue #1155, spec `effect-boundary-protection`, ADR-0129, 2026-09-28)**:
   a protected target is refused identically by `rm -f`, by `python3 -c 'import os; os.remove(...)'`,
   and by any other interpreter the fence admits, because the protection now lives at the

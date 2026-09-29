@@ -370,7 +370,7 @@ never mixed with sandboxed numbers.
 ## Options
 
 `harbor agent schema iknow_harbor.agent:IKnowAgent` prints this table from the
-code. Env fallbacks work for all four (`--ae IKNOW_BUNDLE_TGZ=...`).
+code. Env fallbacks work for all but `max_turns` (`--ae IKNOW_BUNDLE_TGZ=...`).
 
 | kwarg             | env                     | default     | meaning                                                                                                                                                                          |
 | ----------------- | ----------------------- | ----------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -378,6 +378,90 @@ code. Env fallbacks work for all four (`--ae IKNOW_BUNDLE_TGZ=...`).
 | `permission_mode` | `IKNOW_PERMISSION_MODE` | `full_auto` | always injected explicitly; `default` would deny every mutation and still exit 0                                                                                                 |
 | `eval_state`      | `IKNOW_EVAL_STATE`      | `false`     | ADR-0130 posture. The env var is only the _adapter option's_ fallback for `--ae`; it is never forwarded into the container — the posture travels as the argv flag `--eval-state` |
 | `max_turns`       | —                       | none        | `--max-turns` for `iknow ask`                                                                                                                                                    |
+| `trace_out`       | —                       | `false`     | retain the per-turn trajectory. Off by default. **No env fallback**, unlike the two above — see below                                                                            |
+
+### `--trace-out`: per-turn trajectories
+
+The pilot (`docs/evidence/adr-0130/terminal-bench-2-1-pilot.md` §8) scored two
+model-attributable trials with **no per-turn record kept**, which cost three
+findings: the loop diagnosis for both scored trials (both hit the 40-turn cap,
+one of them passing anyway), any tool-selection rate, and the classification of
+the second hard-wall deny, whose correctness stayed "undetermined" because the
+offending command text was never captured.
+
+With `--ak trace_out=true`, `ask` receives
+`--trace-out /logs/agent/trace` and writes its JSONL trace there. Two facts
+about the flag's shape matter to the adapter:
+
+- **It takes a directory, not a file.** The records land at
+  `<dir>/<conversationId>.jsonl` (`src/harness/trace/jsonl.ts:192-197`), and
+  the conversation id is a random UUID minted inside the container. So the
+  adapter names the directory, records the _directory_ on the trial metadata,
+  and never claims a filename it has not seen.
+- **It composes with `--eval-state`.** Verified against the real parser: both
+  are read, with no rejection. The eval-state trials are exactly the ones whose
+  diagnosis is wanted.
+
+The parent directory is created by the command's existing `mkdir -p`, not left
+to iknow's deferred `mkdirSync`, which sits behind an injectable writer and is
+a detail two layers down.
+
+**It is not a harbor `--artifact` entry.** `/logs/agent/` is already mounted
+from the trial directory and already collected whole by `_download_agent_logs`
+(`trial.py:573-593`), and `include_logs` / `exclude_logs` (`trial.py:603-609`)
+govern it like any other agent log. `/logs/artifacts/` is reserved for artifacts
+re-materialized into a _separate_ verifier environment
+(`ArtifactHandler.upload_artifacts`, `artifact_handler.py:169-214`), and this
+trace is evidence for reading the agent's run, not an input to the verifier.
+
+### No `Env` fallback, unlike the other two options
+
+`permission_mode` and `eval_state` carry `Env(...)` annotations; `trace_out`
+deliberately does not. Harbor's env fallback is **not scoped to `--ae`** — its
+`get_env` falls through to the host process environment
+(`harbor/agents/base.py:178-181`) — so an `Env` annotation here made a bare host
+export sufficient to change a trial. Measured with the annotation in place:
+
+| host export                      | result                                                                                                                                                  |
+| -------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `IKNOW_TRACE_OUT=1`              | `trace_out` became `True`; the argv and the log-dir tree of a run configured to be the pilot-measured baseline were rewritten, with no operator request |
+| `IKNOW_TRACE_OUT=/tmp/some/path` | `ValueError: trace_out: Input should be a valid boolean`, before any container started                                                                  |
+
+It could not be tightened rather than dropped, because of a name collision:
+`IKNOW_TRACE_OUT` is a **shipped iknow variable with path semantics** that
+`src/cli/trace-root.ts:29` already honors, so one name would mean two different
+things in two domains. `--ak trace_out=true` is the only surface.
+`tests/test_iknow_adapter.py` asserts the suite is hermetic under both exports.
+
+### Three trace states, and which mechanism earns each
+
+The trial metadata records `trace_out` (the directory) and `trace_state`. The
+point of the second key is that `trace_out` alone cannot answer "is there a
+trajectory?", because the ask JSON carries no turn-by-turn record.
+
+| `trace_state`  | meaning                                           | what detects it                        |
+| -------------- | ------------------------------------------------- | -------------------------------------- |
+| `present`      | at least one non-empty `<dir>/*.jsonl` landed     | the post-run probe, `_probe_trace_dir` |
+| `empty`        | the dir exists and holds no non-empty trace       | the post-run probe                     |
+| `absent`       | the dir does not exist — nothing was ever written | the post-run probe                     |
+| _(key absent)_ | tracing was never requested; **not** a failure    | the `trace_out` option being false     |
+
+`trace_write_failed: true` is a separate, complementary signal: it is iknow's
+own warn-once notice from a writer that _tried_ and failed, and it does not fail
+the trial (iknow warns and answers anyway — measured, not assumed).
+
+The probe exists because a run that never got far enough to write anything —
+a missing API key, a settings error, an addon that would not load — leaves
+**no notice on the output stream at all**. Measured: `ask --json --trace-out`
+with no API key printed the provider envelope, exited 1, and left the trace
+directory holding zero files. Parsing stdout cannot see that; reading the
+directory in the container, before it is torn down, can.
+
+The probe uses `test -s` (size > 0), so a **zero-byte** `.jsonl` — the writer
+opened the file and the run then died — is recorded as `empty`, not handed to a
+reader as a retained trajectory. It is POSIX sh only (`for` + `test`, no `find`,
+no `stat`, no `[[ ]]`), and an unmatched glob expands to itself literally, so the
+empty case needs no missing-file guard.
 
 No option changed with the node fix, but `install()`'s guarantee did: on return,
 a plain non-login shell in the task container can resolve `node` — either it
