@@ -60,6 +60,13 @@ _NODE_VERSION_PROBE = (
     "process.exit(Number(process.versions.node.split('.')[0]) >= "
     f"{NODE_MAJOR_FLOOR} ? 0 : 1)"
 )
+# Printed by the first leg of the smoke test, so "node ran but the addons
+# failed" is a fact the container reports rather than something guessed from
+# the failure text. A failure-text matcher is deliberately not also consulted:
+# "No such file or directory" is what a missing shared library looks like, and
+# that arrives after the marker, not before it.
+_NODE_MARKER = "iknow-node-runnable"
+_NODE_MARKER_PROBE = f"console.log('{_NODE_MARKER}')"
 # tree-sitter is imported lazily by the bash tool, so `--version` alone does not
 # prove the native addons load; importing them explicitly does.
 _NATIVE_PROBE = (
@@ -81,6 +88,14 @@ class IKnowBundleMissingError(IKnowInstallError):
 
 class IKnowGlibcRequiredError(IKnowInstallError):
     """musl/Alpine or a foreign architecture cannot load the shipped prebuilds."""
+
+
+class IKnowNodeUnavailableError(IKnowInstallError):
+    """No runnable `node` is on the container PATH, so the smoke test never ran.
+
+    Distinct from `IKnowGlibcRequiredError` because a libc or architecture
+    mismatch only exists once node has actually executed the bundle.
+    """
 
 
 class IKnowEvalStateUnsupportedError(IKnowInstallError):
@@ -134,6 +149,24 @@ class IKnowOptions(InstalledAgentOptions):
         ge=1,
         description="--max-turns for `iknow ask`. Omitted = iknow's default.",
     )
+
+
+def _nvm_version_major(path: str) -> int | None:
+    """Parse the major out of `$NVM_DIR/versions/node/vX.Y.Z/bin/node`.
+
+    Returns None for anything that is not an nvm node binary, including a
+    version directory nvm writes for aliases or custom builds whose name is
+    not a plain `vN.N.N` triple. Parsing is what makes the selection immune to
+    the byte ordering of the listing that produced the path.
+    """
+    parts = PurePosixPath(path.rstrip("/")).parts
+    if len(parts) < 4 or parts[-2] != "bin" or parts[-1] != "node":
+        return None
+    version = parts[-3]
+    if not version.startswith("v"):
+        return None
+    major = version[1:].split(".", 1)[0]
+    return int(major) if major.isdigit() else None
 
 
 def render_iknow_settings(model_route: str) -> str:
@@ -332,22 +365,113 @@ class IKnowAgent(BaseInstalledAgent):
             )
         )
         if check.return_code == 0:
+            # The probe above sources nvm.sh when it can, so passing here does
+            # not prove a fresh shell can see node. On a kept container with a
+            # pre-existing nvm that is exactly the difference between exit 0
+            # here and "node: command not found" in run(), so the check is
+            # repeated without nvm before the symlink step is skipped.
+            plain = await environment.exec(
+                command=f"node -e {shlex.quote(_NODE_VERSION_PROBE)}"
+            )
+            if plain.return_code == 0:
+                return
+            await self._link_node_onto_system_path(environment)
             return
         await self.exec_as_agent(
             environment,
             command=f"set -euo pipefail; {nvm_node_install_snippet()}",
             env={"NVM_NODEJS_ORG_MIRROR": "https://nodejs.org/dist"},
         )
-        # Later exec calls start a fresh non-login shell, so the freshly
-        # installed node must be on a path that needs no nvm sourcing.
+        await self._link_node_onto_system_path(environment)
+
+    async def _link_node_onto_system_path(self, environment: BaseEnvironment) -> None:
+        """Put the nvm-installed node on a PATH that needs no nvm sourcing.
+
+        Every later `environment.exec()` starts a fresh non-login shell, and
+        such a shell cannot see `$NVM_DIR/versions/node/*/bin`. So the binary is
+        located inside the nvm tree by its own layout — the version directory
+        nvm just created — and never by `command -v node`, which reports
+        whatever the ambient PATH happens to carry.
+
+        The listing runs in the agent's own context because the nvm tree lives
+        under the agent's `$HOME` and is not necessarily readable by root's
+        shell; only the resolved path is then handed to `exec_as_root`, and
+        `/usr/local/bin` is on root's PATH by the same token.
+
+        **Selection policy: the highest major at or above `NODE_MAJOR_FLOOR`.**
+        The listing itself is byte-sorted, so it must not be trusted for order:
+        a tree holding v9.11.2, v18.20.4 and v22.23.3 lists v9.11.2 *last*,
+        and linking that "last" entry gives a real, runnable node 9 that
+        `dist/cli.js` cannot be parsed by. The major is therefore parsed out of
+        each candidate and compared numerically. A tree whose every candidate is
+        below the floor is an error, not a downgrade: the floor is a hard
+        precondition of the bundle, and the post-link probe re-checks the
+        binary that was actually linked.
+
+        A failure here is raised instead of skipped: a node that exists solely
+        under `$NVM_DIR` fails later, once, in `_assert_bundle_runtime`, as
+        "node: command not found".
+        """
+        result = await environment.exec(
+            command=(
+                "sh -c 'ls -1 \"${NVM_DIR:-$HOME/.nvm}/versions/node/\"*/bin/node"
+                " 2>/dev/null'"
+            )
+        )
+        binary = self._select_nvm_node(result)
         await self.exec_as_root(
             environment,
-            command=(
-                'NODE_BIN="$(command -v node || true)"; '
-                'if [ -n "$NODE_BIN" ] && [ "$NODE_BIN" != "/usr/local/bin/node" ]; '
-                'then ln -sf "$NODE_BIN" /usr/local/bin/node; fi'
-            ),
+            command=f"ln -sf {shlex.quote(binary)} /usr/local/bin/node",
         )
+        # A dangling symlink is silent until run() fails deep inside a task, so
+        # the link is proven here by resolving it in a shell with no nvm. The
+        # probe is the floor check rather than a bare `--version`, so the floor
+        # follows the binary actually linked even if the path above picked the
+        # wrong entry: the container is the authority on its own node.
+        linked = await environment.exec(
+            command=f"node -e {shlex.quote(_NODE_VERSION_PROBE)}"
+        )
+        if linked.return_code != 0:
+            raise IKnowNodeUnavailableError(
+                f"linked {binary} to /usr/local/bin/node, but a plain shell "
+                f"cannot run a node at major {NODE_MAJOR_FLOOR} or newer from it, "
+                "so every later step would fail with 'node: command not found' "
+                "or with a CLI the bundle does not support. stdout: "
+                f"{self._truncate_output(linked.stdout)} / stderr: "
+                f"{self._truncate_output(linked.stderr)}"
+            )
+
+    def _select_nvm_node(self, result: Any) -> str:
+        """Pick the highest nvm node at or above the floor, or raise.
+
+        The listing arrives byte-sorted, so the *last* line is the oldest
+        single-digit major (v9 sorts after v22), not the newest. Candidates are
+        ranked by their parsed major instead, and the post-link probe re-checks
+        whatever was chosen.
+        """
+        candidates: list[tuple[int, str]] = []
+        for line in (result.stdout or "").splitlines():
+            path = line.strip()
+            major = _nvm_version_major(path)
+            if path.startswith("/") and major is not None:
+                candidates.append((major, path))
+        if not candidates:
+            raise IKnowNodeUnavailableError(
+                "nvm reported a successful install but no node binary exists "
+                "under $NVM_DIR/versions/node/*/bin, so nothing can be put on "
+                "the system PATH. The nvm tree listed: "
+                f"{self._truncate_output(result.stdout)}"
+            )
+        eligible = [entry for entry in candidates if entry[0] >= NODE_MAJOR_FLOOR]
+        if not eligible:
+            raise IKnowNodeUnavailableError(
+                f"every node under $NVM_DIR/versions/node/*/bin is below major "
+                f"{NODE_MAJOR_FLOOR} (found "
+                f"{', '.join(path for _major, path in candidates)}), and "
+                f"iknow's bundle cannot be parsed by a node that old, so no "
+                "binary is linked rather than linking one that would fail later."
+            )
+        return max(eligible)[1]
 
     async def _unpack_bundle(
         self, environment: BaseEnvironment, bundle: Path, home: str
@@ -366,19 +490,51 @@ class IKnowAgent(BaseInstalledAgent):
         self, environment: BaseEnvironment, home: str
     ) -> None:
         target = self._install_dir(home)
+        # The first leg prints a marker whether or not the CLI behind it loads,
+        # so "node ran" is a fact from the container, not a guess from the
+        # failure text; the CLI runs after it, so its own output still ends the
+        # combined stream.
         command = (
-            f"cd {target} && node ./dist/cli.js --version && "
+            f"cd {target} && node -e {shlex.quote(_NODE_MARKER_PROBE)} && "
+            f"node ./dist/cli.js --version && "
             f"node -e {shlex.quote(_NATIVE_PROBE)}"
         )
         result = await environment.exec(command=command)
         if result.return_code != 0:
-            raise IKnowGlibcRequiredError(
-                f"iknow bundle smoke test failed (exit {result.return_code}). The "
-                f"bundle is built for {platform.machine()} glibc on the host; a "
-                "different architecture or libc in the task image breaks the "
-                f"native addons. stdout: {self._truncate_output(result.stdout)} / "
-                f"stderr: {self._truncate_output(result.stderr)}"
+            raise self._smoke_test_error(result)
+
+    def _smoke_test_error(self, result: Any) -> IKnowInstallError:
+        """Say which half of the smoke test failed, not just that one did.
+
+        A missing or unrunnable node is an install problem with a different
+        remedy than a foreign libc, and reporting the latter for the former
+        sends the reader to the wrong place.
+        """
+        stdout = result.stdout or ""
+        stderr = result.stderr or ""
+        # Only the marker decides "did node run". Matching the failure text
+        # instead would misattribute the exact case the marker exists to catch:
+        # a slim image missing a shared library fails with "No such file or
+        # directory" *after* node printed the marker, and a command-not-found
+        # regex would report "node never ran" for a node that plainly did.
+        if _NODE_MARKER not in stdout:
+            return IKnowNodeUnavailableError(
+                f"iknow bundle smoke test failed (exit {result.return_code}) "
+                f"before node ran anything: the container has no runnable "
+                f"`node` on the PATH these commands see, so the bundle was "
+                f"never loaded and this says nothing about glibc or "
+                f"architecture. Check that node is linked on the system PATH "
+                f"(e.g. /usr/local/bin/node) and not only inside nvm's "
+                f"per-shell PATH. stdout: {self._truncate_output(stdout)} / "
+                f"stderr: {self._truncate_output(stderr)}"
             )
+        return IKnowGlibcRequiredError(
+            f"iknow bundle smoke test failed (exit {result.return_code}) after "
+            f"node ran. The bundle is built for {platform.machine()} glibc on "
+            "the host; a different architecture or libc in the task image breaks "
+            f"the native addons. stdout: {self._truncate_output(stdout)} / "
+            f"stderr: {self._truncate_output(stderr)}"
+        )
 
     async def _assert_eval_state_flag(
         self, environment: BaseEnvironment, home: str

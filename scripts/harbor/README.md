@@ -90,7 +90,11 @@ node -e "import('tree-sitter').then(() => import('tree-sitter-bash'))
 imported lazily by the bash tool. The adapter therefore runs both probes as an
 install-time smoke test, and refuses musl/Alpine images up front with
 `IKnowGlibcRequiredError` (`tree-sitter@0.25.1` and `tree-sitter-bash@0.25.1`
-ship glibc-only prebuilds).
+ship glibc-only prebuilds). The smoke test's first leg prints a marker, so a
+failure is attributed to the half that failed: node not runnable at all raises
+`IKnowNodeUnavailableError`, while node having run and then failed to load the
+addons is what raises `IKnowGlibcRequiredError`. Reporting the latter for the
+former sent a real trial's missing-node failure to the wrong remedy.
 
 A third probe closes the gap ADR-0130 §1 says must not exist — a stale bundle
 that silently ignores `--eval-state`. `iknow ask` folds unknown positionals into
@@ -106,10 +110,34 @@ disagreement errors the trial instead of scoring it.
 Proved in containers (no task, no model call):
 
 - `ubuntu:24.04` (glibc 2.39, x86_64): musl probe silent -> apt deps -> harbor's
-  nvm snippet installs `v22.23.3` -> `ln -sf` to `/usr/local/bin/node` -> bundle
-  unpack -> `node ./dist/cli.js --version` = `0.1.0` and the addon probe prints
-  `iknow-native-ok`, exit 0.
+  nvm snippet installs `v22.23.3` -> bundle unpack -> `node ./dist/cli.js
+--version` = `0.1.0` and the addon probe prints `iknow-native-ok`, exit 0.
 - `alpine:3.20`: the same musl probe echoes `musl`, i.e. the guard fires.
+
+**The `ln -sf` leg was not part of that measurement, and an earlier version of
+this file claimed it was.** The original smoke ran in a shell that could already
+see `node`, so it could not have detected a missing symlink. What is now
+guaranteed instead, by the code and by unit tests:
+
+- the node binary is located by the nvm tree's own layout
+  (`$NVM_DIR/versions/node/*/bin/node`) and never by `command -v node` in a
+  fresh shell, which is what silently produced an empty `NODE_BIN` and skipped
+  the symlink entirely (`|| true` swallowed it — the `|| true` is gone, so the
+  listing can no longer fail quietly);
+- among the candidates, the **highest major at or above `NODE_MAJOR_FLOOR`**
+  wins. The listing is byte-sorted, so its last line is the _oldest_ single-digit
+  major (v9 sorts after v22), not the newest; a tree whose every candidate is
+  below the floor is an error rather than a silent downgrade;
+- an empty nvm tree raises `IKnowNodeUnavailableError` instead of skipping;
+- the new link is resolved with a version probe in a plain shell, so a dangling
+  symlink — or a linked node below the floor — fails at `install()` rather than
+  deep inside a task;
+- `_ensure_node` no longer returns early on the nvm-sourcing probe alone: that
+  probe sources `nvm.sh`, so a pre-existing nvm that satisfies it could still
+  leave a fresh shell unable to see node.
+
+Not yet re-measured in a real container — the `ubuntu:24.04` end of the run
+through the _fixed_ symlink path.
 
 ## 2. Make the adapter importable by harbor
 
@@ -207,6 +235,13 @@ code. Env fallbacks work for all four (`--ae IKNOW_BUNDLE_TGZ=...`).
 | `eval_state`      | `IKNOW_EVAL_STATE`      | `false`     | ADR-0130 posture. The env var is only the _adapter option's_ fallback for `--ae`; it is never forwarded into the container — the posture travels as the argv flag `--eval-state` |
 | `max_turns`       | —                       | none        | `--max-turns` for `iknow ask`                                                                                                                                                    |
 
+No option changed with the node fix, but `install()`'s guarantee did: on return,
+a plain non-login shell in the task container can resolve `node` — either it
+was already there, or it was linked onto the system PATH and proven with a
+version probe in a shell that sources no nvm. So `get_version_command()` and
+`run()`'s `node ./dist/cli.js ask` are not left to discover a node that exists
+only inside nvm's per-shell PATH.
+
 ## What is proven and what is not
 
 Proven:
@@ -215,9 +250,10 @@ Proven:
 - Preflight fails locally with actionable messages for a missing bundle and a
   missing `MINIMAX_API_KEY`; `--ak permission_mode=yolo` is rejected by the
   option schema before any container starts.
-- Unit tests: 52 passed (measured 2026-09-29, `pytest -q`).
+- Unit tests: 70 passed (measured 2026-09-29, `pytest -q`).
 - Bundle + node + native addons load inside `ubuntu:24.04`; the musl guard fires
-  on `alpine:3.20`.
+  on `alpine:3.20`. The image is glibc 2.39 — the `IKnowGlibcRequiredError` a
+  real trial reported there was a misattribution, see below.
 - `render_iknow_settings()` output is accepted by iknow: with a valid route and
   no key, the unpacked bundle exits 1 with
   `{"error":"llm_provider_api_key_missing","code":"provider_api_key_missing",...}`,
@@ -225,10 +261,19 @@ Proven:
 
 Not proven:
 
-- **No scored trial was run.** Nothing in this document is evidence about
-  terminal-bench scores; the end-to-end path
-  `setup() -> install() -> run() -> verifier` inside a Harbor trial has not
-  executed even once.
+- **The end-to-end trial path is still unproven — it has never reached
+  `run()`.** A scored trial _was_ attempted
+  (`harbor run -d terminal-bench/terminal-bench-2-1 -i
+terminal-bench/adaptive-rejection-sampler ...`) and it reached `install()`,
+  where it failed: `iknow bundle smoke test failed (exit 127) ... bash: line 1:
+node: command not found`. The cause was the adapter's own symlink step
+  resolving `NODE_BIN` from an ambient PATH that a fresh shell does not have,
+  so node stayed inside `$NVM_DIR` and nothing on the system PATH could run it.
+  That is now fixed and unit-tested, but nothing in this document is evidence
+  about terminal-bench scores: `setup() -> install() -> run() -> verifier` has
+  still not completed once.
+- The fixed `install()` path has not been re-measured in a real container; the
+  `ubuntu:24.04` claim above predates it.
 - `environment.upload_file()` semantics for a 41M tarball (docker cp) and
   `_upload_config_text()` path permissions inside a real task container.
 - Harbor's `exec_as_agent` user model on task images whose `default_user` is not
@@ -274,7 +319,10 @@ PYTHONPATH="$PWD:$HOME/.local/share/uv/tools/harbor/lib/python3.13/site-packages
 ```
 
 The adapter is not installed into Harbor's own venv, so the tests import harbor
-from its site-packages via `PYTHONPATH`. 56 tests as of 2026-09-29.
+from its site-packages via `PYTHONPATH`. 65 tests as of 2026-09-29.
+(Plain `python3 -m pytest` does not work here: the system python3.14 has no
+pytest, and the adapter is not installed into Harbor's venv — use the command
+above.)
 
 - `tests/test_parse_iknow_ask_output.py` — pure parsing: pretty and compact JSON,
   braces inside strings, JSON after stderr noise, last-answer-wins, missing and
@@ -286,4 +334,13 @@ from its site-packages via `PYTHONPATH`. 56 tests as of 2026-09-29.
   harbor's CLI touches: option validation, `preflight`, the assembled `ask`
   command, `--max-turns`. Plus the eval-state carrier: the flag reaches argv and
   the env never carries it, the `--help` capability probe (refusal, pass, skip),
-  and the `runState` agreement gate in both directions.
+  and the `runState` agreement gate in both directions. Plus the node PATH and
+  smoke-test attribution: the symlink resolves the binary from the nvm tree with
+  an empty ambient PATH, a multi-version tree links the highest eligible major
+  rather than the byte-last one, a tree of only legacy nodes links nothing, the
+  link is proven in a plain shell, an empty tree is an error rather than a
+  skipped step, the nvm _install_ branch is covered end to end, an nvm-sourced
+  probe alone no longer skips the link, `node: command not found` is
+  `IKnowNodeUnavailableError` (not `IKnowGlibcRequiredError`), a missing shared
+  library _after_ node ran is `IKnowGlibcRequiredError`, and a native addon load
+  failure is still `IKnowGlibcRequiredError`.

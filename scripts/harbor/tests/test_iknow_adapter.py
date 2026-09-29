@@ -13,12 +13,15 @@ from harbor.agents.installed.base import (
 from iknow_harbor import IKnowAgent
 from iknow_harbor.agent import (
     _MAX_TURNS_ERROR,
+    _NODE_MARKER,
     EVAL_STATE_ENV,
     EVAL_STATE_FLAG,
     EVAL_STATE_RUN_LABEL,
     MINIMAX_API_KEY_ENV,
     PERMISSION_MODE_ENV,
     IKnowEvalStateUnsupportedError,
+    IKnowGlibcRequiredError,
+    IKnowNodeUnavailableError,
     IKnowRunStateMismatchError,
     _run_metadata,
     render_iknow_settings,
@@ -171,6 +174,351 @@ class _StubEnvironment:
         return SimpleNamespace(
             return_code=self._return_code, stdout=self._stdout, stderr=""
         )
+
+
+class _NodePathEnvironment(_StubEnvironment):
+    """Replays results keyed by a substring of the command, not by call index.
+
+    Lets one stub stand for a whole install path: an nvm tree the fresh shell
+    cannot see, the symlink that fixes it, and the probe that proves it.
+    Keying on content is what makes these tests assert the contract — an
+    adapter that emitted the same commands in a different order, or skipped
+    one, fails here instead of replaying the wrong result into the next step.
+
+    A needle may map to a list of results consumed in order, because the
+    adapter issues two textually identical `node -e <floor probe>` commands
+    (one before the link, one after) that must answer differently; the last
+    entry repeats. The first matching needle wins, so a more specific needle
+    belongs earlier in the mapping.
+    """
+
+    def __init__(self, results, default=("", "", 0)):
+        super().__init__()
+        self._results = {
+            needle: (list(value) if isinstance(value, list) else [value])
+            for needle, value in results.items()
+        }
+        self._default = default
+        self.users: list[str | None] = []
+
+    async def exec(self, command: str, user=None, **_ignored):
+        self.commands.append(command)
+        self.users.append(user)
+        for needle, replay in self._results.items():
+            if needle in command:
+                stdout, stderr, return_code = (
+                    replay.pop(0) if len(replay) > 1 else replay[0]
+                )
+                return SimpleNamespace(
+                    return_code=return_code, stdout=stdout, stderr=stderr
+                )
+        stdout, stderr, return_code = self._default
+        return SimpleNamespace(return_code=return_code, stdout=stdout, stderr=stderr)
+
+
+def _calls(environment: _StubEnvironment, needle: str) -> list[str]:
+    return [command for command in environment.commands if needle in command]
+
+
+class TestEnsureNode:
+    """A probe that sources nvm.sh does not prove a fresh shell sees node."""
+
+    def test_an_nvm_only_install_is_linked_even_when_the_probe_passes(self, tmp_path):
+        environment = _NodePathEnvironment(
+            {
+                # Both probes are the same text; the first sources nvm.sh and
+                # finds node, the second does not. The `if [ -s` guard tells
+                # the first probe apart, and the *order* of the remaining two
+                # (plain-shell check, then the post-link proof) is what the
+                # two-entry replay under the floor probe carries.
+                # The guard needle is deliberately not `nvm.sh` itself: the nvm
+                # *install* snippet mentions nvm.sh too.
+                "if [ -s": ("", "", 0),
+                "process.versions.node": [("", "", 127), ("v22.23.3", "", 0)],
+                "ls -1": ("/root/.nvm/versions/node/v22.23.3/bin/node\n", "", 0),
+            }
+        )
+        subject = agent(tmp_path)
+        subject.ensure_system_dependencies = _no_op
+
+        asyncio.run(subject._ensure_node(environment))
+
+        assert _calls(environment, "ln -sf")
+        assert _calls(environment, "process.versions.node")
+
+    def test_an_image_without_node_is_installed_through_nvm_and_then_linked(
+        self, tmp_path
+    ):
+        # The path a real ubuntu:24.04 trial took: no node at all, so the
+        # nvm install snippet runs before the link step. Nothing else covers
+        # that branch, and it is the one the failing trial exercised.
+        environment = _NodePathEnvironment(
+            {
+                "if [ -s": ("", "bash: node: command not found", 127),
+                "nvm install": ("", "", 0),
+                "ls -1": ("/root/.nvm/versions/node/v22.23.3/bin/node\n", "", 0),
+                "process.versions.node": ("v22.23.3", "", 0),
+            }
+        )
+        subject = agent(tmp_path)
+        subject.ensure_system_dependencies = _no_op
+
+        asyncio.run(subject._ensure_node(environment))
+
+        assert _calls(environment, "nvm install")
+        assert _calls(environment, "ln -sf") == [
+            (
+                "set -o pipefail; ln -sf /root/.nvm/versions/node/v22.23.3/bin/node"
+                " /usr/local/bin/node"
+            )
+        ]
+        # The install is issued as the agent user, the symlink as root: root
+        # cannot read the agent's nvm tree, and the agent cannot write
+        # /usr/local/bin.
+        install_index = next(
+            index
+            for index, command in enumerate(environment.commands)
+            if "nvm install" in command
+        )
+        assert environment.users[install_index] is None
+        assert environment.users[install_index + 2] == "root"
+
+    def test_a_node_already_on_the_plain_path_is_left_alone(self, tmp_path):
+        environment = _NodePathEnvironment(
+            {
+                "if [ -s": ("", "", 0),
+                "process.versions.node": ("", "", 0),
+            }
+        )
+        subject = agent(tmp_path)
+        subject.ensure_system_dependencies = _no_op
+
+        asyncio.run(subject._ensure_node(environment))
+
+        assert not _calls(environment, "ln -sf")
+        assert not any("nvm install" in command for command in environment.commands)
+
+
+class TestNodePathLink:
+    """The nvm binary must be located by the nvm tree, not by the PATH."""
+
+    def test_link_does_not_depend_on_an_nvm_initialized_path(self, tmp_path):
+        environment = _NodePathEnvironment(
+            {
+                # The nvm tree holds the binary even though the ambient PATH
+                # of a fresh shell resolves none: this is what a real
+                # ubuntu:24.04 container reported.
+                "ls -1": ("/root/.nvm/versions/node/v22.23.3/bin/node\n", "", 0),
+                "process.versions.node": ("v22.23.3", "", 0),
+            }
+        )
+        subject = agent(tmp_path)
+
+        asyncio.run(subject._link_node_onto_system_path(environment))
+
+        # The lookup sees the nvm tree even though the ambient PATH is empty,
+        # and the root step symlinks the absolute path it found.
+        assert _calls(environment, "ln -sf") == [
+            (
+                "set -o pipefail; ln -sf /root/.nvm/versions/node/v22.23.3/bin/node"
+                " /usr/local/bin/node"
+            )
+        ]
+        assert "$NVM_DIR" in environment.commands[0] or ".nvm" in environment.commands[0]
+        # A `command -v node` lookup is the ambient-PATH dependency that
+        # silently produced no symlink in a real ubuntu:24.04 container.
+        assert not any(
+            "command -v node" in command for command in environment.commands
+        )
+        assert environment.users[1] == "root"  # the `ln -sf` runs as root
+
+    def test_the_linked_node_is_proven_in_a_plain_shell(self, tmp_path):
+        environment = _NodePathEnvironment(
+            {
+                "ls -1": ("/root/.nvm/versions/node/v22.23.3/bin/node\n", "", 0),
+                "process.versions.node": ("", "bash: node: command not found", 127),
+            }
+        )
+        subject = agent(tmp_path)
+
+        with pytest.raises(IKnowNodeUnavailableError, match="command not found"):
+            asyncio.run(subject._link_node_onto_system_path(environment))
+
+        assert _calls(environment, "process.versions.node")
+
+    def test_a_multi_version_tree_links_the_newest_not_the_byte_last(self, tmp_path):
+        # `ls -1` is byte-sorted, so v9.11.2 comes *last* in a tree that also
+        # holds v22.23.3. Taking the last line links node 9, which runs fine
+        # and then cannot parse dist/cli.js -- silently, at no error anywhere.
+        environment = _NodePathEnvironment(
+            {
+                "ls -1": (
+                    (
+                        "/root/.nvm/versions/node/v18.20.4/bin/node\n"
+                        "/root/.nvm/versions/node/v22.23.3/bin/node\n"
+                        "/root/.nvm/versions/node/v9.11.2/bin/node\n"
+                    ),
+                    "",
+                    0,
+                ),
+                "process.versions.node": ("v22.23.3", "", 0),
+            }
+        )
+        subject = agent(tmp_path)
+
+        asyncio.run(subject._link_node_onto_system_path(environment))
+
+        assert _calls(environment, "ln -sf") == [
+            (
+                "set -o pipefail; ln -sf /root/.nvm/versions/node/v22.23.3/bin/node"
+                " /usr/local/bin/node"
+            )
+        ]
+
+    def test_a_tree_of_only_legacy_nodes_links_nothing(self, tmp_path):
+        # Every candidate is below NODE_MAJOR_FLOOR. Downgrading silently is
+        # the bug; linking nothing and saying so is the contract.
+        environment = _NodePathEnvironment(
+            {
+                "ls -1": (
+                    (
+                        "/root/.nvm/versions/node/v18.20.4/bin/node\n"
+                        "/root/.nvm/versions/node/v9.11.2/bin/node\n"
+                    ),
+                    "",
+                    0,
+                ),
+            }
+        )
+        subject = agent(tmp_path)
+
+        with pytest.raises(IKnowNodeUnavailableError, match="below major 20"):
+            asyncio.run(subject._link_node_onto_system_path(environment))
+
+        assert not _calls(environment, "ln -sf")
+
+    def test_the_floor_follows_the_linked_binary_not_the_glob_order(self, tmp_path):
+        # A directory nvm does not name `vN.N.N` cannot be ranked, so it is
+        # never linked even when it is the only thing in the tree.
+        environment = _NodePathEnvironment(
+            {"ls -1": ("/root/.nvm/versions/node/now/bin/node\n", "", 0)}
+        )
+        subject = agent(tmp_path)
+
+        with pytest.raises(IKnowNodeUnavailableError, match="no node binary"):
+            asyncio.run(subject._link_node_onto_system_path(environment))
+
+        assert not _calls(environment, "ln -sf")
+
+    def test_an_empty_nvm_tree_is_an_error_not_a_skipped_step(self, tmp_path):
+        environment = _NodePathEnvironment({"ls -1": ("", "", 0)})
+        subject = agent(tmp_path)
+
+        with pytest.raises(IKnowNodeUnavailableError, match="no node binary"):
+            asyncio.run(subject._link_node_onto_system_path(environment))
+
+        assert not _calls(environment, "ln -sf")
+
+
+class TestSmokeTestAttribution:
+    """A missing node must not be reported as a glibc problem, and vice versa."""
+
+    def test_missing_node_is_not_reported_as_glibc(self, tmp_path):
+        environment = _StubEnvironment(
+            stdout="", return_code=127
+        )
+        subject = agent(tmp_path)
+        environment.exec = _replaying(
+            ("", "bash: line 1: node: command not found", 127)
+        )
+
+        with pytest.raises(IKnowNodeUnavailableError) as excinfo:
+            asyncio.run(subject._assert_bundle_runtime(environment, "/root"))
+
+        assert not isinstance(excinfo.value, IKnowGlibcRequiredError)
+        assert "/usr/local/bin/node" in str(excinfo.value)
+
+    def test_a_native_addon_load_failure_is_still_a_glibc_error(self, tmp_path):
+        environment = _StubEnvironment()
+        subject = agent(tmp_path)
+        environment.exec = _replaying(
+            (
+                f"{_NODE_MARKER}\n",
+                (
+                    "Error: Cannot find module 'tree-sitter-bash'\n"
+                    "NODE_MODULE_VERSION 127\n"
+                ),
+                1,
+            )
+        )
+
+        with pytest.raises(IKnowGlibcRequiredError):
+            asyncio.run(subject._assert_bundle_runtime(environment, "/root"))
+
+    def test_a_missing_marker_means_node_never_ran(self, tmp_path):
+        # A glibc-hostile loader can word its refusal in ways the
+        # command-not-found matcher does not cover; the marker is the fact.
+        environment = _StubEnvironment()
+        subject = agent(tmp_path)
+        environment.exec = _replaying(("", "could not open the shared object", 1))
+
+        with pytest.raises(IKnowNodeUnavailableError):
+            asyncio.run(subject._assert_bundle_runtime(environment, "/root"))
+
+    def test_a_missing_shared_library_after_node_ran_is_a_glibc_error(self, tmp_path):
+        # Verbatim dlopen failure shape from a slim task image. "No such file
+        # or directory" reads like command-not-found but arrives *after* node
+        # printed the marker, so reporting "node never ran" would send the
+        # reader to fix a PATH that is already correct.
+        environment = _StubEnvironment()
+        subject = agent(tmp_path)
+        environment.exec = _replaying(
+            (
+                f"{_NODE_MARKER}\n",
+                (
+                    "node: error while loading shared libraries: libstdc++.so.6: "
+                    "cannot open shared object file: No such file or directory\n"
+                ),
+                127,
+            )
+        )
+
+        with pytest.raises(IKnowGlibcRequiredError) as excinfo:
+            asyncio.run(subject._assert_bundle_runtime(environment, "/root"))
+
+        assert not isinstance(excinfo.value, IKnowNodeUnavailableError)
+
+    def test_the_smoke_test_proves_more_than_the_cli_reports_itself(self, tmp_path):
+        # The native leg is the point: `dist/cli.js --version` can pass while
+        # the addons it loads lazily cannot. Asserting on the command text
+        # proved nothing, so this drives the failure and names the error class.
+        environment = _StubEnvironment()
+        subject = agent(tmp_path)
+        environment.exec = _replaying(
+            (
+                f"{_NODE_MARKER}\n",
+                "Error: Cannot find module 'tree-sitter'\n",
+                1,
+            )
+        )
+
+        with pytest.raises(IKnowGlibcRequiredError) as excinfo:
+            asyncio.run(subject._assert_bundle_runtime(environment, "/root"))
+
+        assert "glibc" in str(excinfo.value)
+
+
+def _replaying(result: tuple[str, str, int]):
+    async def exec(command: str, **_ignored):
+        return SimpleNamespace(
+            return_code=result[2], stdout=result[0], stderr=result[1]
+        )
+
+    return exec
+
+
+async def _no_op(*_args, **_ignored):
+    return None
 
 
 class TestEvalStateCarrier:
