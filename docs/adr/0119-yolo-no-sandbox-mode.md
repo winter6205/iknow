@@ -94,6 +94,18 @@ The common shape of both resolutions: **an exemption must be explicit, named, an
 
 **(iii) The regression face moved.** The physical probe `npm run probe:sandbox` no longer exists on master (archived to `iknow-archive/scripts-probes/`; the main repo keeps `probe:sandbox:subagent` for the violation face). The yolo argv-contract regression now lives in the vitest parity test `tests/harness/sandbox/yolo-probe-parity.test.ts`, which asserts against real `createBwrapFence` output and carries over the probe's six yolo checks (argv / same-netns / loopback / home-write / verify-route / fence-contrast), physically-executing arms guarded by the bwrap-availability convention.
 
+## Amendment 2026-09-29 (eval state)
+
+**Ruling 7 is qualified, not overturned.** `--yolo` remains a parse-time typed refusal on `chat` / `serve` / `ask` / `oneshot` / `trace` (`src/harness/sandbox/yolo.ts:79`), and yolo still has exactly two entry points. ADR-0130 adds a separate named posture — **eval state** — which reuses this ADR's entry state-combination verbatim (permission → `full_auto`, `fsMode: workspace` → `global`, fence retires wholesale, egress seam retired, all four routes bare) but is reached headlessly through an explicit, non-default, named opt-in. Basis: benchmark evaluation has no use for the fence, and invariant #1's constant `--unshare-net` would make install-dependent tasks structurally unsolvable for reasons unrelated to the model, destroying the score's attribution.
+
+Three consequences for this document's own wording:
+
+- Consequences' line "demoted from an absolute discipline to 'discipline + one named exception'" now describes **two named exceptions**: yolo mode (this ADR) and eval state (ADR-0130 §1).
+- The defense line this ruling relied on — entry enumeration plus the parity tests — holds against what it was written to prevent, a _silent_ extension. Because eval state is a distinct face rather than a widened flag, `--yolo` keeps its TUI-only meaning and the byte-pinned refusal face certified by `tests/harness/sandbox/yolo-probe-parity.test.ts` is untouched. The narrowing is real but bounded: the defense now covers two named entries, and the ADR-0130 reporting invariant (an eval-state number must name its state) is the substitute audit face.
+- The title's "the single explicit, operator-locked counter-example" and Conflict resolution (a)'s "named-exempted exactly once by this ADR … yolo is the **only** explicit, operator-locked counter-example" (`:83`) stay verbatim as the record of what this ADR did, and are qualified here: there are now **two** named counter-examples to `沙箱纪律` #653 G3 / ADR-0097 invariant #1 — yolo mode and **评测态** (ADR-0130). What still holds in both sentences is their scoping, not their count: one ADR named one face, and that face has exactly two entries.
+
+What eval state does **not** exempt is unchanged by this amendment: the **hard-wall** still intercepts before `full_auto` grants anything, and the which-tree axis from Amendment (i) is fence-independent, so writes still resolve against the live `taskRoot`. The ro-bind axis and the credential read mask retire with the fence, exactly as under yolo — see ADR-0130 §3 for the consequence that follows for credentials injected into benchmark containers.
+
 ## Deletion / non-goals
 
 **Out of this decision's scope** (named item by item, so later implementations cannot casually extend it):

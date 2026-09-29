@@ -18,6 +18,13 @@ docs/iknow-spec/docs/eval/results/
 # temporary TUI design frame captures (view-only, regenerated on demand)
 .frames/
 
+# Python bytecode caches. scripts/harbor (ADR-0130 Harbor adapter) is the
+# first tracked Python in this repo; without these, `git add scripts/harbor/`
+# sweeps in its own __pycache__/*.pyc. `.pytest_cache/` and `.ruff_cache/`
+# are NOT listed: each ships a self-ignoring .gitignore, which git already honors.
+__pycache__/
+*.pyc
+
 # Node / TypeScript build
 node_modules/
 # hand-moved workspace artifact (was a symlink committed as plain file); kept arborist from resolving workspaces

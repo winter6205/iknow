@@ -35,13 +35,13 @@ Add a `--yolo` **no-sandbox mode** to the TUI: reachable only from the CLI entry
 
 1. **The fence retires wholesale, this is not permission relaxation**: under yolo the spawn argv has no bwrap prefix, consistently across all four routes; the reading "sandbox still on but permissions relaxed" does not exist.
 2. **Single SSOT point**: all four routes share one branch of `createBwrapFence`; there is no second fence assembly. A missing new `BwrapFenceOptions` field (`undefined`) = non-yolo.
-3. **Zero change off yolo**: on non-yolo paths the argv, `requireBwrap` behavior, the always-present `--unshare-net`, and egress assembly are byte-identical (ADR-0097 is only named-amended, never revoked).
+3. **Zero change off yolo**: on paths that are neither yolo nor **评测态 (eval state)**, the argv, `requireBwrap` behavior, the always-present `--unshare-net`, and egress assembly are byte-identical (ADR-0097 is only named-amended, never revoked).
 4. **TUI-only reachability**: the entries are the `--yolo` flag (before TUI start) and in-session `/yolo` + confirmation modal only; a non-TUI public command carrying it = typed error with non-zero exit.
 5. **Nothing persisted**: the yolo axis stays out of settings, out of the session file, with no config-panel row; at startup each session passes it explicitly, in-session switching touches the in-memory holder only.
 6. **Entry/exit are an idempotent set**: repeated entry takes no second snapshot, repeated exit overwrites nothing (guarding the snapshot against self-pollution); after one enter → exit → re-enter the snapshot still holds the true pre-entry values.
 7. **Axis orthogonality**: yolo does not lock the permission axis (Shift+Tab still cycles); yolo does not skip the worktree gate; the egress domain allowlist does not intervene under yolo.
 8. **Symmetric probing + fail-closed**: on a host without bwrap, entry and exit are **refused alike** (typed notice + guidance, zero state change); holder absent defaults to non-yolo.
-9. **Exemptions must be named**: yolo is the **only explicit exemption face** of sandbox discipline #653 G3 and ADR-0097 invariant #1 (carried by ADR-0119's ruling; on the ADR-0097 side it is the Amendment 2026-09-18).
+9. **Exemptions must be named**: yolo is the explicit exemption face of sandbox discipline #653 G3 and ADR-0097 invariant #1 (carried by ADR-0119's ruling; on the ADR-0097 side it is the Amendment 2026-09-18). **评测态 (eval state)** (ADR-0130) is a **second, separately named face** of those same two, reached headlessly by an explicit non-default opt-in — the invariant is that every face is named and greppable, not that exactly one exists. `--yolo` itself stays TUI-only (rule 4) and is not the door to eval state.
 
 ## Operator-locked specification (implementers no longer choose)
 

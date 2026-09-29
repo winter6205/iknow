@@ -701,6 +701,56 @@ hardcoded defaults` for those three fields only; other fields unchanged.
 
 ### Fixed
 
+- **`--eval-state` is no longer detected by a registry of flags to reject, and `ask --resume --eval-state=true <id>` no longer resumes a session named `--eval-state=true` (ADR-0130, 2026-09-29)**:
+  the posture flag was recognized by enumerating the value-taking options that must
+  refuse it (`--host`, `--trace-out`, `--data-dir`, `--workspace-root`), which is a
+  list that has to be extended by hand every time an option is added and therefore
+  could never be complete — completeness being the property ADR-0130 asks for. The
+  rule now derives from the parser's own structure: the argument scan loop is the
+  single place a token is consumed as a flag, so on the query-bearing path a consumed
+  token never reaches the positional stream and a posture spelling between two of the
+  operator's words is plainly one of their words. The display path (`-h` / `-V`) reads
+  the raw argv instead, where a valueless flag _is_ present; it is settled
+  positionally — a display path starts nothing, so it has no operator words at all —
+  which is what the deleted registry was proxying for. One `slotValue` reader, applied
+  by every value-taking branch except `--resume` (which reports a posture in its slot
+  as the existing typed `eval_state_flag_conflict` rather than throwing), makes "a
+  posture flag is never a legal value" a property of the parser rather than a list to
+  maintain, so a value-taking flag added later inherits it by calling the reader. A
+  test now reads the source of `parseArgs` and asserts that every arm consuming
+  `argv[++i]` calls `slotValue` other than `--resume`, so the one documented
+  exception cannot be joined by a silent second one. The span reading still consults
+  one name table, `SUBCOMMAND_HEADS` — pre-existing, and a closed dispatch vocabulary
+  rather than an open-ended flag list (ADR-0130 §7).
+  The user-visible defect that registry carried: `iknow ask --resume`
+  `--eval-state=true` `<id>` silently resumed a session whose id was the literal
+  string `--eval-state=true`, with no posture entered and no refusal, while bare
+  `--eval-state` in the same slot was correctly refused. Both spellings now take
+  ADR-0130's existing typed `eval_state_flag_conflict` refusal. `--yolo` is
+  untouched — ADR-0119 ruling 7 stands, `--yolo` is still a parse-time typed
+  refusal on `chat` / `serve` / `ask` / `oneshot` / `trace`, and
+  `iknow tui --yolo` is still its only legal surface. Evidence: the eight
+  argv-parsing files that cover the parser (`parse-args-eval-state`,
+  `parse-args-yolo`, `parse-args-resume`, `parse-args-tui`,
+  `parse-args-max-turns`, `data-dir`, `trace-out`, `cli-session`) pass at
+  8 files / 220 tests, with `parse-args-eval-state` going 63 → 97 cases as the
+  enumeration-shaped table was replaced by one rule over all seven
+  value-taking slots in all three spellings, the display-path cases extended to
+  the token orderings that decide the span, and a source-derived tripwire added
+  that reads `parseArgs` itself so an _unpublished_ new value flag cannot leave
+  the slot table silently incomplete. The S5 complexity ratchet for
+  `parseArgs` went 47 → 40, the seven `raw === undefined` branches having moved
+  out of the parse into the shared slot reader. A differential sweep of every
+  2- and 3-token permutation over a 16-token pool (4352 vectors) against the
+  previous parser shows no input losing a posture, and every difference falls
+  into the two intended families above — the resume `=`-form fix and the
+  display-path restoration. Real-CLI exit-code probes:
+  `iknow ask grep --yolo in src` → exit 1 `yolo_non_tui_entry`, `iknow chat
+--eval-state` → exit 1 `eval_state_unsupported_entry`, `iknow ask q
+--eval-state --resume abc` → exit 1 `eval_state_flag_conflict`, `iknow ask
+--resume --eval-state=true hi` → exit 1 `eval_state_flag_conflict` (the fix),
+  `iknow ask --yolo hi` → exit 1 `yolo_non_tui_entry`.
+
 - **A protected credential could be read out through an ancestor mount that the read mask never reached (issue #1159, spec `effect-boundary-protection`, ADR-0129, 2026-09-28)**:
   the credential read mask was computed per direct match, so a filesystem-arm ancestor
   (a bind of a directory holding the credential) shadowed a name-pattern match below it —

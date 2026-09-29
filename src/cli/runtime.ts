@@ -123,6 +123,21 @@ export interface CliBuildEngineOpts {
    *  a mutable context; ask passes none -> run_graph and the orchestration
    *  segment are not assembled). */
   graphMode?: GraphModeContext;
+  /**
+   * ADR-0092: fs isolation-tier holder — forwarded to build-engine's bash
+   * factory (read per call). Declared here so the CLI entries that wire it are
+   * compile-checked (the wrapper forwards `rest` wholesale, so an undeclared key
+   * would still travel at runtime and the drop would be silent).
+   */
+  fsMode?: import("../harness/sandbox/fs-mode.js").FsModeContext;
+  /**
+   * ADR-0119 / ADR-0130: yolo-axis (fence-retire) holder — forwarded to
+   * build-engine, which threads it to the four routes (foreground bash /
+   * background spawn / verify sandbox-run / subagent worker env wire). Absent →
+   * non-yolo (fail-closed keeps the fence). ADR-0130's eval state is the second
+   * face that reaches the same branch, so it supplies the same holder.
+   */
+  yolo?: import("../harness/sandbox/yolo.js").YoloContext;
   /** Host-injected session-scoped todoDir, semantically the "session
    *  project root" (`resolveProjectSessionDir(baseDir, projectIdentityRoot)`).
    *  todo_write consumes it at main-loop assembly; the per-conversation file

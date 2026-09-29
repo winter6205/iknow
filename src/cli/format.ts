@@ -34,6 +34,7 @@ import type {
   TokenUsage,
 } from "../harness/index.js";
 import type { VerifyAnswerView } from "../session-api/contract.js";
+import type { EvalStateRunLabel } from "../harness/sandbox/eval-state.js";
 import {
   createOutputMask,
   currentSecretValues,
@@ -51,6 +52,13 @@ export const REDACTED_PLACEHOLDER = "[已加密思考]";
 export interface FormatRunOpts {
   readonly result: RunResult;
   readonly trace: LoopTrace;
+  /**
+   * ADR-0130 §5: the named runtime state the run executed in, published in the
+   * same artifact as the number. Absent = no named state, and the key is dropped
+   * (same conditional-key style as `lastUsage`), so every existing consumer sees
+   * its exact key set. Currently only eval state fills it.
+   */
+  readonly runState?: EvalStateRunLabel;
 }
 
 /**
@@ -329,6 +337,10 @@ function tokenSegment(lastUsage: TokenUsage | null): string {
  * `JSON.stringify` drops `undefined` values). `TokenUsage` field names are
  * already camelCase, so no mapping rewrite in the projection layer.
  *
+ * `runState` (ADR-0130 §5) rides the same conditional-key rule: an unnamed run
+ * (every entry but eval state) keeps its exact published key set; only a named
+ * state adds the one string.
+ *
  * The thinking display switch does **not** affect the JSON projection
  * (machine readers can extract thinking from `result.messages` themselves).
  *
@@ -349,6 +361,8 @@ export function formatRunJson(opts: FormatRunOpts): string {
       turnCount: result.turnCount,
       lastUsage,
       trace,
+      // Undefined for an unnamed run -> dropped (see the `lastUsage` rule).
+      runState: opts.runState,
     },
     null,
     2

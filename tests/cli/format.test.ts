@@ -222,6 +222,42 @@ describe("formatRunJson", () => {
     assert.strictEqual(parsed.trace.turns.length, 0);
     assert.strictEqual(parsed.finalText, null);
   });
+
+  // ADR-0130 §5: an eval-state run must publish the state it ran in. The key is
+  // emitted only when the entry was asked for, so every non-eval ask keeps its
+  // exact published key set.
+  describe("runState (ADR-0130 eval-state visibility)", () => {
+    it("omits runState entirely when the run carries no named state", () => {
+      const raw = formatRunJson({
+        result: mkResult(),
+        trace: mkTrace([mkTurn({ toolNames: ["echo"] })]),
+      });
+      const parsed = JSON.parse(raw);
+      assert.equal("runState" in parsed, false);
+      assert.deepEqual(Object.keys(parsed).sort(), [
+        "finalText",
+        "stopReason",
+        "trace",
+        "turnCount",
+      ]);
+    });
+
+    it("emits runState=eval_state when the entry was used", () => {
+      const parsed = JSON.parse(
+        formatRunJson({
+          result: mkResult(),
+          trace: mkTrace([]),
+          runState: "eval_state",
+        })
+      );
+      assert.strictEqual(parsed.runState, "eval_state");
+      // Additive: the existing published fields are still all there.
+      assert.strictEqual(parsed.finalText, "hello");
+      assert.strictEqual(parsed.stopReason, "completed");
+      assert.strictEqual(parsed.turnCount, 1);
+      assert.ok(parsed.trace && typeof parsed.trace === "object");
+    });
+  });
 });
 
 /**

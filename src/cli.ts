@@ -52,13 +52,27 @@ import {
   createPermissionModeContext,
   parsePermissionMode,
 } from "./harness/permission/index.js";
-import type { PermissionMode } from "./harness/permission/modes.js";
+import type {
+  PermissionMode,
+  PermissionModeContext,
+} from "./harness/permission/modes.js";
 import {
   createGraphModeContext,
   resolveGraphMode,
 } from "./harness/graph/mode.js";
 import { createLiveGraphLedgerHost } from "./harness/graph/ledger.js";
 import { createFsModeContext } from "./harness/sandbox/fs-mode.js";
+import type { FsModeContext } from "./harness/sandbox/fs-mode.js";
+import type { YoloContext } from "./harness/sandbox/yolo.js";
+// ADR-0130 eval state: the headless, named entry to the same runtime posture
+// `--yolo` reaches through the TUI (fence retired, permission full_auto, fs tier
+// global). The entry notice and the published state label are this module's SSOT.
+import {
+  enterEvalState,
+  EVAL_STATE_NOTICE,
+  EVAL_STATE_RUN_LABEL,
+  type EvalStateRunLabel,
+} from "./harness/sandbox/eval-state.js";
 import { isIknowError } from "./shared/errors.js";
 import {
   isWorkspaceRootError,
@@ -240,13 +254,81 @@ function printChatError(err: unknown): void {
   writeErr(`错误: ${String(err)}`);
 }
 
+/**
+ * Everything one eval-state invocation contributes to its consumer, in ONE
+ * object: the two `buildHarnessEngine` assembly fields (fence-retire holder +
+ * the fs tier the enter combination landed on) and the ADR-0130 §5 published
+ * state label. All three come from the same entry decision, so they travel
+ * together and the consumer never re-derives "is this an eval run?".
+ *
+ * One object rather than three because the alternative — a holder plus two
+ * `...(evalHolders ? … : {})` spreads — puts the same predicate at two call
+ * sites inside `runOneShot`, a function already carrying pre-logged length
+ * debt. The consumers are object-literal targets with declared key sets, and
+ * they read only their own keys, so spreading the whole projection is inert for
+ * the ones that do not take all three (`formatRunJson` reads `opts.runState`;
+ * `buildHarnessEngine` reads `opts.yolo` / `opts.fsMode`).
+ */
+interface EvalStateProjection {
+  readonly yolo: YoloContext;
+  readonly fsMode: FsModeContext;
+  /** ADR-0130 §5: the state a number produced here must be published under. */
+  readonly runState: EvalStateRunLabel;
+}
+
+/**
+ * Spread-guard helper, the same shape as `yoloHolderSpread`
+ * (`src/harness/sandbox/yolo.ts`): it moves the "emit the keys only when the
+ * posture was entered" branch out of the hosting function, so
+ * `lint:s5:staged` sees a branch-free call site instead of one more ternary in
+ * `runOneShot`.
+ *
+ * Semantics are byte-identical to the inline
+ * `...(projection !== undefined ? projection : {})`.
+ */
+function evalStateSpread(
+  projection: EvalStateProjection | undefined
+): Partial<EvalStateProjection> {
+  return projection !== undefined ? projection : {};
+}
+
+/**
+ * ADR-0130 eval state at the ask entry: `--eval-state` → the yolo-shaped holders,
+ * anything else → `undefined`, so the call site keeps the fenced baseline.
+ */
+function enterEvalStateForAsk(
+  parsed: ParsedCli,
+  permission: PermissionModeContext
+): EvalStateProjection | undefined {
+  if (parsed.evalState !== true) {
+    return undefined;
+  }
+  const holders = enterEvalState({
+    permission,
+    // Seeded from settings like every other entry (runChat / tui), so the
+    // workspace → global flip yolo's enter combination performs is the real one
+    // rather than a no-op on a holder nobody seeded.
+    fsMode: createFsModeContext(resolveFsIsolationMode(loadIknowSettings())),
+  });
+  writeErr(EVAL_STATE_NOTICE);
+  // ONE projection for the whole posture: the two assembly fields and the
+  // published state label are the three keys the entry contributes, and they
+  // come from one decision, so they are assembled together here rather than
+  // re-asked at two call sites (which is what grew `runOneShot` past its S5
+  // baseline — see `evalStateSpread` for the spread-guard rationale).
+  return {
+    yolo: holders.yolo,
+    fsMode: holders.fsMode,
+    runState: EVAL_STATE_RUN_LABEL,
+  };
+}
+
 async function runOneShot(parsed: ParsedCli): Promise<void> {
   if (parsed.missingQuery) {
     printUsage();
     process.exitCode = 1;
     return;
   }
-
   const bundle: RuntimeBundle = await prepareRuntime();
   // Writer-side data root, single source: the ask entry's store pool =
   // `resolveServeDataDir(parsed.dataDir)` (independent of workspaceRoot); the
@@ -256,6 +338,17 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   const dataDir = resolveServeDataDir(parsed.dataDir);
   const tracePath = resolveTraceRoot(parsed.traceOut, dataDir);
 
+  // The ask entry reads the static mode from env IKNOW_PERMISSION_MODE; oneshot
+  // exposes no switching (the context is never set, equivalent to static).
+  const permissionMode = createPermissionModeContext(
+    (process.env.IKNOW_PERMISSION_MODE as PermissionMode | undefined) ??
+      "default"
+  );
+  // ADR-0130: eval state flips this same holder and hands back the fence-retire
+  // holder; undefined when the flag was not asked for (the entry then keeps
+  // today's fenced shape).
+  const evalState = enterEvalStateForAsk(parsed, permissionMode);
+
   let built: { deps: LoopEngineDeps };
   try {
     // ask oneshot: no interactive user → fail-closed askUser (always deny).
@@ -263,18 +356,20 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     // Ask explicitly sets memory:{enabled:false}: the registry strips the 8 memory
     // tools and the memory_layer section is not assembled; the other 4 identity
     // sections stay as-is (deps.system still wires createIknowSystemResolver).
-    // The ask entry reads the static mode from env IKNOW_PERMISSION_MODE; oneshot
-    // exposes no switching (the context is never set, equivalent to static).
     // ADR-0019: the `--workspace-root` flag is passed through — ask is also a
     // per-root state consumer.
     built = await buildHarnessEngine(bundle, {
       askUser: createFailClosedAskUser(),
       surface: "ask",
       memory: { enabled: false },
-      permissionMode: createPermissionModeContext(
-        (process.env.IKNOW_PERMISSION_MODE as PermissionMode | undefined) ??
-          "default"
-      ),
+      permissionMode,
+      // ADR-0130 eval state → the same two assembly fields yolo uses: `yolo`
+      // retires the fence on all four routes (ADR-0119 §ruling 2), `fsMode`
+      // carries the global tier the enter combination landed on. Emitted only
+      // when the flag was asked for: a non-eval ask keeps the absent-holder V1
+      // baseline (no tier holder → global at the factory, no yolo holder → the
+      // fence stays up), byte-identical to before this entry existed.
+      ...evalStateSpread(evalState),
       // Gate on `!== undefined`, not truthiness — an empty string must reach
       // buildHarnessEngine explicitly to trigger the resolver's empty_explicit.
       // A truthy gate would swallow `""` as "unset", and the CLI would show a
@@ -360,7 +455,16 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     }
     throw err;
   }
-  process.stdout.write(`${formatRunJson({ result, trace: loopTrace })}\n`);
+  // ADR-0130 §5: a number produced in eval state must name that state in the
+  // same artifact. A non-eval run passes nothing → the key is dropped, so the
+  // published ask / oneshot JSON keeps its exact key set.
+  process.stdout.write(
+    `${formatRunJson({
+      result,
+      trace: loopTrace,
+      ...evalStateSpread(evalState),
+    })}\n`
+  );
 }
 
 async function runChat(parsed: ParsedCli): Promise<void> {
@@ -781,6 +885,25 @@ function rejectNonTuiYoloEntry(parsed: ParsedCli): void {
   }
 }
 
+/**
+ * ADR-0130 §1 / §5: `--eval-state` is refused on every entry but the two headless
+ * one-shot faces, and refused outright when combined with `--resume`. The parser
+ * has already decided (single read point, same face as the yolo guard above); this
+ * only renders it, strictly after `rejectNonTuiYoloEntry` so a request carrying
+ * both flags reports the yolo refusal alone.
+ *
+ * It has to run before any dispatch: `chat --eval-state` must not reach
+ * `prepareRuntime`, or the refusal would arrive as a settings error and the
+ * session would already have started.
+ */
+function rejectEvalStateRequest(parsed: ParsedCli): void {
+  const rejection = parsed.evalStateRejection;
+  if (rejection !== undefined) {
+    writeErr(rejection.message);
+    process.exit(1);
+  }
+}
+
 async function main(): Promise<void> {
   const parsed = parseArgs({
     argv: process.argv.slice(2),
@@ -803,6 +926,7 @@ async function main(): Promise<void> {
   }
 
   rejectNonTuiYoloEntry(parsed);
+  rejectEvalStateRequest(parsed);
 
   if (parsed.command === "chat") {
     await runChat(parsed);

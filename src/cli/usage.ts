@@ -51,6 +51,16 @@ export function usageText(): string {
                                 / not persisted; the in-session /yolo toggle asks for confirmation
                                 chat / serve / ask / oneshot / trace 携带 → 报错并非零退出、不启动
                                 / rejected with a typed error (non-zero exit) for those five commands
+  --eval-state                  仅 ask / oneshot：ADR-0130 评测态（围栏整体退场、不落盘、无需 TUI）
+                                / ask / oneshot only: ADR-0130 eval state — the bwrap fence retires
+                                entirely, and the posture is never persisted (per-invocation only)
+                                权限 full_auto + fs 档 global；hard-wall 与 taskRoot 写目标不随之退场
+                                / permission full_auto, fs tier global; the hard-wall and the live
+                                taskRoot write target do not retire with the fence
+                                chat / serve / trace / tui 携带，或与 --resume 同给 → 报错并非零退出、不启动
+                                / rejected with a typed error (non-zero exit) on those entries, or when
+                                combined with --resume; ask 的 JSON 以 runState="eval_state" 标明本态
+                                / the ask JSON artifact names its own state (runState="eval_state")
 
 会话内命令 / In-chat commands:
   /help  /status  /quit  /json on|off  /reset
