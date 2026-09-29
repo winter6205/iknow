@@ -77,6 +77,119 @@ _NATIVE_PROBE = (
     "(error) => { console.error(String(error && error.message)); process.exit(1); })"
 )
 
+# The highest `GLIBCXX_x.y.z` the shipped prebuilds reference, measured from
+# the bundle tarball rather than read off a failure message:
+#   tree-sitter@0.25.1      -> GLIBCXX_3.4.31 (the ceiling)
+#   tree-sitter-bash@0.25.1 -> GLIBCXX_3.4.21
+# The 3.4.31 reference is a single libstdc++ symbol,
+# _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE15_M_replace_cold...,
+# introduced in GCC 12. An image whose libstdc++ predates GCC 12 loads node fine
+# and then fails to dlopen the addon, which is what a real Debian 12 trial did.
+# The version, not a symbol spelling, is what is compared in the container:
+# readelf is absent from most task images, and the version strings are plain
+# data in libstdc++.so.6.
+REQUIRED_GLIBCXX = "GLIBCXX_3.4.31"
+
+# `apt-get install libstdc++6` on an image that already has it at the repository
+# candidate is a no-op that exits 0, so a version check is the only thing that
+# can tell "installed" from "new enough". This is not hypothetical: Debian 12's
+# libstdc++6 tops out at GLIBCXX_3.4.30, one short of the requirement.
+#
+# Two things in this command were found by running it against real containers
+# rather than by reasoning about it, and both are load-bearing:
+#
+# - `|| true` inside the loop. `grep` exits 1 when it matches nothing, so every
+#   element of the pipeline exits 1, and harbor prepends `set -o pipefail` to
+#   every command it runs. Without the guard, an image with no readable
+#   libstdc++.so.6 aborted install() with NonZeroAgentExitCodeError instead of
+#   reporting "no runtime found" and letting the install run — on precisely the
+#   image that most needs the install. Inside the loop, the guard also makes the
+#   `[ -r ]` test's own exit status irrelevant.
+#
+# - `tr -c '[:alnum:]_.'` rather than `grep -a`. `grep -a` is a GNU extension
+#   that busybox does not implement (`grep [-HhnlLoqvsrRiwFE]`), so on Alpine
+#   the probe silently extracted nothing and reported "none found" even with a
+#   current libstdc++ installed. Converting the file to one-token-per-line with
+#   `tr` and matching whole lines is POSIX and behaves identically on busybox
+#   and GNU. `strings` is not an alternative: it is absent from the Debian task
+#   images. (On Alpine's *musl* libstdc++ the answer is a true negative either
+#   way — that build carries no GLIBCXX_3.4.x version strings at all, which is
+#   consistent with `_reject_musl` refusing the image before this step runs.)
+#
+# The probe emits *every* match and stops there. It deliberately does not sort:
+# `sort -V` is a GNU extension, which is at odds with the POSIX-only rationale
+# above, and plain `sort` is not merely cosmetic — the lexicographic maximum of
+# a real libstdc++'s tokens is `GLIBCXX_3.4.9`, not `GLIBCXX_3.4.35`, because
+# "9" sorts after "3". A lexicographic max therefore fails *closed* but
+# wrongly, refusing an image that has the runtime and issuing a pointless
+# install first. Picking the maximum numerically is the same code the
+# pass/fail decision already uses (`_glibcxx_at_least`), so the ordering has
+# exactly one implementation.
+_LIBSTDCXX_CANDIDATES = (
+    "/usr/lib/x86_64-linux-gnu/libstdc++.so.6",
+    "/usr/lib64/libstdc++.so.6",
+    "/usr/lib/libstdc++.so.6",
+    "/lib/x86_64-linux-gnu/libstdc++.so.6",
+)
+
+
+def _glibcxx_probe_command(candidates: tuple[str, ...]) -> str:
+    """Build the probe that prints every `GLIBCXX_x.y.z` the image defines.
+
+    The candidate list is a parameter so a test can point the very same command
+    at a fixture, rather than at `/usr/lib`, and run it in a real shell.
+    """
+    return (
+        "for so in "
+        + " ".join(shlex.quote(candidate) for candidate in candidates)
+        + "; do "
+        '[ -r "$so" ] && tr -c "[:alnum:]_." "\\n" < "$so" '
+        '| grep -oE "^GLIBCXX_[0-9.]+$" || true; done'
+    )
+
+
+_GLIBCXX_CEILING_PROBE = _glibcxx_probe_command(_LIBSTDCXX_CANDIDATES)
+
+# How to satisfy the C++ runtime, per package manager, as one row: the package
+# name (`libstdc++` on Alpine and the RHEL family, the soname-derived
+# `libstdc++6` on Debian/Ubuntu), the install command, and the per-exec env it
+# needs. Detection is by package manager rather than by os-release, so a task
+# image that ships an unexpected base (CentOS Stream, UBI) is still handled by
+# the manager that is actually present.
+#
+# Kept as a single mapping rather than two parallel dicts keyed by the same
+# manager set: those could drift, and a manager present in one and absent from
+# the other would fail with a bare `KeyError` instead of an error the reader can
+# act on. `_cxx_runtime_install` is the only reader, and it raises.
+_CXX_RUNTIME_INSTALLS: dict[str, tuple[str, str, dict[str, str] | None]] = {
+    # The `apt-get update` prefix is load-bearing, not hygiene. Without it a
+    # task image whose package cache is empty or stale fails with "Unable to
+    # locate package libstdc++6" — and the repository may well carry a new enough
+    # build, with the cache the only thing wrong. Harbor's own dependency
+    # installer does both halves (base.py: `apt-get update && apt-get install
+    # -y`, plus DEBIAN_FRONTEND=noninteractive); an unanswered debconf prompt
+    # would hang the install in a container with no pty rather than fail it.
+    "apt-get": (
+        "libstdc++6",
+        "apt-get update && apt-get install -y --no-install-recommends",
+        {"DEBIAN_FRONTEND": "noninteractive"},
+    ),
+    "apk": ("libstdc++", "apk add --no-cache", None),
+    "dnf": ("libstdc++", "dnf install -y", None),
+    "yum": ("libstdc++", "yum install -y", None),
+}
+
+
+def _cxx_runtime_install(manager: str) -> tuple[str, str, dict[str, str] | None]:
+    """The (package, install command, exec env) row for a known package manager."""
+    try:
+        return _CXX_RUNTIME_INSTALLS[manager]
+    except KeyError:
+        raise IKnowInstallError(
+            f"no C++-runtime install is defined for package manager {manager!r}; "
+            f"supported: {', '.join(sorted(_CXX_RUNTIME_INSTALLS))}"
+        ) from None
+
 
 class IKnowInstallError(RuntimeError):
     """Environment cannot host iknow; raised before the trial runs any step."""
@@ -88,6 +201,20 @@ class IKnowBundleMissingError(IKnowInstallError):
 
 class IKnowGlibcRequiredError(IKnowInstallError):
     """musl/Alpine or a foreign architecture cannot load the shipped prebuilds."""
+
+
+class IKnowCppRuntimeTooOldError(IKnowInstallError):
+    """The image's libstdc++ cannot provide the symbol version the addons need.
+
+    Separate from `IKnowGlibcRequiredError` on purpose. That one means the
+    image's libc family is wrong for the shipped prebuilds (musl, or a
+    foreign architecture) and no package install can change it. This one means
+    the libc is fine and the C++ runtime in front of it is merely too old, so
+    the remedy is a package — but on some images (Debian 12's GLIBCXX_3.4.30
+    ceiling) the distribution has no newer one to install, and saying so is
+    the whole point of raising here instead of continuing into a dlopen
+    failure inside `_assert_bundle_runtime`.
+    """
 
 
 class IKnowNodeUnavailableError(IKnowInstallError):
@@ -167,6 +294,70 @@ def _nvm_version_major(path: str) -> int | None:
         return None
     major = version[1:].split(".", 1)[0]
     return int(major) if major.isdigit() else None
+
+
+def _glibcxx_components(version: str) -> tuple[int, ...] | None:
+    """Split `GLIBCXX_x.y.z` into numeric components, or None if it is not one.
+
+    `isascii()` guards the digit test: `str.isdigit()` is also true for
+    superscripts and other non-ASCII digits, and `int()` raises on those, so
+    `isdigit()` alone would make this predicate partial. The probe cannot
+    produce such a token today (it is anchored to `[0-9.]`), but the predicate
+    is a total function or it is a latent crash.
+    """
+    prefix, _, rest = version.partition("_")
+    if prefix != "GLIBCXX" or not rest:
+        return None
+    components = rest.split(".")
+    if not components or not all(
+        part.isascii() and part.isdigit() for part in components
+    ):
+        return None
+    return tuple(int(part) for part in components)
+
+
+def _glibcxx_at_least(observed: str | None, required: str) -> bool:
+    """Compare a `GLIBCXX_x.y.z` ceiling against the version the addons need.
+
+    Numeric component comparison, not string comparison: "3.4.9" sorts after
+    "3.4.30" lexicographically, so a string ordering would accept an image
+    that is eleven releases short. Anything unparseable — including the empty
+    string an image with no readable libstdc++.so.6 reports — is treated as not
+    satisfying the requirement, so an unreadable probe leads to the install
+    attempt and, failing that, to a clear error rather than a silent pass.
+    """
+    observed_parts = _glibcxx_components(observed.strip()) if observed else None
+    required_parts = _glibcxx_components(required)
+    if observed_parts is None or required_parts is None:
+        return False
+    return observed_parts >= required_parts
+
+
+def _glibcxx_ceiling(tokens: str) -> str:
+    """Reduce every version the probe printed to the highest one.
+
+    The probe deliberately does not sort (see `_GLIBCXX_CEILING_PROBE`), so the
+    maximum is computed here, from the same numeric components the pass/fail
+    decision uses. A lexicographic maximum is the bug this replaces: on a real
+    libstdc++ the highest token by byte order is `GLIBCXX_3.4.9`, which is
+    thirty-one releases short of a real ceiling and would refuse an image that
+    in fact carries GLIBCXX_3.4.35.
+
+    Unparseable lines are skipped rather than fatal — the probe's output is a
+    container-controlled string, and one odd line must not turn the probe into
+    an exception. A stream with no parseable version yields "", which every
+    caller already reads as "not new enough".
+    """
+    best: tuple[int, ...] | None = None
+    for line in tokens.splitlines():
+        components = _glibcxx_components(line.strip())
+        if components is not None and (best is None or components > best):
+            best = components
+    return f"GLIBCXX_{'.'.join(str(part) for part in best)}" if best else ""
+
+
+def _describe_glibcxx(observed: str | None) -> str:
+    return observed.strip() if observed and observed.strip() else "none found"
 
 
 def render_iknow_settings(model_route: str) -> str:
@@ -269,6 +460,7 @@ class IKnowAgent(BaseInstalledAgent):
         self._settings_text()
         home = await self._agent_home(environment)
         await self._reject_musl(environment)
+        await self._ensure_cpp_runtime(environment)
         await self._ensure_node(environment)
         await self._unpack_bundle(environment, bundle, home)
         await self._assert_bundle_runtime(environment, home)
@@ -355,6 +547,137 @@ class IKnowAgent(BaseInstalledAgent):
                 "Task image is musl-based (Alpine): iknow's tree-sitter and "
                 "tree-sitter-bash addons ship glibc prebuilds only."
             )
+
+    async def _ensure_cpp_runtime(self, environment: BaseEnvironment) -> None:
+        """Guarantee a libstdc++ that can provide `REQUIRED_GLIBCXX`.
+
+        Runs before `_ensure_node` and before the bundle smoke test, because
+        the failure it prevents only surfaces once node has executed the
+        addon: a Debian 12 trial loaded node fine and then died in
+        `_assert_bundle_runtime` with "version `GLIBCXX_3.4.31' not found".
+
+        The version is *re-checked after* installing, never assumed from the
+        install's exit code. That is the load-bearing part: on an image whose
+        libstdc++ is already at the repository candidate (Debian 12 ships
+        GLIBCXX_3.4.30), `apt-get install -y libstdc++6` prints "already the
+        newest version", exits 0, and changes nothing. Treating that exit 0
+        as success would hand back a container that fails the same way it
+        entered, so the post-install probe is what decides.
+
+        What is deliberately *not* attempted: pulling a newer libstdc++ from a
+        foreign Debian suite. The one combination that clears 3.4.31 (trixie
+        libstdc++6 14.2.0) drags in `libc-bin 2.41`, so "fixing" the addon
+        would upgrade the image's glibc underneath a benchmark task that
+        measures git behaviour. That is a larger change to the task
+        environment than a benchmark adapter is entitled to make silently, so
+        the image is refused with the ceiling named instead.
+        """
+        ceiling = await self._probe_glibcxx_ceiling(environment)
+        if _glibcxx_at_least(ceiling, REQUIRED_GLIBCXX):
+            self.logger.debug(
+                "libstdc++ already provides %s (ceiling %s); no install issued",
+                REQUIRED_GLIBCXX,
+                _describe_glibcxx(ceiling),
+            )
+            return
+
+        manager = await self._get_system_package_manager(environment)
+        if manager is None:
+            raise IKnowCppRuntimeTooOldError(
+                f"the task image's libstdc++ provides at most "
+                f"{_describe_glibcxx(ceiling)}, but iknow's tree-sitter "
+                f"prebuild needs {REQUIRED_GLIBCXX}, and none of the supported "
+                "package managers (apt-get, apk, dnf, yum) is present to "
+                "install a newer one. Use a glibc task image with a GCC 12 or "
+                "newer C++ runtime."
+            )
+        package, install, env = _cxx_runtime_install(manager)
+        self.logger.info(
+            "libstdc++ ceiling is %s, below the required %s; installing %s via %s",
+            _describe_glibcxx(ceiling),
+            REQUIRED_GLIBCXX,
+            package,
+            manager,
+        )
+        # The install is run through the *bare* environment.exec, not
+        # exec_as_root, because exec_as_root raises on a non-zero exit and the
+        # outcome has to be read rather than thrown:
+        #
+        #   - success (0): the post-install probe is still the authority, since
+        #     "already the newest version" is also a 0 that changed nothing.
+        #   - failure (non-zero): a stale apt cache ("Unable to locate
+        #     package libstdc++6"), a dead registry, a full /var/cache — the
+        #     install did not raise the ceiling, but that is a statement about
+        #     *this attempt*, not about what the distribution has. Asserting
+        #     "the distribution's own C++ runtime is the ceiling here" from a
+        #     failed install would send the reader to change task image when
+        #     the fix is a cache refresh, so the install's own output is
+        #     reported instead.
+        result = await environment.exec(
+            command=f"set -o pipefail; {install} {package}",
+            user="root",
+            env=env,
+        )
+        install_error = None
+        if result.return_code != 0:
+            install_error = (
+                f"(exit {result.return_code}) "
+                f"{self._truncate_output(result.stderr or result.stdout)}"
+            )
+            self.logger.info(
+                "installing %s via %s failed: %s", package, manager, install_error
+            )
+
+        upgraded = await self._probe_glibcxx_ceiling(environment)
+        if not _glibcxx_at_least(upgraded, REQUIRED_GLIBCXX):
+            if install_error is not None:
+                # The install failed, so "the install did not raise the
+                # ceiling" is all that has been established; the repository may
+                # still hold a new enough build.
+                raise IKnowCppRuntimeTooOldError(
+                    f"the task image's libstdc++ provides at most "
+                    f"{_describe_glibcxx(upgraded)}, still short of the "
+                    f"{REQUIRED_GLIBCXX} iknow's tree-sitter prebuild needs "
+                    f"(measured from the bundle: _ZNSt7__cxx1112basic_stringI"
+                    "cSt11char_traitsIcESaIcEE15_M_replace_cold...@"
+                    f"{REQUIRED_GLIBCXX}), and `installing {package} via "
+                    f"{manager}` did not raise the ceiling: {install_error}. "
+                    "This is the install failing, not a statement that the "
+                    "distribution has nothing newer: check the image's package "
+                    "cache and repository reachability first (an `apt-get "
+                    "update` that cannot reach the mirrors, an unreachable "
+                    "registry, a full /var/cache all look like this), and only "
+                    "then whether the image needs a newer C++ runtime."
+                )
+            raise IKnowCppRuntimeTooOldError(
+                f"the task image's libstdc++ still provides at most "
+                f"{_describe_glibcxx(upgraded)} after installing {package} via "
+                f"{manager}, but iknow's tree-sitter prebuild needs "
+                f"{REQUIRED_GLIBCXX} (measured from the bundle: "
+                "_ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE15_"
+                "_M_replace_cold...@GLIBCXX_3.4.31). The distribution's own "
+                "C++ runtime is the ceiling here, so this image cannot host "
+                "the shipped prebuild; use a task image with a GCC 12+ "
+                "toolchain (Debian 13/Ubuntu 24.04 or newer, RHEL 9+)."
+            )
+        self.logger.info(
+            "libstdc++ ceiling after installing %s: %s", package, upgraded
+        )
+
+    async def _probe_glibcxx_ceiling(self, environment: BaseEnvironment) -> str:
+        """Read the highest `GLIBCXX_` version the image's libstdc++ defines.
+
+        The shell emits every match and Python picks the maximum numerically;
+        see `_glibcxx_ceiling`. Returns the empty string when no readable
+        libstdc++.so.6 is found, and the caller treats that as "not new enough"
+        — an image where the runtime is missing entirely is strictly worse than
+        one where it is old, so it must reach the install attempt and its own
+        error.
+        """
+        result = await self.exec_as_root(
+            environment, command=_GLIBCXX_CEILING_PROBE
+        )
+        return _glibcxx_ceiling(result.stdout or "")
 
     async def _ensure_node(self, environment: BaseEnvironment) -> None:
         await self.ensure_system_dependencies(environment, ("curl", "bash", "tar"))

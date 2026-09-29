@@ -73,7 +73,8 @@ exits 127.
 Chosen: **(a)**. It is the only route that is independent of task-image network
 policy, and it keeps the native-addon binaries identical to the ones already
 verified on the host. The cross-libc risk that (a) carries is handled explicitly
-below.
+below — both the libc-family half and, since a scored trial failed on it, the
+C++-runtime half.
 
 ### Verifying the bundle on the host
 
@@ -95,6 +96,149 @@ failure is attributed to the half that failed: node not runnable at all raises
 `IKnowNodeUnavailableError`, while node having run and then failed to load the
 addons is what raises `IKnowGlibcRequiredError`. Reporting the latter for the
 former sent a real trial's missing-node failure to the wrong remedy.
+
+#### The C++ runtime: `GLIBCXX_3.4.31`
+
+A second scored trial (`terminal-bench/fix-git`, Debian 12, glibc 2.36) failed
+with `libstdc++.so.6: version 'GLIBCXX_3.4.31' not found`. Node ran fine and
+the addons could not load. Nothing in `ensure_system_dependencies` provides a
+new enough `libstdc++`, so `install()` now checks and satisfies it up front
+(`_ensure_cpp_runtime`, before `_ensure_node` and before the smoke test).
+
+The requirement is **measured from the bundle, not taken from the error text**:
+
+```bash
+V=$(mktemp -d) && tar xzf /tmp/iknow-bundle.tgz -C "$V" \
+  node_modules/tree-sitter/prebuilds/linux-x64/tree-sitter.node \
+  node_modules/tree-sitter-bash/prebuilds/linux-x64/tree-sitter-bash.node
+objdump -T "$V"/node_modules/tree-sitter/prebuilds/linux-x64/tree-sitter.node \
+  | grep GLIBCXX_3.4.31
+# 0000000000000000 DF *UND* (GLIBCXX_3.4.31)
+#   _ZNSt7__cxx1112basic_stringIcSt11char_traitsIcESaIcEE15_M_replace_coldEPcmPKcmm
+```
+
+One symbol reaches that version, introduced in **GCC 12**. The other prebuild,
+`tree-sitter-bash`, tops out at `GLIBCXX_3.4.21`; every other `linux-x64`
+addon in the closure (`lightningcss`, `rollup`, `tailwindcss-oxide`, `lzma`)
+needs only `GLIBC_2.14` and no `GLIBCXX` at all. So `GLIBCXX_3.4.31` is the
+single binding requirement, and `REQUIRED_GLIBCXX` is it.
+
+What `install()` now guarantees, on return:
+
+- the image's `libstdc++` defines `GLIBCXX_3.4.31` or newer, **verified by a
+  probe against the container**, not inferred from an install's exit code;
+- if it already does, nothing is installed and no package manager is even
+  looked up;
+- if it does not, the C++ runtime is installed by the manager found in the
+  image: `libstdc++6` on apt-get, `libstdc++` on apk/dnf/yum. Detection is by
+  package manager, not by `/etc/os-release`, so a CentOS Stream or UBI base is
+  still handled by the manager that is actually present.
+
+What still happens on an image that cannot satisfy it: `install()` raises
+`IKnowCppRuntimeTooOldError` naming the ceiling it found, the package it
+tried, and the version required. Four cases reach that error, and each is a
+real image state, not a hypothetical — the reader's next step differs between
+them, so each gets its own message:
+
+| image state                                         | what happens                                                                                                                     |
+| --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
+| no supported package manager                        | raised before any install; the message lists the four managers it looked for                                                     |
+| the install **failed** (stale cache, dead registry) | raised reporting the install's own exit code and stderr, and explicitly _not_ claiming the distribution has nothing newer        |
+| the install succeeded but the ceiling did not move  | raised with the _post_-install ceiling and the "distribution's own C++ runtime is the ceiling" verdict; this is Debian 12, below |
+
+The install is run through the bare `environment.exec` rather than
+`exec_as_root`, precisely so its outcome is read rather than thrown. A
+successful install is still not taken as proof: "already the newest version" is
+also an exit 0 that changed nothing, so the post-install probe remains the
+authority in both directions. What the return code buys is the _distinction_
+between "the repository has nothing newer" and "the repository was never
+reached" — reporting the second as the first would send the reader to change
+task image when the fix is a cache refresh. The apt row is therefore
+`apt-get update && apt-get install …` with `DEBIAN_FRONTEND=noninteractive` on
+the exec's `env`, matching harbor's own dependency installer: without the
+refresh, an image with an empty package cache fails with "Unable to locate
+package libstdc++6" even when the repository carries a new enough build, and
+without the flag an unanswered debconf prompt hangs a container with no pty.
+
+**Debian 12 cannot be fixed by a package install, and this is measured, not
+assumed.** Its `libstdc++6` is `12.2.0-14+deb12u1`, whose ceiling is
+`GLIBCXX_3.4.30` — one short. `apt-get install -y libstdc++6` reports "already
+the newest version" and changes nothing; `bookworm-backports` carries no newer
+`libstdc++6` (`apt-cache madison` lists the 12.2.0-14+deb12u1 build only). The
+only source that clears the bar is trixie's `libstdc++6 14.2.0`, and
+installing it pulls `libc-bin 2.41-12+deb13u4` — it upgrades the image's
+**glibc** to satisfy one addon. That is refused deliberately: a benchmark
+adapter that silently upgrades a task image's libc is changing the environment
+underneath a task that measures git behaviour. So the trial is refused with the
+ceiling named, and the remedy is a task image with a GCC 12+ runtime.
+
+This also means the two error classes are genuinely distinct and must stay so:
+`IKnowGlibcRequiredError` is an image whose libc family cannot host the
+prebuilds at all (musl, foreign architecture) and which `_reject_musl` refuses
+before any of this runs, while `IKnowCppRuntimeTooOldError` is a glibc image
+with a merely old C++ runtime in front of it.
+
+The probe emits **every** `GLIBCXX_` token the library carries and the
+maximum is chosen in Python (`_glibcxx_ceiling`, from the same numeric
+components `_glibcxx_at_least` compares). The shell deliberately does not sort:
+`sort -V` is a GNU extension, at odds with the POSIX-only rationale the rest of
+the probe is built on, and plain `sort` is worse than cosmetic — the
+lexicographic maximum of a real libstdc++ is `GLIBCXX_3.4.9`, not
+`GLIBCXX_3.4.35`, because "9" sorts after "3". A lexicographic max fails
+_closed_ but wrongly: it refuses an image that does have the runtime, and issues
+a pointless install first. The ordering therefore has exactly one
+implementation, and it is the same code as the pass/fail decision.
+
+#### Measured in real containers
+
+The C++-runtime step was exercised against live containers on 2026-09-29, by
+running the adapter's own `_ensure_cpp_runtime` over a `BaseEnvironment`
+shaped like harbor's docker backend (`bash -c`, `set -o pipefail` prepended):
+
+| container                                             | ceiling          | outcome                                                                                                                       |
+| ----------------------------------------------------- | ---------------- | ----------------------------------------------------------------------------------------------------------------------------- |
+| `alexgshaw/fix-git:20260403` (the failing task image) | `GLIBCXX_3.4.30` | `apt-get install libstdc++6` issued, ceiling re-probed unchanged, `IKnowCppRuntimeTooOldError` raised naming `GLIBCXX_3.4.30` |
+| `ubuntu:24.04`                                        | `GLIBCXX_3.4.33` | accepted, no install issued, no package-manager lookup                                                                        |
+| `ubuntu:24.04` with `libstdc++6` removed              | none found       | probe exited 0, install attempted, still refused                                                                              |
+| `alpine:3.20`                                         | none found       | probe exited 0; musl libstdc++ carries no `GLIBCXX_3.4.x` at all                                                              |
+
+Three defects in this step were found **only** by running it in a container,
+and all three are now fixed and regression-tested:
+
+- `grep -a` is a GNU extension busybox does not implement, so the probe
+  silently extracted nothing on Alpine even with a current `libstdc++`
+  installed. `strings` is not an alternative — it is absent from the Debian
+  task images. The probe now splits the file with `tr -c '[:alnum:]_.'` and
+  matches whole lines, which is POSIX and behaves the same on busybox and GNU.
+  The version _ordering_ is done in Python, so the shell only has to produce a
+  token.
+- harbor prepends `set -o pipefail` to every command. `grep` exits 1 when it
+  matches nothing, so on an image with no readable `libstdc++.so.6` the probe
+  aborted `install()` with `NonZeroAgentExitCodeError` instead of reporting "no
+  runtime found" and letting the install run — on precisely the image that most
+  needs it. A `|| true` inside the loop fixes it. _Inside_ is load-bearing:
+  hoisting it outside leaves every element of the pipeline still failing under
+  `pipefail`, and an assertion of the form `"|| true" in probe` is satisfied by
+  that wrong placement, so the tests assert the guard's _position_ and run the
+  probe in a real shell.
+- `sort -V` is a GNU extension, and the probe's stated rationale is POSIX-only.
+  A comment claimed "the ordering is not done by `sort -V`" while `sort -u -V |
+tail -1` was doing exactly that. The claim is now true because `sort` is gone
+  entirely and Python computes the maximum.
+
+The end-to-end link was confirmed on the real task image: with the bundle
+unpacked and node v22.23.3 installed, the marker leg prints
+`iknow-node-runnable` and the native leg fails with exactly the reported
+`GLIBCXX_3.4.31' not found`; on `ubuntu:24.04`, which `_ensure_cpp_runtime`
+accepts, the same bundle prints `iknow-native-ok` (exit 0). The requirement
+the adapter now enforces is exactly the requirement the bundle has.
+
+**Not measured:** the fix-git image is still unscorable, because Debian 12
+genuinely has no new enough `libstdc++` to install. What changed is that the
+trial now fails at `install()` with the ceiling and the required version named,
+instead of failing inside a native-addon load. Reaching a score on that image
+needs a task-image change (Debian 13 / Ubuntu 24.04 base), not an adapter
+change.
 
 A third probe closes the gap ADR-0130 §1 says must not exist — a stale bundle
 that silently ignores `--eval-state`. `iknow ask` folds unknown positionals into
@@ -242,6 +386,13 @@ version probe in a shell that sources no nvm. So `get_version_command()` and
 `run()`'s `node ./dist/cli.js ask` are not left to discover a node that exists
 only inside nvm's per-shell PATH.
 
+The C++-runtime step added a second guarantee: on return, either the image's
+`libstdc++` provides `GLIBCXX_3.4.31` (verified by probing the container, not
+inferred from an install's exit code) or `install()` has already raised
+`IKnowCppRuntimeTooOldError` naming the ceiling and the version required. No
+option was added for it — it is not configurable, because the required version
+is a property of the bundle, not of the trial.
+
 ## What is proven and what is not
 
 Proven:
@@ -250,7 +401,17 @@ Proven:
 - Preflight fails locally with actionable messages for a missing bundle and a
   missing `MINIMAX_API_KEY`; `--ak permission_mode=yolo` is rejected by the
   option schema before any container starts.
-- Unit tests: 70 passed (measured 2026-09-29, `pytest -q`).
+- Unit tests: 109 passed (measured 2026-09-29, `pytest -q`).
+- `REQUIRED_GLIBCXX` is measured from the shipped prebuilds, not from a
+  failure message: `GLIBCXX_3.4.31` on `tree-sitter`, `GLIBCXX_3.4.21` on
+  `tree-sitter-bash`, nothing above `GLIBC_2.14` for every other addon.
+- `_ensure_cpp_runtime` was run against live containers (table above): it
+  accepts `ubuntu:24.04` without installing, and on the real
+  `alexgshaw/fix-git:20260403` it issues `apt-get install libstdc++6`, re-probes,
+  and refuses with the ceiling named.
+- Debian 12's `libstdc++6` ceiling is `GLIBCXX_3.4.30` and no newer one is
+  installable on it (measured: `apt-cache madison`, backports empty, trixie
+  would pull `libc-bin 2.41`). That image is refused, not silently upgraded.
 - Bundle + node + native addons load inside `ubuntu:24.04`; the musl guard fires
   on `alpine:3.20`. The image is glibc 2.39 — the `IKnowGlibcRequiredError` a
   real trial reported there was a misattribution, see below.
@@ -262,18 +423,26 @@ Proven:
 Not proven:
 
 - **The end-to-end trial path is still unproven — it has never reached
-  `run()`.** A scored trial _was_ attempted
+  `run()`.** Two scored trials _were_ attempted
   (`harbor run -d terminal-bench/terminal-bench-2-1 -i
-terminal-bench/adaptive-rejection-sampler ...`) and it reached `install()`,
-  where it failed: `iknow bundle smoke test failed (exit 127) ... bash: line 1:
+terminal-bench/adaptive-rejection-sampler ...` and then
+  `-i terminal-bench/fix-git`). The first reached `install()`
+  and failed: `iknow bundle smoke test failed (exit 127) ... bash: line 1:
 node: command not found`. The cause was the adapter's own symlink step
   resolving `NODE_BIN` from an ambient PATH that a fresh shell does not have,
   so node stayed inside `$NVM_DIR` and nothing on the system PATH could run it.
-  That is now fixed and unit-tested, but nothing in this document is evidence
-  about terminal-bench scores: `setup() -> install() -> run() -> verifier` has
-  still not completed once.
+  That is now fixed and unit-tested. The second got past that and failed
+  _correctly_ attributed — node ran, the marker printed, and the native leg
+  died on `GLIBCXX_3.4.31' not found` → `IKnowGlibcRequiredError` — which is
+  the case the C++-runtime step now handles by refusing the image with its
+  ceiling named. Neither trial reached `run()`, so nothing in this document is
+  evidence about terminal-bench scores: `setup() -> install() -> run() ->
+verifier` has still not completed once.
 - The fixed `install()` path has not been re-measured in a real container; the
-  `ubuntu:24.04` claim above predates it.
+  `ubuntu:24.04` claim above predates it. (The C++-runtime step _has_ been
+  measured in real containers — see the table above — but the full
+  `setup() -> install()` sequence driven by harbor's own trial machinery has
+  not.)
 - `environment.upload_file()` semantics for a 41M tarball (docker cp) and
   `_upload_config_text()` path permissions inside a real task container.
 - Harbor's `exec_as_agent` user model on task images whose `default_user` is not
@@ -319,7 +488,7 @@ PYTHONPATH="$PWD:$HOME/.local/share/uv/tools/harbor/lib/python3.13/site-packages
 ```
 
 The adapter is not installed into Harbor's own venv, so the tests import harbor
-from its site-packages via `PYTHONPATH`. 65 tests as of 2026-09-29.
+from its site-packages via `PYTHONPATH`. 109 tests as of 2026-09-29.
 (Plain `python3 -m pytest` does not work here: the system python3.14 has no
 pytest, and the adapter is not installed into Harbor's venv — use the command
 above.)
@@ -343,4 +512,40 @@ above.)
   probe alone no longer skips the link, `node: command not found` is
   `IKnowNodeUnavailableError` (not `IKnowGlibcRequiredError`), a missing shared
   library _after_ node ran is `IKnowGlibcRequiredError`, and a native addon load
-  failure is still `IKnowGlibcRequiredError`.
+  failure is still `IKnowGlibcRequiredError`. Plus the C++ runtime: a new-enough
+  ceiling issues no install and does not even look up a package manager, a
+  too-old one installs the per-distro package name (`libstdc++6` vs
+  `libstdc++`) as root and re-probes afterwards, the apt row carries both
+  `apt-get update` and `DEBIAN_FRONTEND=noninteractive` (asserted through the
+  issued command's exec `env` as well as through the table), an image with no
+  package manager is refused listing the four it looked for, an install that
+  leaves the ceiling unchanged raises `IKnowCppRuntimeTooOldError` naming the
+  ceiling, a **failing** install raises instead reporting its own exit code and
+  stderr and explicitly does _not_ claim the distribution is the ceiling, a
+  missing `libstdc++` is treated as too old rather than as new enough, and the
+  probe is run for real rather than string-matched: a binary `libstdc++.so.6`
+  fixture is written to a temp dir and probed under `bash -c` with
+  `set -o pipefail`, asserting that every token is emitted (so any
+  `sort … | tail -1` fails), that the numeric maximum is what Python derives,
+  and that the `|| true` guard is _inside_ the loop (its position, and the
+  exit code a real shell gives on an image with no readable library). The
+  probe also avoids the GNU-only `grep -a` / `strings`.
+
+  The step _ordering_ is asserted by driving `install()` itself over a stub
+  that answers every probe it issues, so removing the call or moving it after
+  `_ensure_node` or the smoke test fails — including on the failing-install
+  path, where nothing is uploaded, nothing is unpacked, and node is never
+  probed. The manager table is one row per manager (package, command, env) with
+  a guarded lookup, so a manager missing from it raises a readable error rather
+  than a bare `KeyError`. The version comparison itself is covered by a table
+  including the lexicographic trap (`GLIBCXX_3.4.9` sorts after `3.4.31` as
+  text and is still eleven releases short) and the non-ASCII-digit trap
+  (`isdigit()` is true for superscripts, where `int()` raises).
+
+  Each of these was checked by mutating the adapter and watching the suite go
+  red: deleting / reordering the `install()` call, hoisting `|| true` out of the
+  loop, restoring `sort -u -V | tail -1` or plain `sort -u | tail -1`, dropping
+  `apt-get update` or the `DEBIAN_FRONTEND` env, forcing the
+  distribution-ceiling message on a failed install, taking the ceiling maximum
+  by byte order, dropping the `isascii()` guard, and removing the guarded
+  manager lookup each fail at least one named test.
