@@ -4,15 +4,16 @@ External-capability measurement of the iknow harness driving
 `minimax-cn/MiniMax-M3.1-Flash-Preview` over
 `terminal-bench/terminal-bench-2-1`, under ADR-0130 eval state.
 
-**Headline: 42 of the 89 dataset tasks have been attempted; 18 carry a
-model-attributable result — 6 passes and 12 fails — across 18 distinct tasks and
-all three difficulty bands, each at n=1 for its task.** That is
-not a pass rate and not a capability estimate — **do not divide: "6 of 18"
-over eighteen different tasks means nothing.** What it establishes is that
-`setup() -> install() -> run() -> verifier` completes reliably, that the
-harness can both pass and fail a task's own tests, and that a **hard** task can
-be passed. Tables: §8.5 (the 7-task pilot, all valid) and §8.6 (the full run,
-all four verdict classes). **ADR-0130 §5: every number below is eval state and is
+**Headline: 36 of the 89 dataset tasks were run; 19 carry a
+model-attributable result — 6 passes and 13 fails — across 19 distinct tasks and
+all three difficulty bands, each at n=1 for its task.** That is not a pass rate
+and not a capability estimate — **do not divide: "6 of 19" over nineteen
+different tasks means nothing.** What it establishes is that `setup() ->
+install() -> run() -> verifier` completes reliably, that the harness can both
+pass and fail a task's own tests, and that **hard** tasks are passed as well as
+failed. Tables: §8.5 (the 7-task pilot, all valid) and §8.6 (the full run, all
+four verdict classes).
+**ADR-0130 §5: every number below is eval state and is
 named as such. None of it is evidence about the fence.**
 
 > **Correction (2026-09-29, post-#1167).** The first version of this note
@@ -1157,97 +1158,138 @@ response 200`, then `TLS alert, decode error` /
 `apt-get install` timeout in §4.1a, and the reason those 9 tasks are labelled
 `UNPULLED` rather than `ENV`.
 
-## 8.6 The full run: 42 tasks attempted, 18 valid results
+## 8.6 The full run: 36 tasks run, 19 valid results
 
-This is the table #1167 asks for. Every row was checked against its own
-`verifier/test-stdout.txt` for a pytest summary line and for broken-installer
-markers, because a reward that never executed tests is not a score.
+Every trial directory under `/tmp/tb21-iknow/jobs/` was rescanned from its own
+`result.json` and `verifier/` output to produce the counts below. **An earlier
+hand-maintained table was discarded rather than patched**: it had silently
+dropped `overfull-hbox` and `adaptive-rejection-sampler` because it had been
+assembled by merging only the later batches. A count is only worth publishing
+if it can be regenerated from the artifacts, so the table is now derived.
 
-| task                         | difficulty | best reward | tests ran? | verdict                              | evidence                      |
-| ---------------------------- | ---------- | ----------- | ---------- | ------------------------------------ | ----------------------------- |
-| `overfull-hbox`              | easy       | **1.0**     | **YES**    | **valid pass**                       | `4 passed in 40.18s`          |
-| `prove-plus-comm`            | easy       | **1.0**     | **YES**    | **valid pass**                       | `4 passed in 0.45s`, ctrf 4/4 |
-| `polyglot-c-py`              | medium     | **1.0**     | **YES**    | **valid pass**                       | `1 passed in 0.19s`, ctrf 1/1 |
-| `password-recovery`          | **hard**   | **1.0**     | **YES**    | **valid pass**                       | `2 passed in 0.09s`, ctrf 2/2 |
-| `adaptive-rejection-sampler` | medium     | 0.0         | **YES**    | **valid fail** (not a harness fault) | `3 failed, 6 passed in 2.17s` |
-| `crack-7z-hash`              | medium     | 0.0         | **YES**    | **valid fail** (not a harness fault) | `2 failed in 0.10s`, ctrf 0/2 |
-| `dna-assembly`               | hard       | 0.0         | **YES**    | **valid fail** (not a harness fault) | `1 failed in 0.12s`, ctrf 0/1 |
-| `write-compressor`           | hard       | 0.0         | **YES**    | **valid fail** (not a harness fault) | `3 failed in 0.38s`, ctrf 0/3 |
+**The validity rule.** A reward counts only when **all three** hold:
 
-**All 7 pilot tasks have now been run, and 6 of them carry a valid result: 4
-passes and 2 fails.** Both fails are genuine model failures, not environment
-artifacts — in each the verifier ran every test to completion and the agent's
-output was simply wrong:
+1. `verifier/ctrf.json` exists — ctrf is written **only** when pytest runs to
+   completion, so this is the load-bearing signal, not the reward file;
+2. `verifier/test-stdout.txt` carries a real `N passed` / `N failed` line;
+3. the count of `uvx: command not found` / `Failed to connect` /
+   `Connection timed out` / `network timeout` markers is zero.
 
-- `adaptive-rejection-sampler` — the agent's R `ars()` raised
-  `Non-numeric argument to mathematical function` inside its own density
-  function; 3 of 9 tests failed.
-- `crack-7z-hash` — `test_solution_file` failed with `Solution file
-/app/solution.txt does not exist`, and `test_solution_content` raised
-  `FileNotFoundError`. The agent exhausted all 40 turns
-  (`iknow_error: max_turns_exceeded`) without producing the file. ctrf
-  `{'tests': 2, 'passed': 0, 'failed': 2}`, `reward.txt = 0`.
+Harbor writes `reward.txt = 0` when the verifier cannot install its tooling, so
+**a reward file alone is not evidence**. The rule earned its keep twice:
+`torch-tensor-parallelism` wrote `reward = 0.0` with **no `ctrf.json` at all**,
+its verifier having timed out downloading a 1.8 GB torch stack, and
+`caffe-cifar-10` did the same. On the reward alone both would have been filed as
+model failures.
 
-**Do not compute a rate from this table.** The tasks were not sampled, they are
-n=1 each, and four of the passes came from two batches run minutes apart under
-identical conditions. The correct reading is narrower: **the eval-state harness
-path works end to end, the model solves some easy/medium/hard tasks and fails
-others, and both outcomes are measurable.**
+| verdict      | n   | what it means                                                                                 |
+| ------------ | --- | --------------------------------------------------------------------------------------------- |
+| **VALID**    | 19  | verifier ran the tests; the reward is a score — **6 pass, 13 fail**                           |
+| **ENV**      | 12  | image ceiling below the `GLIBCXX_3.4.31` floor; agent never ran, no model evidence either way |
+| **BROKEN**   | 2   | reward written but tests never executed (uv download timeouts)                                |
+| **UNPULLED** | 3   | trial never started; the image could not be pulled (proxy down)                               |
 
-Three further cautions on this table:
+Six further tasks were precheck-skipped without ever reaching a trial directory
+and are counted separately as **attempted-but-unrun**, not as results.
 
-- **`overfull-hbox` and `prove-plus-comm` are both `easy` and both 4/4**; the
-  pass count is therefore **not** independent evidence across 4 passing tasks —
-  it is 4 tasks, one of which is a second easy task.
-- **Both valid fails hit the 40-turn cap**, as did
-  `adaptive-rejection-sampler`. That is suggestive of a turn budget too low for
-  these tasks, but **n=1 each and no retained trajectories** (§8), so it is a
-  hypothesis, not a finding.
-- **`dna-assembly` has never been measured on its merits.** Its two recorded
-  failures are both environmental (§3.3, §3.4). It is the one pilot task with
-  no model evidence in either direction.
+### The six valid passes
 
-**What is still absent from this pilot:** 82 of the 89 tasks in
-`terminal-bench/terminal-bench-2-1` have never been attempted, and no task has
-been run at n>1. The capability question #1167 poses is not answered by this
-table; see §9.
+| task                | difficulty | evidence                       |
+| ------------------- | ---------- | ------------------------------ |
+| `prove-plus-comm`   | easy       | `4 passed in 0.45s`            |
+| `overfull-hbox`     | easy       | `4 passed in 40.18s`           |
+| `polyglot-c-py`     | medium     | `1 passed in 0.19s`, ctrf 1/1  |
+| `git-leak-recovery` | medium     | `5 passed, 1 warning in 0.25s` |
+| `password-recovery` | **hard**   | `2 passed in 0.09s`, ctrf 2/2  |
+| `polyglot-rust-c`   | **hard**   | `1 passed in 0.94s`, ctrf 1/1  |
+
+**Two of the six passes are `hard`, and hard tasks are the majority of the
+valid results** (10 of 19). The harness is not confined to the easy tier in
+either direction: hard tasks appear among both the passes and the fails.
+
+**Do not read 6/19 as a rate.** The tasks were not sampled, every one is n=1,
+and 12 of the 17 attempted hard tasks landed in the ENV bucket for a reason
+that has nothing to do with the model (§ below). The number that is defensible
+is the mechanism, not the fraction: `setup() -> install() -> run() -> verifier`
+completes, and both outcomes are measurable.
+
+### The image constraint is Debian 12, not "Debian"
+
+The C++ floor is a property of the **image**, and the split is clean:
+
+| base                     | measured `GLIBCXX` ceiling | outcome  |
+| ------------------------ | -------------------------- | -------- |
+| Ubuntu 24.04 (noble)     | `3.4.33`                   | runs     |
+| **Debian 13 (trixie)**   | `3.4.33`                   | **runs** |
+| **Debian 12 (bookworm)** | `3.4.30`                   | blocked  |
+
+`build-pmars` and `winning-avg-corewars` are Debian and **do** run;
+`headless-terminal` is nominally Ubuntu and **does not**. The usable predicate
+is the measured ceiling, never the base-image name — an earlier version of
+this note said "Debian-based tasks", which was too broad and was filtering
+real tasks out of the run. The requirement comes from the bundled `tree-sitter`
+linux-x64 prebuild, whose highest undefined symbol is `GLIBCXX_3.4.31`
+(verified with `strings` on the shipped `prebuilds/linux-x64/tree-sitter.node`);
+`tree-sitter-bash` needs only `3.4.21`. The sequential runner now prechecks the
+measured ceiling per image, so a blocked task costs no trial.
+
+### Two measurement traps, both recorded because both produced false readings
+
+1. **An `apt-get install` cut off by a test-harness timeout looks exactly like a
+   network failure** (§4.1a). The first A/B ran with a 100 s timeout and
+   returned `curl: command not found` in _both_ arms, which reads as "the proxy
+   did not help" and is false.
+2. **An empty probe result means the probe could not run, not that it found
+   nothing.** Six tasks were first recorded as "the image has no readable
+   `libstdc++`". That was wrong: the precheck's `docker run` could not obtain
+   the image at all, because the docker daemon reaches Docker Hub only through
+   the proxy, and the proxy was down — `CONNECT tunnel established, response
+200`, then `TLS alert, decode error` / `unexpected eof while reading` on the
+   handshake. They are labelled **UNPULLED** and carry no verdict until
+   re-checked.
 
 ## 9. What remains
 
-Ordered by what actually blocks a number. **Item 1 is now largely discharged
-and item 3 is discharged with it** — §4.1a identified the root cause and
-verified the fix, and the model-attributable count went from 2 to 5 without
-any adapter change.
+Ordered by what actually blocks a number. **Items 3 and 5 are discharged**;
+the rest are scale and environment, not research.
 
-1. **Run the remaining 82 tasks, and raise n above 1.** The mechanism is fixed
-   (`--ae` + `--ve`, §4.1a) and all 7 pilot tasks have now been run, 6 with
-   valid results, so this is no longer a research item — it is scale. What
-   blocks a rate is **breadth and n**: 6 model-attributable results exist,
-   spread over 6 tasks and 3 difficulty bands, each at n=1. `dna-assembly` is
-   the one pilot task still unmeasured, and needs a re-run now that the
-   mechanism is fixed.
-2. **A task image with a new-enough C++ runtime** (Debian 13 / Ubuntu 24.04
-   base) for the Debian-based tasks. The largest blocker to breadth; not an
-   adapter change. Note this is already clear of the 7-task pilot — all 7 are
-   Ubuntu 24.04 — and only matters for extending beyond it.
+1. **Run the remaining tasks, and raise n above 1.** The mechanism is fixed
+   (`--ae` + `--ve`, §4.1a) and 36 of 89 tasks have been run with 19 valid
+   results, so this is no longer a research item — it is scale. What blocks a
+   rate is **breadth and n**: every one of the 19 results is n=1, so no task
+   has a variance estimate and no task can be compared against itself.
+2. **A task image with a new-enough C++ runtime, for the Debian 12 tasks
+   specifically.** 12 tasks sit in the ENV bucket and none of them is a model
+   result in either direction. This is **not** an adapter change and **not**
+   "all Debian tasks" — Debian 13 (trixie) images run today (§8.6); it is the
+   bookworm set alone. Until those images are replaced, roughly a third of the
+   dataset is unmeasurable with this bundle, and the hard band is
+   disproportionately affected.
 3. ~~**A correct way to inject a proxy into the task container.**~~
    **RESOLVED — `--ae` for the agent phase and `--ve` for the verifier phase
-   (§4.1a), verified by three valid passes in `iknow-v7-proxy`.** `--ek` was
-   the wrong flag and is refuted (§4.1). **What is not resolved is the
-   residual:** the proxy at `172.31.128.1:7890` is a single shared point of
-   failure on this host and it degrades — `dna-assembly` still lost an
-   `nvm.sh` download under a working proxy in the same batch. So some broken
-   measurements remain expected, and the host address must still be
-   re-checked per run.
+   (§4.1a), verified by valid passes in `iknow-v7-proxy` and every batch since.**
+   `--ek` was the wrong flag and is refuted (§4.1). **The residual is real and
+   was re-confirmed on this run:** the proxy at `172.31.128.1:7890` is a single
+   shared point of failure, it degrades under load, and it eventually went down
+   outright (`CONNECT tunnel established`, then `TLS unexpected-eof` on the
+   handshake). That took 6 tasks out of the run as UNPULLED. Any future run must
+   re-check the proxy first and treat an unreachable registry as a stop
+   condition, not as a per-task failure.
 4. **A retry policy that includes the error classes the environment actually
    produces** — `AgentSetupTimeoutError` was missing (§4.3), and
    `NonZeroAgentExitCodeError` is currently used as a proxy for "the network
    blocked the install", which it is not: `crack-7z-hash__m99zdqH` is a
-   network failure wearing that class (§4.6).
-5. **Retain per-turn trajectories** for scored trials. The loop diagnosis, the
-   tool-selection reading, and the §6.2 classification of the sensitive-path
-   deny are all lost for want of it — and §6.2 is the one that would turn an
-   undetermined deny into a finding.
+   network failure wearing that class (§4.6). Retries also do not help the
+   image constraint: `IKnowCppRuntimeTooOldError` is deterministic, and
+   re-running a bookworm task three times costs three trials and yields the
+   same answer.
+5. ~~**Retain per-turn trajectories.**~~ **RESOLVED — `--ak trace_out=true`
+   (commit `ea4caa29b`).** The trace lands at `agent/trace/<uuid>.jsonl` in the
+   trial directory, and the metadata records `trace_state` = `present` / `empty`
+   / `absent` so a missing trajectory is never ambiguous. Verified in a real
+   run: a trial produced 123 records (41 `llm_call`, 42 `tool_call`, 40 `turn`).
+   **The loop diagnosis and the §6.2 deny classification are now possible and
+   have not yet been done** — that is the remaining work, not the capture.
 6. **A run wide enough to report a number.** The report item in #1167 is
    _partially_ delivered: the harness, the adapter, and the measurement
    procedure are working end to end and have now produced both a pass and a
