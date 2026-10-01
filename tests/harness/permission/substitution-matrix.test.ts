@@ -722,13 +722,13 @@ describe("SC20 — the routed hard-deny outcomes deny at the wall surface", () =
     expect(graph.parseForSecurity(command).kind).toBe("malformed");
     expect(hitOf(graph, command)).toEqual({
       id: "unparseable",
-      pattern: "verdict=malformed",
+      pattern: "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
     });
     expectDeniedInEveryMode(
       graph,
       command,
       "id=unparseable",
-      "verdict=malformed"
+      "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）"
     );
   });
 
@@ -914,16 +914,19 @@ const GOLDEN_REASON_TABLE: Readonly<
       '[hard_wall] dangerous command pattern matched (id=bare-metachar, pattern=">")',
   },
   "root-find-walk": {
-    command: "find /",
+    // A MUTATING root search: spec SC6 stopped denying the read-only ones, and
+    // this id and its rendered string are unchanged for the searches the wall
+    // still owns.
+    command: "find / -delete",
     desc: "find",
     reason:
       '[hard_wall] dangerous command pattern matched (id=root-find-walk, pattern="find")',
   },
   unparseable: {
     command: 'echo "$(rm -rf /',
-    desc: "verdict=malformed",
+    desc: "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
     reason:
-      '[hard_wall] dangerous command pattern matched (id=unparseable, pattern="verdict=malformed")',
+      '[hard_wall] dangerous command pattern matched (id=unparseable, pattern="verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）")',
   },
   "parameter-expansion": {
     command: "echo ${ANTHROPIC_AUTH_TOKEN}",
@@ -2312,13 +2315,13 @@ describe("SC9 — a heredoc body is judged by its receiver", () => {
     expect(graph.parseForSecurity(body).kind).toBe("malformed");
     expect(hitOf(graph, command)).toEqual({
       id: "unparseable",
-      pattern: "verdict=malformed",
+      pattern: "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
     });
     expectDeniedInEveryMode(
       graph,
       command,
       "id=unparseable",
-      "verdict=malformed"
+      "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）"
     );
   });
 

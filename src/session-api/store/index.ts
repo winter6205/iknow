@@ -53,6 +53,9 @@ export {
   type SessionJsonlError,
   type SessionJsonlRecord,
   type SessionOutcomeRecord,
+  type SecurityInterruptionRecord,
+  type SecurityInterruptionItem,
+  type SecurityInterruptionCleanup,
   type SessionTitleRecord,
 } from "./jsonl.js";
 export {

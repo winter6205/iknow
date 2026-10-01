@@ -122,13 +122,24 @@ export type {
 export {
   DEFAULT_MAX_OUTPUT_CODE_POINTS,
   SIGNAL_EXIT_CODES,
-  killProcessGroup,
   requireBwrap,
   runInSandbox,
   signalExitCode,
   spawnWithStopSignal,
   truncateByCodePoint,
 } from "./runner.js";
+export {
+  NOT_STARTED_CLEANUP,
+  confirmedStopped,
+  processGroupAlive,
+  sendSignalToProcessGroup,
+  unconfirmedCleanup,
+  waitForProcessGroupGone,
+} from "./cleanup-result.js";
+export type {
+  CleanupEvidence,
+  CleanupUnconfirmedReason,
+} from "./cleanup-result.js";
 export type {
   SandboxRunOptions,
   SandboxRunResult,

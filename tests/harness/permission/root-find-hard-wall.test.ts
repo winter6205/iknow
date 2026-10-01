@@ -1,17 +1,43 @@
 /**
- * Hard-wall: root `find` walks are denied before spawn.
+ * Hard-wall: the root `find` walk — what it still denies, and what it no
+ * longer does.
  *
- * Invariant pinned here: a `find` whose search root denotes the filesystem
- * root never reaches the bash handler — no grant, no `full_auto`, and no
- * isolation-read classification can turn it into an executed walk. CONTEXT
- * **hard-wall** (ADR-0068) is the un-overridable spawn-time intent filter;
- * in the default global FS posture the fence has no bound on a whole-machine
- * read walk, and the 2026-09-14 incident ran `find /` for ~232 s until the
- * host cancelled.
+ * CONTEXT **hard-wall** (ADR-0068) is the un-overridable spawn-time intent
+ * filter, and the 2026-09-14 incident that shaped it ran `find /` for ~232 s
+ * until the host cancelled. That incident is why this wall exists, and it is
+ * also the reason the wall cannot simply keep denying every root walk: the cost
+ * of the deny was a whole class of legitimate, read-only searches that could
+ * not run at all, and the cost of allowing them is not a new hole if the walk
+ * is bounded — which it now is.
  *
- * The inverse is pinned with the same strength: `find .` / `find <root>/…`
- * relative walks and `find /tmp …` are NOT this wall — scoping the tree is
- * the reader's job, and the wall must not become a blanket `find` ban.
+ * What this file pins, under `specs/hard-wall-denial-alignment.md` SC6
+ * ("Root read-only search") and Assumption 4 "Root search":
+ *
+ *   1. A MUTATING root search is still denied before spawn, and no grant, no
+ *      `full_auto` and no read-only category can turn it into an executed
+ *      walk. `-delete`, `-exec` / `-execdir` / `-ok` / `-okdir`, the
+ *      file-producing `-fprint` family, and a root search feeding an `rm` are
+ *      decisions about the tree, not searches, and they are what this wall is
+ *      for.
+ *   2. A READ-ONLY root search is not denied for being rooted at `/`. It
+ *      reaches the same ordinary permission checks every other command does,
+ *      and once admitted it runs under the SAME Bash execution deadline as
+ *      every other foreground call (ADR-0134: 10 s by default, a validated
+ *      `timeout_ms` otherwise, enforced in the process plane). There is no
+ *      root-search-specific limit — SC6's third clause, asserted directly
+ *      against the tool's own declaration in
+ *      `root-find-readonly-allowance.test.ts`.
+ *
+ * So the 232 s incident is now bounded by the runtime deadline rather than by
+ * a blanket deny: a walk that overruns is terminated through the same bounded
+ * TERM/grace/KILL route as any other expiring command, and reports as a
+ * per-call `execution_failed` / `message: "timeout"`. Scoping the tree remains
+ * the reader's job — this file still pins that `find .` and `find /tmp` were
+ * never this wall to begin with, and the wall must not become a blanket `find`
+ * ban in the other direction either. The read-only root search's own matrix
+ * (every root spelling, every operator, every arity) lives in
+ * `root-find-readonly-allowance.test.ts`; this file is the deny surface and the
+ * reason strings.
  */
 
 import { describe, it } from "vitest";
@@ -41,87 +67,100 @@ function patternId(command: string): string | undefined {
   return findDangerousPattern(command)?.id;
 }
 
-/** Commands the wall MUST deny: filesystem-root search roots. */
+/**
+ * Commands the wall MUST deny: filesystem-root searches that MUTATE.
+ *
+ * Every row is a root walk carrying a predicate the read-only roster does not
+ * name, or feeding a destructive consumer. The read-only spelling of each shape
+ * (`find /`, `cd / && find .`, …) is deliberately NOT here: SC6 removed its
+ * deny, and `root-find-readonly-allowance.test.ts` is where those are pinned as
+ * reaching ordinary permissions.
+ *
+ * The root SPELLINGS themselves are unchanged and still worth pinning here, so
+ * each group below keeps a mutating predicate and the rows still measure that
+ * the wall finds the root no matter how `/` is written or hidden in a `cd`.
+ */
 const DENIED: ReadonlyArray<string> = [
-  "find /",
-  "find / -maxdepth 3",
-  "find / -maxdepth 1",
-  "find / -name x",
-  "find / -type f -print",
-  "find  /",
-  "find / ",
-  'find "/"',
-  "find '/'",
-  "find //",
-  "find / -maxdepth 3 -name '*.ts'",
-  "find /tmp/.. -maxdepth 2",
-  "find /./ -name x",
-  "find /../ -maxdepth 1",
-  "find -L / -maxdepth 2",
-  "find -- / -maxdepth 1",
-  "find -O2 / -maxdepth 1",
-  "find -D tree / -maxdepth 1",
+  "find / -delete",
+  "find / -maxdepth 3 -delete",
+  "find / -maxdepth 1 -delete",
+  "find / -name x -delete",
+  "find / -type f -print -delete",
+  "find  / -delete",
+  // a trailing space is still the same root operand
+  "find / -delete",
+  'find "/" -delete',
+  "find '/' -delete",
+  "find // -delete",
+  "find / -maxdepth 3 -name '*.ts' -delete",
+  "find /tmp/.. -maxdepth 2 -delete",
+  "find /./ -name x -delete",
+  "find /../ -maxdepth 1 -delete",
+  "find -L / -maxdepth 2 -delete",
+  "find -- / -maxdepth 1 -delete",
+  "find -O2 / -maxdepth 1 -delete",
+  "find -D tree / -maxdepth 1 -delete",
   // wrapper prefixes forward the same argv
-  "sudo find / -maxdepth 2",
-  "env -i find / -maxdepth 1",
-  "nohup find / -maxdepth 1",
+  "sudo find / -maxdepth 2 -delete",
+  "env -i find / -maxdepth 1 -delete",
+  "nohup find / -maxdepth 1 -delete",
   // a wrapper's value-taking flag eats its value, so the wrapped command word
   // is still located (value-blind scanning would land on `root` / `HOME` / the
   // duration and let the walk through)
-  "sudo -u root find / -maxdepth 3",
-  "sudo --user root find / -maxdepth 3",
-  "sudo -uroot find / -maxdepth 3",
-  "env -u HOME find / -maxdepth 3",
-  "env --unset HOME find / -maxdepth 3",
-  "timeout -s KILL 5 find / -maxdepth 3",
-  "nice -n 5 find / -maxdepth 3",
-  "stdbuf -o L find / -maxdepth 3",
-  "setsid find / -maxdepth 3",
+  "sudo -u root find / -maxdepth 3 -delete",
+  "sudo --user root find / -maxdepth 3 -delete",
+  "sudo -uroot find / -maxdepth 3 -delete",
+  "env -u HOME find / -maxdepth 3 -delete",
+  "env --unset HOME find / -maxdepth 3 -delete",
+  "timeout -s KILL 5 find / -maxdepth 3 -delete",
+  "nice -n 5 find / -maxdepth 3 -delete",
+  "stdbuf -o L find / -maxdepth 3 -delete",
+  "setsid find / -maxdepth 3 -delete",
   // xargs forwards its argument run the same way
-  "xargs find / -maxdepth 3",
+  "xargs find / -maxdepth 3 -delete",
   // a quoted command word is the same command to bash
-  '"find" / -maxdepth 3',
-  "'find' / -maxdepth 3",
+  '"find" / -maxdepth 3 -delete',
+  "'find' / -maxdepth 3 -delete",
   // relative operands resolve against the cd-folded cwd, not literal equality:
   // `cd /tmp && find ..` is `find /`
-  "cd / && find ./.. && ls",
-  "cd / && find ../ && ls",
-  "cd / && find ../.",
-  "cd /tmp && find ..",
-  "cd / && find ./.",
+  "cd / && find ./.. -delete && ls",
+  "cd / && find ../ -delete && ls",
+  "cd / && find ../. -delete",
+  "cd /tmp && find .. -delete",
+  "cd / && find ./. -delete",
   // a one-level directory's parent IS the root
-  "cd /home && find ..",
-  "cd /usr && find ..",
+  "cd /home && find .. -delete",
+  "cd /usr && find .. -delete",
   // a glob rooted at / is the same whole-machine walk after expansion
-  "find /*",
-  "find /?",
+  "find /* -delete",
+  "find /? -delete",
   // cwd-relative form with the root hidden in the cd
-  "cd / && find .",
-  "cd /; find .",
-  "cd / && find -maxdepth 2",
-  'cd "/" && find .',
-  "cd /tmp/.. && find .",
-  "cd / && find . -name x",
+  "cd / && find . -delete",
+  "cd /; find . -delete",
+  "cd / && find -maxdepth 2 -delete",
+  'cd "/" && find . -delete',
+  "cd /tmp/.. && find . -delete",
+  "cd / && find . -name x -delete",
   // `cd`'s own options do not change the destination
-  "cd -- / && find .",
-  "cd -P / && find .",
+  "cd -- / && find . -delete",
+  "cd -P / && find . -delete",
   // a chained cd back out of a non-root dir: `..` from /tmp is /
-  "cd /tmp && cd .. && find .",
-  "cd /tmp && cd ./.. && find .",
+  "cd /tmp && cd .. && find . -delete",
+  "cd /tmp && cd ./.. && find . -delete",
   // `cd -` swaps OLDPWD back in: the third cd returns to the root
-  "cd / && cd /tmp && cd - && find .",
+  "cd / && cd /tmp && cd - && find . -delete",
   // bare find with no path operand when the cwd IS the root
-  "cd / && find",
-  "cd / && find -name x",
+  "cd / && find -delete",
+  "cd / && find -name x -delete",
   // subsequent line: a newline splits statements like `;`
-  "echo go\ncd / && find .",
+  "echo go\ncd / && find . -delete",
   // SC-S3-2's owned append. The backslash is stripped by the scan fold, so the
   // command word reads as `find` and its operand as the root. Before T21 this
   // deny came from the splitter's token run; on the parsed path it must come
   // from the SAME fold driven by the tree — the escaped word reaches `argv` as
   // one `WordFact`, `wordSource` unescapes it, and `commandAt` sees a bare
   // `find /`. Both shapes of it, in both carriers:
-  "f\\ind /",
+  "f\\ind / -delete",
 ];
 
 /** Commands the wall must NOT deny: same shape, non-root walk root. */
@@ -233,9 +272,12 @@ describe("hard-wall: root find — reason is typed and model-visible", () => {
   }) as AciToolDef;
 
   it("deny reason carries [hard_wall] + the root-find-walk id", () => {
+    // The command is a MUTATING root walk: SC6 removed the deny for the
+    // read-only ones, and the id and this exact string are what survives for
+    // the ones the wall still owns.
     const out = checkPermission({
       def: bash,
-      input: { command: "find / -maxdepth 3" },
+      input: { command: "find / -maxdepth 3 -delete" },
       sources: policy.sources,
       hardWalls: policy.hardWalls,
       defaultByCategory: policy.defaultByCategory,
@@ -247,6 +289,10 @@ describe("hard-wall: root find — reason is typed and model-visible", () => {
   });
 
   it("a permissive session grant cannot override the wall", () => {
+    // The claim is about LAYER ORDER, not about a particular command: the
+    // hard-wall deny is computed before the session layer is consulted. A
+    // mutating root walk is the probe, because a read-only one no longer has a
+    // wall to override and would make this assert nothing about ordering.
     const session = createSessionGrants();
     session.add({
       id: "session-allow-all",
@@ -257,7 +303,7 @@ describe("hard-wall: root find — reason is typed and model-visible", () => {
     const p = createPermissionPolicy({ session });
     const out = checkPermission({
       def: bash,
-      input: { command: "find /" },
+      input: { command: "find / -delete" },
       sources: p.sources,
       hardWalls: p.hardWalls,
       defaultByCategory: p.defaultByCategory,
@@ -270,7 +316,7 @@ describe("hard-wall: root find — reason is typed and model-visible", () => {
     const p = createPermissionPolicy({ mode: "full_auto" });
     const out = checkPermission({
       def: bash,
-      input: { command: "cd / && find ." },
+      input: { command: "cd / && find . -delete" },
       sources: p.sources,
       hardWalls: p.hardWalls,
       defaultByCategory: p.defaultByCategory,
@@ -288,7 +334,7 @@ describe("hard-wall: root find — reason is typed and model-visible", () => {
     const p = createPermissionPolicy({ mode: "full_auto" });
     const out = checkPermission({
       def: readOnlyBash,
-      input: { command: "find / -maxdepth 5" },
+      input: { command: "find / -maxdepth 5 -delete" },
       sources: p.sources,
       hardWalls: p.hardWalls,
       defaultByCategory: p.defaultByCategory,
@@ -341,7 +387,10 @@ describe("hard-wall: root find — executor chain never reaches spawn", () => {
     });
 
     const [result] = await runtime.executor.executeAll([
-      { id: "t4-find", name: "bash", input: { command: "find / -maxdepth 3" } },
+      // A MUTATING root walk: the probe is the spawn-adjacent inner executor
+      // never being reached, and a read-only root walk now reaches it by
+      // design (`root-find-readonly-allowance.test.ts` pins that side).
+      { id: "t4-find", name: "bash", input: { command: "find / -maxdepth 3 -delete" } },
     ]);
 
     assert.equal(calls.length, 0, "bash inner must not be reached");
@@ -407,8 +456,10 @@ describe("hard-wall: root find — command-node equivalence for escaped separato
     assert.equal(parsed.operators.length, 0);
     assert.deepEqual([...parsed.bareNewlineOffsets], [4]);
     // The wall's answer for that reading: the root-find fold fires across the
-    // newline, exactly as it did when the fold read one segment.
-    assert.equal(findDangerousPattern("cd /\nfind .")?.id, "root-find-walk");
-    assert.ok(isDangerousCommand("cd /\nfind ."));
+    // newline, exactly as it did when the fold read one segment. The command
+    // carries a mutating predicate so the row still measures the fold; SC6
+    // removed the deny for the read-only spelling of the same shape.
+    assert.equal(findDangerousPattern("cd /\nfind . -delete")?.id, "root-find-walk");
+    assert.ok(isDangerousCommand("cd /\nfind . -delete"));
   });
 });

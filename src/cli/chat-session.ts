@@ -40,6 +40,7 @@ import {
   writeOut,
 } from "./session-io.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
+import { parseViolationEvent } from "../harness/sandbox/violation-handling.js";
 import {
   mainCheckoutOf,
   type WorktreeGateReader,
@@ -71,9 +72,12 @@ import {
   type SubagentWakeError,
 } from "../harness/subagent/host-wake.js";
 import {
-  createViolationCounter,
+  createViolationTurnScope,
   wireKillSessionNotification,
+  type ParsedViolationEvent,
+  type ViolationTurnScope,
 } from "../harness/sandbox/violation-handling.js";
+import type { BackgroundTaskManager } from "../harness/background/manager.js";
 import { createStreamDraft } from "./stream-draft.js";
 import {
   formatThinkingLive,
@@ -243,6 +247,13 @@ export type ChatSessionOpts = {
    */
   readonly subagentManager?: SubAgentManager;
   /**
+   * ADR-0135: the live engine's background-task manager, used to cancel the
+   * finite background jobs one turn owns when a security interruption stops
+   * that turn. Absent (ask / unwired / tests) → those items are reported
+   * unconfirmed rather than silently left running.
+   */
+  readonly backgroundManager?: BackgroundTaskManager;
+  /**
    * Verify-loop config (settings.verify section, constructed in cli.ts).
    * A missing command (including a wholly missing verify section) still
    * yields a non-undefined `{ command: "" }` — with subagentManager present
@@ -361,6 +372,13 @@ export type RebuiltChatEngine = EngineBundle & {
    * degradation as the catalog; never silently becomes "no rescan").
    */
   readonly skillRescanner?: SkillRescanner;
+  /**
+   * The rebuilt engine's background-task manager (`BuiltEngine` same field).
+   * ADR-0135: swapped on rebind so a security interruption cancels the
+   * interrupted turn's own background jobs through the ACTIVE engine.
+   * Optional: a legacy seam omits it → the original manager is kept.
+   */
+  readonly backgroundManager?: BackgroundTaskManager;
 };
 
 export type ChatLineContext = {
@@ -405,6 +423,22 @@ export type ChatLineContext = {
   checkpointStore?: SessionStore;
   /** T1: resolved root persisted when a fresh checkpoint file is bootstrapped. */
   workspaceRoot?: string;
+  /**
+   * ADR-0135: the current user turn's violation scope (counter + owned-work
+   * ledger + escalation abort). Replaced at the start of every query line and
+   * left in place afterwards so a later turn can read what the previous one
+   * owned. Undefined before the first query line → the wrapped executor
+   * behaves as if it had no scope.
+   */
+  violationTurn?: ViolationTurnScope;
+  /**
+   * ADR-0135: the live engine's background-task manager, used to cancel the
+   * finite background jobs one turn owns. Mutable — a rebind rebuild swaps it
+   * alongside `subagentManager`, so the cancellation route can never reach a
+   * retired engine. Absent (unwired / ask / tests) → those jobs are reported
+   * unconfirmed rather than silently left running.
+   */
+  backgroundManager?: BackgroundTaskManager;
   /**
    * Same as ChatSessionOpts.subagentManager, passed through by
    * runChatSession. Absent (undefined) = no drain, zero change. Mutable —
@@ -565,6 +599,12 @@ function swapHostHandlesToRebuiltEngine(
   rebuilt: RebuiltChatEngine
 ): void {
   ctx.subagentManager = rebuilt.subagentManager;
+  // ADR-0135: the background-task manager must follow the active engine too,
+  // or a turn after a rebind would cancel jobs through a retired manager.
+  // Same "keep the original when the seam omits it" rule as the fields below.
+  if (rebuilt.backgroundManager !== undefined) {
+    ctx.backgroundManager = rebuilt.backgroundManager;
+  }
   ctx.graphAssembly = rebuilt.graphAssembly;
   ctx.autoMemory = rebuilt.autoMemory;
   ctx.overlayMemoryPrefetch = rebuilt.overlayMemoryPrefetch;
@@ -841,6 +881,91 @@ async function resolveVerifyDispatch(
     return { userText: query, completionMode: "hitl" };
   }
 }
+
+/**
+ * ADR-0135: the operator-facing line for a turn interrupted by the
+ * confirmed-violation escalation. Says what happened, that the session is
+ * kept, and what happened to the turn's own work — including the items whose
+ * teardown could not be confirmed, which are named rather than omitted, so
+ * the notice never overstates how much was stopped.
+ *
+ * A malformed payload degrades to the count alone: the turn is already
+ * stopping, so a formatting failure must not change that or throw.
+ *
+ * The payload is read by `parseViolationEvent` — the same function the trace
+ * reader and the serve hub's durable projection use — so this line cannot
+ * disagree with the evidence it is reporting about. It used to parse the JSON
+ * a fourth time and drop `tier` entirely, which is how one escalation came to
+ * read as `mid-escalation` in the trace and as nothing at all here.
+ */
+export function formatSecurityInterruption(reason: string): string {
+  const parsed = parseViolationEvent(reason);
+  const head = formatInterruptionHead(parsed);
+  const tail = formatInterruptedWork(parsed?.cleanup ?? []);
+  if (tail === null) return head;
+  return `${head}\n${tail}`;
+}
+
+/**
+ * The notice's first line: what stopped the turn and that the session is kept.
+ *
+ * Every part is optional except the confirmed count, so an unreadable payload
+ * still yields a line — degrading to the count alone rather than throwing,
+ * because the turn is already stopping and a formatting failure must not
+ * change that.
+ */
+function formatInterruptionHead(
+  parsed: ParsedViolationEvent | undefined
+): string {
+  const confirmed = parsed?.confirmedViolations ?? 0;
+  // The producer's own tier label, so the operator reads the same word the
+  // evidence records. `mid-escalation` (the threshold-crossing notification)
+  // and `mid`/`high` (the structured report) are different stages of one
+  // event, and the line names which one it is.
+  const tier = parsed?.tier;
+  const tool = parsed?.tool ?? "";
+  return (
+    `[violation] turn stopped after ${confirmed} confirmed security violation` +
+    (tier === undefined ? "" : ` (tier=${tier})`) +
+    (tool === "" ? "" : ` (tool=${tool})`) +
+    "; the conversation is kept — send another message to continue"
+  );
+}
+
+/**
+ * The second line of the interruption notice: what happened to the turn's own
+ * work, split out of `formatSecurityInterruption` so the per-state wording is
+ * one table rather than three parallel branches in the notice itself.
+ *
+ * `null` means "no cleanup item to name", which the caller answers with the
+ * head line alone — the same single-line notice an item-free payload produced
+ * before. The state order and the per-state wording are the notice's, and are
+ * deliberately fixed: the unconfirmed bucket is named last and named
+ * explicitly, so a reviewer never reads a shorter list and infers more was
+ * stopped than the evidence carries.
+ */
+function formatInterruptedWork(
+  cleanup: ReadonlyArray<{ readonly id: string; readonly state: string }>
+): string | null {
+  if (cleanup.length === 0) return null;
+  const parts: string[] = [];
+  // Ordered by how much the operator still has to do about it: requested
+  // first, confirmed next, and the unconfirmed tail named last because it is
+  // the only bucket that may still be running.
+  for (const [state, prefix] of INTERRUPTED_WORK_STATES) {
+    const ids = cleanup.filter((c) => c.state === state).map((c) => c.id);
+    if (ids.length === 0) continue;
+    parts.push(`${prefix}${ids.join(", ")}`);
+  }
+  return `[violation] this turn's work — ${parts.join("; ")}`;
+}
+
+/** The cleanup states the notice names, in output order, with their wording. */
+const INTERRUPTED_WORK_STATES: ReadonlyArray<readonly [string, string]> = [
+  ["stop_requested", "stop requested for "],
+  ["confirmed_stopped", "confirmed stopped: "],
+  ["unconfirmed", "NOT confirmed stopped (still may be running): "],
+];
 
 function busyBox(ctx: ChatLineContext): { value: boolean } {
   if (ctx.clientBusy === undefined) {
@@ -1439,6 +1564,24 @@ function chatPrefetchExcludeIds(ctx: ChatLineContext): Set<string> {
  * the assembly-time resolution. Absent both (unwired ask / test entry) →
  * `process.cwd()`, the baseline.
  */
+/**
+ * The signal one chat turn runs under: the REPL-level Ctrl+C controller
+ * merged with this turn's violation-scope abort.
+ *
+ * ADR-0135 needs the escalation abort to reach run(), not just the tool
+ * layer — the interruption stops the turn, and run() is what observes a
+ * cancelled signal. Merging (rather than replacing) keeps Ctrl+C working
+ * unchanged and keeps the two causes distinguishable, because only the
+ * Ctrl+C controller is ever aborted by the SIGINT handler.
+ */
+function chatTurnSignal(ctx: ChatLineContext): AbortSignal | undefined {
+  const ctrlC = ctx.abortController?.signal;
+  const violation = ctx.violationTurn?.interrupt.signal;
+  if (ctrlC === undefined) return violation;
+  if (violation === undefined) return ctrlC;
+  return AbortSignal.any([ctrlC, violation]);
+}
+
 function chatVerifyCwd(ctx: ChatLineContext): string {
   return ctx.engineRoot ?? ctx.workspaceRoot ?? process.cwd();
 }
@@ -1525,6 +1668,29 @@ async function runChatQueryLine(
   // multi-rounds) shares the same tool surface. Shift+Tab and `/graph` flips
   // after this point take effect only on the next line.
   ctx.graphAssembly?.beginRound();
+
+  // ADR-0135 turn boundary: a fresh violation scope per user query line. The
+  // streak starts at zero, the owned-work ledger is empty (so an earlier
+  // turn's persistent service is out of reach), and the escalation abort is
+  // un-fired. The verify / auto-loop multi-rounds on THIS line share the one
+  // scope, which is correct — they are one user turn.
+  ctx.violationTurn = createViolationTurnScope({
+    cancelSubagent: (taskId) => ctx.subagentManager?.abortTask(taskId) ?? false,
+    // ADR-0135: the finite background jobs THIS turn launched, through the
+    // live engine's own manager. Absent (unwired / rebind-without-manager) →
+    // those items report unconfirmed rather than being claimed stopped.
+    // Read through ctx (not a captured value) so a rebind's rebuilt manager
+    // is the one that gets used.
+    ...(ctx.backgroundManager !== undefined
+      ? {
+          cancelBackgroundTask: (taskId: string) =>
+            ctx.backgroundManager!.stop(
+              taskId,
+              ctx.state.conversationId ?? undefined
+            ),
+        }
+      : {}),
+  });
 
   // HITL vs /goal auto dispatch. Read the disk only when verifyConfig is
   // present; the absent branch goes straight to runHarness(query, ...) with
@@ -1628,7 +1794,7 @@ async function runChatQueryLine(
                 completionMode: verifyDispatch.completionMode,
                 config: ctx.verifyConfig,
                 sessionId: ctx.state.conversationId ?? "chat",
-                signal: ctx.abortController?.signal,
+                signal: chatTurnSignal(ctx),
                 cwd: chatVerifyCwd(ctx),
                 // The verify command's fence matches the bash tool surface
                 // (holder read per call; absent → global baseline).
@@ -1649,7 +1815,7 @@ async function runChatQueryLine(
                 const outcome = await runHarness(
                   effective,
                   ctx.deps,
-                  ctx.abortController?.signal,
+                  chatTurnSignal(ctx),
                   {
                     priorMessages,
                     onStream: wrappedOnStream,
@@ -2741,6 +2907,11 @@ function assembleChatSessionContext(input: {
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),
     subagentManager: opts.subagentManager,
+    // ADR-0135: the live background-task manager, so an interrupted turn can
+    // cancel the finite background jobs it launched. Absent on unwired/ask
+    // shapes → those jobs report unconfirmed instead of being left running
+    // with no evidence.
+    backgroundManager: opts.backgroundManager,
     verifyConfig: opts.verifyConfig,
     autoMemory: opts.autoMemory,
     overlayMemoryPrefetch: opts.overlayMemoryPrefetch,
@@ -2845,12 +3016,17 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     conversationId,
   };
 
-  // Wrap the executor with the violation kill-session hook so tool results
-  // get observed against the three-tier counter. When the counter
-  // escalates, wireKillSessionNotification writes the stderr line and sets
-  // process.exitCode = 1; the REPL then closes after the current turn
-  // (kill = exit the session).
-  const counter = createViolationCounter();
+  // Wrap the executor with the violation hook so tool results get observed
+  // against the three-tier counter. When the counter escalates,
+  // wireKillSessionNotification writes the stderr line and sets
+  // process.exitCode = 1; the REPL then closes after the current turn.
+  //
+  // ADR-0135: a FRESH turn scope is installed on the ctx at the start of
+  // every user query line, and the wrapped executor reads it per call. The
+  // previous code built one counter for the whole REPL, so denials
+  // accumulated across turns and three unrelated denials spread over a long
+  // session would interrupt a turn that had done nothing wrong. Per-turn
+  // scope is what makes "a new user turn starts at zero" true here.
   const killRef: { fired: boolean } = { fired: false };
   const notify = wireKillSessionNotification({ sink: writeErr });
   const onKill = (reason: string): void => {
@@ -2874,8 +3050,14 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     ...base,
     executor: wrapWithViolationHook({
       inner: base.executor,
-      counter,
       onKill,
+      // Read per call, not per assembly: the deps object is built once (and
+      // reused across turns, including after a root rebind), so the scope
+      // must be resolved when a turn actually runs.
+      turnScopeFor: () => ctx.violationTurn,
+      onInterrupt: (reason) => {
+        writeErr(formatSecurityInterruption(reason));
+      },
     }),
     // CliChatState.conversationId is string | null; LoopEngineDeps
     // .conversationId is string | undefined — collapse null via ?? undefined

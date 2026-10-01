@@ -60,6 +60,7 @@ import type {
   SessionOutcomeRecord,
   SessionTitleRecord,
   SessionTailRecord,
+  SecurityInterruptionRecord,
 } from "./jsonl.js";
 import {
   chainFromHead,
@@ -578,9 +579,26 @@ export class SessionStore {
     readonly turnId: string;
     readonly stopReason: StopReason;
     readonly supplierDetail?: SupplierStopDetail;
+    /** ADR-0135: structured cause + bounded cleanup for a turn interrupted
+     *  by the confirmed-violation escalation. Absent for every other stop,
+     *  including a user Ctrl+C — the key's absence is what keeps the two
+     *  indistinguishable-but-different events apart. */
+    readonly securityInterruption?: SecurityInterruptionRecord;
   }): Promise<void> {
-    const { id, turnId, stopReason, supplierDetail } = opts;
+    const { id, turnId, stopReason, supplierDetail, securityInterruption } =
+      opts;
     if (!isStopReason(stopReason)) {
+      throw {
+        kind: "schema_invalid",
+        conversation_id: id,
+        field: "outcome",
+      } satisfies SessionStoreError;
+    }
+    // ADR-0135: a security interruption rides the existing `cancelled`
+    // reason. Rejecting any other reason here keeps the persisted record
+    // self-consistent — a stop that claims a security cause without being a
+    // cancellation would be a lie a reviewer could act on.
+    if (securityInterruption !== undefined && stopReason !== "cancelled") {
       throw {
         kind: "schema_invalid",
         conversation_id: id,
@@ -594,6 +612,7 @@ export class SessionStore {
       turnId,
       stopReason,
       ...(supplierDetail !== undefined ? { supplierDetail } : {}),
+      ...(securityInterruption !== undefined ? { securityInterruption } : {}),
     };
     try {
       await appendFile(path, `${JSON.stringify(record)}\n`, "utf8");

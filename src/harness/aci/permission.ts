@@ -125,6 +125,11 @@ export function checkPermission(opts: {
     sources: opts.policy.sources,
     hardWalls: opts.policy.hardWalls,
     defaultByCategory: opts.policy.defaultByCategory,
+    // ADR-0132/ADR-0133: forwarded from the policy so this legacy entry
+    // answers with the same cleanup scope as the runtime's own gate.
+    ...(opts.policy.hostRoots !== undefined
+      ? { hostRoots: opts.policy.hostRoots }
+      : {}),
   });
 }
 

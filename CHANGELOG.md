@@ -733,6 +733,39 @@ hardcoded defaults` for those three fields only; other fields unchanged.
 
 ### Fixed
 
+- **Hard-wall denials now separate a confirmed sensitive path from a fragment that merely occurs in code, and process teardown reports what it actually observed (ADR-0131/0132, 2026-10-01)**:
+  a fragment match was treated as a verdict, so `node -e 'process.env.NODE_OPTIONS'` was
+  denied for a string that is not a path. The wall now classifies a match as a confirmed
+  path target, a proven chain member, or an unresolved one that routes to the existing
+  per-call Security review — and a match must be interior to an identifier chain, so the
+  sensitive name itself is never mistaken for an inert member of one. Confirmed reads,
+  writes, redirect targets and recursively parsed nested shells stay non-overridable in
+  both permission modes. Process cleanup reports `not_started`, `confirmed_stopped` or
+  `unconfirmed` rather than a boolean: the background path used to disarm its kill timer
+  on the leader's exit, so a surviving descendant was forgotten and the task looked
+  cleanly exited.
+
+- **Bounded file cleanup, read-only root search, and a per-call runtime deadline (ADR-0132/0133/0134, 2026-10-01)**:
+  `rm -f` of an explicit file inside the calling identity's own session scratch, or of an
+  ordinary file inside the active task root, leaves the blanket destructive-command wall
+  and enters normal permission handling — `default` asks, `full_auto` may allow. The
+  scratch root itself, recursive forms, mixed or outside targets, another identity's pad
+  and protected targets receive no exception, and containment is decided from the
+  filesystem rather than a text prefix. A read-only search rooted at `/` is no longer
+  denied for its root; a mutating one is, and the allowance is a closed roster of
+  predicates verified against the real binary. Bash takes an optional `timeout_ms`; an
+  omitted one is a 10-second runtime deadline that actually terminates the process tree,
+  and a background job's deadline is set at launch and is not extended by polling. A
+  background call without `timeout_ms` keeps the persistent-service lifecycle.
+
+- **Three confirmed security violations in one turn now stop that turn and its owned work (ADR-0135, 2026-10-01)**:
+  the accumulator was session-wide and its notification did not reliably stop ongoing
+  work. The streak is now scoped to the current user turn, an admitted successful tool
+  call resets it, and routine denials, reviewer unavailability, timeouts and cleanup
+  failures leave it unchanged. Reaching the threshold stops further model and tool
+  scheduling, cancels this turn's in-flight work, workers and finite background jobs, and
+  retains the session with a structured cause and per-item cleanup confirmation.
+
 - **`--eval-state` is no longer detected by a registry of flags to reject, and `ask --resume --eval-state=true <id>` no longer resumes a session named `--eval-state=true` (ADR-0130, 2026-09-29)**:
   the posture flag was recognized by enumerating the value-taking options that must
   refuse it (`--host`, `--trace-out`, `--data-dir`, `--workspace-root`), which is a

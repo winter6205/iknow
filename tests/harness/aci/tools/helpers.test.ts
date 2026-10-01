@@ -709,11 +709,14 @@ describe("spawnWithStopSignal", () => {
       { cwd: tmpdir() }
     );
 
+    // The exact result, including the cleanup evidence: a natural exit never
+    // requested a teardown, so it must not claim one.
     assert.deepEqual(await done, {
       code: 7,
       signal: null,
       stdout: "out",
       stderr: "err",
+      cleanup: { state: "not_started" },
     });
   });
 

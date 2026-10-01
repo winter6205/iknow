@@ -10,6 +10,7 @@ import {
 import { parseForSecurity } from "./shell-parse.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type { SecurityReviewRequirement } from "./security-review.js";
+import type { CleanupRootSnapshot } from "./cleanup-roots.js";
 import type {
   CodeBuiltInPolicySource,
   HardRuleSpec,
@@ -85,6 +86,20 @@ export interface PermissionPolicy {
   readonly defaultByCategory: Readonly<Record<ToolCategory, CategoryDefault>>;
   /** W2: process-level permission mode (default / plan / full_auto). */
   readonly mode: PermissionModeContext;
+  /**
+   * ADR-0132/ADR-0133: the host's per-call root context, read at the moment a
+   * call is judged rather than frozen here, because a `taskRoot` rebind and a
+   * `conversationId`-derived scratch both change per call. The host shares ONE
+   * snapshot between this admission and the Bash handler, so the two gates
+   * cannot disagree about which identity's scratch or which task root the
+   * command was measured against.
+   *
+   * A function rather than a value so `CheckPermissionInput` callers that only
+   * hold a policy (the permission runtime, the executor's prediction pass) get
+   * the current roots for free, and so an assembly that never wired one leaves
+   * every verdict byte-identical.
+   */
+  readonly hostRoots?: () => CleanupRootSnapshot;
 }
 
 export interface CreatePermissionPolicyOpts {
@@ -94,6 +109,13 @@ export interface CreatePermissionPolicyOpts {
   /** W2: Permission mode. Either a static value or a mutable context (REPL
    *  can flip via `/permissions full_auto` without rebuilding the engine). */
   readonly mode?: PermissionMode | PermissionModeContext;
+  /**
+   * ADR-0132/ADR-0133: the host's root-context reader. Absent → the
+   * destructive-rm wall answers exactly as it did before this seam existed,
+   * because a cleanup exception is only ever a REMOVAL of a finding and
+   * without a root context nothing can establish one.
+   */
+  readonly hostRoots?: () => CleanupRootSnapshot;
 }
 
 export function createPermissionPolicy(
@@ -113,6 +135,7 @@ export function createPermissionPolicy(
       ? Object.freeze({ ...opts.defaultByCategory })
       : DEFAULT_BY_CATEGORY,
     mode: asModeContext(opts?.mode),
+    ...(opts?.hostRoots !== undefined ? { hostRoots: opts.hostRoots } : {}),
   });
 }
 
@@ -125,6 +148,13 @@ export interface CheckPermissionInput {
   /** W2: mode context — resolved at call time so a REPL `/permissions`
    *  toggle takes effect for subsequent tool calls without rebuilding. */
   readonly mode?: PermissionModeContext;
+  /**
+   * ADR-0132/ADR-0133: the call's host root context. Read ONCE here so the
+   * wall below and the executor's own prediction pass see the same vintage a
+   * `taskRoot` rebind cannot split. Absent → no cleanup exception is
+   * reachable and every verdict is the pre-existing one.
+   */
+  readonly hostRoots?: () => CleanupRootSnapshot;
 }
 
 /** The ask tier's own reason prefix; `[hard_wall]` is deny's, never reused here. */
@@ -312,21 +342,18 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
   const ctx = { tool: def.name, input };
   const mode: PermissionMode = opts.mode?.get() ?? "default";
   const category = def.aci.category;
+  // One read, one vintage: the wall below is the only consumer, and reading it
+  // per predicate would let a `taskRoot` flip between the two walls below.
+  const roots = opts.hostRoots?.();
+  // The extra key is the ONLY difference from the declared `HardRuleSpec` input
+  // shape, and it is additive: a wall that does not read it ignores it.
+  const wallCtx: { tool: string; input: unknown; roots?: CleanupRootSnapshot } =
+    roots === undefined ? ctx : { ...ctx, roots };
 
   // 1. Hard-walls FIRST — un-overrideable in any mode. This is the security
   //    backstop and must run before mode resolution.
-  for (const hardWall of opts.hardWalls) {
-    if (hardWall.match(ctx)) {
-      // SC3: prefer the input-specific reason (carries the matched pattern
-      // id) over the static one when the hard-wall provides `reasonFor`.
-      const specific = hardWall.reasonFor?.(ctx);
-      const detail = specific ?? hardWall.reason;
-      return {
-        decision: "deny",
-        reason: `${HARD_WALL_DENY_PREFIX} ${detail}`,
-      };
-    }
-  }
+  const walled = hardWallOutcome(opts.hardWalls, wallCtx);
+  if (walled !== null) return walled;
 
   // 1.5 ADR-0127 Security review requirement — below the deny tier (a
   //     confirmed inner deny has already returned above, and the
@@ -339,20 +366,33 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
 
   // 2. Layered rules (session > project > code). First match wins per layer
   //    priority. Mode does NOT relax layer rules — only fills the gap.
-  const layerOrder: ReadonlyArray<PermissionSource> = [
-    "session",
-    "project",
-    "code",
-  ];
-  for (const layer of layerOrder) {
-    for (const rule of rulesFor(opts.sources, layer)) {
-      if (rule.match(ctx)) {
-        return { decision: rule.decision, reason: rule.reason };
-      }
-    }
-  }
+  const granted = layerRuleOutcome(opts.sources, ctx);
+  if (granted !== null) return granted;
 
   // 3. Mode + category default resolution.
+  const defaulted = modeAndCategoryOutcome(opts, mode, category, ctx);
+  if (defaulted !== null) return defaulted;
+  return {
+    decision: "ask",
+    reason: `category default: ${category} → ask user`,
+  };
+}
+
+/**
+ * Step 3's answer for everything ABOVE the category default, or `null` when the
+ * call reaches the default.
+ *
+ * The trailing `ask` stays in the caller so it reads as the unconditional floor
+ * of this tier: no mode, no substitution arm and no stored rule above ever
+ * leaves the function without an answer, and a mode that neither allows nor
+ * denies lands on that floor rather than on a missing value.
+ */
+function modeAndCategoryOutcome(
+  opts: CheckPermissionInput,
+  mode: PermissionMode,
+  category: ToolCategory,
+  ctx: { tool: string; input: unknown }
+): PermissionOutcome | null {
   if (mode === "full_auto") {
     // Full-auto allows every non-hard-walled tool. The user opted in
     // explicitly; sensitive paths / dangerous commands are still blocked by
@@ -397,10 +437,59 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
       reason: `category default: ${category} → allow`,
     };
   }
-  return {
-    decision: "ask",
-    reason: `category default: ${category} → ask user`,
-  };
+  return null;
+}
+
+/**
+ * Step 1's answer: the first hard wall that matches, or `null` when none does.
+ *
+ * `null` is what lets the caller proceed to the layers below — it means "no
+ * wall claimed this call", never "no wall ran". Every wall in the list is
+ * offered the call before the answer is `null`.
+ */
+function hardWallOutcome(
+  hardWalls: ReadonlyArray<HardRuleSpec>,
+  wallCtx: { tool: string; input: unknown; roots?: CleanupRootSnapshot }
+): PermissionOutcome | null {
+  for (const hardWall of hardWalls) {
+    if (!hardWall.match(wallCtx)) continue;
+    // SC3: prefer the input-specific reason (carries the matched pattern
+    // id) over the static one when the hard-wall provides `reasonFor`.
+    const specific = hardWall.reasonFor?.(wallCtx);
+    const detail = specific ?? hardWall.reason;
+    return {
+      decision: "deny",
+      reason: `${HARD_WALL_DENY_PREFIX} ${detail}`,
+    };
+  }
+  return null;
+}
+
+/**
+ * Step 2's answer: the first matching stored rule, layer by layer, or `null`
+ * when no layer grants or denies this call.
+ *
+ * `null` means "no stored rule claimed it", which is what hands the call to the
+ * mode + category resolution below. It is never a skip of any layer: the loop
+ * visits all three before answering.
+ */
+function layerRuleOutcome(
+  sources: CheckPermissionInput["sources"],
+  ctx: { tool: string; input: unknown }
+): PermissionOutcome | null {
+  const layerOrder: ReadonlyArray<PermissionSource> = [
+    "session",
+    "project",
+    "code",
+  ];
+  for (const layer of layerOrder) {
+    for (const rule of rulesFor(sources, layer)) {
+      if (rule.match(ctx)) {
+        return { decision: rule.decision, reason: rule.reason };
+      }
+    }
+  }
+  return null;
 }
 
 function rulesFor(

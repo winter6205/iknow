@@ -17,6 +17,10 @@ import type {
 } from "../model-adapter/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import type { ThinkingParams } from "../model-adapter/anthropic-adapter.js";
+// Type-only, and cleanup-result.ts imports nothing from harness, so this edge
+// cannot close a cycle: the execution-result contract states WHAT evidence a
+// failure may carry, while the sandbox stays the single place that PRODUCES it.
+import type { CleanupEvidence } from "../sandbox/cleanup-result.js";
 
 /**
  * Runtime entry signature: takes strictly validated input, returns a
@@ -184,6 +188,16 @@ export type ToolExecutionResult =
        * clean cancellations omit the field.
        */
       readonly background?: true;
+      /**
+       * ADR-0134: what the bounded teardown actually observed for the
+       * execution's process group, so a timeout is readable as more than an
+       * exit code. Additive and optional — a failure with no teardown behind
+       * it (a caller cancel whose cleanup never ran, a spawn failure) omits
+       * the field rather than reporting a default verdict. `unconfirmed`
+       * means a stop was requested but disappearance was never proven; it is
+       * not a successful stop.
+       */
+      readonly cleanup?: CleanupEvidence;
     };
 
 /** Executor interface: takes ordered valid tool-call projections, returns identity-matched results. */

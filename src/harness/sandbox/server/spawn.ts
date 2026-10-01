@@ -14,13 +14,26 @@ import { randomBytes } from "node:crypto";
 import { appendFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import { killProcessGroup } from "../runner.js";
+import {
+  confirmedStopped,
+  sendSignalToProcessGroup,
+  unconfirmedCleanup,
+  waitForProcessGroupGone,
+  type CleanupEvidence,
+} from "../cleanup-result.js";
 import type {
   QueuedTaskEvent,
   SandboxServerError,
   SandboxTaskEvent,
   SandboxTaskHandle,
 } from "./types.js";
+
+/**
+ * Bounded wait for process-group disappearance after the last signal, before
+ * the teardown reports `unconfirmed`. Mirrors the runner's GROUP_SETTLE_MS: it
+ * bounds the verdict wait, not the kill route.
+ */
+export const DEFAULT_GROUP_OBSERVE_MS = 250;
 
 /** Node constant — default killGraceMs (same shape as the manager's background tasks). */
 // (ADR-0021)
@@ -55,30 +68,34 @@ export function logPathFor(cwd: string, taskId: string): string {
 export function escalateToSigkill(
   child: ChildProcess,
   pid: number | undefined,
-  log: (msg: string) => void
+  log: (msg: string) => void,
+  onFailure: (detail: string) => void = (detail) =>
+    log(`sandbox server: ${detail}`)
 ): void {
   if (pid === undefined) return;
   try {
     child.kill("SIGKILL");
   } catch {
-    /* swallow ESRCH / EPIPE */
+    /* the group signal below is the authoritative route; a closed pipe says nothing about liveness */
   }
-  killProcessGroup(pid, "SIGKILL", log);
+  sendSignalToProcessGroup(pid, "SIGKILL", onFailure);
 }
 
 /** Trigger the SIGTERM escalation — shared by all stop entry points. */
 export function escalateToSigterm(
   child: ChildProcess,
   pid: number | undefined,
-  log: (msg: string) => void
+  log: (msg: string) => void,
+  onFailure: (detail: string) => void = (detail) =>
+    log(`sandbox server: ${detail}`)
 ): void {
   if (pid === undefined) return;
   try {
     child.kill("SIGTERM");
   } catch {
-    /* swallow ESRCH / EPIPE */
+    /* the group signal below is the authoritative route; a closed pipe says nothing about liveness */
   }
-  killProcessGroup(pid, "SIGTERM", log);
+  sendSignalToProcessGroup(pid, "SIGTERM", onFailure);
 }
 
 /** Append stdout/stderr chunks to the log file — a serial writeChain avoids races. */
@@ -193,8 +210,13 @@ export function wireChildStreamHandlers(
 }
 
 /**
- * close handler — settled short-circuit + cancelKillTimer + exit/stopped
- * events + channel close.
+ * close handler — settled short-circuit + exit event + the teardown verdict.
+ *
+ * The leader's `close` is not the task's end: a descendant that holds no pipe
+ * and ignores SIGTERM is still running in the group when it arrives. So when a
+ * teardown is in flight, the terminal verdict waits for the bounded
+ * observation and is pushed by `StopHandle` (one terminal transition only);
+ * a natural exit keeps the old shape — exit plus channel close, no stop claim.
  */
 export function onChildClose(
   child: ChildProcess,
@@ -204,12 +226,14 @@ export function onChildClose(
 ): void {
   child.once("close", (code, signal) => {
     if (orphan.settled) return;
-    stopHandle.cancelKillTimer();
     channel.push({ kind: "exit", exit_code: code, signal });
-    if (stopHandle.stopped && signal !== null) {
-      channel.push({ kind: "stopped", signal });
+    if (!stopHandle.stopped) {
+      // No teardown was requested: the task ended on its own. No stop may be
+      // claimed, and there is no group to observe.
+      channel.close();
+      return;
     }
-    channel.close();
+    void stopHandle.settleTeardown(signal);
   });
 }
 
@@ -280,7 +304,13 @@ export function orphanGroupError(
 /** Stop control plane — the closure owns child/pgid/log/stopped/killFallback. */
 export interface StopHandle {
   stop(graceMs?: number): Promise<void>;
-  cancelKillTimer(): void;
+  /**
+   * Complete a teardown that the caller initiated: observe the group within
+   * the bounded window, then push exactly one terminal `stopped` verdict.
+   * Called on the leader's `close`, and on its own when the escalation window
+   * outlasts the leader (an interruptible descendant that never exits).
+   */
+  settleTeardown(signal: NodeJS.Signals | null): Promise<void>;
   readonly stopped: boolean;
 }
 
@@ -289,10 +319,84 @@ export function createStopHandle(
   pgid: number | undefined,
   task_id: string,
   defaultGraceMs: number,
-  log: (msg: string) => void
+  log: (msg: string) => void,
+  channel: EventChannel,
+  observeMs: number = DEFAULT_GROUP_OBSERVE_MS
 ): StopHandle {
   let stopped = false;
   let killFallback: NodeJS.Timeout | undefined;
+  let terminal = false;
+  /** The leader's `close` arrived — no second close will come to settle the verdict. */
+  let closeObserved = false;
+  /** The SIGKILL escalation has fired; settlement is no longer gated on the leader's close. */
+  let escalated = false;
+  /** First non-ESRCH signal failure of this teardown; keeps the verdict off `confirmed_stopped`. */
+  let teardownFailure: string | undefined;
+  /** The signal the group actually died from, carried into the stopped event. */
+  let terminalSignal: NodeJS.Signals | null = null;
+
+  const recordFailure = (detail: string): void => {
+    teardownFailure ??= detail;
+    log(`sandbox server: ${task_id}: ${detail}`);
+  };
+
+  const pushTerminal = (evidence: CleanupEvidence): void => {
+    // EXIT: already terminal — competing stop / close / escalation events yield one transition.
+    if (terminal) return;
+    terminal = true;
+    if (killFallback !== undefined) {
+      clearTimeout(killFallback);
+      killFallback = undefined;
+    }
+    channel.push({
+      kind: "stopped",
+      signal: terminalSignal,
+      cleanup: evidence,
+    });
+    channel.close();
+  };
+
+  /**
+   * Exit condition of the bounded teardown: the group was observed gone, or
+   * the observation expired / a signal failed — which is `unconfirmed`, never
+   * a stop. The window is bounded, so this always returns.
+   *
+   * The escalation is the ceiling: once it has fired, settlement no longer
+   * waits for a leader that may never emit `close` (a signal that never landed
+   * must not leave the task's consumers waiting forever). Before that point
+   * the leader's `close` is the single settlement point, because a descendant
+   * that is still draining must not be reported as a stop.
+   */
+  const observeAndSettle = async (): Promise<void> => {
+    if (!closeObserved && !escalated) return;
+    if (pgid === undefined) {
+      pushTerminal(
+        unconfirmedCleanup(
+          0,
+          "teardown_failed",
+          "no process group to observe",
+          task_id
+        )
+      );
+      return;
+    }
+    const gone = await waitForProcessGroupGone(pgid, observeMs);
+    if (gone) {
+      pushTerminal(confirmedStopped(pgid, task_id));
+      return;
+    }
+    pushTerminal(
+      unconfirmedCleanup(
+        pgid,
+        teardownFailure !== undefined
+          ? "teardown_failed"
+          : "observation_expired",
+        teardownFailure ??
+          "process group still alive when the bounded observation ended",
+        task_id
+      )
+    );
+  };
 
   const stop = (graceMs?: number): Promise<void> => {
     const g = graceMs ?? defaultGraceMs;
@@ -305,38 +409,40 @@ export function createStopHandle(
     }
     if (stopped) return Promise.resolve();
     stopped = true;
-    try {
-      escalateToSigterm(child, pgid, log);
-    } catch (cause) {
-      return Promise.reject({
-        kind: "server_unreachable",
-        context: `stop ${task_id}: kill escalation failed`,
-        cause,
-      } satisfies SandboxServerError);
-    }
+    escalateToSigterm(child, pgid, log, recordFailure);
     if (g > 0) {
       killFallback = setTimeout(() => {
         killFallback = undefined;
-        escalateToSigkill(child, pgid, log);
+        escalated = true;
+        escalateToSigkill(child, pgid, log, recordFailure);
+        // A leader that ignores SIGTERM never emits `close`, so the escalation
+        // itself settles the verdict once the group drains (bounded).
+        void observeAndSettle();
       }, g);
-      killFallback.unref?.();
+      // Deliberately not unref'd: when the leader has already closed, this
+      // timer is the only path that reaps the surviving descendants.
+      void observeAndSettle();
     } else {
       // graceMs=0 → SIGKILL immediately, skipping the setTimeout queue.
-      escalateToSigkill(child, pgid, log);
+      escalated = true;
+      escalateToSigkill(child, pgid, log, recordFailure);
+      void observeAndSettle();
     }
     return Promise.resolve();
   };
 
-  const cancelKillTimer = (): void => {
-    if (killFallback !== undefined) {
-      clearTimeout(killFallback);
-      killFallback = undefined;
-    }
+  const settleTeardown = async (
+    signal: NodeJS.Signals | null
+  ): Promise<void> => {
+    if (terminal) return;
+    terminalSignal ??= signal;
+    closeObserved = true;
+    await observeAndSettle();
   };
 
   return {
     stop,
-    cancelKillTimer,
+    settleTeardown,
     get stopped() {
       return stopped;
     },

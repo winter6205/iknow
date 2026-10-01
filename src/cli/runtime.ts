@@ -144,6 +144,29 @@ export interface CliBuildEngineOpts {
    *  path is derived at call time by `resolveConversationTodoPath` (SSOT in
    *  todo-write.ts). chat/ask CLI entry points resolve it and forward. */
   todoDir?: string;
+  /**
+   * ADR-0132: the CURRENT session's `conversationId`, as a live reader.
+   * Paired with `todoDir`, it is what resolves this identity's session scratch
+   * for the bounded-cleanup root context (ADR-0132 / spec SC4). Absent → no
+   * scratch scope → the scratch exception never applies and every
+   * destructive-rm verdict is unchanged (fail-toward-deny).
+   *
+   * Declared here so the CLI entries that wire it are compile-checked. The
+   * chat entry reached it before this declaration through an untyped object
+   * literal, which is exactly the silent-drop direction this interface exists
+   * to close (see the forwarding note above).
+   */
+  sessionConversationId?: () => string | undefined;
+  /**
+   * ADR-0132: the session-folder ROOT (`<pool>/projects/<slug>`) the scratch
+   * `<root>/<conversationId>/fence-tmp` hangs under. Carried on its own channel
+   * rather than reusing `todoDir`, which ADR-0028 gates per surface: the ask
+   * entry withholds `todoDir` so `todo_write` / agentStatus stay unregistered,
+   * and a scratch root that rides the same field would go with it. Declared
+   * here so the entries that wire it stay compile-checked (see the silent-drop
+   * note above).
+   */
+  sessionRootDir?: string;
   /** ADR-0019: per-root state anchor — the CLI `--workspace-root` flag
    *  forwards to build-engine (the `[explicit, env, cwd]` priority chain
    *  runs at the build-engine layer). Each CLI entry point

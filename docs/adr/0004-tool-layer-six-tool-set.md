@@ -3,6 +3,8 @@
 Date: 2026-08-04
 Status: accepted
 
+Amendment 2026-09-30: ADR-0134 partially supersedes Decision 1's statement that Bash timeout is not exposed to the model. Bash gains optional `timeout_ms`, a 10-second foreground default, and the explicit-background timeout/omission contract. Timing remains host-enforced; the other tool-layer decisions remain in force.
+
 Amendment 2026-09-12: `grep`'s default output shape and count parameter **`head_limit`** are ruled in ADR-0084; the grep clause below ("output is a plain string `path:line:content`") is no longer the default rendering (that is `output=content`). Same-day change: `read_file` without `limit` reads from offset to EOF (the "default 200 lines" in clause 2 is void; the once-drafted default/cap-both-2000 was also rejected); an explicit `limit` stays hard-capped at 2000. `write_file`'s hard rejection of non-empty unread files is ruled in ADR-0084; `edit_file` gets no last-read precondition. The once-drafted "too-short anchor forbids `replace_all`" was rejected; the edit_file clause's unique-match + explicit `replace_all` stands.
 
 ## Context

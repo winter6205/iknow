@@ -914,7 +914,11 @@ describe("SC11: EXPECTED clauses", () => {
       "rm -rf /tmp/deep": "destructive-rm",
       "dd if=/dev/zero of=/dev/sda": "destructive-disk",
       "> /tmp/x": "bare-metachar",
-      "find /": "root-find-walk",
+      // A MUTATING root search: SC6 withdrew the deny for a read-only one, so
+      // `find /` itself is no longer a legacy-deny row and class (e) has no
+      // premise left for it. This id still defers for the searches the wall
+      // owns, which is what the class is about.
+      "find / -delete": "root-find-walk",
     };
     for (const [command, id] of Object.entries(expectedIds)) {
       const row = dualRunCommand(command);
@@ -923,6 +927,15 @@ describe("SC11: EXPECTED clauses", () => {
       expect(row.class, command).toBe("EXPECTED");
       expect(row.clause, command).toBe("e");
     }
+  });
+
+  it("a read-only root search is no longer a legacy-deny row at all", () => {
+    // The premise of clause (e) is a LEGACY DENY, so the command SC6 released
+    // cannot carry the clause: with no old verdict there is nothing to defer.
+    const row = dualRunCommand("find /");
+    expect(row.oldVerdict).toBeNull();
+    expect(row.class).toBe("EXPECTED");
+    expect(row.clause ?? null).toBeNull();
   });
 
   it("a row with no divergence at all is EXPECTED and carries no clause (the corpus is mostly this)", () => {

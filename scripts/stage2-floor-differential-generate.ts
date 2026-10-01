@@ -13,7 +13,9 @@
  * exactly, `expected-relaxation` with the licensed class number AND the spec
  * clause that licenses it when the base denied and the working tree allows,
  * `authorized-id-move` for the one denial whose reported id changes while its
- * tier does not, `fixed` for the allow-to-deny move the spec authorizes in
+ * tier does not, `authorized-diagnostic-move` for the `malformed` denial whose
+ * id and tier both hold while its pattern gains the parse layer's own reason,
+ * `fixed` for the allow-to-deny move the spec authorizes in
  * advance — the two code-bearing fork-bomb variants, with their cause recorded —
  * `security-review` for the deny-to-reviewed-ask move ADR-0127 routes (SC-S2-6
  * class (4): the live review tier is asked first on every deny-to-allow
@@ -101,12 +103,16 @@ export type DivergenceLabel =
   | "same"
   | "expected-relaxation"
   | "authorized-id-move"
+  | "authorized-diagnostic-move"
   | "fixed"
   | "security-review"
   | "open";
 
-/** The licensed relaxation classes: quote/heredoc, inert-span, operand-scope. */
-export type RelaxationClass = "1" | "2" | "3";
+/**
+ * The licensed relaxation classes: quote/heredoc, inert-span, operand-scope,
+ * read-only root search.
+ */
+export type RelaxationClass = "1" | "2" | "3" | "4";
 
 export type WallValue = DangerousPatternHit | boolean | null;
 
@@ -119,6 +125,11 @@ export const RELAXATION_CLAUSES: Record<RelaxationClass, string> = {
   "1": "specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)",
   "2": "specs/hard-wall-ast-migration.md SC-GATES-3 class (2) inert-span (SC-S2-7 comment text, non-code-receiver quoted body)",
   "3": "specs/hard-wall-ast-migration.md SC-GATES-3 class (3) operand-scope (SC-S2-1 third flip; an operand that is data, so not a carrier's)",
+  // Not a migration class: a policy change, admitted to the same vocabulary so
+  // the ledger can price it rather than report it as an unexplained deny→allow.
+  // SC6 withdrew the deny for a READ-ONLY root search only; a mutating one keeps
+  // it, which is the limit this class may never cross.
+  "4": "specs/hard-wall-denial-alignment.md SC6 root read-only search (Assumption 4 Root search; ADR-0134; a mutating root search keeps the deny)",
 };
 
 /**
@@ -158,15 +169,32 @@ const headOracle: Oracle = {
 };
 
 /**
- * The one `{id, pattern}` pair the migration authorizes to move: the fork-bomb
- * shape, denied on both sides, whose reported id changes with the structural
- * rule. Anything else that moves is not authorized and lands `open`.
+ * The `{id, pattern}` pairs the migration authorizes to move. Each is a
+ * distinct class with its own label, so that granting one is never a widened
+ * grant of the other: the fork-bomb shape changes which rule answered it, and
+ * the malformed diagnostic only gains the reason the parse layer already held.
+ * Anything else that moves is not authorized and lands `open`.
  */
-const AUTHORIZED_ID_MOVE: readonly [DangerousPatternHit, DangerousPatternHit] =
+const AUTHORIZED_ID_MOVES: readonly (readonly [
+  DivergenceLabel,
+  DangerousPatternHit,
+  DangerousPatternHit,
+])[] = [
   [
+    "authorized-id-move",
     { id: "bare-metachar", pattern: "|" },
     { id: "destructive-disk", pattern: ":(){ :|:& };:" },
-  ];
+  ],
+  [
+    "authorized-diagnostic-move",
+    { id: "unparseable", pattern: "verdict=malformed" },
+    {
+      id: "unparseable",
+      pattern:
+        "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
+    },
+  ],
+];
 
 // ---------------------------------------------------------------------------
 // the pre-migration oracle
@@ -639,17 +667,26 @@ function excusedBy(
   );
 }
 
-function isAuthorizedMove(
+/**
+ * Which authorized class one moved pair belongs to, by byte-for-byte
+ * comparison of both fields on both sides. A rewording or a re-id of either
+ * side is a different pair and prices `open`, which is what keeps one
+ * diagnostic edit from becoming a standing license for the next.
+ */
+function authorizedMoveLabel(
   base: DangerousPatternHit,
   head: DangerousPatternHit
-): boolean {
-  const [from, to] = AUTHORIZED_ID_MOVE;
-  return (
-    base.id === from.id &&
-    base.pattern === from.pattern &&
-    head.id === to.id &&
-    head.pattern === to.pattern
-  );
+): DivergenceLabel | null {
+  for (const [label, from, to] of AUTHORIZED_ID_MOVES) {
+    if (
+      base.id === from.id &&
+      base.pattern === from.pattern &&
+      head.id === to.id &&
+      head.pattern === to.pattern
+    )
+      return label;
+  }
+  return null;
 }
 
 /** A licensed relaxation always arrives with the clause that licensed it. */
@@ -691,6 +728,21 @@ function isAuthorizedNewDeny(
   );
 }
 
+/**
+ * SC6: the wall withdrew its deny for a READ-ONLY root search. The class is
+ * licensed only when the withdrawn finding is the root-walk id itself, so a
+ * relaxation of some OTHER id is never this class however read-only the
+ * command looks — the id is the first half of the licence, the grammar the
+ * second.
+ */
+function withdrawnReadOnlyRootSearch(
+  command: string,
+  base: DangerousPatternHit
+): Verdict | null {
+  if (base.id !== "root-find-walk") return null;
+  return isReadOnlyRootSearchCommand(command) ? relaxation("4") : null;
+}
+
 export function classifyPattern(
   command: string,
   base: DangerousPatternHit | null,
@@ -704,17 +756,221 @@ export function classifyPattern(
       : { label: "open" };
   }
   if (head !== null) {
-    return isAuthorizedMove(base, head)
-      ? { label: "authorized-id-move" }
-      : { label: "open" };
+    const move = authorizedMoveLabel(base, head);
+    return move === null ? { label: "open" } : { label: move };
   }
   const quotes = quoteLicensedSpans(command);
   if (excusedBy(command, quotes, oracle)) return relaxation("1");
   const spans = [...quotes, ...operandLicensedSpans(command)];
-  return excusedBy(command, spans, oracle)
-    ? relaxation("3")
-    : { label: "open" };
+  if (excusedBy(command, spans, oracle)) return relaxation("3");
+  return withdrawnReadOnlyRootSearch(command, base) ?? { label: "open" };
 }
+
+/**
+ * Whether a command is the read-only root search SC6 stopped denying: a `find`
+ * whose search root is the filesystem root (or hidden in a `cd /` before it)
+ * and whose whole expression is read-only.
+ *
+ * Derived from the COMMAND TEXT, deliberately, and never by importing the
+ * wall's own predicate. This generator's independence property is the whole
+ * point of the ledger: if it asked the wall whether a command is a read-only
+ * root search, the rule under test would be grading its own homework, and a
+ * wall that quietly widened would widen the licence with it. So the shape is
+ * re-derived here from the same grammar facts the spec states — the root
+ * spelling, the `cd` that can hide it, and the closed roster of predicates that
+ * only read — and anything this cannot read is left `open`.
+ */
+function isReadOnlyRootSearchCommand(command: string): boolean {
+  let cwdIsRoot = false;
+  for (const segment of shellSegments(command)) {
+    const tokens = segment
+      .trim()
+      .split(/\s+/)
+      .filter((token) => token.length > 0)
+      .map((token) => token.replace(/^["']|["']$/g, ""));
+    if (tokens.length === 0) continue;
+    const head = (tokens[0] ?? "").replace(/\\/g, "").toLowerCase();
+    if (head === "cd") {
+      cwdIsRoot = (tokens[1] ?? "") === "/";
+      continue;
+    }
+    if (head !== "find") {
+      cwdIsRoot = false;
+      continue;
+    }
+    const verdict = classifyFindSegment(tokens, cwdIsRoot);
+    if (verdict !== "not-root") return verdict === "read-only";
+    cwdIsRoot = false;
+  }
+  return false;
+}
+
+/** The top-level segments the fold reads: `;`, `&&`, `||` and line breaks. */
+function shellSegments(command: string): string[] {
+  return command
+    .replace(/\r\n?/g, "\n")
+    .split("\n")
+    .flatMap((line) => line.split(/(?:;|&&|\|\|)/));
+}
+
+/**
+ * `find`'s leading global options and how many further tokens each consumes:
+ * `-H` / `-L` / `-P` / `--` take none, `-D tree` takes one, and `-O<level>` is
+ * spelled glued to its level. Re-derived here from the same grammar facts the
+ * wall's own `FIND_GLOBAL_OPTION_ARITY` states, for the reason stated above:
+ * the two must not read each other, but they must read the same grammar, and a
+ * shared SHAPE here is what keeps a future option from being handled on one
+ * side only.
+ */
+const FIND_GLOBAL_OPTION_ARITY: ReadonlyMap<string, number> = new Map([
+  ["-H", 0], ["-L", 0], ["-P", 0], ["-D", 1], ["--", 0],
+]);
+
+/** How many tokens the global option at `token` consumes past itself. */
+function globalOptionArity(token: string | undefined): number | undefined {
+  if (token === undefined) return undefined;
+  const known = FIND_GLOBAL_OPTION_ARITY.get(token);
+  return known ?? (/^-O\d$/.test(token) ? 0 : undefined);
+}
+
+/** The index of the first token after the run of leading global options. */
+function afterGlobalOptions(
+  tokens: ReadonlyArray<string>
+): number {
+  let i = 1;
+  for (;;) {
+    const arity = globalOptionArity(tokens[i]);
+    if (arity === undefined) return i;
+    i += arity + 1;
+  }
+}
+
+/**
+ * The search roots of a `find` segment, and the index of the expression that
+ * follows them. GNU find's own boundary: paths must precede the expression, so
+ * the run ends at the first predicate, `(` or `!`.
+ */
+function findRoots(
+  tokens: ReadonlyArray<string>,
+  from: number
+): { readonly roots: readonly string[]; readonly expressionAt: number } {
+  const roots: string[] = [];
+  let i = from;
+  for (; i < tokens.length; i += 1) {
+    const token = tokens[i] ?? "";
+    if (token.startsWith("-") || token === "(" || token === "!") break;
+    roots.push(token);
+  }
+  return { roots, expressionAt: i };
+}
+
+/** Whether this segment's search roots reach the filesystem root. */
+function rootsHitRoot(
+  roots: ReadonlyArray<string>,
+  cwdIsRoot: boolean
+): boolean {
+  if (roots.length === 0) return cwdIsRoot;
+  return roots.some((root) => normalizeRootSpelling(root) === "/");
+}
+
+/**
+ * Whether every token of the expression is read-only traversal, read as a
+ * grammar walk so a value-taking predicate's value is consumed rather than
+ * judged as a predicate of its own.
+ */
+function isReadOnlyExpression(tokens: ReadonlyArray<string>, from: number): boolean {
+  for (let j = from; j < tokens.length; j += 1) {
+    const token = tokens[j] ?? "";
+    if (READ_ONLY_EXPRESSION_OPERATORS.has(token)) continue;
+    if (!token.startsWith("-")) {
+      // A non-flag token that is not an operator is an action terminator or a
+      // value the walk did not consume; either way the expression is not a
+      // read-only one.
+      return false;
+    }
+    const arity = READ_ONLY_EXPRESSION_TOKENS.get(token);
+    if (arity === undefined) return false;
+    j += arity;
+  }
+  return true;
+}
+
+/**
+ * One `find` segment, read against the `find [global-options] [path…]
+ * [expression]` grammar the spec states. `not-root` means the segment is
+ * simply not a root search (so the caller keeps looking); the other two are the
+ * answer, and only `read-only` is licensed as a relaxation.
+ */
+function classifyFindSegment(
+  tokens: ReadonlyArray<string>,
+  cwdIsRoot: boolean
+): "read-only" | "mutating" | "not-root" {
+  const { roots, expressionAt } = findRoots(
+    tokens,
+    afterGlobalOptions(tokens)
+  );
+  if (!rootsHitRoot(roots, cwdIsRoot)) return "not-root";
+  return isReadOnlyExpression(tokens, expressionAt)
+    ? "read-only"
+    : "mutating";
+}
+
+/** `/`, `//`, `/./`, `/../` and `"/"` all denote the filesystem root. */
+function normalizeRootSpelling(token: string): string | undefined {
+  if (!token.startsWith("/")) return undefined;
+  const parts: string[] = [];
+  for (const part of token.split("/")) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") {
+      parts.pop();
+      continue;
+    }
+    parts.push(part);
+  }
+  return `/${parts.join("/")}`;
+}
+
+/**
+ * The read-only predicates and how many following tokens each consumes, copied
+ * from the spec's own roster rather than imported from the wall (see this
+ * function's caller for why the copy is the point). A predicate absent from
+ * this map — every mutating action, and every spelling GNU findutils rejects —
+ * withholds the licence.
+ *
+ * The copy is only worth its independence while it is NOT looser than the wall
+ * it grades. A name here that the wall does not also admit prices a command the
+ * wall still denies as a licensed class-4 relaxation, which is a licence
+ * recorded for a transition that never happened; the day the wall admits the
+ * name, the row silently reads `4` where it should read `open`. A superset is
+ * therefore a defect, not slack, and
+ * `tests/harness/permission/stage2-generator-roster.test.ts` pins the subset
+ * relation as a set property over both literals.
+ *
+ * The roster is named to what GNU findutils actually accepts, which is why the
+ * BSD-only `-larger` / `-smaller` are absent: `find / -larger 1M -print` is
+ * `Unknown argument` on findutils, and a command the binary rejects is a
+ * command the wall has no reason to read as read-only traversal.
+ */
+const READ_ONLY_EXPRESSION_TOKENS: ReadonlyMap<string, number> = new Map([
+  ["-name", 1], ["-iname", 1], ["-path", 1], ["-wholename", 1],
+  ["-iwholename", 1], ["-regex", 1], ["-iregex", 1], ["-regextype", 1],
+  ["-lname", 1], ["-type", 1], ["-xtype", 1], ["-size", 1],
+  ["-empty", 0], ["-samefile", 1], ["-inum", 1],
+  ["-links", 1], ["-perm", 1], ["-mtime", 1], ["-atime", 1], ["-ctime", 1],
+  ["-amin", 1], ["-cmin", 1], ["-newer", 1], ["-anewer", 1], ["-cnewer", 1],
+  ["-used", 1], ["-newermt", 1], ["-user", 1], ["-group", 1], ["-uid", 1],
+  ["-gid", 1], ["-nouser", 0], ["-nogroup", 0], ["-fstype", 1], ["-xdev", 0],
+  ["-prune", 0], ["-quit", 0], ["-maxdepth", 1], ["-mindepth", 1],
+  ["-follow", 0], ["-depth", 0], ["-noleaf", 0],
+  ["-ignore_readdir_race", 0], ["-readable", 0], ["-writable", 0],
+  ["-executable", 0], ["-print", 0], ["-print0", 0], ["-printf", 1],
+  ["-ls", 0], ["-true", 0], ["-false", 0],
+]);
+
+/** `find`'s expression operators, which arrange predicates and carry none. */
+const READ_ONLY_EXPRESSION_OPERATORS: ReadonlySet<string> = new Set([
+  "(", ")", "!", ",", "-a", "-and", "-o", "-or",
+]);
 
 export function classifySensitive(
   command: string,
@@ -1297,6 +1553,8 @@ const LABEL_ROW_BUMPS: Readonly<
   ],
   "security-review": securityReviewBumps,
   fixed: () => ["authorized-new-deny"],
+  "authorized-id-move": () => ["authorized-id-move"],
+  "authorized-diagnostic-move": () => ["authorized-diagnostic-move"],
 };
 
 /** The report buckets one row falls into. */

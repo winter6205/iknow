@@ -13,9 +13,9 @@
  *     against the old char scan — the "wider boundaries measured before
  *     T26" numbers of SC-S4-3.
  *
- * Headline counts (pinned below): shipped vs old = {same: 446,
- * widened-boundaries: 0, dropped-boundaries: 0} over the 446 `ok` rows;
- * pure-facts vs old = {same: 407, widened-boundaries: 0,
+ * Headline counts (pinned below): shipped vs old = {same: 447,
+ * widened-boundaries: 0, dropped-boundaries: 0} over the 447 `ok` rows;
+ * pure-facts vs old = {same: 408, widened-boundaries: 0,
  * dropped-boundaries: 39}, where the 39 are 33 rows whose SEGMENT STRINGS
  * widen (every dropped boundary is a fabrication inside a quoted span, a
  * heredoc body, or a comment — the class the consumer contract licenses as
@@ -264,9 +264,9 @@ describe("replica fidelity: the offset-slice arm is the verbatim scan", () => {
 });
 
 describe("shipped derivation vs the old char scan (SC-S4-3 move)", () => {
-  it("is byte-identical: {same: 446, widened-boundaries: 0, dropped-boundaries: 0}", () => {
+  it("is byte-identical: {same: 447, widened-boundaries: 0, dropped-boundaries: 0}", () => {
     const rows = okRows();
-    expect(rows.length).toBe(446);
+    expect(rows.length).toBe(447);
     let same = 0;
     let widened = 0;
     let dropped = 0;
@@ -287,8 +287,8 @@ describe("shipped derivation vs the old char scan (SC-S4-3 move)", () => {
     // either direction. Non-ok rows (the 5 census entries) degrade to the
     // scan verbatim inside production `splitCommandSegments`.
     expect({ okRows: rows.length, same, widenedBoundaries: widened, droppedBoundaries: dropped }).toEqual({
-      okRows: 446,
-      same: 446,
+      okRows: 447,
+      same: 447,
       widenedBoundaries: 0,
       droppedBoundaries: 0,
     });
@@ -404,7 +404,7 @@ describe("pure-facts arm vs the old scan — T26 measurement", () => {
     );
   });
 
-  it("the counts feed T26: {same: 407, widened: 0, dropped: 39}", () => {
+  it("the counts feed T26: {same: 408, widened: 0, dropped: 39}", () => {
     let same = 0;
     let widened = 0;
     let dropped = 0;
@@ -418,7 +418,7 @@ describe("pure-facts arm vs the old scan — T26 measurement", () => {
       else same += 1;
     }
     expect({ same, widened, dropped }).toEqual({
-      same: 407,
+      same: 408,
       widened: 0,
       dropped: 39,
     });

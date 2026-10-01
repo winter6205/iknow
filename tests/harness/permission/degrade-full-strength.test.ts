@@ -187,7 +187,11 @@ const GATES4_ROWS: readonly Gates4Row[] = [
   {
     command: "echo 'cat ~/.ssh/id_rsa'",
     hitId: null,
-    reason: "[hard_wall] dangerous command: sensitive path targeted by command",
+    // ADR-0131: the sensitive sentence now names the matched roster entry and
+    // the site. On the DEGRADE path there is no parse, so the site is the
+    // whole-text fallback this wall reports for a non-`ok` verdict.
+    reason:
+      "[hard_wall] dangerous command: sensitive path targeted by command (matched `.ssh/` at the code-region)",
   },
   {
     command: 'echo "rm -rf /"',
@@ -198,7 +202,8 @@ const GATES4_ROWS: readonly Gates4Row[] = [
   {
     command: "echo a > '/etc/passwd'",
     hitId: null,
-    reason: "[hard_wall] dangerous command: sensitive path targeted by command",
+    reason:
+      "[hard_wall] dangerous command: sensitive path targeted by command (matched `/etc/passwd` at the code-region)",
   },
   {
     command: "find / -delete",

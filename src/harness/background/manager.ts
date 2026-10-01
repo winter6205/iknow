@@ -46,11 +46,23 @@ import type {
   EgressPolicyInput,
   EgressSession,
 } from "../sandbox/index.js";
-import type { BackgroundTaskRecord, BackgroundTaskStatus } from "./registry.js";
+import type {
+  BackgroundTaskRecord,
+  BackgroundTaskStatus,
+  BackgroundTerminationCause,
+} from "./registry.js";
 import { createBackgroundRegistry } from "./registry.js";
 import type { BackgroundRegistry } from "./registry.js";
 import type { BackgroundTaskError } from "./registry.js";
 import { readProcStartTime } from "./proc.js";
+import {
+  NOT_STARTED_CLEANUP,
+  confirmedStopped,
+  sendSignalToProcessGroup,
+  unconfirmedCleanup,
+  waitForProcessGroupGone,
+  type CleanupEvidence,
+} from "../sandbox/cleanup-result.js";
 
 /** Extra kinds for spawn-request validation failures (manager-specific; the registry is unaware of requests). */
 export type BackgroundSpawnValidationError =
@@ -78,6 +90,17 @@ export const MAX_LOG_READ_BYTES = 100 * 1024;
 export const MAX_CONCURRENT_BACKGROUND_TASKS = 8;
 /** stop escalation: SIGTERM → 2s grace → SIGKILL (reuses the runner.ts stopTree pattern). */
 const STOP_KILL_GRACE_MS = 2_000;
+/**
+ * ADR-0134: the longest accepted finite `timeout_ms`. A host timer at or
+ * beyond this cannot be represented without overflow (setTimeout's 32-bit
+ * signed millisecond delay wraps), so a larger value is a representation
+ * failure rather than a runtime policy — it is rejected, never clamped.
+ */
+export const MAX_BACKGROUND_TIMEOUT_MS = 2_147_483_647;
+/** Bounded wait for the process group to disappear before a teardown verdict
+ *  is published as `unconfirmed`. Mirrors the sandbox planes' settle window:
+ *  it bounds the verdict, never the kill route. */
+const STOP_GROUP_OBSERVE_MS = 250;
 /** shutdown constants mirroring subagent/manager.ts (same names, same
  *  values, for reviewability): SIGTERM → 5s grace → SIGKILL. */
 const SHUTDOWN_SIGKILL_GRACE_MS = 5_000;
@@ -93,9 +116,42 @@ interface BackgroundTask {
   child?: ChildProcess;
   /** Serialized log appendFile chain: each chunk continues off the previous chain tail, preserving order. */
   writeChain: Promise<void>;
+  /**
+   * Bounded-teardown evidence for this task's process group. `not_started`
+   * until stop() requests a teardown and the observation publishes its
+   * verdict; a caller reads it through `status` to tell a confirmed stop
+   * from a cleanup that never proved disappearance.
+   */
+  cleanup: CleanupEvidence;
   /** SIGKILL fallback timer armed by stop(); shutdown() must clearTimeout it
    *  to avoid double-firing with its own 5s grace escalation. */
   killFallback?: NodeJS.Timeout;
+  /**
+   * ADR-0134: the launch-time deadline timer, armed once at spawn and never
+   * re-armed. Polling, log reads and stop requests deliberately do not touch
+   * it — that is what makes the deadline a launch fact rather than an
+   * inactivity timeout. Cleared by the terminal transition and by shutdown,
+   * so a settled task's timer can never signal it afterwards.
+   */
+  deadlineTimer?: NodeJS.Timeout;
+  /**
+   * ADR-0134: the ISO instant this task's deadline expires, frozen at launch.
+   * Null on a persistent-service task (no `timeout_ms` supplied), which is
+   * how a reader tells the two lifecycles apart without consulting a timer.
+   */
+  readonly deadlineAt: string | null;
+  /**
+   * ADR-0134: the validated finite budget this task was launched with, kept so
+   * every later persistence of the record (settle, shutdown convergence)
+   * rewrites the same launch facts it read at spawn. Null = persistent service.
+   */
+  readonly timeoutMs: number | null;
+  /**
+   * ADR-0134: why this task became terminal. Null while running; written once
+   * by whichever transition won the race and read back unchanged by every
+   * later competing trigger.
+   */
+  terminationCause: BackgroundTerminationCause | null;
   /**
    * ADR-0097: egress session handle — the per-task session started by
    * manager.spawn; settle (triggered by child exit) disposes inside the
@@ -247,6 +303,56 @@ export interface BackgroundSpawnRequest {
     readonly mainCheckout: string;
     readonly tmpPad?: string;
   };
+  /**
+   * ADR-0134: the finite runtime budget for this task, in milliseconds, as
+   * supplied (and already validated) by the caller. Present → spawn freezes
+   * ONE deadline at launch (`created_at + timeoutMs`) and terminates the task
+   * when it expires; the deadline is never extended by polling, log reads or
+   * stop requests. Absent → the persistent-service lifecycle, with no runtime
+   * deadline at all — in particular the foreground 10-second default does not
+   * apply to a background task.
+   *
+   * Validation lives in `validateTimeoutMs` (the single SSOT the manager and
+   * the bash handler both consult), so an invalid value can never reach a
+   * process, a registry entry or a timer.
+   */
+  readonly timeoutMs?: number;
+}
+
+/**
+ * ADR-0134: the one validation of a finite `timeout_ms`. A value is accepted
+ * only when it is a positive, finite, integral number of milliseconds whose
+ * resulting host timer is representable. Zero, negative, fractional,
+ * non-finite and unrepresentable values are rejected with a reason instead of
+ * being clamped — a silently shortened timeout is a different contract from
+ * the one the caller asked for.
+ *
+ * Returns null for the accepted case; the shared bash handler consumes the
+ * message to build its pre-launch input failure.
+ */
+export function validateTimeoutMs(
+  value: unknown
+): { readonly ok: true } | { readonly ok: false; readonly reason: string } {
+  if (value === undefined) return { ok: true };
+  if (typeof value !== "number") {
+    return { ok: false, reason: "must be a number of milliseconds" };
+  }
+  if (!Number.isFinite(value)) {
+    return { ok: false, reason: "must be a finite number" };
+  }
+  if (!Number.isInteger(value)) {
+    return { ok: false, reason: "must be a whole number of milliseconds" };
+  }
+  if (value <= 0) {
+    return { ok: false, reason: "must be greater than 0" };
+  }
+  if (value > MAX_BACKGROUND_TIMEOUT_MS) {
+    return {
+      ok: false,
+      reason: `must not exceed ${MAX_BACKGROUND_TIMEOUT_MS} (host timer limit)`,
+    };
+  }
+  return { ok: true };
 }
 
 export type BackgroundSpawnResult =
@@ -266,6 +372,25 @@ export interface BackgroundStatusResult {
   readonly task_id: string;
   readonly exit_code: number | null;
   readonly command: string;
+  /**
+   * What the bounded teardown observed for this task's process group.
+   * `unconfirmed` means a stop was requested but disappearance was never
+   * proven — the group may still hold members, and the caller must not treat
+   * the `killed` status as proof that the work is finished.
+   */
+  readonly cleanup: CleanupEvidence;
+  /**
+   * ADR-0134: the launch-time deadline as an ISO instant, or null on a
+   * persistent-service task. Reading it never moves it — this is a projection
+   * of the clock frozen at launch, not a fresh computation.
+   */
+  readonly deadline_at: string | null;
+  /**
+   * ADR-0134: why the task is in its current state. Null while running; once
+   * terminal it names the trigger that won the race and never changes again,
+   * so a caller reading cause and cleanup together gets one coherent story.
+   */
+  readonly cause: BackgroundTerminationCause | null;
 }
 
 export interface BackgroundOutputResult {
@@ -302,14 +427,17 @@ export interface BackgroundTaskManager {
   ) => Promise<BackgroundOutputResult>;
   /**
    * Host-side kill(-pgid): SIGTERM → 2s grace → SIGKILL.
-   * Idempotent success on already-terminal tasks (a legal state); unknown
-   * tasks throw task_not_found. requesterConversationId is optional (scope
-   * filter, semantics identical to output).
+   * Returns the teardown *request's* evidence, never a claim that the task
+   * exited: the confirmed/unconfirmed verdict for a requested teardown lands on
+   * the task's `cleanup` evidence (read via `status`) after the bounded
+   * observation. Idempotent success on already-terminal tasks (a legal state);
+   * unknown tasks throw task_not_found. requesterConversationId is optional
+   * (scope filter, semantics identical to output).
    */
   readonly stop: (
     taskId: string,
     requesterConversationId?: string
-  ) => Promise<void>;
+  ) => Promise<CleanupEvidence>;
   /**
    * Process-level shutdown (mirrors the subagent manager's exit reap, ADR-0021):
    * clear killFallback timers → SIGTERM all running process groups → ≤5s
@@ -474,7 +602,10 @@ export async function defaultBackgroundSpawn(
   }) as ChildProcess;
 }
 
-/** Spawn-request validation: command must be a non-empty string. */
+/** Spawn-request validation: command must be a non-empty string, and an
+ *  explicit finite `timeoutMs` must be representable (ADR-0134). Both checks
+ *  run before a task id is allocated, so a rejected request leaves no process,
+ *  no registry entry and no timer. */
 function validateRequest(
   req: BackgroundSpawnRequest
 ): BackgroundSpawnValidationError | null {
@@ -482,6 +613,13 @@ function validateRequest(
     return {
       kind: "spawn_validation_failed",
       context: "spawn: command required",
+    } satisfies BackgroundSpawnValidationError;
+  }
+  const timeout = validateTimeoutMs(req.timeoutMs);
+  if (!timeout.ok) {
+    return {
+      kind: "spawn_validation_failed",
+      context: `spawn: timeoutMs ${timeout.reason}`,
     } satisfies BackgroundSpawnValidationError;
   }
   return null;
@@ -494,8 +632,7 @@ function validateRequest(
  * started detached child (SIGKILL, no orphan leak); on success returns
  * undefined. Its own function (complexity gate: spawn does orchestration
  * only).
- */
-async function saveSpawnRecordOrReap(
+ */async function saveSpawnRecordOrReap(
   record: BackgroundTaskRecord,
   child: ChildProcess,
   registry: BackgroundRegistry
@@ -512,6 +649,210 @@ async function saveSpawnRecordOrReap(
     }
     return error;
   }
+}
+
+/**
+ * ADR-0134: disarm every timer a task is holding. Two independent reasons
+ * they must not survive their owner: the stop escalation would re-issue a
+ * SIGKILL that shutdown's own 5s grace already replaced, and a pending
+ * deadline would signal a task after a process-wide shutdown already ended it.
+ */
+function clearTaskTimers(task: BackgroundTask): void {
+  if (task.killFallback) {
+    clearTimeout(task.killFallback);
+    task.killFallback = undefined;
+  }
+  if (task.deadlineTimer) {
+    clearTimeout(task.deadlineTimer);
+    task.deadlineTimer = undefined;
+  }
+}
+
+/**
+ * ADR-0134: the single terminal arbitration point. A settled flag alone is
+ * not enough — a stop request, a deadline expiry and the child's own exit can
+ * all reach a terminal state, and each carries a cause the caller needs. This
+ * assigns the cause exactly once, so a later competing trigger can only
+ * observe the cause already recorded (single-wins semantics — the same
+ * discipline `observeTaskGroupGone` uses for the cleanup verdict).
+ */
+function claimTermination(
+  task: BackgroundTask,
+  cause: BackgroundTerminationCause
+): boolean {
+  if (task.terminationCause !== null) return false;
+  task.terminationCause = cause;
+  return true;
+}
+
+/**
+ * The one-shot terminal transition for a task: migrate the in-memory status,
+ * dispose the egress session, and persist the record. Idempotent by
+ * construction — the first call wins and later calls return immediately.
+ *
+ * The guard ordering is load-bearing. The deadline timer is cleared first (a
+ * terminal task must never be signalled by a pending timer), and the status
+ * migration stays in the same synchronous run as the exit event for a task
+ * with no egress session, so a `status()` reader sampling right after the
+ * emit never observes a stale "running".
+ */
+function createSettleClosure(args: {
+  readonly task: BackgroundTask;
+  readonly record: BackgroundTaskRecord;
+  readonly client: MutableClientState;
+  readonly persistCommand: string;
+  readonly logPath: string;
+  readonly registry: BackgroundRegistry;
+  readonly disposeEgress: (session: EgressSession | undefined) => Promise<void>;
+  readonly log: (msg: string) => void;
+}): (status: BackgroundTaskStatus, exitCode: number | null) => Promise<void> {
+  const { task, record, client, persistCommand, logPath, registry, log } = args;
+  let settled = false;
+  return async (status, exitCode) => {
+    if (settled) return;
+    settled = true;
+    if (task.deadlineTimer !== undefined) {
+      clearTimeout(task.deadlineTimer);
+      task.deadlineTimer = undefined;
+    }
+    // ADR-0097: the egress session is released inside the settle guard — same
+    // lifetime as the task (the child-exit event is the release moment);
+    // dispose failures are swallowed, and shutdown()'s convergence step does
+    // not re-dispose (this guard is idempotent).
+    if (task.egressSession !== undefined) {
+      await args.disposeEgress(task.egressSession);
+    }
+    client.status = status;
+    client.exit_code = exitCode;
+    const rec: BackgroundTaskRecord = {
+      task_id: task.task_id,
+      command: persistCommand,
+      owner_pid: process.pid,
+      conversation_id: record.conversation_id,
+      pgid: record.pgid,
+      status,
+      exit_code: exitCode,
+      created_at: record.created_at,
+      log_path: logPath,
+      ...(record.starttime !== undefined ? { starttime: record.starttime } : {}),
+      ...terminalDeadlineFields(task),
+    };
+    try {
+      await registry.save(rec);
+    } catch (err) {
+      log(
+        `background registry save failed on settle: ${
+          (err as BackgroundTaskError).context
+        }`
+      );
+    }
+  };
+}
+
+/**
+ * ADR-0134: the cause an exit event carries. A signal death on a task nobody
+ * tore down is the process answering a kill that has not been accounted for
+ * (the historical `killed` semantics), so it is named `stop_requested`; any
+ * other exit is the task finishing on its own. A task that already owns a
+ * cause keeps it — a natural exit arriving after a stop request or a deadline
+ * cannot relabel the story the trigger already wrote.
+ */
+function claimExitCause(
+  task: BackgroundTask,
+  signal: NodeJS.Signals | null
+): void {
+  if (task.terminationCause !== null) return;
+  task.terminationCause =
+    signal !== null ? "stop_requested" : "exit";
+}
+
+/**
+ * ADR-0021 + ADR-0134: assemble the running-state record. The deadline
+ * fields are present exactly when a finite budget was supplied, so the
+ * persisted shape itself distinguishes a finite job from a persistent service.
+ */
+function buildSpawnRecord(args: {
+  readonly taskId: string;
+  readonly persistCommand: string;
+  readonly conversationId: string | undefined;
+  readonly pgid: number;
+  readonly createdAt: string;
+  readonly logPath: string;
+  readonly starttime: number | undefined;
+  readonly timeoutMs: number | undefined;
+  readonly deadlineAt: string | null;
+}): BackgroundTaskRecord {
+  return {
+    task_id: args.taskId,
+    command: args.persistCommand,
+    owner_pid: process.pid,
+    conversation_id: args.conversationId ?? "",
+    pgid: args.pgid,
+    status: "running",
+    exit_code: null,
+    created_at: args.createdAt,
+    log_path: args.logPath,
+    ...(args.starttime !== undefined ? { starttime: args.starttime } : {}),
+    ...(args.deadlineAt !== null
+      ? { timeout_ms: args.timeoutMs, deadline_at: args.deadlineAt }
+      : {}),
+  };
+}
+
+/**
+ * ADR-0134: freeze the ONE deadline instant at launch. Derived from
+ * `createdAt` (the record's own time-invariant anchor) rather than a second
+ * `Date.now()` reading, so the persisted `deadline_at` and the armed timer
+ * always name the same instant. A persistent-service request (`timeoutMs`
+ * absent) has no deadline at all — null is that contract, not a "not yet".
+ */
+function freezeDeadlineAt(
+  createdAt: string,
+  timeoutMs: number | undefined
+): string | null {
+  if (timeoutMs === undefined) return null;
+  return new Date(Date.parse(createdAt) + timeoutMs).toISOString();
+}
+
+/**
+ * ADR-0134: the launch-fact fields a persisted record carries, shared by the
+ * running record, the settle rewrite and the shutdown convergence so all three
+ * state the same deadline and the same cause. A persistent-service task
+ * contributes nothing here — the absence of these fields IS the signal that no
+ * runtime deadline exists.
+ */
+function terminalDeadlineFields(task: BackgroundTask): Partial<BackgroundTaskRecord> {
+  return {
+    ...(task.timeoutMs !== null
+      ? { timeout_ms: task.timeoutMs, deadline_at: task.deadlineAt as string }
+      : {}),
+    ...(task.terminationCause !== null
+      ? { termination_cause: task.terminationCause }
+      : {}),
+  };
+}
+
+/**
+ * ADR-0134: arm the launch-time deadline, once, and only for a finite task.
+ * The teardown reuses the stop route (TERM → the same bounded observation →
+ * KILL escalation), so a deadline expiry produces the same truthful cleanup
+ * evidence an explicit stop produces, with `deadline_expired` as the cause.
+ *
+ * `unref` keeps a pending deadline from holding the event loop open — the
+ * same reason the stop escalation timer is unref'd. Nothing here is ever
+ * re-armed: a poll, a log read or a stop request cannot reach this function.
+ */
+function armTaskDeadline(
+  task: BackgroundTask,
+  onExpired: () => void
+): void {
+  if (task.timeoutMs === null) return;
+  const timer = setTimeout(() => {
+    if (task.client.status !== "running") return;
+    onExpired();
+  }, task.timeoutMs);
+  timer.unref?.();
+  task.deadlineTimer = timer;
 }
 
 export function createBackgroundTaskManager(
@@ -644,18 +985,20 @@ export function createBackgroundTaskManager(
      *  manager.spawn paths) default to falling back to command, behavior
      *  unchanged. */
     const persistCommand = request.recordCommand ?? request.command;
-    const record: BackgroundTaskRecord = {
-      task_id: taskId,
-      command: persistCommand,
-      owner_pid: process.pid,
-      conversation_id: request.conversationId ?? "",
+    const createdAt = new Date().toISOString();
+    // ADR-0134: freeze the ONE deadline here, at launch.
+    const deadlineAt = freezeDeadlineAt(createdAt, request.timeoutMs);
+    const record = buildSpawnRecord({
+      taskId,
+      persistCommand,
+      conversationId: request.conversationId,
       pgid: child.pid,
-      status: "running",
-      exit_code: null,
-      created_at: new Date().toISOString(),
-      log_path: logPath,
-      ...(starttime !== undefined ? { starttime } : {}),
-    };
+      createdAt,
+      logPath,
+      starttime,
+      timeoutMs: request.timeoutMs,
+      deadlineAt,
+    });
 
     // Registry json persistence (running state) precedes the return — once
     // spawn resolves the registry is on disk (spawn → registry synchronization
@@ -681,6 +1024,10 @@ export function createBackgroundTaskManager(
       createdAt: record.created_at,
       child,
       writeChain: Promise.resolve(),
+      cleanup: NOT_STARTED_CLEANUP,
+      deadlineAt,
+      timeoutMs: request.timeoutMs ?? null,
+      terminationCause: null,
       // ADR-0097: dispose on the settle path (the session handle is held by
       // the manager, kept out of the registry and the zod schema).
       ...(egressSession !== undefined ? { egressSession } : {}),
@@ -688,52 +1035,23 @@ export function createBackgroundTaskManager(
     tasks.set(taskId, task);
 
     // Terminal status transition: driven by the exit event, migrated once.
-    let settled = false;
-    const settle = async (
-      status: BackgroundTaskStatus,
-      exitCode: number | null
-    ): Promise<void> => {
-      if (settled) return;
-      settled = true;
-      // ADR-0097: dispose the egress session synchronously inside the settle
-      // guard — same lifetime as the task (the child-exit event is the
-      // release moment); dispose failures are swallowed (a terminal session
-      // does not throw); holding the session handle is the manager layer's
-      // job, and shutdown() convergence step 5 does not re-dispose (the
-      // settled guard is idempotent). The guard stays at the call site: with
-      // egressSession undefined there must be zero awaits — settle inside
-      // the exit-event callback must migrate client.status synchronously
-      // (status() readers sample synchronously after the emit; one extra
-      // microtask tick would read "running").
-      if (task.egressSession !== undefined) {
-        await disposeEgressQuietly(task.egressSession);
+    const settle = createSettleClosure({
+      task,
+      record,
+      client,
+      persistCommand,
+      logPath,
+      registry,
+      disposeEgress: disposeEgressQuietly,
+      log,
+    });
+
+    armTaskDeadline(task, () => {
+      if (claimTermination(task, "deadline_expired")) {
+        log(`background deadline expired: ${taskId}`);
       }
-      client.status = status;
-      client.exit_code = exitCode;
-      const rec: BackgroundTaskRecord = {
-        task_id: taskId,
-        command: persistCommand,
-        owner_pid: process.pid,
-        conversation_id: record.conversation_id,
-        pgid: record.pgid,
-        status,
-        exit_code: exitCode,
-        created_at: record.created_at,
-        log_path: logPath,
-        ...(record.starttime !== undefined
-          ? { starttime: record.starttime }
-          : {}),
-      };
-      try {
-        await registry.save(rec);
-      } catch (err) {
-        log(
-          `background registry save failed on settle: ${
-            (err as BackgroundTaskError).context
-          }`
-        );
-      }
-    };
+      requestTeardown(task, "deadline");
+    });
 
     // Streaming log append: stdout + stderr merge into the same log file.
     // The serialized chain preserves order: each chunk continues off
@@ -757,10 +1075,21 @@ export function createBackgroundTaskManager(
       // event arrives the write queue may still be pending — settle only
       // migrates status + persists json; log flush is drained on the output
       // side.
-      const termStatus: BackgroundTaskStatus =
-        signal !== null ? "killed" : "exited";
-      const exitCode = code ?? (signal === null ? 0 : null);
-      void settle(termStatus, exitCode);
+      claimExitCause(task, signal);
+      // The leader's exit says nothing about the tree: a descendant that holds
+      // no pipe keeps the group alive, so a teardown's verdict waits for the
+      // bounded observation rather than for this event. A natural exit with no
+      // teardown requested publishes no stop claim.
+      if (task.cleanup.state !== "not_started") {
+        void observeTaskGroupGone(
+          task,
+          task.cleanup.state === "unconfirmed" ? task.cleanup.detail : undefined
+        );
+      }
+      void settle(
+        signal !== null ? "killed" : "exited",
+        code ?? (signal === null ? 0 : null)
+      );
     });
 
     return { status: "ok", task_id: taskId, log_path: logPath };
@@ -822,6 +1151,11 @@ export function createBackgroundTaskManager(
       task_id: taskId,
       exit_code: task.client.exit_code,
       command: task.client.command,
+      cleanup: task.cleanup,
+      // Projections of the launch-time facts, never recomputed: reading status
+      // must not be an observable act on the clock.
+      deadline_at: task.deadlineAt,
+      cause: task.terminationCause,
     };
   }
 
@@ -864,11 +1198,86 @@ export function createBackgroundTaskManager(
     };
   }
 
-  /** Host-side kill(-pgid): SIGTERM → 2s grace → SIGKILL. */
+  /**
+   * ADR-0134: the one bounded teardown route, shared by an explicit `stop`
+   * and a deadline expiry so both produce the same cleanup evidence and the
+   * same TERM → grace → KILL escalation. `label` only names the trigger in
+   * the log; it never changes what is signalled.
+   *
+   * Returns false when the task is not teardownable (already terminal, or no
+   * child handle) — the caller turns that into the idempotent no-op stop()
+   * promises.
+   */
+  function requestTeardown(
+    task: BackgroundTask,
+    label: "stop" | "deadline"
+  ): boolean {
+    if (task.client.status !== "running") return false;
+    // A teardown is already in flight for this task: re-signalling would be a
+    // second TERM round for one request (duplicate stop, stop racing the
+    // deadline), not a new teardown.
+    if (task.killFallback !== undefined) return false;
+    const child = task.child;
+    const pid = child?.pid;
+    if (!child || pid === undefined) {
+      log(`background ${label}: no child handle for ${task.task_id}`);
+      return false;
+    }
+    // First strike: dual path — the child process alone + the whole process
+    // group (under fakes process.kill throws ESRCH on the fake pid and is
+    // swallowed; assertions go through the child.kill record).
+    let teardownFailure: string | undefined;
+    const recordFailure = (detail: string): void => {
+      teardownFailure ??= detail;
+      log(`background ${label}: ${detail}`);
+    };
+    try {
+      child.kill("SIGTERM");
+    } catch {
+      /* Dead-process EPIPE / ESRCH ignored */
+    }
+    sendSignalToProcessGroup(pid, "SIGTERM", recordFailure);
+    // SIGKILL fallback: only sent if still running after 2s.
+    const killFallback = setTimeout(() => {
+      const t = tasks.get(task.task_id);
+      if (t && t.client.status === "running" && t.child) {
+        try {
+          t.child.kill("SIGKILL");
+        } catch {
+          /* ignored */
+        }
+        sendSignalToProcessGroup(pid, "SIGKILL", recordFailure);
+        void observeTaskGroupGone(t, teardownFailure);
+      }
+    }, STOP_KILL_GRACE_MS);
+    killFallback.unref?.();
+    // Record on the task — shutdown() clears the timer before SIGTERM, so
+    // the 2s grace window and shutdown's own 5s escalation never re-issue a
+    // duplicate SIGKILL.
+    task.killFallback = killFallback;
+    // The group's fate is observed after the escalation has had its grace
+    // window, not by this call: a teardown is a request and returns
+    // immediately.
+    void waitForProcessGroupGone(pid, STOP_KILL_GRACE_MS).then((gone) =>
+      observeTaskGroupGone(task, teardownFailure, gone)
+    );
+    return true;
+  }
+
+  /**
+   * Host-side kill(-pgid): SIGTERM → 2s grace → SIGKILL.
+   *
+   * The returned evidence describes the *request*, never the task's fate:
+   * `confirmed_stopped` only when the group was already observed gone before
+   * the request; `unconfirmed` while a teardown is in flight. The
+   * confirmation of a requested teardown lands on the task's cleanup evidence
+   * (read via `status`), after the bounded observation — so a caller that
+   * awaits `stop()` is never told the task exited when it did not.
+   */
   async function stop(
     taskId: string,
     requesterConversationId?: string
-  ): Promise<void> {
+  ): Promise<CleanupEvidence> {
     const task = ensureTask(taskId, "stop");
     // ADR-0021: scope filter (semantics identical to output), checked before the
     // idempotence branch: trying to stop another conversation's task →
@@ -878,54 +1287,46 @@ export function createBackgroundTaskManager(
     assertTaskInScope(task, requesterConversationId, "stop");
     if (task.client.status !== "running") {
       // Idempotence: stop on an already-terminal task = legal no-op (no throw, no second signal).
-      return;
+      return task.cleanup;
     }
-    const child = task.child;
-    const pid = child?.pid;
-    if (!child || pid === undefined) {
-      log(`background stop: no child handle for ${taskId}`);
-      return;
-    }
-    // First strike: dual path — the child process alone + the whole process
-    // group (under fakes process.kill throws ESRCH on the fake pid and is
-    // swallowed; assertions go through the child.kill record).
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      /* Dead-process EPIPE / ESRCH ignored */
-    }
-    try {
-      process.kill(-pid, "SIGTERM");
-    } catch (err) {
-      const code = (err as NodeJS.ErrnoException).code;
-      // ESRCH = the process group already vanished (possibly just exited
-      // naturally with the exit event not yet delivered) → kill_race window;
-      // converge as idempotent, no throw.
-      if (code !== "ESRCH") {
-        log(`background stop SIGTERM group failed: ${String(err)}`);
-      }
-    }
-    // SIGKILL fallback: only sent if still running after 2s.
-    const killFallback = setTimeout(() => {
-      const t = tasks.get(taskId);
-      if (t && t.client.status === "running" && t.child) {
-        try {
-          t.child.kill("SIGKILL");
-        } catch {
-          /* ignored */
-        }
-        try {
-          process.kill(-pid, "SIGKILL");
-        } catch {
-          /* ignored */
-        }
-      }
-    }, STOP_KILL_GRACE_MS);
-    killFallback.unref?.();
-    // Record on the task — shutdown() clears the timer before SIGTERM, so
-    // the 2s grace window and shutdown's own 5s escalation never re-issue a
-    // duplicate SIGKILL.
-    task.killFallback = killFallback;
+    // ADR-0134: claim the cause before the first signal, so a stop that races
+    // the deadline or the child's own exit keeps the cause the caller asked
+    // for. The claim is single-wins — an already-claimed task keeps its cause.
+    claimTermination(task, "stop_requested");
+    requestTeardown(task, "stop");
+    return NOT_STARTED_CLEANUP;
+  }
+
+  /**
+   * Publish the bounded observation of a task's process group onto the task.
+   *
+   * Exit condition: the group was observed gone → `confirmed_stopped`; the
+   * window ended with members alive, or a signal failed → `unconfirmed`. The
+   * publish is single-wins, so competing stop / exit / escalation events keep
+   * the first verdict instead of overwriting it.
+   */
+  async function observeTaskGroupGone(
+    task: BackgroundTask,
+    teardownFailure: string | undefined,
+    alreadyGone?: boolean
+  ): Promise<void> {
+    const pid = task.child?.pid;
+    if (pid === undefined) return;
+    const gone =
+      alreadyGone ??
+      (await waitForProcessGroupGone(pid, STOP_GROUP_OBSERVE_MS));
+    if (task.cleanup.state !== "not_started") return;
+    task.cleanup = gone
+      ? confirmedStopped(pid, task.task_id)
+      : unconfirmedCleanup(
+          pid,
+          teardownFailure !== undefined
+            ? "teardown_failed"
+            : "observation_expired",
+          teardownFailure ??
+            "process group still alive when the bounded observation ended",
+          task.task_id
+        );
   }
 
   /**
@@ -959,7 +1360,9 @@ export function createBackgroundTaskManager(
 
   /**
    * Process-level shutdown (ADR-0021):
-   *   1. clear all armed killFallback timers (the stop fallback layer)
+   *   1. clear all armed killFallback timers (the stop fallback layer) and
+   *      all armed deadline timers (ADR-0134 — a process-wide shutdown ends
+   *      every task, so a pending deadline must never fire afterwards)
    *   2. SIGTERM all running process groups (child + group dual path)
    *   3. wait ≤5s grace (child-exit event + escalation timer dual gate)
    *   4. SIGKILL as fallback for groups that did not exit
@@ -976,13 +1379,11 @@ export function createBackgroundTaskManager(
     if (shuttingDown) return;
     shuttingDown = true;
 
-    // 1. Collect all running tasks + clear killFallback timers (stop escalation won't strike again).
+    // 1. Collect all running tasks + clear the armed timers (neither the stop
+    //    escalation nor a pending deadline may strike after shutdown).
     const running: BackgroundTask[] = [];
     for (const task of tasks.values()) {
-      if (task.killFallback) {
-        clearTimeout(task.killFallback);
-        task.killFallback = undefined;
-      }
+      clearTaskTimers(task);
       if (task.client.status === "running") {
         running.push(task);
       }
@@ -1072,6 +1473,10 @@ export function createBackgroundTaskManager(
       if (task.client.status !== "running") continue;
       task.client.status = "killed";
       task.client.exit_code = null;
+      // ADR-0134: a task still running when the host shuts down was ended by
+      // the shutdown, not by anything the model asked for. A cause already
+      // claimed by an earlier trigger (a stop, a deadline) is kept.
+      task.terminationCause ??= "shutdown";
       // ADR-0097: shutdown fallback dispose (session-start exception /
       // settle path never fired).
       await disposeEgressQuietly(task.egressSession);
@@ -1085,6 +1490,8 @@ export function createBackgroundTaskManager(
         exit_code: null,
         created_at: task.createdAt,
         log_path: task.client.log_path,
+        ...terminalDeadlineFields(task),
+        termination_cause: task.terminationCause,
       };
       try {
         await registry.save(rec);

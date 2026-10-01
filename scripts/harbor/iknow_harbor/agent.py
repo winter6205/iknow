@@ -74,6 +74,11 @@ _MAX_TURNS_ERROR = "max_turns_exceeded"
 # glob expands to itself literally, so the "no file" case is a comparison
 # against the pattern rather than a missing-argument read.
 _TRACE_PROBE_PRESENT = "present"
+# The conversation id iknow minted inside the container is what a trial's
+# trace is joined on, and the file probe that reads it out is a separate
+# command from `_trace_probe_command` rather than an extension of it: that
+# one's one-word answer is asserted by its own tests, and widening it would
+# change what `trace_state` means for every existing reader.
 _TRACE_PROBE_EMPTY = "empty"
 _TRACE_PROBE_ABSENT = "absent"
 
@@ -528,12 +533,22 @@ class IKnowAgent(BaseInstalledAgent):
         # a metadata dict that says only "a trace was requested" cannot tell a
         # retained trajectory from an absent one.
         trace_state = await self._probe_trace_dir(environment, options)
+        # Only worth a second container round trip when the first one already
+        # said a trajectory is there; an empty or absent dir has no file to
+        # name, and a second probe there could only ever answer "nothing".
+        trace_file = (
+            await self._probe_trace_file(environment, options)
+            if trace_state == _TRACE_PROBE_PRESENT
+            else None
+        )
         if _is_capped_turn_run(parsed, result.return_code):
             self.logger.warning(
                 "iknow hit its turn budget; scoring the partial run instead of "
                 "erroring the trial"
             )
-            context.metadata = _run_metadata(parsed, options, trace_state)
+            context.metadata = _run_metadata(
+                parsed, options, trace_state, trace_file
+            )
             return
         if result.return_code != 0:
             raise self._classify_exec_error(command, result)
@@ -543,7 +558,7 @@ class IKnowAgent(BaseInstalledAgent):
                 f"{self._truncate_output(result.stdout)}"
             )
         self._assert_run_state_named(parsed, options)
-        _apply_to_context(parsed, context, options, trace_state)
+        _apply_to_context(parsed, context, options, trace_state, trace_file)
 
     async def _probe_trace_dir(
         self, environment: BaseEnvironment, options: IKnowOptions
@@ -586,6 +601,33 @@ class IKnowAgent(BaseInstalledAgent):
             )
             return _TRACE_PROBE_ABSENT
         return observed
+
+    async def _probe_trace_file(
+        self, environment: BaseEnvironment, options: IKnowOptions
+    ) -> str | None:
+        """Name the trajectory file this run retained, if it retained one.
+
+        The conversation id is minted by `iknow ask` inside the container and
+        never printed, so without this the trial's `agent/trace/<id>.jsonl`
+        could only be found by globbing. Reading it out here — while the
+        container still exists, the same window `_probe_trace_dir` uses — is
+        what lets a reviewer holding a `reward.txt` and a `result.json` name
+        the exact run that produced them.
+
+        Returns None when no trace was requested, none was retained, or the
+        probe was unreadable. A name is never invented from the directory.
+        """
+        if not options.trace_out:
+            return None
+        result = await environment.exec(
+            command=_trace_file_probe_command(_trace_out_dir())
+        )
+        name = (result.stdout or "").strip()
+        if not name or "/" in name or not name.endswith(".jsonl"):
+            # Defensive against a probe whose output is not a bare file name:
+            # an unusable answer yields no id, never a malformed one.
+            return None
+        return f"{_trace_out_dir()}/{name}"
 
     def _assert_run_state_named(
         self, parsed: ParsedRun, options: IKnowOptions
@@ -1068,6 +1110,24 @@ def _trace_probe_command(directory: str) -> str:
     )
 
 
+def _trace_file_probe_command(directory: str) -> str:
+    """Print the first non-empty trace file name in *directory*, or nothing.
+
+    POSIX sh only, and `-s` for the same reason `_trace_probe_command` uses
+    it: a zero-byte `.jsonl` is a writer that opened the file and a run that
+    then died, which is not a trajectory and must not be named as one. The
+    name is printed bare (no directory prefix) because the trial metadata
+    already carries the directory as `trace_out`; repeating it would let the
+    two disagree.
+    """
+    quoted = shlex.quote(directory)
+    return (
+        f"for f in {quoted}/*.jsonl; do "
+        f'if [ -s "$f" ]; then printf "%s\\n" "${{f##*/}}"; exit 0; fi; '
+        "done"
+    )
+
+
 def _trace_out_dir() -> str:
     """The container path `--trace-out` is handed, as a *directory*.
 
@@ -1104,7 +1164,10 @@ def _is_capped_turn_run(parsed: ParsedRun, return_code: int) -> bool:
 
 
 def _run_metadata(
-    parsed: ParsedRun, options: IKnowOptions, trace_state: str | None = None
+    parsed: ParsedRun,
+    options: IKnowOptions,
+    trace_state: str | None = None,
+    trace_file: str | None = None,
 ) -> dict[str, Any]:
     # ADR-0130 reporting invariant: an eval-state number must name its state, so
     # the posture lands on the trial record, not only in the launch command.
@@ -1125,6 +1188,16 @@ def _run_metadata(
         # no notice on the output stream, so without this key `trace_out` reads
         # as "a trajectory is here" for a trial that has none.
         metadata["trace_state"] = trace_state or _TRACE_PROBE_ABSENT
+    if trace_file is not None:
+        # The concrete file this trial retained, and the conversation id it
+        # carries. This is the join key between a trajectory and the grader
+        # result beside it: `results.json` names this path, and a reader can
+        # open exactly the run that produced the adjacent `reward.txt`.
+        # Recorded only when a file was actually observed — never derived from
+        # the directory alone, which would name a trajectory that does not
+        # exist.
+        metadata["trace_file"] = trace_file
+        metadata["trace_conversation_id"] = trace_file.rsplit("/", 1)[-1][: -len(".jsonl")]
     if parsed.trace_write_failed:
         # A trace that could not be written is not an error the trial failed
         # for — iknow warns once and answers anyway, and the answer is still
@@ -1143,6 +1216,7 @@ def _apply_to_context(
     context: AgentContext,
     options: IKnowOptions,
     trace_state: str | None = None,
+    trace_file: str | None = None,
 ) -> None:
     usage = parsed.usage
     if usage is not None:
@@ -1153,7 +1227,7 @@ def _apply_to_context(
         context.n_input_tokens = (usage.input_tokens or 0) + cached + creation
         context.n_cache_tokens = cached
         context.n_output_tokens = usage.output_tokens
-    metadata = _run_metadata(parsed, options, trace_state)
+    metadata = _run_metadata(parsed, options, trace_state, trace_file)
     if parsed.stop_reason is not None:
         metadata["stop_reason"] = parsed.stop_reason
     context.metadata = metadata

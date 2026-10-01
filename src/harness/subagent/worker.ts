@@ -32,7 +32,10 @@
 import { homedir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { join, resolve } from "node:path";
-import { workerFenceTmpBesideRecord } from "../sandbox/fence-tmp.js";
+import {
+  snapshotIdentityScratchRoot,
+  workerFenceTmpBesideRecord,
+} from "../sandbox/fence-tmp.js";
 import Anthropic from "@anthropic-ai/sdk";
 import {
   loadIknowEnv,
@@ -884,6 +887,32 @@ export async function createWorkerRuntime(
       workRoot: sandboxRoot,
       knownToolNames: new Set(reg.inner.list().map((def) => def.name)),
     }),
+    // ADR-0132/ADR-0133: the worker's OWN cleanup scope. Both roots are the
+    // values this worker process already resolved for its Bash factory —
+    // `workerFenceTmp` (its own pad under `subagents/<taskId>/`, per ADR-0092:
+    // every identity, main session or worker, has its own session tmp) and
+    // `sandboxRoot` (the taskRoot its fence runs in, frozen at spawn).
+    //
+    // Reusing `workerFenceTmp` is the point, not a convenience: it is the
+    // literal value threaded to `tmpDir` on the registry call above, so
+    // permission admission and the Bash handler judge the same pad. Deriving
+    // a second scratch here would let the two gates disagree, and borrowing
+    // the PARENT's scratch would hand a worker deletion authority over the
+    // parent's files — the cross-identity case ADR-0132 withholds.
+    //
+    // A worker with no resolvable pad (no `tmpDir`, no `traceFilePath`) has no
+    // scratch scope, so the exception cannot be established at all.
+    hostRoots: () => {
+      const scratchRoot =
+        workerFenceTmp === undefined
+          ? undefined
+          : snapshotIdentityScratchRoot(workerFenceTmp);
+      const taskRoot = snapshotIdentityScratchRoot(sandboxRoot);
+      return {
+        ...(scratchRoot !== undefined ? { scratchRoot } : {}),
+        ...(taskRoot !== undefined ? { taskRoot } : {}),
+      };
+    },
   });
   const settingsHooks = createSettingsHookContribution({
     hooks: loadIknowSettings({

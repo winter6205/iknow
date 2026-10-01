@@ -278,10 +278,12 @@ function basenameLower(text: string): string {
 /* ---------- the battery ---------- */
 
 describe("the pinned population parses, and its non-ok rows are exactly the census", () => {
-  it("carries 507 shapes of which only the four census rows are non-ok", () => {
+  it("carries 508 shapes of which only the four census rows are non-ok", () => {
+    // 508 after the corpus gained its mutating root search (`find / -delete`),
+    // which SC6 left a deny and which the population therefore now carries.
     const rows = okRows();
-    expect(population().length).toBe(507);
-    expect(rows.length).toBe(503);
+    expect(population().length).toBe(508);
+    expect(rows.length).toBe(504);
   });
 });
 

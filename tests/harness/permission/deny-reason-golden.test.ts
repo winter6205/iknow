@@ -83,7 +83,11 @@ const GOLDEN_DENY_REASONS: Readonly<Record<DestructiveFamilyId, GoldenRow>> =
         '[hard_wall] dangerous command pattern matched (id=destructive-disk, pattern="mkfs")',
     },
     "root-find-walk": {
-      command: "find /",
+      // Spec SC6 removed the deny for a READ-ONLY root search, so the
+      // representative for this id is a MUTATING one — the id itself survives
+      // unchanged for the searches the wall still owns, which is what keeps
+      // the rendered string byte-identical.
+      command: "find / -delete",
       desc: "find",
       reason:
         '[hard_wall] dangerous command pattern matched (id=root-find-walk, pattern="find")',
@@ -102,9 +106,9 @@ const GOLDEN_DENY_REASONS: Readonly<Record<DestructiveFamilyId, GoldenRow>> =
     },
     unparseable: {
       command: 'echo "$(rm -rf /',
-      desc: "verdict=malformed",
+      desc: "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
       reason:
-        '[hard_wall] dangerous command pattern matched (id=unparseable, pattern="verdict=malformed")',
+        '[hard_wall] dangerous command pattern matched (id=unparseable, pattern="verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）")',
     },
   });
 
@@ -234,18 +238,29 @@ describe("SC-GATES-6 — the sensitive-path arm keeps its own non-`pattern=` sen
   // inside `classifyDangerousExecute`), and the two reason shapes must stay
   // distinguishable exactly as today: no `pattern=`, no id, and no
   // `findDangerousPattern` hit in front of it.
+  //
+  // ADR-0131 changed this sentence's TAIL, not its shape: it now names the
+  // roster entry that matched and the site the parse established it at
+  // (`(matched `.ssh/` at the code-region)`). Before, every confirmed match on
+  // every command rendered one identical 49-character string, so an operator
+  // could see THAT a sensitive path was targeted but not WHICH roster entry
+  // fired — the same information the `pattern=` arms of this wall already
+  // carry, and the information `boundary-refusal-copy.test.ts` requires the
+  // path-bearing arm to give. The distinguishing properties this describe
+  // exists to protect are untouched: still no `pattern=`, still no id, still
+  // behind the pattern arms.
   const command = "echo 'cat ~/.ssh/id_rsa'";
 
   it("denies with the sensitive-path sentence, not the pattern wrapper", () => {
     assert.equal(hitOf(command), null, command);
     assert.equal(
       detailOf(command),
-      "dangerous command: sensitive path targeted by command",
+      "dangerous command: sensitive path targeted by command (matched `.ssh/` at the argv-operand)",
       command
     );
     assert.equal(
       reasonOf(command),
-      "[hard_wall] dangerous command: sensitive path targeted by command",
+      "[hard_wall] dangerous command: sensitive path targeted by command (matched `.ssh/` at the argv-operand)",
       command
     );
     assert.equal(reasonOf(command).includes("pattern="), false, command);

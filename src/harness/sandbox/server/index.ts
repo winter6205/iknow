@@ -50,6 +50,7 @@ import {
   createEventChannel,
   createOrphanSettler,
   createStopHandle,
+  DEFAULT_GROUP_OBSERVE_MS,
   DEFAULT_KILL_GRACE_MS,
   logPathFor,
   makeLogWriter,
@@ -103,32 +104,46 @@ function validateFenceAndCwd(
   }
 }
 
+/** The frame fields that carry a bounded numeric budget and are range-checked on both protocols. */
+type NumericArgField = "maxOutputCodePoints" | "killGraceMs" | "groupObserveMs";
+
+/** Checked in this order, so the first offending field is the one reported. */
+const NUMERIC_ARG_FIELDS: readonly NumericArgField[] = Object.freeze([
+  "maxOutputCodePoints",
+  "killGraceMs",
+  "groupObserveMs",
+]);
+
+/**
+ * Read the three budgets off either request shape. maxOutputCodePoints is
+ * exec-only, so a key that is absent from the frame yields undefined — the same
+ * "not supplied, apply the default" state an explicit undefined carries. The
+ * cast is the price of validating one table against two request shapes; the
+ * types in ./types.ts remain the authority on what each field means.
+ */
+function numericArgsOf(
+  req: ExecRequest | SpawnRequest
+): Readonly<Record<NumericArgField, number | undefined>> {
+  return req as unknown as Readonly<
+    Record<NumericArgField, number | undefined>
+  >;
+}
+
 /** Negative / non-integer argument validation — passes the RangeError through for the client to catch. */
 function validateNumericArgs(
   req: ExecRequest | SpawnRequest,
   op: "exec" | "spawn"
 ): void {
-  if (
-    "maxOutputCodePoints" in req &&
-    req.maxOutputCodePoints !== undefined &&
-    (!Number.isInteger(req.maxOutputCodePoints) || req.maxOutputCodePoints < 0)
-  ) {
+  const args = numericArgsOf(req);
+  for (const field of NUMERIC_ARG_FIELDS) {
+    const value = args[field];
+    // Absent or explicitly undefined → the protocol default applies, nothing to check.
+    if (value === undefined) continue;
+    if (Number.isInteger(value) && value >= 0) continue;
     throw {
       kind: "negative_argument",
-      context: `${op}: maxOutputCodePoints=${req.maxOutputCodePoints} must be a non-negative integer`,
-      cause: new RangeError(
-        "maxOutputCodePoints must be a non-negative integer"
-      ),
-    } satisfies SandboxServerError;
-  }
-  if (
-    req.killGraceMs !== undefined &&
-    (!Number.isInteger(req.killGraceMs) || req.killGraceMs < 0)
-  ) {
-    throw {
-      kind: "negative_argument",
-      context: `${op}: killGraceMs=${req.killGraceMs} must be a non-negative integer`,
-      cause: new RangeError("killGraceMs must be a non-negative integer"),
+      context: `${op}: ${field}=${value} must be a non-negative integer`,
+      cause: new RangeError(`${field} must be a non-negative integer`),
     } satisfies SandboxServerError;
   }
 }
@@ -160,6 +175,10 @@ export function createSandboxServer(
         signal: req.signal,
         env: req.env,
         killGraceMs: req.killGraceMs,
+        groupObserveMs: req.groupObserveMs,
+        ...(req.deadlineMs !== undefined
+          ? { deadlineMs: req.deadlineMs }
+          : {}),
       }
     );
     try {
@@ -168,6 +187,10 @@ export function createSandboxServer(
         exitCode: result.code ?? signalExitCode(result.signal),
         stdout: truncateByCodePoint(result.stdout, maxOutputCodePoints),
         stderr: truncateByCodePoint(result.stderr, maxOutputCodePoints),
+        ...(result.cleanup !== undefined ? { cleanup: result.cleanup } : {}),
+        ...(result.deadlineExpired === true
+          ? { deadline_expired: true }
+          : {}),
       };
     } catch (cause) {
       // exception: child exited without acknowledgement / spawn failed — typed
@@ -187,9 +210,17 @@ export function createSandboxServer(
     validateFenceAndCwd(req, "spawn");
     validateNumericArgs(req, "spawn");
     const killGraceMs = req.killGraceMs ?? DEFAULT_KILL_GRACE_MS;
+    const groupObserveMs = req.groupObserveMs ?? DEFAULT_GROUP_OBSERVE_MS;
     const task_id = newTaskId();
     const log_path = logPathFor(req.cwd, task_id);
-    return runSpawnNode(req, task_id, log_path, killGraceMs, log);
+    return runSpawnNode(
+      req,
+      task_id,
+      log_path,
+      killGraceMs,
+      groupObserveMs,
+      log
+    );
   }
 
   return { exec, spawn };
@@ -201,6 +232,7 @@ function runSpawnNode(
   task_id: string,
   log_path: string,
   killGraceMs: number,
+  groupObserveMs: number,
   log: (msg: string) => void
 ): Promise<SandboxTaskHandle> {
   return new Promise<SandboxTaskHandle>((resolveHandle, rejectHandle) => {
@@ -216,7 +248,15 @@ function runSpawnNode(
       rejectHandle,
       log
     );
-    const stopHandle = createStopHandle(child, pgid, task_id, killGraceMs, log);
+    const stopHandle = createStopHandle(
+      child,
+      pgid,
+      task_id,
+      killGraceMs,
+      log,
+      channel,
+      groupObserveMs
+    );
     wireChildStreamHandlers(child, channel, writer);
     onChildError(child, orphan, task_id, log);
     onChildClose(child, channel, orphan, stopHandle);
@@ -243,3 +283,7 @@ export type {
   QueuedTaskEvent,
 } from "./types.js";
 export { renderSandboxServerError } from "./types.js";
+export type {
+  CleanupEvidence,
+  CleanupUnconfirmedReason,
+} from "../cleanup-result.js";

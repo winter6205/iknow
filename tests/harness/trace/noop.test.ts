@@ -89,13 +89,14 @@ describe("createNoopTraceService", () => {
     for (const spy of consoleSpies) spy.mockClear();
   });
 
-  it("returns a TraceService with exactly 11 public methods", () => {
+  it("returns a TraceService with exactly 12 public methods", () => {
     const svc = createNoopTraceService();
     expect(typeof svc.recordLlmCall).toBe("function");
     expect(typeof svc.recordToolCall).toBe("function");
     expect(typeof svc.recordTurn).toBe("function");
     expect(typeof svc.recordSession).toBe("function");
     expect(typeof svc.recordSandboxCmd).toBe("function");
+    expect(typeof svc.recordViolation).toBe("function");
     expect(typeof svc.recordVerification).toBe("function");
     expect(typeof svc.recordGoal).toBe("function");
     expect(typeof svc.recordSubagentSpawn).toBe("function");
@@ -115,6 +116,7 @@ describe("createNoopTraceService", () => {
       "recordToolCall",
       "recordTurn",
       "recordVerification",
+      "recordViolation",
     ]);
   });
 

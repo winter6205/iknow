@@ -18,6 +18,7 @@
  * handler implementations live in ./index.ts.
  */
 import type { BwrapFence } from "../bwrap.js";
+import type { CleanupEvidence } from "../cleanup-result.js";
 
 /** Short-lived exec request — returns a one-shot result after the child exits. */
 export interface ExecRequest {
@@ -30,6 +31,19 @@ export interface ExecRequest {
   readonly maxOutputCodePoints?: number;
   /** Defaults to 2_000 ms. Negative → RangeError; 0 = SIGKILL immediately, no SIGTERM first. */
   readonly killGraceMs?: number;
+  /**
+   * ADR-0134: this run's runtime deadline, enforced by the process plane and
+   * reported back as `deadline_expired` on the response. Undefined = no
+   * deadline (the pre-ADR-0134 exec shape, still what verify and every other
+   * exec consumer send).
+   */
+  readonly deadlineMs?: number;
+  /**
+   * Bounded wait for process-group disappearance before the teardown reports
+   * `unconfirmed`. Defaults to GROUP_SETTLE_MS; it bounds the verdict wait
+   * only, never the kill route. Negative → RangeError (negative_argument).
+   */
+  readonly groupObserveMs?: number;
 }
 
 export interface ExecResponse {
@@ -37,6 +51,20 @@ export interface ExecResponse {
   readonly exitCode: number;
   readonly stdout: string;
   readonly stderr: string;
+  /**
+   * Bounded-teardown evidence for the fence's process group, so a timeout or
+   * an abort that could not confirm disappearance is visible to the caller
+   * instead of being flattened into an exit code. Absent only when the fence
+   * never started (no process group to report on).
+   */
+  readonly cleanup?: CleanupEvidence;
+  /**
+   * ADR-0134: true only when the run was ended by its own `deadlineMs` rather
+   * than by the caller or by a natural exit. Additive: an exec without a
+   * deadline omits it entirely, so consumers that predate ADR-0134 read the
+   * exact same response as before.
+   */
+  readonly deadline_expired?: boolean;
 }
 
 /** Long-lived spawn request — resolves task_id synchronously; the handle keeps emitting events. */
@@ -48,6 +76,8 @@ export interface SpawnRequest {
   readonly signal?: AbortSignal;
   /** Defaults to 2_000 ms (SIGTERM→SIGKILL escalation grace); negative → RangeError. */
   readonly killGraceMs?: number;
+  /** Bounded wait for process-group disappearance before the `stopped` event reports `unconfirmed`. Defaults to GROUP_SETTLE_MS. */
+  readonly groupObserveMs?: number;
   /** Placeholder form (conversation roundtrip) — persisted to disk; the caller restores the real value before passing the fence. */
   readonly recordCommand?: string;
   /** Session identity (passed through to the manager.state in-memory Map). */
@@ -79,6 +109,13 @@ export type SandboxTaskEvent =
   | {
       readonly kind: "stopped";
       readonly signal: NodeJS.Signals | null;
+      /**
+       * What the bounded teardown observed for this task's process group.
+       * `unconfirmed` means the stop was issued but disappearance was never
+       * proven — the task's process may still exist, and the consumer must
+       * not read this event as "the work is finished".
+       */
+      readonly cleanup: CleanupEvidence;
     };
 
 /**

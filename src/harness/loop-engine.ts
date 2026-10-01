@@ -85,6 +85,9 @@ import type {
   TraceService,
   TraceStatus,
   TraceError,
+  ToolCallCause,
+  ToolCallRecord,
+  CleanupTraceEvidence,
 } from "./trace/index.js";
 import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
@@ -180,6 +183,105 @@ function toDecision(
     default:
       return "nonSuccessStop";
   }
+}
+
+/**
+ * Derive a tool call's typed trace cause from the result the executor returned.
+ *
+ * The three sources are the result's own structured fields, never the message
+ * text: ADR-0005's envelope tags a per-call deadline as `execution_failed` with
+ * `message: "timeout"` and an outer cancel as `message: "cancelled"`, and the
+ * spec forbids recognizing a failure class by substring-matching a model-facing
+ * message. `computeToolStopFlags` already reads these two tags by strict
+ * equality for control flow; this reads the same two facts for the trace, and
+ * that agreement is the point — the row a reviewer reads and the stop the
+ * engine took cannot disagree about why a call failed.
+ *
+ * `cleanup_unconfirmed` outranks the other two: an unconfirmed teardown is a
+ * fault of its own that a reader must be able to filter on, and it does not
+ * erase the timeout/cancel that caused it (both stay on the row — `cleanup`
+ * still carries the evidence, and `error.message` still carries the envelope).
+ *
+ * Returns undefined when the result offered nothing to read. Absence is
+ * meaningful — a policy denial and an ordinary execution failure are both
+ * "no typed cause" — so this never defaults to a value.
+ */
+function toToolCallCause(result: {
+  readonly kind: string;
+  readonly message?: string;
+  readonly cleanup?: { readonly state: string };
+}): ToolCallCause | undefined {
+  if (result.cleanup?.state === "unconfirmed") return "cleanup_unconfirmed";
+  if (result.kind !== "execution_failed") return undefined;
+  if (result.message === "timeout") return "timeout";
+  if (result.message === "cancelled") return "cancelled";
+  return undefined;
+}
+
+/**
+ * The row's `error.message` for one failed result: the model-facing summary
+ * when the result carries one, and otherwise the kind itself. `tool_not_found`
+ * has no summary — its informative half is the tool name, which already rides
+ * on `toolName` — so repeating its kind keeps the row readable rather than
+ * dropping the field a consumer may filter on.
+ */
+function errorMessageFor(
+  result: ToolExecutionResult
+): string {
+  return result.kind === "execution_failed" || result.kind === "validation_failed"
+    ? result.message
+    : result.kind;
+}
+
+/**
+ * Build one tool-call trace row from the result the executor returned.
+ *
+ * Split out of the tool phase so the phase reads as "one row per result" and
+ * the row's own shape — which failures keep the model's message, which carry a
+ * typed cause, which carry teardown evidence — lives in one place next to
+ * `toToolCallCause`, whose two tags it repeats. The caller keeps nothing of
+ * that: it passes the result and the surrounding bookkeeping and records what
+ * comes back.
+ *
+ * `cleanup` is read only off an `execution_failed` result because no other kind
+ * produces one, so a verdict on a row is always a fact about a call that ran.
+ */
+function toolCallRecordFor(input: {
+  readonly parentLlmCallId: string | undefined;
+  readonly result: ToolExecutionResult;
+  readonly toolName: string;
+  readonly arguments: unknown;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly durationMs: number;
+}): ToolCallRecord {
+  const { result } = input;
+  const ok = result.kind === "ok";
+  const cause = toToolCallCause(result);
+  const cleanup: CleanupTraceEvidence | undefined =
+    result.kind === "execution_failed" ? result.cleanup : undefined;
+  return {
+    parentLlmCallId: input.parentLlmCallId,
+    toolName: input.toolName,
+    toolKind: result.kind,
+    startedAt: input.startedAt,
+    endedAt: input.endedAt,
+    durationMs: input.durationMs,
+    argumentsCaptured: true,
+    arguments: input.arguments,
+    resultCaptured: false,
+    status: ok ? "ok" : "error",
+    ...(ok
+      ? {}
+      : {
+          error: {
+            type: result.kind,
+            message: errorMessageFor(result),
+          },
+        }),
+    ...(cause !== undefined ? { cause } : {}),
+    ...(cleanup !== undefined ? { cleanup } : {}),
+  };
 }
 
 /**
@@ -3503,33 +3605,19 @@ async function stepWithTrace(opts: {
       toolPhase.toolCallViews.map((v) => [v.id, v.input] as const)
     );
     for (const result of toolPhase.toolResults) {
-      const toolName =
-        nameById.get(result.toolUseId) ??
-        (result.kind === "tool_not_found" ? result.toolName : "");
+      const record = toolCallRecordFor({
+        parentLlmCallId: llmCallId,
+        result,
+        toolName:
+          nameById.get(result.toolUseId) ??
+          (result.kind === "tool_not_found" ? result.toolName : ""),
+        arguments: inputById.get(result.toolUseId),
+        startedAt: toolStartedAt,
+        endedAt: toolEndedAt,
+        durationMs: toolDurationMs,
+      });
       const toolCallId = await safeTrace(() =>
-        opts.deps.trace!.recordToolCall({
-          parentLlmCallId: llmCallId,
-          toolName,
-          toolKind: result.kind,
-          startedAt: toolStartedAt,
-          endedAt: toolEndedAt,
-          durationMs: toolDurationMs,
-          argumentsCaptured: true,
-          arguments: inputById.get(result.toolUseId),
-          resultCaptured: false,
-          status: result.kind === "ok" ? "ok" : "error",
-          error:
-            result.kind === "ok"
-              ? undefined
-              : {
-                  type: result.kind,
-                  message:
-                    result.kind === "execution_failed" ||
-                    result.kind === "validation_failed"
-                      ? result.message
-                      : result.kind,
-                },
-        })
+        opts.deps.trace!.recordToolCall(record)
       );
       if (toolCallId) toolCallIds.push(toolCallId);
     }

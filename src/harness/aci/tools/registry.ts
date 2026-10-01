@@ -351,6 +351,26 @@ export interface CreateDefaultAciRegistryOptions {
    *  session's ledger (read / update), paired with `todoActor` to express
    *  "only the parent may add". */
   readonly todoDir?: string;
+  /**
+   * ADR-0132: the session-folder ROOT this identity's scratch hangs under —
+   * `resolveProjectSessionDir(...)` output, i.e. `<pool>/projects/<slug>`.
+   *
+   * This is NOT `todoDir`, even though both entries currently pass the same
+   * string, and the two must not be collapsed back into one seam. `todoDir`
+   * answers "should todo_write / the agentStatus seam be assembled", and
+   * ADR-0028 gates that on the surface; this answers "where does this
+   * session's `fence-tmp` live", which every surface needs and none of them may
+   * be denied by a tool-registration decision. Reusing `todoDir` for both is
+   * what left `ask` with two gates measuring different directories: the
+   * permission side still resolved `<todoDir>/<convId>/fence-tmp` from the
+   * ungated value while the Bash handler — reading the gated one — fell back to
+   * a `mkdtemp` pad, so `$TMPDIR` matched itself while the equivalent absolute
+   * path matched nothing. Separate names, separate duties, one value.
+   *
+   * Absent → bash keeps its legacy resolution (`tmpDir`, else `projectDir` +
+   * the call's `conversationId`, else its own fallback pad).
+   */
+  readonly sessionRootDir?: string;
   /** ADR-0085: todo_write caller capabilities (actor). conversationId is the
    *  fallback source for `ctx.conversationId` (the worker-process executor
    *  does not synthesize that ctx field); with `canAdd:false` the tool's
@@ -647,6 +667,33 @@ function workspaceRootSpread(root: string | undefined): {
   return root !== undefined ? { workspaceRoot: root } : {};
 }
 
+/**
+ * ADR-0132: the bash factory's `projectDir` — the session-folder root its
+ * `<sessionFolder>/fence-tmp` scratch resolves under.
+ *
+ * Two host fields name that root and the ungated `sessionRootDir` wins, because
+ * the two answer different questions and only one of them may be withheld:
+ * `todoDir` decides whether `todo_write` / the agentStatus seam are assembled
+ * (ADR-0028 gates that on the surface, and `ask` withholds it by design), while
+ * the scratch anchor decides where this session's pad lives, which no surface
+ * may decline. Reading only the gated field is what let the permission side and
+ * this handler measure different directories on `ask` — the handler then fell
+ * back to a private `mkdtemp` pad, so `$TMPDIR/…` agreed with itself while the
+ * equivalent absolute path did not.
+ *
+ * `todoDir` remains the fallback so an assembly that supplies only the older
+ * field (worker, legacy callers) keeps its exact previous wiring.
+ */
+function sessionProjectDirSpread(
+  sessionRootDir: string | undefined,
+  todoDir: string | undefined
+): {
+  readonly projectDir?: string;
+} {
+  const dir = sessionRootDir ?? todoDir;
+  return dir !== undefined ? { projectDir: dir } : {};
+}
+
 export function createDefaultAciRegistry(
   opts: CreateDefaultAciRegistryOptions
 ): AciRegistry {
@@ -776,9 +823,11 @@ export function createDefaultAciRegistry(
         ...(opts.liveTaskRoot !== undefined
           ? { liveTaskRoot: opts.liveTaskRoot }
           : {}),
-        // todoDir is the session project dir; bash resolves
-        // `<sessionFolder>/fence-tmp` per conversationId (ADR-0074).
-        ...(opts.todoDir !== undefined ? { projectDir: opts.todoDir } : {}),
+        // ADR-0074 / ADR-0132: the session-folder root bash resolves
+        // `<sessionFolder>/fence-tmp` from. Two hosts name it, and the ungated
+        // one wins — see `sessionProjectDirSpread` for why they are two fields
+        // and not one.
+        ...sessionProjectDirSpread(opts.sessionRootDir, opts.todoDir),
         // worker identity pad (nested under subagents/<taskId>/).
         ...(opts.tmpDir !== undefined ? { tmpDir: opts.tmpDir } : {}),
         // ADR-0084: successful whitelisted single-file reads are booked in

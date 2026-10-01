@@ -23,6 +23,7 @@ import {
   type TokenUsage,
 } from "../harness/index.js";
 import type { TraceServiceWithHealth } from "../harness/trace/jsonl.js";
+import { violationRecordFromReason } from "../harness/trace/violation-record.js";
 import { type CompactReason } from "../harness/compress/index.js";
 import {
   runVerifyLoop,
@@ -102,7 +103,13 @@ import {
   workerMetaPath,
   workerTranscriptPath,
 } from "../harness/sandbox/fence-tmp.js";
-import { createViolationCounter } from "../harness/sandbox/violation-handling.js";
+import {
+  createViolationCounter,
+  createViolationTurnScope,
+  parseViolationEvent,
+} from "../harness/sandbox/violation-handling.js";
+import type { CleanupEvidence } from "../harness/sandbox/cleanup-result.js";
+import type { BackgroundTaskManager } from "../harness/background/manager.js";
 import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js";
 import {
   createOutputMask,
@@ -131,8 +138,7 @@ import {
   errorMessage,
   withApiError,
 } from "../harness/errors.js";
-import { appendFileSync, mkdirSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import type { AciCatalog } from "../harness/aci/types.js";
 import {
@@ -151,7 +157,11 @@ import { resolveMcpRoots, type McpRoots } from "../harness/mcp/roots.js";
 import { SessionStore, type SessionListEntry } from "./store/index.js";
 import type { SessionStoreError } from "./store/index.js";
 import type { SessionFileV1 } from "./store/index.js";
-import type { SessionOutcomeRecord } from "./store/index.js";
+import type {
+  SessionOutcomeRecord,
+  SecurityInterruptionItem,
+  SecurityInterruptionRecord,
+} from "./store/index.js";
 import { resolveConversationTraceFilePath } from "./store/index.js";
 import { readWorkerInFlightToolName } from "./store/index.js";
 import {
@@ -241,15 +251,6 @@ import {
   withThinkingOverride,
   type ThinkingOverride,
 } from "./thinking-override.js";
-
-/** Best-effort JSON parse: returns the parsed value or the raw string. */
-function safeParse(s: string): unknown {
-  try {
-    return JSON.parse(s);
-  } catch {
-    return s;
-  }
-}
 
 /**
  * Validate the root at the session-creation boundary as well as at the
@@ -604,6 +605,177 @@ export interface TurnOutcomeEvidence {
   readonly outcomes: ReadonlyMap<string, SessionOutcomeRecord>;
 }
 
+/**
+ * Merge an optional host signal with the turn's escalation abort, keeping
+ * `undefined` as the no-signal baseline (rather than handing `AbortSignal.any`
+ * an array containing undefined, which throws).
+ */
+function mergeSignals(
+  host: AbortSignal | undefined,
+  escalation: AbortSignal
+): AbortSignal {
+  return host === undefined ? escalation : AbortSignal.any([host, escalation]);
+}
+
+/**
+ * ADR-0135: read the executor's interruption payload into the persisted
+ * record shape.
+ *
+ * The payload's own reading is `parseViolationEvent`'s (one function, shared
+ * with the trace reader and the CLI line) — this adds only the persisted shape
+ * on top. It used to be a third independent reader, and that is what made a
+ * `mid-escalation` notification vanish: this one accepted only `{mid, high}`,
+ * so a payload it did not recognize took the WHOLE record with it, and the
+ * turn's structured cause could no longer be joined to the trace row that
+ * recorded the same event.
+ *
+ * The requirements kept here are this record's, not the payload's: a durable
+ * row a reviewer may act on ("this worker was confirmed stopped") needs a
+ * named tier, a count and a cleanup array. A payload that does not carry them
+ * yields undefined — the turn keeps its `cancelled` stop and the evidence is
+ * simply absent, the same posture as any other record whose provenance cannot
+ * be established. An `unconfirmed` item is projected as such; it is never
+ * upgraded into a confirmed stop.
+ */
+function parseSecurityInterruption(
+  reason: string
+): SecurityInterruptionRecord | undefined {
+  const parsed = parseViolationEvent(reason);
+  if (parsed === undefined) return undefined;
+  const { tier, confirmedViolations, cleanup } = parsed;
+  if (tier !== "mid" && tier !== "high") return undefined;
+  if (confirmedViolations === undefined) return undefined;
+  if (cleanup === undefined) return undefined;
+  return {
+    ...(parsed.turnId !== undefined ? { turnId: parsed.turnId } : {}),
+    tier,
+    tool: parsed.tool,
+    confirmedViolations,
+    cleanup: cleanup.flatMap((item) => projectInterruptionItem(item)),
+  };
+}
+
+/**
+ * ADR-0135: the interruption record as the optional field every consumer of a
+ * turn takes, or nothing at all when the turn was not stopped by the security
+ * escalation.
+ *
+ * One helper because the three consumers (the save, the live DTO, the appended
+ * outcome) must agree on the absent case: a key that is missing means "this
+ * turn has no security cause", which is different from a key present with no
+ * cause in it, and three hand-rolled spreads were three chances to spell that
+ * differently.
+ */
+function securityInterruptionOption(
+  record: SecurityInterruptionRecord | undefined
+): { readonly securityInterruption?: SecurityInterruptionRecord } {
+  if (record === undefined) return {};
+  return { securityInterruption: record };
+}
+
+/**
+ * ADR-0135: the active engine's background-task manager as the optional
+ * passthrough both cache-activation paths use, so the per-root entry and the
+ * MCP face cannot disagree about whether a face exists.
+ *
+ * Absent (ask surface / test-injected buildEngine) → the key is omitted, which
+ * is what leaves a turn's background jobs reported `unconfirmed` rather than
+ * claimed stopped.
+ */
+function builtBackgroundManagerOption(
+  manager: BackgroundTaskManager | undefined
+): { readonly backgroundManager?: BackgroundTaskManager } {
+  if (manager === undefined) return {};
+  return { backgroundManager: manager };
+}
+
+function projectInterruptionItem(
+  item: unknown
+): ReadonlyArray<SecurityInterruptionItem> {
+  const base = readInterruptionItemHeader(item);
+  if (base === null) return [];
+  const evidence = base.item["cleanup"];
+  if (evidence === null || typeof evidence !== "object") return [];
+  const cleanup = projectInterruptionCleanup(evidence as Record<string, unknown>);
+  if (cleanup === null) return [];
+  return [{ ...base.header, cleanup }];
+}
+
+/** The item's identity + summary fields, or `null` when the shape is not one. */
+type InterruptionItemHeader = {
+  readonly item: Record<string, unknown>;
+  readonly header: Omit<SecurityInterruptionItem, "cleanup">;
+};
+
+function readInterruptionItemHeader(item: unknown): InterruptionItemHeader | null {
+  const it = item as Record<string, unknown> | null;
+  if (
+    it === null ||
+    typeof it !== "object" ||
+    (it["kind"] !== "subagent" && it["kind"] !== "background_task") ||
+    typeof it["id"] !== "string" ||
+    (it["state"] !== "stop_requested" &&
+      it["state"] !== "confirmed_stopped" &&
+      it["state"] !== "unconfirmed")
+  ) {
+    return null;
+  }
+  const reason = typeof it["reason"] === "string" ? { reason: it["reason"] } : {};
+  return {
+    item: it,
+    header: {
+      kind: it["kind"],
+      id: it["id"],
+      state: it["state"],
+      ...reason,
+    },
+  };
+}
+
+/**
+ * One item's cleanup evidence, projected onto the persisted shape, or `null`
+ * when the evidence does not carry a state this record can state.
+ *
+ * Every arm that cannot state the evidence returns `null`, which the caller
+ * drops the item over — a persisted `confirmed_stopped` is a claim a reviewer
+ * will act on, and an evidence block this projection cannot read must not be
+ * summarized as a stop.
+ */
+function projectInterruptionCleanup(
+  evidence: Record<string, unknown>
+): SecurityInterruptionItem["cleanup"] | null {
+  if (evidence["state"] === "not_started") {
+    return { state: "not_started" };
+  }
+  if (
+    (evidence["state"] !== "confirmed_stopped" &&
+      evidence["state"] !== "unconfirmed") ||
+    typeof evidence["pgid"] !== "number"
+  ) {
+    return null;
+  }
+  const taskId =
+    typeof evidence["task_id"] === "string"
+      ? { task_id: evidence["task_id"] }
+      : {};
+  if (evidence["state"] === "confirmed_stopped") {
+    return { state: "confirmed_stopped", pgid: evidence["pgid"], ...taskId };
+  }
+  if (
+    typeof evidence["reason"] !== "string" ||
+    typeof evidence["detail"] !== "string"
+  ) {
+    return null;
+  }
+  return {
+    state: "unconfirmed",
+    reason: evidence["reason"],
+    pgid: evidence["pgid"],
+    detail: evidence["detail"],
+    ...taskId,
+  };
+}
+
 /** Answer fields carrying the turn's terminal state, from the persisted
  *  outcome at `anchorId` when this projection has evidence to consult. Without
  *  a record the answer keeps `outcome: {terminal:"unknown"}` and omits
@@ -623,7 +795,11 @@ function projectOutcomeFields(
   const recorded =
     anchorId === undefined ? undefined : evidence.outcomes.get(anchorId);
   if (recorded === undefined) return { outcome: { terminal: "unknown" } };
-  return turnOutcomeFields(recorded.stopReason, recorded.supplierDetail);
+  return turnOutcomeFields(
+    recorded.stopReason,
+    recorded.supplierDetail,
+    recorded.securityInterruption
+  );
 }
 
 /** The head-chain event id a turn's terminal outcome is anchored to: the last
@@ -938,6 +1114,13 @@ export type SessionHubOptions = {
        *  (listMcpTools visible surface). */
       catalog?: AciCatalog;
       /**
+       * ADR-0135: background-task manager, so an interrupted turn can cancel
+       * the finite background jobs it launched. Optional for the same reason
+       * as the fields above — a test seam that omits it simply reports those
+       * jobs as unconfirmed.
+       */
+      backgroundManager?: BackgroundTaskManager;
+      /**
        * Assembly-time skill catalog + rescan seam (hot-on-slash side).
        * Production `buildHarnessEngine`'s `BuiltEngine` carries both; the
        * test seam may omit them (absent → listSkills falls back to the
@@ -1004,6 +1187,13 @@ export type SessionHubOptions = {
 type HubEngineEntry = EngineBundle & {
   mcpRoots?: McpRoots;
   mcpManager?: McpManager;
+  /**
+   * ADR-0135: the assembly's background-task manager, so a turn interrupted
+   * by the security escalation can cancel the finite background jobs IT
+   * launched. Absent (ask surface / test-injected buildEngine) → those jobs
+   * are reported as unconfirmed rather than silently claimed stopped.
+   */
+  backgroundManager?: BackgroundTaskManager;
   catalog?: AciCatalog;
   /** Assembly-time skill catalog + rescan seam (see buildEngine). */
   skillCatalog?: SkillCatalog;
@@ -1115,12 +1305,41 @@ export class SessionHub {
   private readonly surface: "chat" | "tui" | "ask" | "serve" | undefined;
   /** Subagent manager (host drain consumption surface; lazy acquisition see ensureDeps). */
   private subagentManager: SubAgentManager | undefined;
+  /**
+   * ADR-0135: the ACTIVE engine's background-task manager, published with the
+   * other per-turn faces (see `activateSubagentManager`). Read per turn so a
+   * worktree rebind's rebuilt engine supplies its own manager; undefined
+   * (ask surface / injected test engine) → a turn's background jobs are
+   * reported unconfirmed rather than silently left running with no evidence.
+   */
+  private activeBackgroundManager: BackgroundTaskManager | undefined;
   /** All per-root managers remain in the host read aggregation surface. */
   private readonly subagentManagers: SubagentManagerRegistry;
   /** Serve-only terminal wake subscription; TUI owns its UI-aware wake. */
   private subagentWake: SubagentWake | undefined;
   /** Coarse serve target: the most recently addressed conversation. */
   private lastConversationId: string | undefined;
+  /**
+   * ADR-0132: the identity this hub's engines may scope a scratch cleanup to,
+   * as a live reader (passing the method reference is intentional — the
+   * engine stores the function, not its result).
+   *
+   * Coarse on purpose, and the coarseness is bounded in one direction. The hub
+   * caches one engine per root and shares `cachedDeps` across every session,
+   * so no per-session value exists at assembly; `lastConversationId` is the
+   * same fact `attachSubagentWake` already reads for the serve-only wake.
+   * With two sessions' turns in flight it names the most recently ADDRESSED
+   * one, not necessarily the one whose tool call is being judged. That can
+   * only cost the exception, never grant it: a wrong root leaves the
+   * destructive-rm finding in place, so the call is denied, and the Bash
+   * handler re-derives its own snapshot from the call's real
+   * `ctx.conversationId` and denies anything that is not inside THAT session's
+   * pad. Establishing the per-call identity instead would mean threading
+   * `conversationId` from `executeAll` into `hostRoots` — a permission-layer
+   * signature change this seam is not allowed to make.
+   */
+  private readonly activeConversationId = (): string | undefined =>
+    this.lastConversationId;
   /** Per-root state anchor cache; resolved by the serve entrypoint and passed through. */
   private readonly workspaceRoot: string | undefined;
   /**
@@ -1223,6 +1442,8 @@ export class SessionHub {
           mcpRoots?: McpRoots;
           mcpManager?: McpManager;
           catalog?: AciCatalog;
+          /** ADR-0135: per-turn cancellation of background jobs. */
+          backgroundManager?: BackgroundTaskManager;
           /** Assembly-time skill face (catalog + rescan seam) surfaced. */
           skillCatalog?: SkillCatalog;
           skillRescanner?: SkillRescanner;
@@ -2014,6 +2235,11 @@ export class SessionHub {
         // tool; remapping stopReason to protocolError would drop the assistant
         // delta on persist and undo ADR-0108 interrupt keep.
         let killed = false;
+        // ADR-0135: the counter and the owned-work ledger are created HERE,
+        // inside this postMessage, so the confirmed-violation streak is
+        // scoped to this user turn. A per-session counter (or one held on the
+        // hub) would accumulate across turns and let an earlier turn's
+        // denials escalate a later, unrelated one.
         const counter = createViolationCounter();
         const onKill = (reason: string): void => {
           // Latch: the counter fires on every record past threshold; the trace
@@ -2022,10 +2248,32 @@ export class SessionHub {
           killed = true;
           this.recordViolationTrace(conversationId, reason);
         };
+        // Owned work: this turn's workers and finite background jobs. The
+        // subagent route is wired here because the hub owns the manager
+        // registry; an earlier turn's persistent service is owned by that
+        // turn's ledger and is not reachable from this one.
+        const turnScope = createViolationTurnScope({
+          cancelSubagent: (taskId) => this.subagentManagers.abortTask(taskId),
+          // ADR-0135: the finite background jobs THIS turn launched, via the
+          // active engine's own manager. Absent (ask surface / injected test
+          // engine) → those items are reported unconfirmed, never claimed
+          // stopped. The conversation scope is passed so the manager's own
+          // cross-session check applies.
+          ...this.cancelBackgroundTaskOption(conversationId),
+        });
+        // The interruption report (cause + bounded per-item cleanup). Held on
+        // the turn so appendTurnOutcome can persist it with the outcome; the
+        // engine itself is untouched and keeps its own `cancelled` stop.
+        let securityInterruption: SecurityInterruptionRecord | undefined;
         const wrappedExecutor = wrapWithViolationHook({
           inner: deps.executor,
           counter,
           onKill,
+          turnScope,
+          onInterrupt: (reason) => {
+            securityInterruption = parseSecurityInterruption(reason);
+            this.recordViolationTrace(conversationId, reason);
+          },
         });
         // Per-session trace: new JsonlTraceService each postMessage (not cached
         // in cachedDeps) because conversationId differs per session (ADR-0003).
@@ -2312,7 +2560,16 @@ export class SessionHub {
                           ? [buildUserCommit(effective)]
                           : []),
                       ];
-                      return run(effective, runDeps, opts.signal, {
+                      // ADR-0135: the turn's escalation abort rides the run
+                      // signal, so the turn stops at the next decision point —
+                      // a pending model request is abandoned, not awaited and
+                      // answered. The caller's own signal (Esc) still flows
+                      // through unchanged and remains distinguishable.
+                      return run(
+                        effective,
+                        runDeps,
+                        mergeSignals(opts.signal, turnScope.interrupt.signal),
+                        {
                         priorMessages,
                         onStream: wrappedOnStream,
                         hostStreamPresent: opts.onStream !== undefined,
@@ -2355,6 +2612,10 @@ export class SessionHub {
                 // priorMessages = the file BEFORE this run; only the messages THIS
                 // run appended count as progress for the cancelled-delta decision.
                 priorMessages: session.messages,
+                // ADR-0135: this turn's security cause, when the escalation
+                // stopped it. Persisted beside the `cancelled` outcome so a
+                // reopened session can tell a security stop from a Ctrl+C.
+                ...securityInterruptionOption(securityInterruption),
               });
               void saved;
               // Each turn hands the result to the auto-memory hook, which owns
@@ -2471,6 +2732,7 @@ export class SessionHub {
                   // (saved is consumed only on cancelled; other stopReasons
                   // like completed do not read it).
                   priorMessages: session.messages,
+                  ...securityInterruptionOption(securityInterruption),
                   ...presentText("stopSummary", capturedStopSummary),
                   // Surface the verify final verdict (failed/unstable/
                   // escalated) to the DTO.
@@ -3367,26 +3629,29 @@ export class SessionHub {
    * Best-effort — a trace write failure must not break the served turn; any
    * error is swallowed (mirrors JsonlTraceService warn-once semantics).
    * `reason` is already a JSON string produced by createKillSessionHook.
+   *
+   * ADR-0135 / SC12: the row goes through the shared JsonlTraceService
+   * (`recordViolation`) instead of a private `appendFileSync`, so the
+   * interruption lands in the same file as the turn and tool rows it
+   * interrupted, under the same write-failure accounting — a lost interruption
+   * report surfaces in `getTraceWriteFailures` rather than vanishing. The
+   * payload keeps the producer's shape (`detail` carries the full
+   * createKillSessionHook JSON, notification and structured report alike);
+   * the structured fields a reviewer reads (`tier`, `turn_id`,
+   * `confirmed_violations`, `cleanup`) additionally sit at the top level when
+   * the producer supplied them, so a reader can join without parsing `detail`.
    */
   private recordViolationTrace(conversationId: string, reason: string): void {
     if (!this.traceOut) return;
     try {
-      // ADR-0071: violations share the main-session trace domain,
-      // anchored at `<projectDir>/<convId>/trace.jsonl`. Derivation reuses
-      // `resolveConversationTraceFilePath`, same source as `createTrace` →
-      // the two write paths of one session cannot drift to different files.
-      const filePath = resolveConversationTraceFilePath({
-        projectDir: this.store.getProjectDir(),
-        conversationId,
-      });
-      mkdirSync(dirname(filePath), { recursive: true });
-      const line = JSON.stringify({
-        conversation_id: conversationId,
-        record_type: "violation",
-        ts: new Date().toISOString(),
-        detail: safeParse(reason),
-      });
-      appendFileSync(filePath, line + "\n", "utf8");
+      const trace = this.createTrace(conversationId);
+      if (trace === undefined) return;
+      const record = violationRecordFromReason(
+        reason,
+        new Date().toISOString()
+      );
+      if (record === undefined) return;
+      void trace.recordViolation(record);
     } catch {
       // Best-effort observability; never let trace I/O break the served turn.
     }
@@ -3696,6 +3961,10 @@ export class SessionHub {
      *  omitted, defaults to priorMessages (postMessage path — model prior ==
      *  disk prior). */
     readonly diskPrior?: ReadonlyArray<AnthropicNativeMessage>;
+    /** ADR-0135: the interrupted turn's security cause + bounded cleanup
+     *  evidence, persisted with this turn's outcome. Absent on every other
+     *  path (including a user Ctrl+C and /continue). */
+    readonly securityInterruption?: SecurityInterruptionRecord;
   }): Promise<boolean> {
     const { conversationId, session, result, priorMessages } = opts;
     const diskPrior = opts.diskPrior ?? priorMessages;
@@ -3769,7 +4038,13 @@ export class SessionHub {
           root === undefined ? updated : { ...updated, workspaceRoot: root },
       });
     });
-    await this.appendTurnOutcome(conversationId, session, updated, result);
+    await this.appendTurnOutcome(
+      conversationId,
+      session,
+      updated,
+      result,
+      opts.securityInterruption
+    );
     return true;
   }
 
@@ -3786,7 +4061,10 @@ export class SessionHub {
     conversationId: string,
     prior: SessionFileV1,
     updated: SessionFileV1,
-    result: RunResult
+    result: RunResult,
+    /** ADR-0135: the interrupted turn's cause + bounded cleanup evidence.
+     *  Absent for every other turn, including a user Ctrl+C. */
+    securityInterruption?: SecurityInterruptionRecord
   ): Promise<void> {
     if (updated.messages.length <= prior.messages.length) return;
     const turnId = await this.store.readHead(conversationId);
@@ -3798,6 +4076,7 @@ export class SessionHub {
       ...(result.supplierDetail !== undefined
         ? { supplierDetail: result.supplierDetail }
         : {}),
+      ...(securityInterruption !== undefined ? { securityInterruption } : {}),
     });
   }
 
@@ -3956,6 +4235,7 @@ export class SessionHub {
       this.activateSkillFace(hit);
       await this.activateMcpFace(hit);
       this.activateSubagentManager(hit.subagentManager);
+      this.activateBackgroundManager(hit.backgroundManager);
       return hit;
     }
     const built = this.buildEngine
@@ -3970,6 +4250,8 @@ export class SessionHub {
       overlayMemoryPrefetch: built.overlayMemoryPrefetch,
       ...(built.mcpRoots ? { mcpRoots: built.mcpRoots } : {}),
       ...(built.mcpManager ? { mcpManager: built.mcpManager } : {}),
+      // ADR-0135: per-turn cancellation of this turn's own background jobs.
+      ...builtBackgroundManagerOption(built.backgroundManager),
       ...("catalog" in built && built.catalog
         ? { catalog: built.catalog }
         : {}),
@@ -4015,11 +4297,52 @@ export class SessionHub {
     this.subagentManagers.register(manager);
   }
 
+  /** ADR-0135: publish the active engine's background-task manager so a turn
+   *  can cancel the finite background jobs it owns. Follows the active engine
+   *  (per-root cache hit and rebuild alike), so a rebind cannot leave a stale
+   *  manager reachable. */
+  private activateBackgroundManager(
+    manager: BackgroundTaskManager | undefined
+  ): void {
+    this.activeBackgroundManager = manager;
+  }
+
+  /**
+   * ADR-0135: the turn scope's background-cancellation route, or nothing at all
+   * when the active engine has no background manager.
+   *
+   * The empty spread is the absent case, and it is the honest one: the turn
+   * scope then reports this turn's background items as `unconfirmed` rather
+   * than claiming a stop nobody can carry out. It is deliberately NOT a route
+   * that returns a "nothing was running" answer — that would be the same
+   * fabricated stop, produced from a missing manager instead of a missing
+   * process group.
+   */
+  private cancelBackgroundTaskOption(
+    conversationId: string
+  ): {
+    readonly cancelBackgroundTask?: (
+      taskId: string
+    ) => Promise<CleanupEvidence>;
+  } {
+    if (this.activeBackgroundManager === undefined) return {};
+    return {
+      // The conversation scope is passed so the manager's own cross-session
+      // check applies. The manager itself is read at CALL time, not captured
+      // here: a turn can outlive the engine activation that published this
+      // route, and the original wiring resolved the cell per invocation.
+      cancelBackgroundTask: (taskId: string) =>
+        this.activeBackgroundManager!.stop(taskId, conversationId),
+    };
+  }
+
   private async buildProductionEngine(root: string): Promise<
     EngineBundle & {
       mcpRoots?: McpRoots;
       mcpManager?: McpManager;
       catalog?: AciCatalog;
+      /** ADR-0135: per-turn cancellation of this turn's background jobs. */
+      backgroundManager?: BackgroundTaskManager;
       skillCatalog?: SkillCatalog;
       skillRescanner?: SkillRescanner;
       /** Full-view field of `BuiltEngine.worktreeOnMutate`. */
@@ -4124,6 +4447,14 @@ export class SessionHub {
       // TUI) share the same `(baseDir, projectIdentityRoot)` pair → one
       // session resolves to one projectDir (the `<surface>` split is gone).
       todoDir: this.store.getProjectDir(),
+      // ADR-0132: the identity whose session scratch this engine may clean.
+      // Read live because one engine serves many sessions here (the per-root
+      // engine cache and the cached-deps path are both shared across
+      // conversations) — a pinned id would freeze one session's pad into an
+      // engine that later serves another, which is exactly the cross-identity
+      // deletion ADR-0132 withholds. Same source the per-run tool context
+      // takes its `conversationId` from.
+      sessionConversationId: this.activeConversationId,
       // ADR-0088: background-task registry root = sibling `tasks/` of the
       // same project tree. The store's projectDir is already
       // `<poolRoot>/projects/<slug>` (the ADR-0071 formula), so task registry
@@ -4189,6 +4520,7 @@ export class SessionHub {
       ) {
         const entry = await this.getOrBuildEngine(mapRoot);
         this.activeGraphAssembly = entry.graphAssembly;
+        this.activateBackgroundManager(entry.backgroundManager);
         return entry.deps;
       }
       this.activeGraphAssembly = this.injectedGraphAssembly;
@@ -4201,6 +4533,7 @@ export class SessionHub {
       // pulled back to the main-repo face by bindRoot.
       const entry = await this.getOrBuildEngine(mapRoot);
       this.activeGraphAssembly = entry.graphAssembly;
+      this.activateBackgroundManager(entry.backgroundManager);
       return entry.deps;
     }
     if (this.cachedDeps) return this.cachedDeps;
@@ -4305,6 +4638,10 @@ export class SessionHub {
       // takes the store-projected projectDir, same source as the
       // `buildProductionEngine` path above (the `<surface>` split is gone).
       todoDir: this.store.getProjectDir(),
+      // ADR-0132: same live identity reader as the per-root path above. The
+      // cached-deps engine is shared across sessions for the same reason, so
+      // it needs the same live read.
+      sessionConversationId: this.activeConversationId,
       // ADR-0088: same as the `buildProductionEngine` path — registry root =
       // sibling `tasks/` of the project tree (same store-projected slug).
       tasksDir: join(this.store.getProjectDir(), TASKS_DIR_NAME),
@@ -4331,6 +4668,8 @@ export class SessionHub {
     this.mcpHome = homedir();
     await this.activateMcpFace({
       ...(built.mcpManager ? { mcpManager: built.mcpManager } : {}),
+      // ADR-0135: per-turn cancellation of this turn's own background jobs.
+      ...builtBackgroundManagerOption(built.backgroundManager),
       ...(built.mcpRoots ? { mcpRoots: built.mcpRoots } : {}),
       ...(built.catalog ? { catalog: built.catalog } : {}),
     });
@@ -4476,6 +4815,10 @@ export class SessionHub {
      *  thinking / invalid bounds (byte-stable, same pattern as
      *  thinking/toolCalls/lastUsage). */
     readonly thinkingMs?: number;
+    /** ADR-0135: this turn's security-interruption cause + bounded cleanup
+     *  evidence, so the live answer carries the same cause a reload will
+     *  project from the persisted record. Absent for every other turn. */
+    readonly securityInterruption?: SecurityInterruptionRecord;
   }): TurnDto {
     const { query, result } = opts;
     // Serve SPA output boundary — mask known secret values in the
@@ -4493,7 +4836,8 @@ export class SessionHub {
     // rides that view, so a truncation is shown identically live and reopened.
     const outcomeFields = turnOutcomeFields(
       result.stopReason,
-      result.supplierDetail
+      result.supplierDetail,
+      opts.securityInterruption
     );
     return {
       query,

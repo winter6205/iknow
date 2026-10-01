@@ -38,6 +38,52 @@ export interface TraceError {
   message: string;
 }
 
+/**
+ * Typed cause of one tool call's failure, as the engine observed it.
+ *
+ * Why this is not derived from `error.message`: ADR-0005 makes the message the
+ * model-facing surface, and the spec forbids recognizing a failure class by
+ * matching an arbitrary message substring. `error.type` alone cannot carry it
+ * either — ADR-0091's per-call timeout and ADR-0135's security-interruption
+ * cancel are both `execution_failed`, so the two were indistinguishable on the
+ * trace until this field existed.
+ *
+ * `cleanup_unconfirmed` is separate from `timeout` / `cancelled` on purpose: a
+ * teardown that was requested but never proven is a fault of its own, and a
+ * reader filtering on the cause must be able to find it without parsing the
+ * cleanup body. It does not replace the underlying cause — a timed-out call
+ * whose teardown was unconfirmed carries both, `cleanup` holding the evidence.
+ *
+ * Postel: absent means the engine recognized no cause, which is a fact a reader
+ * needs (it is why absence must never be defaulted to `"unknown"`).
+ */
+export type ToolCallCause = "timeout" | "cancelled" | "cleanup_unconfirmed";
+
+/**
+ * Process-tree cleanup evidence as it appears on a trace row.
+ *
+ * Structurally identical to the sandbox bounded-context result
+ * (`sandbox/cleanup-result.ts`), redefined here for the same reason every other
+ * union in this file is: the trace bounded context imports no sibling domain
+ * (file-header precedent), and loop-engine structurally assigns. The three
+ * states stay distinct on the wire — a consumer that collapses them to a
+ * boolean cannot tell a confirmed stop from a request that was never proven.
+ */
+export type CleanupTraceEvidence =
+  | { readonly state: "not_started" }
+  | {
+      readonly state: "confirmed_stopped";
+      readonly pgid: number;
+      readonly task_id?: string;
+    }
+  | {
+      readonly state: "unconfirmed";
+      readonly reason: "observation_expired" | "teardown_failed";
+      readonly pgid: number;
+      readonly detail: string;
+      readonly task_id?: string;
+    };
+
 export interface LlmCallRecord {
   startedAt: string;
   endedAt: string;
@@ -100,6 +146,14 @@ export interface ToolCallRecord {
   result?: unknown;
   status: TraceStatus;
   error?: TraceError;
+  /** ADR-0091 / ADR-0134 / ADR-0135 typed cause; absent when none was observed. */
+  cause?: ToolCallCause;
+  /**
+   * Bounded process-tree teardown evidence (ADR-0134). Present only when the
+   * execution actually reported one — a spawn failure or a cancel whose
+   * cleanup never ran omits it, which is *not* a successful stop.
+   */
+  cleanup?: CleanupTraceEvidence;
 }
 
 export interface TurnRecord {
@@ -165,6 +219,76 @@ export interface SandboxCmdRecord {
   durationMs: number;
   status: TraceStatus;
   error?: TraceError;
+}
+
+/**
+ * Security-interruption record (ADR-0135).
+ *
+ * Written through the shared service rather than by a caller's own
+ * `appendFileSync`, so an interruption lands in the same file as the turn and
+ * tool rows it interrupted, with the same write-failure accounting. A reviewer
+ * rebuilding the interrupted turn reads three things off this row: the cause
+ * (`tier` / `tool` / `message` / `confirmedViolations`), which turn it belongs
+ * to (`turnId`, bound to the trace `turn` row rather than to file order), and
+ * per-item evidence that each cancelled task was actually named and actually
+ * stopped — or, where it was not, why not.
+ *
+ * `tier: "mid-escalation"` is the operator *notification* written at the moment
+ * the threshold is reached; it carries no cleanup because none has been
+ * collected yet. The structured report arrives separately with the real
+ * `tier: "mid" | "high"`. Consumers select the report by the presence of
+ * `cleanup` / `confirmedViolations`, never by tier alone.
+ *
+ * The tool-use id is carried when the executor's result had one, so a single
+ * offending call can be named rather than inferred from ordering.
+ */
+export interface ViolationRecord {
+  readonly ts: string;
+  /**
+   * The tier the producer named. Optional: a payload that named none, or
+   * named one this build does not recognize, records the field ABSENT rather
+   * than a default. An absent tier says "the producer named no tier", which is
+   * a different statement from a row recording one — and a reader that fills
+   * it in would be asserting a severity the payload does not carry.
+   */
+  readonly tier?: "low" | "mid" | "high" | "mid-escalation";
+  readonly tool: string;
+  readonly message: string;
+  /** Engine turn id the violation was observed under, when the host had one. */
+  readonly turnId?: string;
+  /** The offending call's own id, when the executor's result carried one. */
+  readonly toolUseId?: string;
+  /** Consecutive confirmed violations that produced this record. */
+  readonly confirmedViolations?: number;
+  /**
+   * Per-item bounded cleanup for the work this turn owned. Absent on the
+   * escalation notification (nothing collected yet) and on a host that runs no
+   * cleanup pass — absence never means "nothing needed stopping".
+   */
+  readonly cleanup?: ReadonlyArray<ViolationCleanupItem>;
+  /**
+   * The producer's own payload, verbatim (the createKillSessionHook JSON).
+   * Carried so the trace never becomes a lossy projection of the report: a
+   * consumer that needs a field this schema has not grown yet reads it here.
+   */
+  readonly detail?: unknown;
+}
+
+/**
+ * One cancelled turn-owned item as the trace records it: the owner identity
+ * (`kind` + `id`) and the verdict of its bounded teardown, carried verbatim
+ * from the turn-work registry. `state` mirrors the top-level verdict and
+ * `cleanup` carries the plane's own evidence, so a consumer need not branch on
+ * which plane produced the item. `stop_requested` is deliberately distinct from
+ * `confirmed_stopped`: a delivered signal is not an observed exit.
+ */
+export interface ViolationCleanupItem {
+  readonly kind: "subagent" | "background_task";
+  readonly id: string;
+  readonly state: "stop_requested" | "confirmed_stopped" | "unconfirmed";
+  /** Typed cause when `state === "unconfirmed"`. */
+  readonly reason?: string;
+  readonly cleanup: CleanupTraceEvidence;
 }
 
 /**
@@ -425,6 +549,13 @@ export interface TraceService {
   recordSession(record: SessionRecord): Promise<string | undefined>;
   /** Record one sandbox command execution (schema ready, emitter pendingRuntime). @throws never. */
   recordSandboxCmd(record: SandboxCmdRecord): Promise<string | undefined>;
+  /**
+   * Record one security-interruption event (ADR-0135). Written through the
+   * shared service so an escalation lands in the same file as the turn and
+   * tool rows it interrupted, under the same write-failure accounting.
+   * @throws never — returns undefined on write failure.
+   */
+  recordViolation(record: ViolationRecord): Promise<string | undefined>;
   /**
    * Record one verification verdict. Unlike the others, id/sessionId/ts come
    * from the caller; success returns record.id, failure undefined.

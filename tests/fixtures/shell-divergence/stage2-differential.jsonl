@@ -16,11 +16,13 @@
 {"command":"dd if=/dev/zero of=/dev/sda","wall":"sensitive","base":false,"head":false,"label":"same"}
 {"command":"> /tmp/x","wall":"pattern","base":{"id":"bare-metachar","pattern":">"},"head":{"id":"bare-metachar","pattern":">"},"label":"same"}
 {"command":"> /tmp/x","wall":"sensitive","base":false,"head":false,"label":"same"}
-{"command":"find /","wall":"pattern","base":{"id":"root-find-walk","pattern":"find"},"head":{"id":"root-find-walk","pattern":"find"},"label":"same"}
+{"command":"find /","wall":"pattern","base":{"id":"root-find-walk","pattern":"find"},"head":null,"label":"expected-relaxation","class":"4","clause":"specs/hard-wall-denial-alignment.md SC6 root read-only search (Assumption 4 Root search; ADR-0134; a mutating root search keeps the deny)"}
 {"command":"find /","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"find / -delete","wall":"pattern","base":{"id":"root-find-walk","pattern":"find"},"head":{"id":"root-find-walk","pattern":"find"},"label":"same"}
+{"command":"find / -delete","wall":"sensitive","base":false,"head":false,"label":"same"}
 {"command":"[[ a == b ]]","wall":"pattern","base":null,"head":null,"label":"same"}
 {"command":"[[ a == b ]]","wall":"sensitive","base":false,"head":false,"label":"same"}
-{"command":"echo hi &&","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed"},"label":"same"}
+{"command":"echo hi &&","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）"},"label":"authorized-diagnostic-move"}
 {"command":"echo hi &&","wall":"sensitive","base":false,"head":false,"label":"same"}
 {"command":"echo\\ test","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 echo \"test\""},"head":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 echo \"test\""},"label":"same"}
 {"command":"echo\\ test","wall":"sensitive","base":false,"head":false,"label":"same"}
@@ -148,7 +150,7 @@
 {"command":"php -r 'rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
 {"command":"php -e 'shutdown'","wall":"pattern","base":{"id":"destructive-disk","pattern":"shutdown"},"head":{"id":"destructive-disk","pattern":"shutdown"},"label":"same"}
 {"command":"php -e 'shutdown'","wall":"sensitive","base":false,"head":false,"label":"same"}
-{"command":"powershell -c Remove-Item -Recurse -Force C:\\","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed"},"label":"same"}
+{"command":"powershell -c Remove-Item -Recurse -Force C:\\","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）"},"label":"authorized-diagnostic-move"}
 {"command":"powershell -c Remove-Item -Recurse -Force C:\\","wall":"sensitive","base":false,"head":false,"label":"same"}
 {"command":"powershell -c 'Write-Output rm -rf /'","wall":"pattern","base":{"id":"destructive-rm","pattern":"rm -rf"},"head":{"id":"destructive-rm","pattern":"rm -rf"},"label":"same"}
 {"command":"powershell -c 'Write-Output rm -rf /'","wall":"sensitive","base":false,"head":false,"label":"same"}
@@ -800,7 +802,7 @@
 {"command":"cat <<'EOF'\nid_rsa\nEOF","wall":"sensitive","base":true,"head":false,"label":"expected-relaxation","class":"2","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (2) inert-span (SC-S2-7 comment text, non-code-receiver quoted body)"}
 {"command":"cat <<'EOF'\n/etc/passwd\nEOF","wall":"pattern","base":null,"head":null,"label":"same"}
 {"command":"cat <<'EOF'\n/etc/passwd\nEOF","wall":"sensitive","base":true,"head":false,"label":"expected-relaxation","class":"2","clause":"specs/hard-wall-ast-migration.md SC-GATES-3 class (2) inert-span (SC-S2-7 comment text, non-code-receiver quoted body)"}
-{"command":"python3 <<'EOF'\nopen('/etc/passwd').read()\nEOF","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed"},"label":"same"}
+{"command":"python3 <<'EOF'\nopen('/etc/passwd').read()\nEOF","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）"},"label":"authorized-diagnostic-move"}
 {"command":"python3 <<'EOF'\nopen('/etc/passwd').read()\nEOF","wall":"sensitive","base":true,"head":true,"label":"same"}
 {"command":"bash -c 'cat /etc/passwd'","wall":"pattern","base":null,"head":null,"label":"same"}
 {"command":"bash -c 'cat /etc/passwd'","wall":"sensitive","base":true,"head":true,"label":"same"}

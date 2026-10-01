@@ -28,6 +28,9 @@ export function createNoopTraceService(): TraceServiceWithHealth {
     async recordSandboxCmd(_record) {
       return undefined;
     },
+    async recordViolation(_record) {
+      return undefined;
+    },
     async recordVerification(_record) {
       return undefined;
     },

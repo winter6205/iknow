@@ -24,8 +24,10 @@
  *   (c) every row's recorded HEAD hit still matches what HEAD computes now,
  *       which is what catches a future `id`/`pattern` move — or a narrowed
  *       wall roster — sneaking in without a regeneration;
- *   (d) the authorized `{id, pattern}` move is exactly the one the fork-bomb
- *       shape owns, and no other row moved;
+ *   (d) every `{id, pattern}` move is one of the two authorized shapes — the
+ *       fork-bomb pair, and the `malformed` diagnostic that kept its id and
+ *       gained the reason the parse layer already held — each pinned byte for
+ *       byte on both sides, with no other row moved;
  *   (e) every relaxation row cites the SC-GATES-3 clause its own class names,
  *       and the carrier, wrapper, store-or-run and unknown-executor shapes the
  *       ledger prices stay unlicensable against the wall's live answer;
@@ -58,6 +60,7 @@ import {
   commandContainsSensitivePath,
   findDangerousPattern,
   type DangerousPatternHit,
+  type DangerousPatternId,
 } from "../../../src/harness/permission/hard-walls.js";
 import { parseForSecurity } from "../../../src/harness/permission/shell-parse.js";
 import {
@@ -80,12 +83,17 @@ type DivergenceLabel =
   | "same"
   | "expected-relaxation"
   | "authorized-id-move"
+  | "authorized-diagnostic-move"
   | "fixed"
   | "security-review"
   | "open";
 
-/** The licensed relaxation classes: quote/heredoc, inert-span, operand-scope. */
-type RelaxationClass = "1" | "2" | "3";
+/**
+ * The licensed relaxation classes: quote/heredoc, inert-span, operand-scope,
+ * read-only root search. Class 4 is the only one added after the AST migration,
+ * and it cites a different spec — see `RELAXATION_CLAUSES` in the generator.
+ */
+type RelaxationClass = "1" | "2" | "3" | "4";
 
 type WallValue = DangerousPatternHit | boolean | null;
 
@@ -127,6 +135,7 @@ const ADMITTED_LABELS: readonly DivergenceLabel[] = [
   "same",
   "expected-relaxation",
   "authorized-id-move",
+  "authorized-diagnostic-move",
   "fixed",
   "security-review",
   "open",
@@ -169,11 +178,22 @@ const AUTHORIZED_NEW_DENY: ReadonlyMap<string, DangerousPatternHit> = new Map([
 
 const TYPED_HEADLESS_DENY_PREFIX = "typed-headless-deny:";
 
-/** Which relaxation classes each wall may be excused under. */
+/**
+ * Which relaxation classes each wall may be excused under.
+ *
+ * Class 4 is on the `pattern` wall only, and only for the `root-find-walk` id:
+ * SC6 withdrew that wall's deny for a read-only root search and nothing else.
+ * The `sensitive` wall is deliberately left without it — a root search that
+ * newly stopped being a protected-path finding would be a different and much
+ * larger change, and must not ride in on this class.
+ */
 const LICENSED_CLASSES: Record<WallName, readonly RelaxationClass[]> = {
-  pattern: ["1", "3"],
+  pattern: ["1", "3", "4"],
   sensitive: ["2"],
 };
+
+/** The single id class 4 may be charged against. */
+const CLASS_4_ID: DangerousPatternId = "root-find-walk";
 
 /**
  * SC-GATES-3: a tagged relaxation must be tagged to a clause. The citation names
@@ -184,6 +204,9 @@ const CLAUSE_CITATION: Record<RelaxationClass, RegExp> = {
   "1": /^specs\/hard-wall-ast-migration\.md SC-GATES-3 class \(1\) quote\/heredoc\b/,
   "2": /^specs\/hard-wall-ast-migration\.md SC-GATES-3 class \(2\) inert-span\b/,
   "3": /^specs\/hard-wall-ast-migration\.md SC-GATES-3 class \(3\) operand-scope\b/,
+  // Class 4 cites the policy spec, not the migration spec: it is a withdrawn
+  // deny, not a carrier move.
+  "4": /^specs\/hard-wall-denial-alignment\.md SC6 root read-only search\b/,
 };
 
 /**
@@ -194,6 +217,59 @@ const AUTHORIZED_MOVE = {
   base: { id: "bare-metachar", pattern: "|" },
   head: { id: "destructive-disk", pattern: ":(){ :|:& };:" },
 } as const;
+
+/**
+ * The second authorized `{base, head}` move, and a second CLASS rather than a
+ * second entry in the fork-bomb one: the fork-bomb shape is licensed by
+ * SC-S2-8, while this one is licensed by SC14's diagnostic correction, and the
+ * two must fail independently. Resetting the base baseline instead would have
+ * silently re-priced every later move as `same`, which is exactly the blind
+ * spot this file exists to close.
+ *
+ * The move is pinned byte for byte on both sides, and the `id` side of the pin
+ * is load-bearing: the wall renders the parse layer's own reason into the
+ * pattern, and a correction that also renumbered the id, or that reworded the
+ * reason, is a change this gate has not been shown to authorize and must fail
+ * here rather than pass as a diagnostic.
+ */
+const AUTHORIZED_DIAGNOSTIC_MOVE = {
+  base: { id: "unparseable", pattern: "verdict=malformed" },
+  head: {
+    id: "unparseable",
+    pattern:
+      "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
+  },
+} as const;
+
+/**
+ * The label vocabulary and the authorized shapes, bound together: a move label
+ * with no pinned shape cannot be granted, and a pinned shape with no label
+ * cannot be recorded. A label added to one list and not the other fails the
+ * load rather than quietly pricing a moved row.
+ */
+const AUTHORIZED_MOVE_BY_LABEL: ReadonlyMap<
+  DivergenceLabel,
+  typeof AUTHORIZED_MOVE | typeof AUTHORIZED_DIAGNOSTIC_MOVE
+> = new Map([
+  ["authorized-id-move", AUTHORIZED_MOVE],
+  ["authorized-diagnostic-move", AUTHORIZED_DIAGNOSTIC_MOVE],
+]);
+
+/**
+ * Whether one recorded `{base, head}` pair is one of the authorized moves. Both
+ * fields of both sides are compared: a prefix match on `pattern`, or a match on
+ * `id` alone, would let a future wall reword or re-id its own diagnostic
+ * through this gate.
+ */
+function isAuthorizedMove(
+  base: WallValue,
+  head: WallValue
+): typeof AUTHORIZED_MOVE | typeof AUTHORIZED_DIAGNOSTIC_MOVE | null {
+  for (const shape of [AUTHORIZED_MOVE, AUTHORIZED_DIAGNOSTIC_MOVE] as const) {
+    if (sameValue(base, shape.base) && sameValue(head, shape.head)) return shape;
+  }
+  return null;
+}
 
 // --------------------------------------------------------------------------
 // fixture loading — a violating line fails the load, nothing is skipped
@@ -299,7 +375,7 @@ function parseRow(line: string, index: number): FixtureRow {
       `${where}: label ${JSON.stringify(raw.label)} is not admitted`
     );
   const cls = raw.class;
-  if (cls !== undefined && !["1", "2", "3"].includes(cls as string))
+  if (cls !== undefined && !["1", "2", "3", "4"].includes(cls as string))
     throw new Error(`${where}: class ${JSON.stringify(cls)} is unknown`);
   const clause = raw.clause;
   if (clause !== undefined && typeof clause !== "string")
@@ -355,13 +431,18 @@ function assertLabelIsCoherent(row: FixtureRow, where: string): void {
   }
   if (row.clause !== undefined)
     throw new Error(`${where}: only a relaxation row carries a citation`);
-  if (row.label === "authorized-id-move") {
-    const authorized =
-      sameValue(row.base, AUTHORIZED_MOVE.base) &&
-      sameValue(row.head, AUTHORIZED_MOVE.head);
-    if (!authorized || !denies(row.head))
+  const authorized = AUTHORIZED_MOVE_BY_LABEL.get(row.label);
+  if (authorized !== undefined) {
+    if (
+      !sameValue(row.base, authorized.base) ||
+      !sameValue(row.head, authorized.head)
+    )
       throw new Error(
-        `${where}: labeled id move but is not the authorized pair`
+        `${where}: labeled ${row.label} but is not the authorized pair`
+      );
+    if (!denies(row.base) || !denies(row.head))
+      throw new Error(
+        `${where}: labeled ${row.label} but the tier did not stay deny -> deny`
       );
     rejectEvidence(row, where);
     return;
@@ -491,6 +572,22 @@ function denies(value: WallValue): boolean {
   return typeof value === "boolean" ? value : value !== null;
 }
 
+/**
+ * A pattern row that kept its deny but changed the bytes it denies with. (d)
+ * reads this set off the fixture rather than off the labels, so a row that
+ * moved and was mislabeled is still visible to the gate.
+ */
+function movedPatternRows(
+  source: readonly FixtureRow[] = patternRows
+): FixtureRow[] {
+  return source.filter(
+    (row) =>
+      denies(row.base) &&
+      denies(row.head) &&
+      JSON.stringify(row.base) !== JSON.stringify(row.head)
+  );
+}
+
 // --------------------------------------------------------------------------
 // the grader's own re-licensing: a recorded relaxation must be one the
 // grader can derive from the parse and the row's own baseline hit
@@ -513,6 +610,27 @@ function stillDenies(text: string, pattern: string): boolean {
  */
 function unlicensedRelaxation(row: FixtureRow): string | null {
   if (row.label !== "expected-relaxation") return null;
+  // Class 4 is re-derived from the command's own grammar, by the same
+  // independent predicate the generator used — the point of the class is that
+  // the ledger can price it, so the grader prices it too rather than taking the
+  // recorded class on trust. Everything else about the row is checked below.
+  if (row.class === "4") {
+    if (row.wall !== "pattern")
+      return `${describeRow(row)}: class 4 is licensed on the pattern wall only`;
+    if ((row.base as DangerousPatternHit)?.id !== CLASS_4_ID)
+      return `${describeRow(row)}: class 4 is licensed for ${CLASS_4_ID} only`;
+    const priced = classifyPattern(
+      row.command,
+      row.base as DangerousPatternHit,
+      null,
+      () => ({ pattern: () => row.base, sensitive: () => false })
+    );
+    return priced.class === "4"
+      ? null
+      : `${describeRow(row)}: the grader prices ${JSON.stringify(
+          priced
+        )}, not class 4`;
+  }
   if (row.wall === "sensitive") {
     if (inertLicensedSpans(row.command).length === 0)
       return `${describeRow(row)}: no inert span this file licenses covers the excision`;
@@ -675,6 +793,57 @@ describe("(b) every new allow is a licensed relaxation or a recorded review", ()
     ).toEqual([]);
   });
 
+  it("class 4 prices ONLY the read-only root search it was written for", () => {
+    // The class must not become a general licence for a withdrawn wall. Each
+    // row below is a root-rooted command that is NOT a read-only search, and
+    // the ledger must price it `open` rather than wave it through as class 4.
+    const denied = { id: CLASS_4_ID, pattern: "find" } as const;
+    const oracle: Oracle = {
+      pattern: () => denied,
+      sensitive: () => false,
+    };
+    const notReadOnly: ReadonlyArray<string> = [
+      // every mutating action
+      "find / -delete",
+      "find / -exec rm {} +",
+      "find / -execdir rm {} +",
+      "find / -ok rm {} +",
+      "find / -okdir rm {} +",
+      "find / -fprint /tmp/out",
+      "find / -fprint0 /tmp/out",
+      "find / -fprintf /tmp/out %p",
+      "find / -fls /tmp/out",
+      // an unknown flag is not read-only just because it is not known to be
+      // mutating
+      "find / -bogus",
+      "find / -deletee",
+      // and the root-hidden-in-a-cd spellings of the same
+      "cd / && find . -delete",
+      "cd /tmp && find .. -delete",
+    ];
+    for (const command of notReadOnly) {
+      const priced = classifyPattern(command, denied, null, oracle);
+      expect(priced.label, command).toBe("open");
+      expect(priced.class, command).toBeUndefined();
+    }
+  });
+
+  it("class 4 does not travel to a non-root walk or to another id", () => {
+    // A non-root search was never denied by this wall, so a `same` row there
+    // carries no class at all; and the class is bound to ONE id, so a
+    // relaxation of a different id is unlicensable even when the command looks
+    // like a read-only root search.
+    const otherId = { id: "destructive-rm", pattern: "rm -rf" } as const;
+    const oracle: Oracle = {
+      pattern: () => otherId,
+      sensitive: () => false,
+    };
+    for (const command of ["find / -name x", "find /tmp -name x"]) {
+      const priced = classifyPattern(command, otherId, null, oracle);
+      expect(priced.class ?? null, command).not.toBe("4");
+    }
+  });
+
   it("each licensed class has a supplier, so the class is not an empty excuse", () => {
     for (const [wall, classes] of Object.entries(LICENSED_CLASSES)) {
       for (const cls of classes) {
@@ -717,30 +886,76 @@ describe("(c) live HEAD still answers what the fixture recorded", () => {
   });
 });
 
-describe("(d) exactly the one authorized id move", () => {
-  it("the moved set is the fork-bomb pair and nothing else moved", () => {
-    const moved = patternRows.filter(
-      (row) =>
-        denies(row.base) &&
-        denies(row.head) &&
-        JSON.stringify(row.base) !== JSON.stringify(row.head)
+describe("(d) every move is one of the two authorized shapes", () => {
+  it("the moved set is exactly the two authorized pairs, one row each", () => {
+    const moved = movedPatternRows();
+    const bomb = moved.filter(
+      (row) => isAuthorizedMove(row.base, row.head) === AUTHORIZED_MOVE
     );
-    const labeled = rows.filter((row) => row.label === "authorized-id-move");
+    const diagnostic = moved.filter(
+      (row) =>
+        isAuthorizedMove(row.base, row.head) === AUTHORIZED_DIAGNOSTIC_MOVE
+    );
     expect(
-      moved.map(describeRow),
-      "more rows moved their {id, pattern} than the one authorized pair"
-    ).toHaveLength(1);
-    expect(labeled.map(describeRow)).toEqual(moved.map(describeRow));
-    for (const row of moved) {
-      expect(row.command).toBe(AUTHORIZED_MOVE.head.pattern);
-      expect(row.base).toEqual(AUTHORIZED_MOVE.base);
-      expect(row.head).toEqual(AUTHORIZED_MOVE.head);
+      bomb.map((row) => row.command),
+      "the fork-bomb pair must still be the only row that moved its id"
+    ).toEqual([AUTHORIZED_MOVE.head.pattern]);
+    expect(
+      diagnostic.length,
+      "the diagnostic correction moved no rows on the fixture"
+    ).toBeGreaterThan(0);
+    const movedKey = (row: FixtureRow) =>
+      `${describeRow(row)} ${JSON.stringify(row.head)}`;
+    expect(
+      moved.map(movedKey).sort(),
+      "a row moved its {id, pattern} without matching either authorized shape"
+    ).toEqual([...bomb, ...diagnostic].map(movedKey).sort());
+  });
+
+  it("labels every move with the class its own pinned shape authorizes", () => {
+    const labeled = rows.filter((row) =>
+      AUTHORIZED_MOVE_BY_LABEL.has(row.label)
+    );
+    expect(
+      labeled.map((row) => row.label),
+      "an authorized move label is recorded with no row"
+    ).toEqual(
+      movedPatternRows().map((row) => {
+        const shape = isAuthorizedMove(row.base, row.head);
+        expect(
+          shape,
+          `${describeRow(row)} is labeled but matches no authorized shape`
+        ).not.toBeNull();
+        return shape === AUTHORIZED_MOVE
+          ? "authorized-id-move"
+          : "authorized-diagnostic-move";
+      })
+    );
+  });
+
+  it("the diagnostic move keeps its id and its tier, and both are pinned", () => {
+    for (const row of rows.filter(
+      (each) => each.label === "authorized-diagnostic-move"
+    )) {
+      expect(row.base, describeRow(row)).toEqual(
+        AUTHORIZED_DIAGNOSTIC_MOVE.base
+      );
+      expect(row.head, describeRow(row)).toEqual(
+        AUTHORIZED_DIAGNOSTIC_MOVE.head
+      );
+      // deny -> deny, with the id unchanged: only the diagnostic text moved. A
+      // reword or a re-id of the same verdict is not this shape.
+      expect(denies(row.base), "the pre-state must deny the shape").toBe(true);
+      expect(denies(liveHead(row)), "HEAD must still deny the shape").toBe(true);
+      expect((row.head as DangerousPatternHit).id).toBe(
+        AUTHORIZED_DIAGNOSTIC_MOVE.base.id
+      );
     }
   });
 
   it("the move keeps the tier: denied before, denied now", () => {
-    for (const row of rows.filter(
-      (each) => each.label === "authorized-id-move"
+    for (const row of rows.filter((each) =>
+      AUTHORIZED_MOVE_BY_LABEL.has(each.label)
     )) {
       expect(denies(row.base), "the pre-state must deny the shape").toBe(true);
       expect(denies(liveHead(row)), "HEAD must still deny the shape").toBe(
@@ -1154,6 +1369,148 @@ describe("(f) planted falsifiers: the grader itself must fail on each", () => {
         0
       )
     ).toThrow(/not the authorized pair/);
+  });
+
+  it("prices a deny-to-deny text change that is not a pinned shape as open", () => {
+    // Granting the malformed diagnostic a class must not turn this gate into a
+    // general allow for deny-to-deny text changes. These are the shapes a
+    // future wall edit could plausibly produce: a reworded reason, a re-id of
+    // the same verdict, a prefix of the pinned pattern, and a moved id. None is
+    // a pinned pair, so the matcher refuses each and the generator prices it
+    // `open` — the loud result that blocks a merge.
+    const pinned = AUTHORIZED_DIAGNOSTIC_MOVE;
+    // A pair that denies on both sides never reaches the relaxation branches,
+    // so the oracle is not consulted and any label here came from the
+    // authorized-move lookup alone.
+    const denyBoth: Oracle = {
+      pattern: () => pinned.head as DangerousPatternHit,
+      sensitive: () => true,
+    };
+    const unauthorized: readonly [string, WallValue, WallValue][] = [
+      [
+        "reworded reason",
+        pinned.base,
+        { ...pinned.head, pattern: `${pinned.head.pattern} 。` },
+      ],
+      ["re-id'd verdict", pinned.base, { ...pinned.head, id: "malformed" }],
+      [
+        "prefix of the pattern",
+        pinned.base,
+        { ...pinned.head, pattern: "verdict=malformed 语法不完整" },
+      ],
+      [
+        "moved id, pinned pattern",
+        { id: "unparseable", pattern: "verdict=aborted" },
+        pinned.head,
+      ],
+      [
+        "a wholly different pair",
+        { id: "destructive-rm", pattern: "rm -rf" },
+        { id: "destructive-rm", pattern: "rm -fr /" },
+      ],
+    ];
+    for (const [what, base, head] of unauthorized) {
+      expect(
+        isAuthorizedMove(base, head),
+        `${what} must not match an authorized move shape`
+      ).toBeNull();
+      expect(
+        classifyPattern(
+          "echo hi &&",
+          base as DangerousPatternHit,
+          head as DangerousPatternHit,
+          denyBoth
+        ).label,
+        `${what} must price as an unlicensed divergence, not a second-class move`
+      ).toBe("open");
+    }
+  });
+
+  it("fails to admit a moved row wearing either move label", () => {
+    const pinned = AUTHORIZED_DIAGNOSTIC_MOVE;
+    const reworded = `${pinned.head.pattern} 。`;
+    const impostors: readonly [string, Record<string, unknown>][] = [
+      [
+        "the id-move label on a reworded diagnostic",
+        {
+          command: "echo hi &&",
+          wall: "pattern",
+          base: pinned.base,
+          head: { ...pinned.head, pattern: reworded },
+          label: "authorized-id-move",
+        },
+      ],
+      [
+        "the diagnostic label on a reworded diagnostic",
+        {
+          command: "echo hi &&",
+          wall: "pattern",
+          base: pinned.base,
+          head: { ...pinned.head, pattern: reworded },
+          label: "authorized-diagnostic-move",
+        },
+      ],
+      [
+        "the diagnostic label on a re-id'd verdict",
+        {
+          command: "echo hi &&",
+          wall: "pattern",
+          base: pinned.base,
+          head: { ...pinned.head, id: "malformed" },
+          label: "authorized-diagnostic-move",
+        },
+      ],
+      [
+        "the diagnostic label on the fork-bomb pair",
+        {
+          command: "echo hi &&",
+          wall: "pattern",
+          base: AUTHORIZED_MOVE.base,
+          head: AUTHORIZED_MOVE.head,
+          label: "authorized-diagnostic-move",
+        },
+      ],
+    ];
+    for (const [what, raw] of impostors) {
+      expect(
+        () => parseRow(planted(raw), 0),
+        `${what} must be refused at the load`
+      ).toThrow(/not the authorized pair/);
+    }
+    // A near-miss of the vocabulary fails the load outright rather than
+    // arriving as an unpriced row.
+    expect(() =>
+      parseRow(
+        planted({ ...impostors[0][1], label: "authorized-diagnostic-move-x" }),
+        0
+      )
+    ).toThrow(/is not admitted/);
+  });
+
+  it("fails the moved-set gate on a deny-to-deny move no label can claim", () => {
+    // (d) reads the moved set off the fixture rather than off the labels, so a
+    // row that moved and was mislabeled is still visible to the gate. This is
+    // the same predicate (d) applies, over a row no pinned shape licenses.
+    const stranger: FixtureRow = {
+      command: "echo hi &&",
+      wall: "pattern",
+      base: { id: "unparseable", pattern: "verdict=malformed" },
+      head: { id: "unparseable", pattern: "verdict=malformed but for a typo" },
+      label: "same",
+    };
+    expect(
+      movedPatternRows([stranger]).map(describeRow),
+      "a deny-to-deny text change is a move whatever label it wears"
+    ).toHaveLength(1);
+    expect(
+      isAuthorizedMove(stranger.base, stranger.head),
+      "a near-miss of the pinned diagnostic must not be authorized"
+    ).toBeNull();
+    // And the loader refuses to call such a row `same` — the label a silently
+    // reset base baseline would have written.
+    expect(() => parseRow(planted({ ...stranger }), 0)).toThrow(
+      /labeled same but the two sides differ/
+    );
   });
 
   it("fails on an unreviewed deny-to-relaxation that the grader cannot license itself", () => {

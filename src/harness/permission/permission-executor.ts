@@ -26,6 +26,7 @@ import type {
 import type { HarnessStreamEvent } from "../stream.js";
 import type { AciCatalog, AciToolDef } from "../aci/types.js";
 import { checkPermission, type PermissionPolicy } from "./policy.js";
+import type { CleanupRootSnapshot } from "./cleanup-roots.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type {
   AskUser,
@@ -411,6 +412,7 @@ export function createPermissionRuntime(
       hardWalls: policy.hardWalls,
       defaultByCategory: policy.defaultByCategory,
       mode: policy.mode,
+      ...hostRootsOption(policy),
     });
 
     if (outcome.decision === "ask") {
@@ -681,4 +683,20 @@ function getOrCompileValidator(def: AciToolDef): ValidateFunction {
   v = HYDRATE_AJV.compile(def.inputSchema);
   HYDRATE_VALIDATOR_CACHE.set(def, v);
   return v;
+}
+
+/**
+ * ADR-0132/ADR-0133: the host's root context as the optional `checkPermission`
+ * field, or nothing at all when the policy has none.
+ *
+ * An empty spread is the absent case and reaches `checkPermission` as a
+ * missing field, not as a reader that could return an empty snapshot — the
+ * difference between "no cleanup scope exists" and "a scope with no roots in
+ * it", which the wall would otherwise have to tell apart.
+ */
+function hostRootsOption(
+  policy: PermissionPolicy
+): { readonly hostRoots?: () => CleanupRootSnapshot } {
+  if (policy.hostRoots === undefined) return {};
+  return { hostRoots: policy.hostRoots };
 }

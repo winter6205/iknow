@@ -43,8 +43,10 @@ import { formatRunJson } from "./cli/format.js";
 import {
   run as runHarness,
   createJsonlTraceService,
+  safeTrace,
   type LoopEngineDeps,
 } from "./harness/index.js";
+import { violationRecordFromReason } from "./harness/trace/violation-record.js";
 import {
   createTtyAskUser,
   createFailClosedAskUser,
@@ -349,6 +351,18 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
   // today's fenced shape).
   const evalState = enterEvalStateForAsk(parsed, permissionMode);
 
+  // ADR-0132 / spec SC4: the session scratch this one-shot run owns. The ask
+  // route is non-interactive and single-run, so the identity is a plain value
+  // rather than serve's coarse live reader — the same shape chat pins for its
+  // whole REPL. Resolved through the same `(dataDir, projectIdentityRoot)`
+  // formula every other entry uses, so this run's `$TMPDIR` is the production
+  // session pad and not a private guess.
+  const conversationId = randomUUID();
+  const todoProjectDir = resolveProjectSessionDir(
+    dataDir,
+    deriveProjectIdentityRoot({ cwd: process.cwd() })
+  );
+
   let built: { deps: LoopEngineDeps };
   try {
     // ask oneshot: no interactive user → fail-closed askUser (always deny).
@@ -377,6 +391,19 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
       ...(parsed.workspaceRoot !== undefined
         ? { workspaceRoot: parsed.workspaceRoot }
         : {}),
+      // ADR-0132: the two seams the identity-scratch cleanup exception reads.
+      // `todoDir` is the session project dir the scratch hangs under and
+      // `sessionConversationId` is this run's own id; together they are what
+      // turns the main-session scratch arm on for `ask`. Absent either one,
+      // the arm stays off and every destructive-rm verdict is unchanged — the
+      // fail-toward-deny direction this entry shipped with.
+      todoDir: todoProjectDir,
+      sessionConversationId: () => conversationId,
+      // ADR-0132: the scratch anchor, named for what it is rather than reusing
+      // `todoDir` above. The line above is withheld by ADR-0028's ask gate, and
+      // the Bash handler must still reach this run's session pad — the two
+      // ADR-0132 gates are only in agreement when both are handed the anchor.
+      sessionRootDir: todoProjectDir,
       subagentDiagnosticsDir: resolve(tracePath),
     });
   } catch (err) {
@@ -406,15 +433,34 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     }
     throw err;
   }
-  // ask path: each invocation gets its own conversation_id (ADR-0003).
-  const conversationId = randomUUID();
+  // ask path: each invocation gets its own conversation_id (ADR-0003) — the
+  // same id the assembly above named as this run's cleanup identity, so the
+  // trace anchor and the scratch the wall judges are one identity rather than
+  // two independently minted values.
   const traceService = createJsonlTraceService({
     filePath: tracePath,
     conversationId,
   });
   // T6: wrap the executor with the violation kill-session hook so the ask
   // entry point surfaces violation escalations on stderr + exits with code 1.
-  const { executor } = buildViolationWiring(built.deps.executor);
+  //
+  // ADR-0135 / SC12: the same interruption is also written to the trace the
+  // run already owns, through the same shared JSONL service the turn and tool
+  // rows use. Before this, `ask` printed the operator notice and exited 1 but
+  // left no `violation` row behind, so a retained trial trajectory could not
+  // show why the run stopped — the exact gap the pilot report names. The write
+  // is best-effort: an unwritable trace must not turn an already-failing run
+  // into a different failure.
+  const { executor } = buildViolationWiring(built.deps.executor, {
+    onInterrupt: (reason: string) => {
+      const record = violationRecordFromReason(
+        reason,
+        new Date().toISOString()
+      );
+      if (record === undefined) return;
+      void safeTrace(() => traceService.recordViolation(record));
+    },
+  });
   // The `--max-turns` flag wins; otherwise fall back to the assembly-layer env
   // value (undefined = unlimited). agentVersion is injected CLI-side from
   // getVersion() so the session L1 root record lands at the end of the run.
@@ -426,6 +472,18 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
     trace: traceService,
     agentVersion: getVersion(),
     maxTurns: parsed.maxTurns ?? built.deps.maxTurns,
+    // ADR-0132: this run's own id, into the per-call tool context. The scratch
+    // pad is named `<sessionRootDir>/<conversationId>/fence-tmp`, and the Bash
+    // handler resolves that half from the call context — so handing it the
+    // `sessionRootDir` alone still left the two ADR-0132 gates naming different
+    // directories (the handler fell back to its own `mkdtemp` pad). Same value
+    // the trace above is stamped with, so one run has one identity.
+    //
+    // Absent → every other `ctx.conversationId` consumer (worktree tools,
+    // bash_output / bash_stop scoping) reads it as "no filtering", which on
+    // this surface is the pre-existing state: the ask entry assembles neither
+    // the worktree tools nor the background manager that consume it.
+    conversationId,
   };
   let stopSummary: string | undefined;
   const onStream = (
@@ -609,6 +667,20 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     fsMode,
     liveGraphLedger,
     todoDir: todoProjectDir,
+    // ADR-0132: the identity whose session scratch this engine may clean. A
+    // reader for uniformity with the other entries even though chat's value is
+    // already fixed — `conversationId` is pinned once for the whole REPL
+    // (line above) and reused across every rebind rebuild, so a reader and a
+    // plain string name the same pad here. Wrapping it keeps the three
+    // entries on one seam shape: a host that later learns a per-turn id has
+    // one place to read it from.
+    sessionConversationId: () => conversationId,
+    // ADR-0132: the same scratch anchor the ask entry passes, on the ungated
+    // channel. `todoDir` above already carries this value here, so this line
+    // changes no behavior on this surface — it exists so both CLI entries hand
+    // the engine the anchor through one named seam instead of relying on
+    // `todoDir` happening to be ungated on this particular surface.
+    sessionRootDir: todoProjectDir,
     // ADR-0088: registration root follows the session pool, not workspaceRoot.
     tasksDir,
     // ADR-0099: project memory follows the same tree, not workspaceRoot.
@@ -740,6 +812,9 @@ async function runChat(parsed: ParsedCli): Promise<void> {
     // subagent results into priorMessages. The ask entry has no manager
     // (surface-gated), so it does not pass this.
     subagentManager: built.subagentManager,
+    // ADR-0135: the live background-task manager, so a security interruption
+    // can cancel the finite background jobs the interrupted turn launched.
+    backgroundManager: built.backgroundManager,
     // The loadable-skills surface — CLI, TUI and Web share one slash entry.
     // `/skill-name [remainder]` goes through the skill-load envelope assembly
     // (buildSkillLoadText + createSkillBody, same source as the TUI).
@@ -802,6 +877,10 @@ async function runChat(parsed: ParsedCli): Promise<void> {
         // the catalog would serve "hot in place" candidates from the old root's
         // scanner.
         skillRescanner: rebuilt.skillRescanner,
+        // ADR-0135: the background-task manager swaps with the active engine
+        // too, so an interrupted turn never cancels jobs through a retired
+        // manager.
+        backgroundManager: rebuilt.backgroundManager,
       };
     },
   });

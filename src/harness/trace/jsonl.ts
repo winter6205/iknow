@@ -26,6 +26,7 @@ import type {
   SessionRecord,
   SandboxCmdRecord,
   VerificationRecord,
+  ViolationRecord,
   GoalRecord,
   SubagentSpawnRecord,
   SubagentStopRecord,
@@ -345,6 +346,27 @@ export function createJsonlTraceService(
         conversation_id: conversationId,
         record_type: "sandbox_cmd",
         sandbox_cmd_id: id,
+        ...toSnakeCaseRecord(record),
+      };
+      try {
+        writeLine(line);
+        return id;
+      } catch (err) {
+        recordFailure(err);
+        return undefined;
+      }
+    },
+
+    async recordViolation(
+      record: ViolationRecord
+    ): Promise<string | undefined> {
+      // The id carrier is a violation_id the implementation generates, so a
+      // reader can name the row; `turn_id` separately binds it to its turn.
+      const id = randomUUID();
+      const line: Record<string, unknown> = {
+        conversation_id: conversationId,
+        record_type: "violation",
+        violation_id: id,
         ...toSnakeCaseRecord(record),
       };
       try {

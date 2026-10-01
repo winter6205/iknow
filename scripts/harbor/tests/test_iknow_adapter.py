@@ -45,7 +45,9 @@ from iknow_harbor.agent import (
     _glibcxx_at_least,
     _glibcxx_ceiling,
     _glibcxx_probe_command,
+    _apply_to_context,
     _run_metadata,
+    _trace_file_probe_command,
     _trace_probe_command,
     render_iknow_settings,
 )
@@ -1771,3 +1773,240 @@ def test_the_option_carries_no_env_fallback_at_all():
     assert not any(isinstance(item, Env) for item in metadata), (
         f"trace_out must not declare an Env fallback; got {metadata}"
     )
+
+
+# ============================================================================
+# T8 / SC12: evaluation-entry trace evidence and the join to grader results
+# ============================================================================
+
+
+class TestEvaluationTraceIdentity:
+    """The conversation id is the only key a trial's trace can be joined on.
+
+    `iknow ask` mints a random UUID conversation id inside the container and
+    never prints it, so a trial's `agent/trace/<conversationId>.jsonl` could not
+    be named from `results.json` — the join to the grader result was a
+    filesystem glob plus a guess. The id is read out of the trace directory
+    after the run and lands on the trial metadata, so a reviewer holding a
+    `reward.txt` and a `result.json` can name the exact trajectory that
+    produced it. No verdict is derived here: the raw pass/fail is untouched and
+    the attribution remains T9's job.
+    """
+
+    def _subject(self, tmp_path, **kwargs) -> IKnowAgent:
+        subject = IKnowAgent(
+            logs_dir=tmp_path,
+            model_name=MODEL_ROUTE,
+            bundle_path="/tmp/iknow-bundle.tgz",
+            **kwargs,
+        )
+        subject._extra_env = {MINIMAX_API_KEY_ENV: "test-key"}
+        return subject
+
+    def test_the_conversation_id_is_named_on_the_trial_metadata(self, tmp_path):
+        subject = self._subject(tmp_path, trace_out=True)
+
+        metadata = _run_metadata(
+            ParsedRun(kind="answer", turn_count=3),
+            subject.options,
+            trace_state=_TRACE_PROBE_PRESENT,
+            trace_file=f"/logs/agent/{_TRACE_DIRNAME}/9a995cf5-66ac-4889-b545-75aacacb1e62.jsonl",
+        )
+
+        assert metadata["trace_file"].endswith(
+            f"/logs/agent/{_TRACE_DIRNAME}/9a995cf5-66ac-4889-b545-75aacacb1e62.jsonl"
+        )
+        assert metadata["trace_conversation_id"] == (
+            "9a995cf5-66ac-4889-b545-75aacacb1e62"
+        )
+
+    def test_a_trial_that_retained_a_trace_does_not_lose_its_raw_outcome(self, tmp_path):
+        # Attribution is supplementary. Whatever the run stopped for, the
+        # fields the evaluator already read are unchanged — a trace that
+        # exists never rewrites the score.
+        subject = self._subject(tmp_path, trace_out=True)
+        context = SimpleNamespace(
+            metadata=None, n_input_tokens=0, n_cache_tokens=0, n_output_tokens=0
+        )
+        environment = _StubEnvironment(stdout=_TRACE_PROBE_PRESENT)
+
+        _apply_to_context(
+            ParsedRun(kind="answer", stop_reason="cancelled", turn_count=4),
+            context,
+            subject.options,
+            trace_state=_TRACE_PROBE_PRESENT,
+            trace_file=f"/logs/agent/{_TRACE_DIRNAME}/abc.jsonl",
+        )
+
+        assert context.metadata["stop_reason"] == "cancelled"
+        assert context.metadata["turn_count"] == 4
+        assert context.metadata["trace_state"] == _TRACE_PROBE_PRESENT
+
+    def test_no_trace_file_means_no_trace_keys_at_all(self, tmp_path):
+        # Absence stays the discriminator: a trial that never requested a
+        # trace, and one whose trace dir was empty, must not both claim one.
+        subject = self._subject(tmp_path, trace_out=False)
+
+        metadata = _run_metadata(
+            ParsedRun(kind="answer"), subject.options, trace_state=None
+        )
+
+        assert "trace_file" not in metadata
+        assert "trace_conversation_id" not in metadata
+        assert "trace_state" not in metadata
+        assert "trace_out" not in metadata
+
+    def test_a_present_trace_dir_with_no_file_names_no_conversation_id(self, tmp_path):
+        # The `empty` state is the case the pilot report found: a run that
+        # never got far enough to write a record. It must not be papered over
+        # with a guessed id.
+        subject = self._subject(tmp_path, trace_out=True)
+
+        metadata = _run_metadata(
+            ParsedRun(kind="answer"),
+            subject.options,
+            trace_state=_TRACE_PROBE_EMPTY,
+        )
+
+        assert metadata["trace_state"] == _TRACE_PROBE_EMPTY
+        assert "trace_file" not in metadata
+        assert "trace_conversation_id" not in metadata
+
+    def test_the_file_probe_names_the_trajectory_on_a_real_filesystem(
+        self, tmp_path
+    ):
+        # The three states plus the name are filesystem states, so they are
+        # established on a real directory by the very command the adapter
+        # runs — the same discipline as `test_the_probe_reads_the_directory_in
+        # a_real_shell`. A shell that answered nothing for a directory holding
+        # a real trajectory would leave every trial's join key empty.
+        root = tmp_path / "agent-log"
+        trace_dir = root / _TRACE_DIRNAME
+        probe = _trace_file_probe_command(trace_dir.as_posix())
+
+        assert _run_trace_probe(probe, trace_dir) == ""
+
+        trace_dir.mkdir(parents=True)
+        assert _run_trace_probe(probe, trace_dir) == ""
+
+        # A zero-byte .jsonl is a run that died mid-write: not a trajectory,
+        # so it is not named.
+        (trace_dir / "empty.jsonl").write_bytes(b"")
+        assert _run_trace_probe(probe, trace_dir) == ""
+
+        (trace_dir / "9a995cf5-66ac-4889-b545-75aacacb1e62.jsonl").write_text(
+            '{"record_type":"session"}\n'
+        )
+        assert _run_trace_probe(probe, trace_dir) == (
+            "9a995cf5-66ac-4889-b545-75aacacb1e62.jsonl"
+        )
+
+    def test_the_file_probe_survives_a_directory_name_with_a_space(self, tmp_path):
+        root = tmp_path / "agent log"
+        trace_dir = root / _TRACE_DIRNAME
+        trace_dir.mkdir(parents=True)
+        (trace_dir / "abc.jsonl").write_text("{}\n")
+
+        probe = _trace_file_probe_command(trace_dir.as_posix())
+
+        assert _run_trace_probe(probe, trace_dir) == "abc.jsonl"
+
+    def test_the_file_probe_returns_the_full_path_the_trial_record_names(
+        self, tmp_path, monkeypatch
+    ):
+        subject = self._subject(tmp_path, trace_out=True)
+        environment = _StubEnvironment(
+            stdout="9a995cf5-66ac-4889-b545-75aacacb1e62.jsonl\n"
+        )
+
+        found = asyncio.run(subject._probe_trace_file(environment, subject.options))
+
+        # The recorded path is the one harbor will collect into
+        # `agent/trace/`, not the bare file name.
+        assert found == (
+            f"/logs/agent/{_TRACE_DIRNAME}/9a995cf5-66ac-4889-b545-75aacacb1e62.jsonl"
+        )
+
+    def test_the_file_probe_skipped_when_tracing_was_not_requested(self, tmp_path):
+        subject = self._subject(tmp_path, trace_out=False)
+        environment = _StubEnvironment(stdout="abc.jsonl\n")
+
+        found = asyncio.run(subject._probe_trace_file(environment, subject.options))
+
+        assert found is None
+        assert environment.commands == []
+
+    @pytest.mark.parametrize("stdout", ["", "\n", "not a jsonl name", "a/b.jsonl"])
+    def test_an_unusable_probe_answer_yields_no_conversation_id(
+        self, tmp_path, stdout
+    ):
+        # A probe that returned something unexpected must not put a malformed
+        # path on the trial record: the join key is either a real file or
+        # absent, and it is never a guess.
+        subject = self._subject(tmp_path, trace_out=True)
+        environment = _StubEnvironment(stdout=stdout)
+
+        found = asyncio.run(subject._probe_trace_file(environment, subject.options))
+
+        assert found is None
+
+    def test_the_retained_trajectory_reaches_the_trial_record_through_run(
+        self, tmp_path
+    ):
+        _TRACE_DIR_PATH = f"/logs/agent/{_TRACE_DIRNAME}"
+        # The end-to-end shape, on the adapter's own run(): the flag reaches
+        # argv, the container's trace dir is probed for both its state and its
+        # file name, and both land on `context.metadata` — the record a reader
+        # joins against the adjacent grader result.
+        subject = self._subject(tmp_path, trace_out=True)
+        context = SimpleNamespace(
+            metadata=None, n_input_tokens=0, n_cache_tokens=0, n_output_tokens=0
+        )
+        calls: list[str] = []
+
+        class _Env:
+            async def exec(self, command: str, **_ignored):
+                calls.append(command)
+                if "count_tokens" in command:
+                    return SimpleNamespace(return_code=0, stdout="", stderr="")
+                if command.startswith("printf %s"):
+                    return SimpleNamespace(
+                        return_code=0, stdout="/root\n", stderr=""
+                    )
+                if command == _trace_file_probe_command(_TRACE_DIR_PATH):
+                    return SimpleNamespace(
+                        return_code=0,
+                        stdout="9a995cf5-66ac-4889-b545-75aacacb1e62.jsonl\n",
+                        stderr="",
+                    )
+                if command == _trace_probe_command(_TRACE_DIR_PATH):
+                    return SimpleNamespace(
+                        return_code=0, stdout=_TRACE_PROBE_PRESENT, stderr=""
+                    )
+                if TRACE_OUT_FLAG in command:
+                    return SimpleNamespace(
+                        return_code=0,
+                        stdout=(
+                            '{"finalText":"done","stopReason":"completed",'
+                            '"turnCount":3,"lastUsage":{"inputTokens":5,'
+                            '"outputTokens":3}}\n'
+                        ),
+                        stderr="",
+                    )
+                return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+        asyncio.run(subject.run("q", _Env(), context))
+
+        assert any(TRACE_OUT_FLAG in c for c in calls), (
+            f"the run must actually pass --trace-out; got {calls}"
+        )
+        assert context.metadata["trace_state"] == _TRACE_PROBE_PRESENT
+        assert context.metadata["trace_conversation_id"] == (
+            "9a995cf5-66ac-4889-b545-75aacacb1e62"
+        )
+        assert context.metadata["trace_file"] == (
+            f"/logs/agent/{_TRACE_DIRNAME}/9a995cf5-66ac-4889-b545-75aacacb1e62.jsonl"
+        )
+        # The raw run outcome is untouched by any of this.
+        assert context.metadata["stop_reason"] == "completed"
+        assert context.metadata["turn_count"] == 3

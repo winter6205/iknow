@@ -10,6 +10,15 @@ import {
 } from "./command-roster.js";
 import { splitShellSegments } from "./text-segments.js";
 import {
+  isContainedFileTarget,
+  isDeterminedPathWord,
+  isNonDirectoryTarget,
+  type CleanupRootSnapshot,
+  type CleanupScope,
+} from "./cleanup-roots.js";
+import { isAbsolute, join, resolve } from "node:path";
+
+import {
   parseForSecurity,
   scanWithLegacyDegrade,
   type CommandFact,
@@ -508,14 +517,221 @@ function valueTokensEaten(
 }
 
 /**
- * True when a `find` command's token run walks the whole machine. Restated
- * invariant (T4 acceptance): `find <root> …` never spawns when `<root>` denotes
- * the filesystem root — with or without predicates such as `-maxdepth N`; the
- * wall does not wait for a predicate to appear, because the walk is the thing
- * being denied, not its output shape. Roots that are NOT this wall: `.` /
- * `..` / relative paths / `/tmp` and any other non-root absolute path —
- * scoping the tree is the reader's job (ADR-0068; the 300 s bash
- * `timeoutTier: build` is not the control).
+ * Every predicate `find` accepts that only READS the tree, and how many
+ * following tokens each one consumes. This roster is the positive half of the
+ * read-only root-search exception (spec SC6): a `find` rooted at the
+ * filesystem root clears the root-find wall when its whole expression is spelled
+ * from this list.
+ *
+ * The direction is the point. The question is never "does this command contain
+ * something dangerous" but "is every predicate here one that only reads", and
+ * anything the roster does not name withholds the allowance. A list of known
+ * mutating flags would have the opposite failure: every predicate a future
+ * findutils release adds, and every spelling nobody enumerated, would be
+ * admitted by default. Here each entry is a promise a human makes after
+ * reading what the flag does, so growth is a deliberate act.
+ *
+ * Every name below was run against GNU findutils 4.10 and accepted, with no
+ * filesystem effect; the mutating spellings that the same binary accepts are
+ * `-delete`, `-exec`, `-execdir`, `-ok`, `-okdir`, `-fprint`, `-fprint0`,
+ * `-fprintf` and `-fls`, none of which appears here. That binary also accepts
+ * NO abbreviation of a predicate — `-del`, `-execu`, `-fpri` and `-fl` are all
+ * `unknown predicate` — which is what makes exact-name matching sufficient
+ * rather than merely convenient. `root-find-predicate-roster.test.ts` re-runs
+ * both halves against the real binary so a change here that outruns findutils
+ * fails instead of drifting.
+ */
+const READ_ONLY_FIND_PREDICATES: ReadonlyMap<string, number> = new Map([
+  // Name / pattern / path matching
+  ["-name", 1],
+  ["-iname", 1],
+  ["-path", 1],
+  ["-wholename", 1],
+  ["-iwholename", 1],
+  ["-regex", 1],
+  ["-iregex", 1],
+  ["-regextype", 1],
+  ["-lname", 1],
+  // File type and metadata
+  ["-type", 1],
+  ["-xtype", 1],
+  ["-size", 1],
+  ["-empty", 0],
+  ["-samefile", 1],
+  ["-inum", 1],
+  ["-links", 1],
+  ["-perm", 1],
+  // Time comparison (all spelling forms find accepts)
+  ["-mtime", 1],
+  ["-atime", 1],
+  ["-ctime", 1],
+  ["-amin", 1],
+  ["-cmin", 1],
+  ["-newer", 1],
+  ["-anewer", 1],
+  ["-cnewer", 1],
+  ["-used", 1],
+  ["-newermt", 1],
+  // Ownership
+  ["-user", 1],
+  ["-group", 1],
+  ["-uid", 1],
+  ["-gid", 1],
+  ["-nouser", 0],
+  ["-nogroup", 0],
+  // Filesystem shape and traversal control
+  ["-fstype", 1],
+  ["-xdev", 0],
+  ["-prune", 0],
+  ["-quit", 0],
+  ["-maxdepth", 1],
+  ["-mindepth", 1],
+  ["-follow", 0],
+  ["-depth", 0],
+  ["-noleaf", 0],
+  ["-ignore_readdir_race", 0],
+  // Permissions as a test, never as a change
+  ["-readable", 0],
+  ["-writable", 0],
+  ["-executable", 0],
+  // Output actions: they write to the tool's OWN stdout, never to a file
+  ["-print", 0],
+  ["-print0", 0],
+  ["-printf", 1],
+  ["-ls", 0],
+  // Constants, so a pure predicate expression is expressible
+  ["-true", 0],
+  ["-false", 0],
+]);
+
+/**
+ * `find`'s expression operators. They arrange predicates; they never carry one
+ * of their own, so admitting them cannot admit an unexamined action. `-a` is
+ * the explicit `AND`; the bare `,` is `OR` and the single `;` would be `AND`.
+ */
+const FIND_EXPRESSION_OPERATORS: ReadonlySet<string> = Object.freeze(
+  new Set(["-a", "-and", "-o", "-or", "!", "(", ")", ",", ";"])
+);
+
+/**
+ * Whether one `find` token run expresses READ-ONLY TRAVERSAL: every predicate it
+ * names is in `READ_ONLY_FIND_PREDICATES`, and the expression's structure is
+ * only operators this file has read.
+ *
+ * Consumed as a real grammar walk rather than a token scan, because arity is
+ * load-bearing in both directions. A flag that takes a value must have that
+ * value SKIPPED (`-name` consumes `-delete`, so `find / -name -delete` is a
+ * search for a file literally called `-delete`, and treating the flag as an
+ * action would deny a harmless command); and a value-taking predicate whose
+ * value is MISSING is a command find itself rejects, so the run is judged on
+ * the flags it did name.
+ *
+ * The one structural thing that ends the walk early is the terminator of an
+ * execution action. `find / -exec rm {} \;` carries the whole payload of the
+ * action after `-exec`, and `;` / `+` are ordinary tokens to every other
+ * reader, so scanning the run to its end would grade `rm` as if it were a
+ * predicate. The walk therefore stops as soon as it meets one, and the answer
+ * is the same either way here — `-exec` is not in the roster — but the stop
+ * keeps the reading honest for a command that spells the action's own name as
+ * one of its arguments.
+ */
+function isReadOnlyFindExpression(
+  tokens: ReadonlyArray<string>,
+  at: number
+): boolean {
+  let i = at + 1;
+  // Global options (`-L`, `--`, `-D tree`, `-O2`) may precede the search roots.
+  while (i < tokens.length) {
+    const skip = findGlobalOptionArity(tokens[i]!);
+    if (skip === undefined) break;
+    i += skip + 1;
+  }
+  // Then the search roots, up to the same "paths must precede expression"
+  // boundary `commandOperands` stops at.
+  while (i < tokens.length && !tokens[i]!.startsWith("-")) i += 1;
+  for (; i < tokens.length; i += 1) {
+    const token = stripQuoteLayer(tokens[i]!.replace(/\\/g, ""));
+    // Operators are tested BEFORE the predicate roster, because three of them
+    // (`-a`, `-o`, `-and`/`-or`) are themselves spelled with a leading dash and
+    // would otherwise be read as an unrecognised predicate.
+    if (FIND_EXPRESSION_OPERATORS.has(token)) continue;
+    if (!token.startsWith("-")) {
+      // A non-flag token that is not an operator is an execution terminator
+      // (`;` / `+`) or a value some preceding predicate failed to consume.
+      // Both withhold the allowance, which is what keeps
+      // `find / -exec rm {} \;` from being graded as if `rm` were a predicate.
+      return false;
+    }
+    const arity = READ_ONLY_FIND_PREDICATES.get(token);
+    if (arity === undefined) return false;
+    i += arity;
+  }
+  return true;
+}
+
+/**
+ * Whether a read-only root search feeds a command that this same wall would
+ * deny for a destructive operand — the `find / -name '*.log' | xargs -0 rm -f`
+ * shape.
+ *
+ * The search's own expression really is read-only, so the expression test alone
+ * clears the wall and the `rm` would reach spawn. It is here because the
+ * allowance is a statement about the COMMAND's intent, not the search's: a walk
+ * whose whole purpose is to hand a whole-machine listing to something that
+ * deletes is not read-only traversal, whatever the search half of it does.
+ *
+ * It reads the receiving run's own command word through the SAME two predicates
+ * the destructive arms use (`isDestructiveWord` for a run that IS the destructive
+ * command, `runsWhatItIsHanded` for one that hands its operand on), so it cannot
+ * disagree with them about what a destructive command is. The direction is
+ * fail-closed: a downstream run this wall cannot read keeps the deny.
+ */
+function rootSearchFeedsDestructiveConsumer(
+  runs: ReadonlyArray<RootFindRun>,
+  from: number
+): boolean {
+  for (let i = from; i < runs.length; i += 1) {
+    const tokens = runs[i]!.tokens;
+    if (tokens.length === 0) continue;
+    const at = commandAt(tokens, DESTRUCTIVE_EXTRA_WRAPPERS);
+    // EXIT: an empty run carries nothing. A run this wall cannot read keeps
+    // the deny: the whole point of the check is that what the search hands over
+    // is not something the search itself can describe.
+    if (at === undefined) return true;
+    const name = at.name;
+    if (isDestructiveWord(name)) {
+      // The run's own command word is destructive, so the listing this search
+      // produced becomes its argv. That is enough on its own: whether `rm` is
+      // spelled here directly or reached through `xargs`, the search supplied
+      // the operands. The name test rather than a roster match is what catches
+      // the `xargs` spelling, whose flags are the file list the search produced
+      // and are therefore not tokens of this run at all.
+      return true;
+    }
+    if (!runsWhatItIsHanded(name)) continue;
+    // The run hands its operand on — `xargs sh -c '…'` is the shape — and a
+    // destructive name anywhere in what it hands on is enough.
+    const rest = tokens.slice(at.index + 1);
+    if (rest.some((token) => isDestructiveWord(commandWord(stripQuoteLayer(token))))) {
+      return true;
+    }
+  }
+  return false;
+}
+
+
+
+/**
+ * True when a `find` command's token run walks the whole machine. This is the
+ * FACT the wall is about — the search's repository is the filesystem root — and
+ * it deliberately does not carry the read-only carve-out, because the fold asks
+ * that question separately: whether the walk is denied is a decision made of
+ * this fact plus the walk's own expression (see `isReadOnlyFindRootWalk` and
+ * the fold).
+ *
+ * Roots that are NOT this wall: `.` / `..` / relative paths / `/tmp` and any
+ * other non-root absolute path — scoping the tree is the reader's job
+ * (ADR-0068).
  *
  * Whole-command form: `cd / && find .` is the same whole-machine walk with the
  * root hidden in the `cd`, so the caller passes the `cd`-aware decision in. A
@@ -524,9 +740,7 @@ function valueTokensEaten(
  *
  * Bare `find` with no path operand walks the shell cwd (GNU find; the
  * options-first spelling `find -name x` included), so it is denied exactly
- * when that cwd is the filesystem root. The near-miss `find /tmp -maxdepth N`
- * is NOT denied — the readonly find-flag table answers for it, same as any
- * other non-root walk.
+ * when that cwd is the filesystem root.
  */
 function isRootFindTokens(
   tokens: ReadonlyArray<string>,
@@ -547,6 +761,45 @@ function isRootFindTokens(
     return cwd === "/";
   }
   return operands.some((raw) => operandDenotesRoot(raw, cwd));
+}
+
+/**
+ * The read-only carve-out, as its own predicate (spec SC6 / Assumption 4 "Root
+ * search" / ADR-0134 "Read-only root traversal reaches normal permission checks
+ * and this common execution contract").
+ *
+ * It answers two questions the root fact alone cannot, which is why the split
+ * exists at all:
+ *
+ *   - a MUTATING root search keeps the deny. `-delete` removes every match,
+ *     `-exec` / `-execdir` / `-ok` / `-okdir` run a program over the whole
+ *     machine, and the `-fprint` family writes a file from a whole-machine walk.
+ *     None of these is a search; each is a decision about the tree.
+ *   - a READ-ONLY root search clears the wall and continues through ordinary
+ *     permission checks, exactly like `find /tmp`. The reason the 2026-09-14
+ *     incident (a `find /` running ~232 s until the host cancelled it) is no
+ *     longer this wall's to prevent is that the walk is no longer unbounded: it
+ *     reaches the SAME Bash execution deadline as every other foreground call
+ *     (ADR-0134 — 10 s by default, a validated `timeout_ms` otherwise, enforced
+ *     in the process plane, with no root-search-specific cap). The fence still
+ *     applies, the sensitive-path wall still applies, and a walk that overruns
+ *     ends as a per-call `execution_failed` / `message: "timeout"` rather than
+ *     as a runaway process. Scoping the tree remains the reader's job; what
+ *     changed is that an unbounded walk is no longer the alternative.
+ */
+function isReadOnlyFindRootWalk(
+  tokens: ReadonlyArray<string>,
+  cwd: string | undefined,
+  wordsIncomplete: boolean
+): boolean {
+  const command = commandAt(tokens);
+  if (command === undefined || command.name !== "find") return false;
+  if (!isRootFindTokens(tokens, cwd, wordsIncomplete)) return false;
+  // The bare walk is a whole-machine search like any other, and the same
+  // expression decides whether its root is what denies it: `cd / && find -name
+  // x` and `cd / && find -delete` part ways here exactly as their
+  // explicit-root twins do.
+  return isReadOnlyFindExpression(tokens, command.index);
 }
 
 /**
@@ -768,15 +1021,28 @@ interface RootFindRun {
  * un-set a cwd the shell already moved.
  */
 function foldRootFind(runs: Iterable<RootFindRun>): DangerousPatternHit | null {
+  const ordered = [...runs];
   let state: CwdState = { cwd: undefined, oldpwd: undefined };
-  for (const run of runs) {
+  for (const [index, run] of ordered.entries()) {
     const moved = applyCd(run.tokens, state);
     if (moved !== null) state = moved;
-    if (isRootFindTokens(run.tokens, state.cwd, run.wordsIncomplete)) {
-      // EXIT: reject on the first root-walk find — the whole-machine walk is
-      // the intent being denied, so no later segment can rescue the command.
-      return { id: "root-find-walk", pattern: "find" };
+    if (!isRootFindTokens(run.tokens, state.cwd, run.wordsIncomplete)) {
+      continue;
     }
+    // A read-only walk is not denied for its root (spec SC6) — but it is still
+    // denied when the same command hands that walk's listing to a destructive
+    // consumer. The intent being denied there is the `rm`, and the search is
+    // how it gets its operands, so `find / -name '*.log' | xargs -0 rm -f` is
+    // the same mutation as the `-delete` it replaced.
+    if (
+      isReadOnlyFindRootWalk(run.tokens, state.cwd, run.wordsIncomplete) &&
+      !rootSearchFeedsDestructiveConsumer(ordered, index + 1)
+    ) {
+      continue;
+    }
+    // EXIT: reject on the first root-walk find — the whole-machine walk is the
+    // intent being denied, so no later segment can rescue the command.
+    return { id: "root-find-walk", pattern: "find" };
   }
   return null;
 }
@@ -1035,16 +1301,20 @@ function isPureMetacharBody(command: string): boolean {
 }
 
 /**
- * The human-facing reason of ADR-0124's over-cap state and of the pre-parse
- * veto is carried into the deny so the operator sees the class, not only a
- * structural token; `malformed` and `aborted` render their `verdict=` alone.
+ * The human-facing reason of ADR-0124's over-cap state, of the pre-parse veto,
+ * and of `malformed` is carried into the deny so the operator sees the class,
+ * not only a structural token. `malformed` used to render its `verdict=` alone
+ * and dropped the parse layer's own reason, which named the actual problem (an
+ * incomplete syntax such as an unclosed quote) and gave the operator nothing
+ * to act on; `aborted` still renders its token alone because its reason is the
+ * analysis budget's, not a statement about the input.
  */
 function routeParseVerdict(
   result: SecurityParseResult
 ): DangerousPatternHit | null {
   switch (result.kind) {
     case "malformed":
-      return { id: "unparseable", pattern: "verdict=malformed" };
+      return { id: "unparseable", pattern: `verdict=malformed ${result.reason}` };
     case "aborted":
       return { id: "unparseable", pattern: "verdict=aborted" };
     case "over-cap":
@@ -1103,8 +1373,15 @@ function routeParseVerdict(
  *   - The root-find walk is decided on the ORDERED segment fold (a `cd /`
  *     arms the `find` that follows it), which the flat per-segment scan
  *     cannot see; it runs before the scan loop so it gets first claim.
+ *
+ * ADR-0132/ADR-0133 layer the bounded cleanup exceptions ON TOP of this
+ * verdict rather than inside it, so this function keeps answering for the
+ * command alone and `findDangerousPattern` is the one that consults the
+ * host's root context. Every arm below is therefore unchanged in reach: a
+ * cleanup exception can only REMOVE a `destructive-rm` finding, never add one
+ * and never touch another id.
  */
-export function findDangerousPattern(
+function findDangerousPatternUnscoped(
   command: string
 ): DangerousPatternHit | null {
   if (command.length === 0) return null;
@@ -1320,6 +1597,252 @@ function rosterHit(text: string): DangerousPatternHit | null {
 
 function isDestructiveWord(name: string): boolean {
   return name.startsWith("mkfs") || DESTRUCTIVE_COMMAND_WORDS.has(name);
+}
+
+// --- ADR-0132 / ADR-0133: the bounded cleanup exceptions ----------------
+//
+// Two exceptions, both scoped to ONE arm of ONE wall: the `destructive-rm`
+// finding, on a `rm` whose every target is a finite explicit non-directory
+// file established inside one host-owned root. Neither is an allow — both only
+// remove the hard-wall finding, so the command then continues through the
+// ordinary mode / category handling the rest of the flow applies.
+//
+// They are ONE function for one reason (ADR-0133's shared-verdict clause): the
+// permission wall and the Bash handler must be able to disagree about nothing.
+// Two arms, one answer each, no second classification to drift.
+/** The variable name whose expansion is trusted, and only when a scratch root exists. */
+const TRUSTED_SCRATCH_ENV_NAME = "TMPDIR";
+
+/** `rm` flags that ask for a tree walk. `-d` does not: it needs `-r` to reach a dir. */
+const RECURSIVE_RM_FLAGS = new Set(["r", "R", "recursive"]);
+
+/** What an admitted cleanup was established inside, and by which rule. */
+export type BoundedCleanupException = {
+  readonly scope: CleanupScope;
+  /** The root the targets were proven to sit under. */
+  readonly root: string;
+  /** Every resolved target, in source order — the all-target evidence. */
+  readonly targets: readonly string[];
+};
+
+/** The `$TMPDIR` / `${TMPDIR}` prefix of an operand, consumed, or `null`. */
+function consumeScratchEnvPrefix(word: string): string | null {
+  for (const form of [`$${TRUSTED_SCRATCH_ENV_NAME}/`, `$${TRUSTED_SCRATCH_ENV_NAME}`]) {
+    if (word.startsWith(form)) return word.slice(form.length);
+  }
+  const braced = `\${${TRUSTED_SCRATCH_ENV_NAME}}`;
+  if (word === braced) return "";
+  if (word.startsWith(`${braced}/`)) return word.slice(braced.length + 1);
+  return null;
+}
+
+/** Strip one layer of matching double quotes; single quotes are NOT strippable
+ *  for expansion purposes (bash does not expand inside them), so they fall
+ *  through as literal text and fail containment instead. */
+function undoubleQuoted(word: string): string | null {
+  if (word.length < 2) return null;
+  if (!word.startsWith('"') || !word.endsWith('"')) return null;
+  return word.slice(1, -1);
+}
+
+/**
+ * Whether `word` is a `rm` flag that does not ask for recursion.
+ *
+ * Clustered short flags are decomposed: `-rf` is two flags, and reading it as
+ * one name would never match a roster of whole names, so a recursive `rm` would
+ * be classified as a bounded cleanup. `--recursive` is the long form; `--` is
+ * the end-of-options marker, which carries no semantics and ends flag reading.
+ */
+function isNonRecursiveRmFlag(word: string, isAfterTerminator: boolean) {
+  if (isAfterTerminator) return false;
+  if (word === "--") return true;
+  if (!word.startsWith("-") || word === "-") return false;
+  if (word.startsWith("--")) return !RECURSIVE_RM_FLAGS.has(word.slice(2));
+  for (const letter of word.slice(1)) {
+    if (letter === "r" || letter === "R") return false;
+  }
+  return true;
+}
+
+/**
+ * One operand, resolved against the snapshot: which root (if any) it is
+ * established inside. `null` means the operand is not a determined path inside
+ * any offered root, and the whole command therefore gets no exception.
+ *
+ * `$TMPDIR` is expanded to the snapshot's own scratch root, so the trusted
+ * expansion and its equivalent absolute spelling are answered by the same
+ * root — never by two independent facts that could drift.
+ */
+function cleanupTargetRoot(
+  word: string,
+  quoteKind: WordFact["quoteKind"],
+  roots: CleanupRootSnapshot,
+  base: string | undefined
+): { readonly root: string; readonly target: string } | null {
+  const literal = quoteKind === "double" ? undoubleQuoted(word) : word;
+  if (literal === null) return null;
+  if (literal.includes("$") || literal.includes("`")) {
+    return scratchExpansionTarget(literal, roots);
+  }
+  if (!isDeterminedPathWord(literal)) return null;
+  if (!isAbsolute(literal) && base === undefined) return null;
+  return containedTargetRoot(
+    isAbsolute(literal) ? literal : resolve(base as string, literal),
+    roots,
+    base
+  );
+}
+
+/**
+ * A determined path, against the offered roots in offer order. A root that
+ * does not contain the target as a non-directory file is skipped, and a target
+ * no offered root establishes ends the walk with `null` — the operand gets no
+ * exception, and with it the whole command.
+ */
+function containedTargetRoot(
+  target: string,
+  roots: CleanupRootSnapshot,
+  base: string | undefined
+): { readonly root: string; readonly target: string } | null {
+  for (const root of [roots.scratchRoot, roots.taskRoot]) {
+    if (root === undefined) continue;
+    if (!isContainedFileTarget(target, root, base ?? "/")) continue;
+    if (!isNonDirectoryTarget(target, base ?? "/")) continue;
+    return { root, target };
+  }
+  return null;
+}
+
+/**
+ * An operand that names a shell expansion, resolved against the snapshot's own
+ * scratch root only. `null` for every case where the expansion cannot be
+ * pinned to a determined file inside that root — which is the only root an
+ * expansion is ever allowed to reach, so the arms are `null` rather than a
+ * walk over the offered roots.
+ */
+function scratchExpansionTarget(
+  literal: string,
+  roots: CleanupRootSnapshot
+): { readonly root: string; readonly target: string } | null {
+  if (roots.scratchRoot === undefined) return null;
+  const rest = consumeScratchEnvPrefix(literal);
+  // An expansion is only ever the FIRST path segment: `$TMPDIR` names the
+  // root, never a suffix, and any second variable stays unresolved. The
+  // substituted remainder is then held to the same determination rule as a
+  // plain operand, or `$TMPDIR/*.cjs` would inherit the exception.
+  if (rest === null || !isDeterminedPathWord(rest)) return null;
+  const target = join(roots.scratchRoot, rest);
+  if (!isContainedFileTarget(target, roots.scratchRoot, "/")) return null;
+  if (!isNonDirectoryTarget(target, "/")) return null;
+  return { root: roots.scratchRoot, target };
+}
+
+/** The single-command `rm -f <files…>` shape both exceptions require. */
+function cleanupRmCommand(parse: SecurityParseOk): CommandFact | null {
+  if (parse.commands.length !== 1) return null;
+  const cmd = parse.commands[0]!;
+  if (cmd.depth !== 0) return null;
+  // The command word must BE `rm`: a wrapper fold (`sudo`, `builtin`, `env`)
+  // changes the uid or the option parsing, and neither exception establishes
+  // authority over the wrapper's own effect.
+  const first = cmd.argv[0];
+  if (first === undefined || first.value !== "rm") return null;
+  return cmd;
+}
+
+/**
+ * The directory a RELATIVE operand resolves against: the call's working
+ * directory, which is the `taskRoot` the Bash handler runs in.
+ *
+ * Never the scratch root. A scratch path reaches a command as an ABSOLUTE
+ * path or through `$TMPDIR` (ADR-0092 never binds it into the guest as a cwd),
+ * so making it the resolution base would fabricate containment: a relative
+ * operand that does not exist would resolve under the scratch and read as
+ * "inside the identity's own scratch", which is exactly the authority this
+ * wall must not invent. With no `taskRoot` there is no working directory to
+ * resolve against, and relative operands get no exception.
+ */
+function cleanupBase(roots: CleanupRootSnapshot): string | undefined {
+  return roots.taskRoot;
+}
+
+/**
+ * Whether `command` is a bounded cleanup this host's roots cover, as ADR-0132 /
+ * ADR-0133 define one. `null` for everything else — and `null` is the whole
+ * fail-toward-deny contract: no parse, a second command, a recursive form, a
+ * glob, an unresolved variable, a directory, another identity's scratch, a
+ * mixed-target command, an escaping symlink, or a protected target all keep
+ * the existing verdict.
+ */
+export function classifyBoundedCleanupException(
+  command: string,
+  roots: CleanupRootSnapshot
+): BoundedCleanupException | null {
+  if (roots.scratchRoot === undefined && roots.taskRoot === undefined) return null;
+  if (command.length === 0) return null;
+  const parse = parseForSecurity(command);
+  if (parse.kind !== "ok") return null;
+  const cmd = cleanupRmCommand(parse);
+  if (cmd === null) return null;
+  // Protected targets are not this arm's business at all: the sensitive wall
+  // owns them, and ADR-0132/0133 grant no authority over them.
+  if (classifySensitivePathEvidence(command).class === "confirmed") return null;
+
+  const established = establishedCleanupTargets(cmd, roots);
+  if (established === null) return null;
+  if (established.length === 0) return null;
+  return {
+    scope: established[0]!.root === roots.scratchRoot ? "identity-scratch" : "task-root",
+    root: established[0]!.root,
+    targets: established.map((entry) => entry.target),
+  };
+}
+
+/**
+ * The `rm` operand walk: every non-flag word resolved against the snapshot, or
+ * `null` when any of them fails. The empty list is a distinct answer from
+ * `null` — a command with no operand established establishes nothing, and the
+ * caller refuses both — so the walk never collapses the two.
+ *
+ * All-target is why a single unresolved operand ends the whole command's
+ * claim, and why a second operand landing in a different root than the first
+ * does the same: the exception this returns removes a deny, so it may only
+ * describe a command whose every operand is inside ONE root.
+ */
+function establishedCleanupTargets(
+  cmd: CommandFact,
+  roots: CleanupRootSnapshot
+): { readonly root: string; readonly target: string }[] | null {
+  const base = cleanupBase(roots);
+  const established: { root: string; target: string }[] = [];
+  let terminatorSeen = false;
+  for (const word of cmd.argv.slice(1)) {
+    const text = wordSource(word);
+    if (!terminatorSeen && isNonRecursiveRmFlag(text, terminatorSeen)) {
+      if (text === "--") terminatorSeen = true;
+      continue;
+    }
+    const resolved = cleanupTargetRoot(text, word.quoteKind, roots, base);
+    if (resolved === null) return null;
+    if (established.length > 0 && established[0]!.root !== resolved.root) return null;
+    established.push(resolved);
+  }
+  return established;
+}
+
+/**
+ * The destructive judgment with the cleanup exceptions applied: the
+ * `destructive-rm` finding this host's roots establish as a bounded cleanup is
+ * not a finding, and nothing else is. Absent roots leave the answer byte-identical.
+ */
+export function findDangerousPattern(
+  command: string,
+  roots?: CleanupRootSnapshot
+): DangerousPatternHit | null {
+  const hit = findDangerousPatternUnscoped(command);
+  if (hit?.id !== "destructive-rm") return hit;
+  if (roots === undefined) return hit;
+  return classifyBoundedCleanupException(command, roots) === null ? hit : null;
 }
 
 /**
@@ -2880,12 +3403,20 @@ const NON_REDIRECT_METACHARS: readonly string[] = Object.freeze([
 function classifyDangerousExecute(input: {
   tool: string;
   input: unknown;
+  /**
+   * ADR-0132/ADR-0133's per-call host root context. `HardRuleSpec.match`'s
+   * declared shape is narrower (`{tool, input}`) and stays that way: an
+   * optional extra member is assignable from every value the declared shape
+   * allows, so `policy.ts` may pass it and a legacy caller that does not is
+   * answered as "no cleanup scope" — today's verdict, unchanged.
+   */
+  readonly roots?: CleanupRootSnapshot;
 }): string | null {
   if (input.tool !== "bash" && input.tool !== "execute") return null;
   const command = (input.input as { command?: unknown } | null | undefined)
     ?.command;
   if (typeof command !== "string") return null;
-  const hit = findDangerousPattern(command);
+  const hit = findDangerousPattern(command, input.roots);
   if (hit !== null) {
     const reason = `dangerous command pattern matched (id=${hit.id}, pattern="${hit.pattern}")`;
     // SC3's wrapper stays byte-identical; only the secret-name bucket gets a
@@ -2898,8 +3429,12 @@ function classifyDangerousExecute(input: {
   }
   // Redirection exemption must NOT leak sensitive paths: `echo x > /etc/shadow`
   // passes the segment allowlist via redirect stripping but must still be denied.
-  if (commandContainsSensitivePath(command)) {
-    return "dangerous command: sensitive path targeted by command";
+  // The verdict is the SHARED classification's, not a second opinion computed
+  // here (ADR-0131): the Bash handler reads the same result, so a permission-
+  // admitted command can never be rejected by a broader duplicate of this rule.
+  const evidence = classifySensitivePathEvidence(command);
+  if (evidence.class === "confirmed") {
+    return `dangerous command: sensitive path targeted by command (matched \`${evidence.fragment}\` at the ${evidence.site})`;
   }
   // Non-allowlisted commands are NOT hard-walled: they fall through to the
   // mode / category default (ask in default mode). The bwrap fence is the
@@ -2911,6 +3446,7 @@ function classifyDangerousExecute(input: {
 function matchDangerousExecute(input: {
   tool: string;
   input: unknown;
+  readonly roots?: CleanupRootSnapshot;
 }): boolean {
   return classifyDangerousExecute(input) !== null;
 }
@@ -2924,6 +3460,7 @@ function matchDangerousExecute(input: {
 function dangerousExecuteReasonFor(input: {
   tool: string;
   input: unknown;
+  readonly roots?: CleanupRootSnapshot;
 }): string | undefined {
   return classifyDangerousExecute(input) ?? undefined;
 }
@@ -3035,13 +3572,12 @@ function sensitiveFragmentHit(text: string): string | null {
  * path-bearing tools, applied to the `command` field of execute tools so the
  * redirect exemption cannot be abused to write to a sensitive location.
  *
- * The roster itself runs unchanged; only the text it runs over is quote-aware —
- * comment text, the quoted-delimiter heredoc bodies of receivers positively
- * proven inert under SC-S2-9, and the quoted bodies whose receiver is missing,
- * ambiguous, or unclassified (excised from THIS wall's deny because their
- * match is answered by the Security review requirement, never by a confident
- * allow or deny) are blanked first, everything else (operands, redirect
- * targets, receiver code) is judged whole.
+ * The verdict is `classifySensitivePathEvidence(command).class === "confirmed"`,
+ * so the permission wall and the Bash handler read ONE result (ADR-0131): a
+ * fragment match is a candidate, and only a site the parser established as a
+ * path target may deny non-overridably. The boolean arm answers exactly that
+ * question, because a caller that can act on the finding can act on the match
+ * — `unresolved` and `non_path` are not this wall's to answer.
  *
  * Exported so `src/harness/aci/tools/bash.ts` (the handler-level gate) applies
  * the same check as the hard-wall — otherwise a redirect like `>> /etc/shadow`
@@ -3049,8 +3585,619 @@ function sensitiveFragmentHit(text: string): string | null {
  * bwrap's ro-bind, not by policy (axis2 skeptic finding).
  */
 export function commandContainsSensitivePath(command: string): boolean {
-  const scanned = scanTextForSensitivePath(command);
-  return sensitiveFragmentHit(scanned) !== null;
+  return classifySensitivePathEvidence(command).class === "confirmed";
+}
+
+// --- ADR-0131: sensitive-path evidence classification --------------------
+//
+// A `SENSITIVE_PATH_FRAGMENTS` match is a CANDIDATE, not a verdict. The
+// reported false denial (issue #1170) came from treating one as a verdict:
+// `node -e 'process.env.NODE_OPTIONS'` matches `\.env\.` and touched no
+// filesystem. The three answers below are grounded in WHERE the match landed
+// and in WHAT the parser established at that site — never in the shape of the
+// matched text. A narrowing exception keyed on the fragment's spelling is the
+// remedy ADR-0131 rejected (`.env.`), so nothing here may be licensed by "the
+// string looks like code".
+//
+//   confirmed  the match is at a site the parse established as a path
+//              TARGET: an argv operand, a redirect target, a heredoc body a
+//              code receiver runs, or a recursively parsed nested shell's
+//              operand. Non-overridable hard deny.
+//   non_path   the match is inside a code/data region and the token carrying
+//              it was not established as a path target. The positive evidence
+//              is that the token IS a name — a bare identifier or a
+//              property-access chain member — so the `env` in
+//              `process.env.NODE_OPTIONS` is a name, not a file. The absence
+//              of a path target is NOT sufficient on its own: a token this
+//              parse cannot read as a name is `unresolved`, because the one
+//              thing that must never decide this is whether the foreign
+//              source left a whitespace word boundary in front of the
+//              fragment. No finding from this wall.
+//   unresolved the match is inside a code/data region and the token IS
+//              path-shaped, but the program that consumes it is not proven to
+//              treat it as data. ADR-0127's per-call review prices it; with
+//              no interactive route the existing typed deny answers, and
+//              reviewer unavailability is never a confirmed violation.
+
+/**
+ * Where in the command text a finding sits, in half-open character offsets.
+ *
+ * Named because both evidence classes carry one and both are handed straight to
+ * a human: `SecurityReviewRequirement.span` is the region ADR-0127 asks an
+ * operator to adjudicate, so a span that does not address the region in
+ * question is a fabricated fact about where the problem is. Structural
+ * compatibility with the parser's own `FactSpan` is deliberate — the parse
+ * grounded arms hand its spans over unchanged, so a cast is never needed to
+ * move a parse span into this field.
+ */
+export interface EvidenceSpan {
+  readonly start: number;
+  readonly end: number;
+}
+
+/** The three ADR-0131 evidence classes, and the one shared result shape. */
+export type SensitivePathEvidence =
+  | {
+      readonly class: "confirmed";
+      /** The roster entry that matched — what the deny names to the operator. */
+      readonly fragment: string;
+      /** Where the match was established, in command-text offsets. */
+      readonly span: EvidenceSpan;
+      /** What kind of site carried it, for the diagnostic. */
+      readonly site: SensitivePathSite;
+    }
+  | {
+      readonly class: "non_path";
+      /** Absent when no roster entry matched at all (the common case). */
+      readonly fragment?: string;
+    }
+  | {
+      readonly class: "unresolved";
+      readonly fragment: string;
+      readonly span: EvidenceSpan;
+      readonly site: SensitivePathSite;
+    };
+
+/** The parse-established sites this classification distinguishes. */
+export type SensitivePathSite =
+  | "argv-operand"
+  | "redirect-target"
+  | "code-region"
+  | "heredoc-body";
+
+/** No roster entry matched: this wall has nothing to classify. */
+const NO_MATCH: SensitivePathEvidence = Object.freeze({ class: "non_path" });
+
+/**
+ * The first roster entry matching inside `text`, with where it matched.
+ *
+ * `offset` is the position `text` occupies in the whole command, so the
+ * returned `span` is already in command-text coordinates. The offsets are the
+ * point of the return value: they are what a `confirmed` arm and the
+ * `unresolved` fallback both hand to a human-readable requirement, and
+ * discarding them in favor of the enclosing command is what made the ADR-0127
+ * prompt point at the interpreter instead of at the path.
+ */
+function sensitiveFragmentAt(
+  text: string,
+  offset: number
+): { fragment: string; span: EvidenceSpan } | null {
+  for (const fragment of SENSITIVE_PATH_FRAGMENTS) {
+    const at = fragment.startsWith("\\")
+      ? new RegExp(fragment).exec(text)
+      : (() => {
+          const index = text.indexOf(fragment);
+          return index < 0
+            ? null
+            : { index, "0": fragment } as unknown as RegExpExecArray;
+        })();
+    if (at === null) continue;
+    const start = offset + at.index;
+    return { fragment, span: { start, end: start + fragment.length } };
+  }
+  return null;
+}
+
+/**
+ * The site's kind for one word, from the parse: an argv position past the
+ * command word is an OPERAND the shell will hand to that program, whatever the
+ * word's spelling. Position 0 is the command word itself, which names what
+ * runs rather than naming a file.
+ */
+function argvSiteKind(index: number): SensitivePathSite {
+  return index === 0 ? "code-region" : "argv-operand";
+}
+
+/**
+ * The code region of one command node: every operand a code-consuming receiver
+ * is handed as source. This is the only region whose matches are re-parsed
+ * before judgment — a program's own source is the one place a roster fragment
+ * can appear without the shell ever being told to open that file.
+ */
+function codeRegionWords(cmd: CommandFact): readonly WordFact[] {
+  const at = destructiveCommandAt(cmd);
+  if (at === undefined) return [];
+  if (!CODE_CONSUMING_COMMAND_NAMES.has(at.name)) return [];
+  return cmd.argv.slice(at.index + 1);
+}
+
+/**
+ * The POSIX-ish shell names among the code consumers. Their operand is a
+ * script THIS parse can read, so an inner match in command position is a
+ * command name and the inner parse is authoritative about it; a `node` /
+ * `python3` operand is source in a grammar this file does not model.
+ */
+const SHELL_FAMILY_NAMES: ReadonlySet<string> = Object.freeze(
+  new Set(["bash", "dash", "ksh", "sh", "zsh"])
+);
+
+/**
+ * A bare identifier: the only token shape that can carry positive evidence of
+ * being a name rather than a value, and so the only shape the command-position
+ * arm will read. Deliberately plain ASCII and deliberately whole-token — a
+ * dotted property-access chain is matched segment by segment below, not by
+ * letting `process.env.NODE_OPTIONS` through as one identifier.
+ */
+const BARE_IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Whether `word` is POSITIVELY established as a name: a run of bare-identifier
+ * segments joined by dots, i.e. an identifier or a property-access chain member
+ * such as `process.env.HOME`. This is the evidence ADR-0131 requires for
+ * `non_path` — not "the parse happened to leave a word boundary in front of
+ * the fragment", and not "no slash was seen".
+ *
+ * Why whole-token, and why the chain is walked segment by segment: the earlier
+ * rule took the inner parse's COMMAND POSITION as its evidence, and command
+ * position is decided by whitespace. That made the verdict a function of the
+ * foreign source's formatting rather than of what the token is:
+ *
+ *     perl -e 'open(F,"/etc/shadow")'   -> command position -> non_path
+ *     perl -e 'open(F, "/etc/shadow")'  -> operand         -> confirmed
+ *
+ * Two commands that read the same file, one space apart, with opposite
+ * verdicts — a `deny -> allow` on a real read. Requiring the whole token to be
+ * a run of names closes the path-shaped family from this side: a roster entry
+ * that reads as a path (`/etc/shadow`, `.ssh/id_rsa`, `/etc/passwd`) contains a
+ * character a bare-identifier segment cannot hold, so no such match can be
+ * spelled this way.
+ *
+ * This is only the FIRST of the two conditions, and on its own it is not
+ * enough: `id_rsa` is a valid bare identifier, so `node -e 'id_rsa'` cleared
+ * this test while naming a real key. See `matchIsInteriorToToken`.
+ */
+function isEstablishedIdentifier(word: string): boolean {
+  if (word.length === 0) return false;
+  return word.split(".").every((segment) => BARE_IDENTIFIER.test(segment));
+}
+
+/**
+ * Whether the roster match on `word` is INTERIOR — something follows it inside
+ * the same token — which is what makes the token a property-access chain
+ * MEMBER rather than the sensitive name itself.
+ *
+ * The two conditions together are the whole of the `non_path` evidence, and
+ * each rules out a real `deny -> allow`:
+ *
+ *   process.env.HOME   `\.env\.` matches `env.` and `HOME` follows -> interior
+ *                      -> a member of a chain -> exempt
+ *   id_rsa             the fragment is the ENTIRE token        -> not interior
+ *                      -> it is the sensitive name itself     -> not exempt
+ *   a.b.id_rsa         the fragment ends the token            -> not interior
+ *   fs.readFileSync(id_rsa)   likewise, and that one really does read the key
+ *
+ * Framing it as "does anything follow the match" rather than as a list of
+ * exempt spellings is deliberate: the roster is frozen by the spec, and any
+ * criterion keyed on which fragment matched would be a shape whitelist — the
+ * remedy ADR-0131 rejected and the one that produced the bypass. A token that
+ * IS the sensitive name is not inert content whatever its letters are, so it
+ * goes to ADR-0127's review like every other unproven case.
+ */
+function matchIsInteriorToToken(word: string, fragment: string): boolean {
+  const end = rosterMatchEndAt(word, fragment);
+  if (end === null) return false;
+  return end < word.length;
+}
+
+/**
+ * Where the roster entry `fragment` stops matching inside `text`, or `null` when
+ * it did not match. Measured from the MATCHED TEXT, not the pattern: a regex
+ * arm's pattern is longer than what it matches (`\.env\.` is six characters and
+ * matches `.env.`, five), so the pattern's length cannot answer "is anything
+ * left in this token". Kept separate from `sensitiveFragmentAt` rather than
+ * folded into it, because that function's `end` is a diagnostic span the deny
+ * reason quotes and widening its meaning would move every reported offset.
+ */
+function rosterMatchEndAt(text: string, fragment: string): number | null {
+  if (fragment.startsWith("\\")) {
+    const at = new RegExp(fragment).exec(text);
+    return at === null ? null : at.index + at[0].length;
+  }
+  const index = text.indexOf(fragment);
+  return index < 0 ? null : index + fragment.length;
+}
+
+/**
+ * The evidence for one match inside a code region, decided by the role the
+ * INNER parse gives the token that carries it.
+ *
+ * `sh -c 'cat /etc/passwd'` and `node -e 'process.env.NODE_OPTIONS'` are the
+ * same outer shape — one quoted operand of an interpreter — and the shell
+ * parse establishes no difference between them. So the role that separates them
+ * is not "does it look like a path" (the shape heuristic ADR-0131 rejects, and
+ * the one `node -e 'fs.readFileSync("/etc/shadow")'` walks straight through)
+ * but:
+ *
+ *   - the token is an inner OPERAND — the inner program was TOLD to open that
+ *     file. Established, therefore `confirmed` (a recursively parsed nested
+ *     shell keeps denying, as the spec requires).
+ *   - the token sits in inner COMMAND POSITION, the receiver is one whose
+ *     source this file cannot read (`node`, `python3`, `perl`, … are not shell
+ *     grammars), AND the token is a name by positive evidence
+ *     (`isEstablishedIdentifier`). Only then is it a property-access member
+ *     rather than something the foreign source carries as a value.
+ *   - anything else — a match the inner parse could not place, an inner
+ *     verdict that is not `ok`, a receiver this file cannot classify, a
+ *     command-position token that is not a name — is `unresolved`, which
+ *     ADR-0127 prices and which may never become an allow.
+ */
+/**
+ * The command-position verdict for one matched token, or `null` to leave it
+ * `unresolved`.
+ *
+ * Four facts have to agree before a match may produce NO finding, and each one
+ * rules out a real `deny -> allow`:
+ *
+ *   - the receiver is a shell this parse can read. Then the inner parse read
+ *     the token as a COMMAND NAME, which cannot name a file, and the arm stops
+ *     here rather than pricing a modelled shape as unresolved.
+ *   - the token is unquoted. A quoted one is a string literal the foreign
+ *     source carries (`fs.readFileSync("/etc/shadow")`).
+ *   - the token IS a name (`isEstablishedIdentifier`). The quote state alone
+ *     cannot decide it, because the foreign source's quoting is exactly what
+ *     this parse cannot read — and command position, the thing that used to
+ *     stand in for "a name", is decided by WHITESPACE, which is formatting and
+ *     not evidence.
+ *   - the match is INTERIOR to the token (`matchIsInteriorToToken`), so the
+ *     token is a chain member and not the sensitive name itself.
+ *
+ * Anything else is `unresolved`: a `deny -> allow` on a real read is far worse
+ * than a review that asks one question too many.
+ */
+function commandPositionVerdict(
+  word: WordFact,
+  hit: { fragment: string },
+  isShell: boolean
+): SensitivePathEvidence | null {
+  if (isShell) return null;
+  if (word.quoteKind !== "none") return null;
+  if (!isEstablishedIdentifier(word.text)) return null;
+  if (!matchIsInteriorToToken(word.text, hit.fragment)) return null;
+  return { class: "non_path", fragment: hit.fragment };
+}
+
+function codeRegionEvidence(
+  raw: string,
+  base: number,
+  receiver: string
+): SensitivePathEvidence | null {
+  // A receiver that eats a SHELL script is one this parse can read: its inner
+  // parse is authoritative, so a match in command position there is a command
+  // name (`sh -c 'id_rsa'`), not a property-access chain, and asking ADR-0127
+  // about it would price a modelled shape as unresolved.
+  if (!CODE_CONSUMING_COMMAND_NAMES.has(receiver)) return null;
+  const isShell = SHELL_FAMILY_NAMES.has(receiver);
+  // The inner parse reads the word's PAYLOAD: the shell's own quote layer is
+  // hygiene around the operand, not part of the source the receiver executes.
+  const text = stripQuoteLayer(raw);
+  const inner = parseForSecurity(text);
+  if (inner.kind !== "ok") return null;
+  for (const node of inner.commands) {
+    for (let i = 1; i < node.argv.length; i++) {
+      const word = node.argv[i]!;
+      const hit = sensitiveFragmentAt(word.text, 0);
+      if (hit === null) continue;
+      return {
+        class: "confirmed",
+        fragment: hit.fragment,
+        span: { start: base, end: base + text.length },
+        site: "code-region",
+      };
+    }
+  }
+  for (const node of inner.commands) {
+    const word = node.argv[0];
+    if (word === undefined) continue;
+    const hit = sensitiveFragmentAt(word.text, 0);
+    if (hit === null) continue;
+    const verdict = commandPositionVerdict(word, hit, isShell);
+    if (verdict !== null) return verdict;
+  }
+  return null;
+}
+
+/**
+ * The whole command's classification, the ONE result the permission wall and
+ * the Bash handler both read.
+ *
+ * A non-`ok` parse keeps ADR-0124's answer for it and adds none of its own.
+ * That means the raw text at FULL strength: the degrade path
+ * (`parser-unavailable`) has no `ok` payload to classify, and ADR-0124 §4
+ * assigns it the legacy text scan, so a fragment there is `confirmed` exactly
+ * as it was before this classification existed. The three hard-deny verdicts
+ * (`malformed` / `over-cap` / `vetoed`) have already denied upstream in
+ * `findDangerousPattern`, and `unknown-syntax` keeps its ask, so neither gains
+ * or loses anything here — the wall must not add a second, differently-timed
+ * answer on top of a verdict that already has one.
+ */
+export function classifySensitivePathEvidence(
+  command: string
+): SensitivePathEvidence {
+  const parse = parseForSecurity(command);
+  if (parse.kind !== "ok") {
+    const hit = sensitiveFragmentHit(command);
+    return hit === null
+      ? NO_MATCH
+      : {
+          class: "confirmed",
+          fragment: hit,
+          span: { start: 0, end: command.length },
+          site: "code-region",
+        };
+  }
+  const overall = sensitiveFragmentAt(scanTextForSensitivePath(command), 0);
+  if (overall === null) return NO_MATCH;
+  const evidence = classifyOnParse(parse);
+  // The fallback names the match's OWN offsets, not the whole command. This
+  // span becomes `SecurityReviewRequirement.span` — the region ADR-0127 asks an
+  // operator to adjudicate — so covering the interpreter, its flags and its
+  // quoting instead of the path-shaped token would ask the reviewer about text
+  // that is not in question. `scanTextForSensitivePath` is length-preserving
+  // (inert spans are blanked with the same number of spaces), so the offsets
+  // read off the scanned text address the original command unchanged.
+  return (
+    evidence ?? {
+      class: "unresolved",
+      fragment: overall.fragment,
+      span: overall.span,
+      site: "code-region",
+    }
+  );
+}
+
+/**
+ * The parse-grounded classification over an `ok` tree, in the one order the
+ * evidence licenses: a site the parser established as a path TARGET is
+ * confirmed wherever it sits, and only a match with no such establishment is
+ * then split between `non_path` and `unresolved`.
+ */
+function classifyOnParse(parse: SecurityParseOk): SensitivePathEvidence | null {
+  return (
+    establishedTargetEvidence(parse) ??
+    heredocBodyEvidence(parse) ??
+    inertSpanEvidence(parse) ??
+    unattributedGapEvidence(parse) ??
+    untrustworthySpanEvidence(parse)
+  );
+}
+
+/**
+ * Arm 1. Established path targets. A redirect target and an argv operand past the
+ * command word are what the shell actually opens — a token the consumer's
+ * ownership cannot establish is still a target, because the shell opens it
+ * regardless of what the program would have done with it. These deny in
+ * any mode, and this is the arm `awk '{ print }' /etc/passwd` lands in.
+ */
+function establishedTargetEvidence(
+  parse: SecurityParseOk
+): SensitivePathEvidence | null {
+  for (const redirect of parse.redirects) {
+    const hit = sensitiveFragmentAt(redirect.target.text, 0);
+    if (hit === null) continue;
+    return {
+      class: "confirmed",
+      fragment: hit.fragment,
+      span: { ...redirect.target.span },
+      site: "redirect-target",
+    };
+  }
+  for (const node of parse.commands) {
+    // A node that IS a code region is entirely owned by it — see
+    // `codeRegionEvidenceIn` for why its words never reach the argv arm.
+    const code = codeRegionWords(node);
+    if (code.length > 0) {
+      const hit = codeRegionEvidenceIn(node, code);
+      if (hit !== null) return hit;
+      continue;
+    }
+    const operand = argvOperandEvidence(node);
+    if (operand !== null) return operand;
+  }
+  return null;
+}
+
+/**
+ * One command node's code region, or `null` when no operand of it matched.
+ *
+ * A node whose operands are the SOURCE a code-consuming receiver runs owns a
+ * code region, and every one of its operands is judged by that region's rule
+ * below rather than as a plain operand. The caller skips the argv-operand arm
+ * for such a node either way — a receiver this file cannot classify, and a
+ * region with no match at all, both leave the node to the next node — so a
+ * code word the region declined to confirm is never re-priced as a target the
+ * consumer merely received.
+ */
+function codeRegionEvidenceIn(
+  node: CommandFact,
+  code: readonly WordFact[]
+): SensitivePathEvidence | null {
+  const receiver = destructiveCommandAt(node)?.name;
+  if (receiver === undefined) return null;
+  for (const word of code) {
+    const hit = sensitiveFragmentAt(word.text, 0);
+    if (hit === null) continue;
+    return (
+      codeRegionEvidence(word.text, word.span.start, receiver) ?? {
+        class: "unresolved",
+        fragment: hit.fragment,
+        span: { ...word.span },
+        site: "code-region",
+      }
+    );
+  }
+  return null;
+}
+
+/** One command node's first sensitive argv operand, or `null` for none. */
+function argvOperandEvidence(
+  node: CommandFact
+): SensitivePathEvidence | null {
+  for (let i = 1; i < node.argv.length; i++) {
+    const word = node.argv[i]!;
+    const hit = sensitiveFragmentAt(word.text, 0);
+    if (hit === null) continue;
+    return {
+      class: "confirmed",
+      fragment: hit.fragment,
+      span: { ...word.span },
+      site: argvSiteKind(i),
+    };
+  }
+  return null;
+}
+
+/**
+ * Arm 2. A heredoc body the receiver rule keeps executable is source the receiver
+ * RUNS, so a match in it is an established target. Bodies excised by
+ * `scanTextForSensitivePath` (comments, proven-inert consumers, and the
+ * unclassified receivers whose match is the review's) never reach here.
+ */
+function heredocBodyEvidence(
+  parse: SecurityParseOk
+): SensitivePathEvidence | null {
+  for (const heredoc of parse.heredocs) {
+    if (!heredoc.delimiterQuoted) continue;
+    if (heredoc.receiverCommandIndex === null) continue;
+    const receiver = findCommand(parse.commands, heredoc.receiverCommandIndex);
+    if (receiver === undefined || !receiverRunsOrStoresBody(receiver)) continue;
+    const text = spanText(parse.text, heredoc.bodySpan);
+    if (text === undefined) continue;
+    const hit = sensitiveFragmentAt(text, 0);
+    if (hit === null) continue;
+    return {
+      class: "confirmed",
+      fragment: hit.fragment,
+      span: { ...heredoc.bodySpan },
+      site: "heredoc-body",
+    };
+  }
+  return null;
+}
+
+/**
+ * Arm 3. A match the argv view does not carry at all — an assignment value
+ * (`FOO='id_rsa' printenv`), a `for` list word — is decided by the SAME
+ * excision judgment `scanTextForSensitivePath` already applies to it, so
+ * the two never answer differently about one span. An excised span (a
+ * comment, a proven-inert receiver's quoted body) is data and produces no
+ * finding; a span the parse kept is a live target the consumer inherits.
+ * A span an argv word already covers is NOT re-read here: arms 1 and 2
+ * own every argv word, and a code operand they declined to confirm must
+ * not be re-priced as a target by this arm.
+ */
+function inertSpanEvidence(
+  parse: SecurityParseOk
+): SensitivePathEvidence | null {
+  const argvCovered = argvSpans(parse);
+  for (const span of parse.inert) {
+    if (isCoveredBy(argvCovered, span.span)) continue;
+    const text = spanText(parse.text, span.span);
+    if (text === undefined) continue;
+    const hit = sensitiveFragmentAt(text, 0);
+    if (hit === null) continue;
+    return spanExcisedFromSensitiveDeny(span, parse)
+      ? { class: "non_path", fragment: hit.fragment }
+      : {
+          class: "confirmed",
+          fragment: hit.fragment,
+          span: { ...span.span },
+          site: "code-region",
+        };
+  }
+  return null;
+}
+
+/** Every span the parse attributes to an argv word or a redirect target. */
+function argvSpans(parse: SecurityParseOk): FactSpan[] {
+  const argvCovered: FactSpan[] = [];
+  for (const node of parse.commands) {
+    for (const word of node.argv) argvCovered.push(word.span);
+  }
+  for (const redirect of parse.redirects) argvCovered.push(redirect.target.span);
+  return argvCovered;
+}
+
+/** Whether `span` sits inside one of the spans the argv view already carries. */
+function isCoveredBy(covered: FactSpan[], span: FactSpan): boolean {
+  return covered.some(
+    (other) => other.start <= span.start && other.end >= span.end
+  );
+}
+
+/**
+ * Arm 3b. A match in text the argv view does not carry as a word and the parse
+ * does not mark inert — a `for` list word, an `export` assignment
+ * value, a `case` pattern. The parse MODELLED this region (it is `ok`,
+ * not `unknown-syntax`), so the match is a live token of a modelled
+ * command rather than a comment or an unparsed body, and the shell will
+ * expand it. Fail toward the target: this is the residual of the command
+ * text that no earlier arm could attribute, and today's wall denied it.
+ */
+function unattributedGapEvidence(
+  parse: SecurityParseOk
+): SensitivePathEvidence | null {
+  const attributed: FactSpan[] = argvSpans(parse);
+  for (const span of parse.inert) attributed.push(span.span);
+  for (const heredoc of parse.heredocs) attributed.push(heredoc.bodySpan);
+  let cursor = 0;
+  const gaps: FactSpan[] = [];
+  for (const span of [...attributed].sort((a, b) => a.start - b.start)) {
+    if (span.start > cursor) gaps.push({ start: cursor, end: span.start });
+    cursor = Math.max(cursor, span.end);
+  }
+  if (cursor < parse.text.length) gaps.push({ start: cursor, end: parse.text.length });
+  for (const gap of gaps) {
+    const text = spanText(parse.text, gap);
+    if (text === undefined) continue;
+    const hit = sensitiveFragmentAt(text, 0);
+    if (hit === null) continue;
+    return {
+      class: "confirmed",
+      fragment: hit.fragment,
+      span: gap,
+      site: "code-region",
+    };
+  }
+  return null;
+}
+
+/**
+ * Arm 4. A match the parse could not place anywhere: the fail-toward-deny arm.
+ * A parse whose own spans contradict its text is the one this wall has
+ * always refused to interpret, and that judgment does not change here.
+ */
+function untrustworthySpanEvidence(
+  parse: SecurityParseOk
+): SensitivePathEvidence | null {
+  if (spansAreTrustworthy(parse, parse.text)) return null;
+  const fragment = sensitiveFragmentHit(parse.text);
+  if (fragment === null) return null;
+  return {
+    class: "confirmed",
+    fragment,
+    span: { start: 0, end: parse.text.length },
+    site: "code-region",
+  };
 }
 
 // --- SC-S2-9 / ADR-0127: the Security review requirement scanner -----------
@@ -3300,6 +4447,25 @@ export function analyzeSecurityReview(
   try {
     const result = parseForSecurity(command);
     if (result.kind !== "ok") return { verdict: "clean" };
+    // ADR-0131: the `unresolved` class this scan's own siblings above cannot
+    // see. A code-consuming receiver (`node`, `python3`) is on the ownership-
+    // established roster, so `commandNodeReview` prices its OPERANDS and finds
+    // nothing to price — but the sensitive wall classified a match inside that
+    // receiver's source as unresolved, and that question belongs to the review.
+    // The classification runs first so the two tiers cannot disagree: a
+    // `confirmed` match has already denied above this layer, and a `non_path`
+    // one asks nothing of anybody.
+    const evidence = classifySensitivePathEvidence(command);
+    if (evidence.class === "unresolved") {
+      return {
+        verdict: "review",
+        requirement: reviewRequirement(
+          "data-ownership-unresolved",
+          evidence.span,
+          `a security-relevant match \`${evidence.fragment}\` sits in a ${evidence.site} the receiver is not proven to consume as a file`
+        ),
+      };
+    }
     return securityReviewForParse(result);
   } catch (fault) {
     return routeReviewFault(fault);

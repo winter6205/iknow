@@ -13,6 +13,7 @@ import type { FsIsolationMode } from "../harness/sandbox/fs-mode.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type { CompactReason } from "../harness/compress/index.js";
 import type { CodeRestoreSkip } from "./store/code-preimage.js";
+import type { SecurityInterruptionRecord } from "./store/jsonl.js";
 import type { SessionStoreErrorKind } from "./store/errors.js";
 
 /** Max user message length (code units). */
@@ -125,6 +126,11 @@ export type TurnOutcomeView =
       /** ADR-0126: supplier-stop detail behind `nonSuccessStop`; absent when the
        *  record carries none (including every outcome written before it). */
       readonly supplierDetail?: SupplierStopDetail;
+      /** ADR-0135: present only when the turn was stopped by the
+       *  confirmed-violation escalation, carrying the cause and the bounded
+       *  per-item cleanup evidence. A user Ctrl+C keeps it absent, so the two
+       *  `cancelled` reasons never project the same shape. */
+      readonly securityInterruption?: SecurityInterruptionRecord;
     }
   | { readonly terminal: "unknown" };
 
@@ -135,12 +141,14 @@ export type TurnOutcomeView =
  *  (byte-stable). */
 export function knownTurnOutcome(
   stopReason: StopReason,
-  supplierDetail?: SupplierStopDetail
+  supplierDetail?: SupplierStopDetail,
+  securityInterruption?: SecurityInterruptionRecord
 ): TurnOutcomeView {
   return {
     terminal: "known",
     stopReason,
     ...(supplierDetail !== undefined ? { supplierDetail } : {}),
+    ...(securityInterruption !== undefined ? { securityInterruption } : {}),
   };
 }
 
@@ -179,9 +187,14 @@ export function projectOutputLimitNotice(
  */
 export function turnOutcomeFields(
   stopReason: StopReason,
-  supplierDetail?: SupplierStopDetail
+  supplierDetail?: SupplierStopDetail,
+  securityInterruption?: SecurityInterruptionRecord
 ): Pick<TurnAnswerDto, "stopReason" | "outcome" | "outputLimitNotice"> {
-  const outcome = knownTurnOutcome(stopReason, supplierDetail);
+  const outcome = knownTurnOutcome(
+    stopReason,
+    supplierDetail,
+    securityInterruption
+  );
   const notice = projectOutputLimitNotice(outcome);
   return {
     stopReason,

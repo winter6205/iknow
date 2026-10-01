@@ -18,6 +18,52 @@ import type { ToolDef } from "../tools/types.js";
 export type AciCategory = "read-only" | "write" | "execute" | "collaborate";
 
 /**
+ * ADR-0134: the default runtime deadline of a finite FOREGROUND Bash
+ * invocation, in milliseconds, used when the model omits `timeout_ms`.
+ *
+ * This is a runtime deadline, not a frontend wait: the process group is torn
+ * down when it expires. It lives here, next to `TIMEOUT_TIER_MS`, because it
+ * is the Bash replacement for the retired `build` tier — a value read by both
+ * the handler (the enforcement site) and its tests.
+ */
+export const DEFAULT_FOREGROUND_BASH_TIMEOUT_MS = 10_000;
+
+/**
+ * ADR-0134: why a `timeout_ms` value was rejected, as a closed set.
+ *
+ * A caller branches on the code (and the executor's `validation_failed`
+ * classification comes from the error's class identity) instead of matching an
+ * arbitrary message substring. `unrepresentable` is a representation limit,
+ * not a command-category runtime policy: the host timer cannot express the
+ * requested deadline, so the value is rejected rather than silently shortened
+ * into a different contract.
+ */
+export const BASH_FOREGROUND_DEADLINE_ERROR_CODES = Object.freeze([
+  "not_a_number",
+  "not_finite",
+  "not_whole",
+  "not_positive",
+  "unrepresentable",
+] as const);
+
+export type BashForegroundDeadlineErrorCode =
+  (typeof BASH_FOREGROUND_DEADLINE_ERROR_CODES)[number];
+
+/**
+ * Why a supplied deadline is a non-starter: the message the model reads.
+ * One table so the code and its wording cannot drift apart.
+ */
+export const BASH_FOREGROUND_DEADLINE_ERROR_REASONS: Readonly<
+  Record<BashForegroundDeadlineErrorCode, string>
+> = Object.freeze({
+  not_a_number: "must be a number of milliseconds",
+  not_finite: "must be a finite number",
+  not_whole: "must be a whole number of milliseconds",
+  not_positive: "must be greater than 0",
+  unrepresentable: "exceeds the host timer limit of 2147483647 ms",
+});
+
+/**
  * Timeout tiers: static per-tool timeout levels.
  *
  *   fast       = 5 s       single file read / glob listing (light atomic ops)

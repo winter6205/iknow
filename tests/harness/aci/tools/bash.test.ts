@@ -27,7 +27,7 @@ afterEach(async () => {
 });
 
 describe("createBashTool — schema and metadata", () => {
-  it("exposes command + optional background only, no model-facing timeout", async () => {
+  it("exposes command + background + the ADR-0134 model-facing timeout_ms", async () => {
     const cwd = await makeScratch("bash-schema-");
     const tool = createBashTool(cwd);
     const schema = tool.inputSchema as {
@@ -39,24 +39,42 @@ describe("createBashTool — schema and metadata", () => {
 
     assert.equal(tool.name, "bash");
     assert.equal(schema.type, "object");
-    // ADR-0097: egress goes through a dedicated seam, no per-call opt-in field — the input surface is just these two.
+    // ADR-0097: egress goes through a dedicated seam, no per-call opt-in field.
+    // ADR-0134 supersedes ADR-0004 Decision 1 ("Bash timeout is not exposed to
+    // the model"): timeout_ms is now part of the model-facing input surface,
+    // and this snapshot pins it byte-for-byte alongside the other two.
     assert.deepEqual(schema.properties, {
       command: { type: "string" },
       // background?: boolean (default false = foreground, behavior unchanged)
       background: {
         type: "boolean",
         description:
-          "When true, run the command in the background: returns {task_id, log_path} immediately and the process keeps running after the call, managed by the task registry. Use for long-lived servers or daemons; pair with bash_output (read the log) and bash_stop (terminate). Defaults to false (foreground).",
+          "When true, run the command in the background: returns {task_id, log_path} immediately and the process keeps running after the call, managed by the task registry. Use for long-lived servers or daemons; pair with bash_output (read the log) and bash_stop (terminate). Add timeout_ms to give the background job a finite runtime budget measured from launch; leave it out to keep a task running until you stop it. Defaults to false (foreground).",
+      },
+      timeout_ms: {
+        type: "integer",
+        minimum: 1,
+        description:
+          "Runtime budget for this call, in whole milliseconds (positive). Foreground: how long the command may run before it is terminated; omit it for the 10-second default. Background: the job's deadline, measured from launch and not extended by reading the log or polling status; omit it for a task that runs until bash_stop. A value that is zero, negative, fractional, or too large for a host timer is rejected before anything starts.",
       },
     });
     assert.deepEqual(schema.required, ["command"]);
     assert.equal(schema.additionalProperties, false);
+    // The pre-ADR-0134 generic `timeout` key stays absent: the field is
+    // named, typed and bounded, not an open-ended passthrough.
     assert.equal("timeout" in schema.properties, false);
     assert.deepEqual(tool.aci, {
       category: "execute",
       isConcurrencySafe: false,
       interruptBehavior: "cancel",
-      timeoutTier: "build",
+      // ADR-0134 moved Bash's clock from the ACI tier into the handler: the
+      // validated `timeout_ms` (or the 10 s default) is enforced in the
+      // process plane. `unbounded` is the honest declaration that the ACI
+      // layer arms no second timer above it — a `build` tier would abort a
+      // 10-minute `timeout_ms` at 5 minutes, which is the nesting this
+      // replaced. `TIMEOUT_TIER_MS.build` itself is unchanged for the tools
+      // that still use it.
+      timeoutTier: "unbounded",
     });
   });
 

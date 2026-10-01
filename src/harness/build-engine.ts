@@ -33,6 +33,7 @@ import {
   clearActiveExtraSecrets,
 } from "./sandbox/env-isolation.js";
 import { createPermissionPolicy } from "./permission/policy.js";
+import type { CleanupRootSnapshot } from "./permission/cleanup-roots.js";
 import { resolveProjectPermissionSource } from "./permission/project-settings.js";
 import type { PermissionModeContext } from "./permission/modes.js";
 import type {
@@ -77,6 +78,10 @@ import {
   type IknowSettings,
 } from "../config/settings.js";
 import { createEgressPolicyFactory } from "./sandbox/egress/assembly.js";
+import {
+  resolveSessionFenceTmp,
+  snapshotIdentityScratchRoot,
+} from "./sandbox/fence-tmp.js";
 import {
   createWorktreeIsolationExecutor,
   createWorktreeOnMutateHolder,
@@ -373,6 +378,49 @@ export type BuildEngineOpts = {
    * subagent / skill orchestration). */
   readonly todoDir?: string;
   /**
+   * ADR-0132/ADR-0133: the CURRENT session's `conversationId`, as a live
+   * reader. It exists because one engine instance serves many sessions (the
+   * serve hub caches one engine per root, the TUI rebuilds per run), so the
+   * session anchor cannot be frozen at assembly — the same "assembly constant
+   * + call-time leaf" shape `todoDir` and the subagent manager use.
+   *
+   * It feeds exactly one thing: resolving this identity's session scratch
+   * (`<todoDir>/<conversationId>/fence-tmp`) for the bounded-cleanup root
+   * context. Absent → no scratch scope → the scratch exception never applies
+   * and every destructive-rm verdict is byte-identical to before this seam.
+   *
+   * Deliberately a reader, not a value: a pinned id would freeze one session's
+   * scratch into an engine that later serves a different one, which is exactly
+   * the cross-identity deletion ADR-0132 withholds. The host owns the truth
+   * here — it is the same id it already passes as `LoopEngineDeps.conversationId`
+   * for the per-run tool context, and for the serve path it is the id of the
+   * session currently occupying this engine.
+   */
+  readonly sessionConversationId?: () => string | undefined;
+
+  /**
+   * ADR-0132: the session-folder ROOT (`<pool>/projects/<slug>`) this
+   * identity's scratch hangs under — the `<sessionRootDir>/<convId>/fence-tmp`
+   * anchor both the Bash handler and permission admission resolve.
+   *
+   * Deliberately NOT folded into `todoDir`, which carries the same string on
+   * every entry that has one. `todoDir` is a tool-registration decision: its
+   * presence decides whether `todo_write` and the agentStatus seam are
+   * assembled, and ADR-0028 gates that on the surface — so on `ask` the value is
+   * withheld by design. The scratch anchor answers a different question ("where
+   * does this session's pad live"), which no surface may decline. Reading the
+   * gated field for both is what made the two ADR-0132 gates disagree on `ask`:
+   * permission admission kept resolving the session pad from the ungated value
+   * while the Bash handler saw no `projectDir` and allocated a private
+   * `mkdtemp` pad, so `$TMPDIR/...` happened to agree with itself while the
+   * equivalent absolute path did not. One channel per concern.
+   *
+   * Absent → the scratch arm resolves no root (fail toward deny), exactly as
+   * when the session anchor is missing.
+   */
+  readonly sessionRootDir?: string;
+
+  /**
    * Background-task registry root (`<poolRoot>/projects/<slug>/tasks/`),
    *
    // (ADR-0088)
@@ -581,6 +629,18 @@ export type BuiltEngine = EngineBundle & {
    * panel from status()/reload(); ask has zero mcp__* tools.
    */
   readonly mcpManager?: McpManager;
+  /**
+   * Background-task manager handle (absent on the ask surface, which builds
+   * none). Exposed so a host can cancel the finite background jobs ONE turn
+   * owns when a security interruption stops that turn (ADR-0135): the
+   * registry needs a per-task teardown route, and without the handle the only
+   * reachable route was the process-wide `shutdown`, which would also kill a
+   * persistent service an earlier turn started.
+   *
+   * Same conditional gate as the tool-surface passthrough, so chat / serve /
+   * TUI have it and ask does not.
+   */
+  readonly backgroundManager?: BackgroundTaskManager;
   /**
    * The two roots resolved by this assembly (`workspaceRoot` +
    * `mcpConfigRoot`). Not exposed on ask or when MCP assembly is absent.
@@ -1465,6 +1525,11 @@ export async function buildHarnessEngine(
       // agentStatusTodoDir below are the same semantics inlined twice —
       // change one, sync the other.
       ...(opts.todoDir ? { todoDir: opts.todoDir } : {}),
+      // ADR-0132: the scratch anchor on its own, ungated channel. Redundant
+      // with `todoDir` on THIS branch (no surface gate to defeat), wired so
+      // the two construction sites stay set-equal on the seam rather than
+      // differing by one line whose reason is invisible at the call site.
+      ...sessionRootDirOption(opts),
       // ADR-0019 (T4 / review-fix H3): per-root state anchor threaded into
       // bash + read_file factories so the fs-policy fence protects
       // `<workspaceRoot>/.iknow` at parity with `<home>/.iknow`. Always
@@ -1605,6 +1670,12 @@ export async function buildHarnessEngine(
       // assembled (same gate as the first construction's todoDir passthrough;
       // the surface !== "ask" condition backstops once more here).
       ...(surface !== "ask" && opts.todoDir ? { todoDir: opts.todoDir } : {}),
+      // ADR-0132: the scratch anchor, on its own channel precisely BECAUSE the
+      // line above is surface-gated. Wiring it here (and not under that gate)
+      // is what makes the Bash handler resolve the same `<convId>/fence-tmp`
+      // permission admission does on this route; nothing above it changes, so
+      // `todo_write` / agentStatus stay as absent on `ask` as ADR-0028 intends.
+      ...sessionRootDirOption(opts),
       ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
       ...(opts.subagentDiagnosticsDir
         ? { traceDir: opts.subagentDiagnosticsDir }
@@ -1821,6 +1892,23 @@ export async function buildHarnessEngine(
     ...(opts.session ? { session: opts.session } : {}),
     // W2: mode context — REPL toggles this via /permissions; absent → default.
     ...(opts.permissionMode ? { mode: opts.permissionMode } : {}),
+    // ADR-0132/ADR-0133: the host-owned per-call cleanup root context. Wired
+    // HERE and not inside the wall, because both the exception's meaning and
+    // the identity it is scoped to are facts only the host has. The reader is
+    // unconditional — the taskRoot arm needs nothing but the live cell — while
+    // its scratch arm stays empty unless the host supplied a session anchor,
+    // so an assembly without one gets workspace cleanup and no scratch scope
+    // (byte-identical to before for every scratch command).
+    hostRoots: mainSessionCleanupRoots({
+      liveTaskRoot,
+      // ADR-0132: the UNGATED scratch anchor, with `todoDir` as the fallback for
+      // assemblies that predate the separate channel. Reading the gated field
+      // alone is what let this side and the Bash handler measure different
+      // directories on `ask`: this call saw a project dir the handler never
+      // received.
+      projectDir: sessionScratchAnchor(opts),
+      conversationId: opts.sessionConversationId,
+    }),
   });
   // Secrets guard assembly — only legacy "block" mode wires a preToolUse
   // short-circuit at the earliest step, ahead of the permission layer;
@@ -2314,6 +2402,9 @@ export async function buildHarnessEngine(
     // gate as deps.skillIndexDelta, zero behavior change).
     ...skillRescannerOption(skillRescanner),
     ...(mcpManager ? { mcpManager } : {}),
+    // ADR-0135: hosts cancel a turn's own finite background jobs through this
+    // handle; without it the escalation could only report "no route".
+    ...backgroundManagerOption(backgroundManager),
     ...(mcpRoots ? { mcpRoots } : {}),
     sessionRoots,
     catalog: reg.catalog,
@@ -2383,6 +2474,103 @@ function lastReadLedgerOption(opts: BuildEngineOpts): {
   readonly lastReadLedger?: LastReadLedgerHost;
 } {
   return opts.lastReadLedger ? { lastReadLedger: opts.lastReadLedger } : {};
+}
+
+/**
+ * ADR-0135: the background-task manager as one bundle passthrough, so the
+ * per-turn cancellation handle a host reads out of `BuiltEngine` is published
+ * by the same conditional the registry sites use, and the `ask` surface (which
+ * builds none) still omits the key rather than publishing an undefined handle.
+ *
+ * Extracted to module level for the same reason as `lastReadLedgerOption`
+ * below — the S5 ratchet on `buildHarnessEngine`'s branch count.
+ */
+function backgroundManagerOption(
+  backgroundManager: BackgroundTaskManager | undefined
+): { readonly backgroundManager?: BackgroundTaskManager } {
+  if (backgroundManager === undefined) return {};
+  return { backgroundManager };
+}
+
+/**
+ * ADR-0132: the scratch-anchor seam as one registry option, used by BOTH
+ * construction sites so they cannot drift apart on a line whose reason is only
+ * visible at the other one.
+ *
+ * Deliberately not folded into the `todoDir` spread beside it: that spread is
+ * what ADR-0028 gates on the surface, and this one is not. Extracted to module
+ * level for the same reason as `lastReadLedgerOption` (the S5 ratchet on
+ * `buildHarnessEngine`'s branch count).
+ */
+function sessionRootDirOption(opts: BuildEngineOpts): {
+  readonly sessionRootDir?: string;
+} {
+  return opts.sessionRootDir !== undefined
+    ? { sessionRootDir: opts.sessionRootDir }
+    : {};
+}
+
+/**
+ * ADR-0132: the session-folder root BOTH ADR-0132 gates must resolve the
+ * scratch under — the ungated `sessionRootDir` when the host supplied one,
+ * otherwise the legacy `todoDir`.
+ *
+ * One function for the value, because the two gates reading it separately is
+ * the defect being repaired: permission admission (here) and the Bash handler
+ * (via the registry seam) were resolving different directories on `ask`, where
+ * ADR-0028 withholds `todoDir` from the handler but not from this call.
+ */
+function sessionScratchAnchor(opts: BuildEngineOpts): string | undefined {
+  return opts.sessionRootDir ?? opts.todoDir;
+}
+
+/**
+ * ADR-0132/ADR-0133: the main session's per-call cleanup root context, read by
+ * permission admission on every call.
+ *
+ * `taskRoot` comes from the LIVE cell, not the frozen `sandboxRoot`: a
+ * worktree rebind moves the working directory, and a snapshot pinned to the
+ * assembly value would judge `rm -f <file>` against a directory the call no
+ * longer runs in — admitting cleanup the new root never granted, or denying
+ * the ordinary cleanup it does. `liveTaskRoot.read()` is the same value the
+ * Bash handler feeds its own snapshot, so the two gates measure one root.
+ *
+ * The scratch root needs the session's `conversationId`, which assembly does
+ * NOT have: one build-engine instance serves many sessions (the serve hub's
+ * per-root engine cache, the TUI's rebuild path), and the id is injected per
+ * run at `LoopEngineDeps.conversationId`. So the scratch is resolved from a
+ * host-supplied live reader at CALL time, through the same
+ * `resolveSessionFenceTmp` formula the Bash handler uses. A host that supplies
+ * no reader establishes no scratch scope, which every consumer reads as no
+ * exception — the fail-toward-deny direction.
+ */
+function mainSessionCleanupRoots(input: {
+  readonly liveTaskRoot: LiveTaskRoot;
+  /** The session-folder root the scratch hangs under (ADR-0132 `sessionRootDir`). */
+  readonly projectDir: string | undefined;
+  /** The session anchor, read per call; absent → no scratch scope. */
+  readonly conversationId: (() => string | undefined) | undefined;
+}): () => CleanupRootSnapshot {
+  return () => {
+    const conversationId = input.conversationId?.();
+    const scratch =
+      conversationId === undefined || input.projectDir === undefined
+        ? undefined
+        : // The same helper the Bash handler calls, so the pad these two
+          // gates judge is created and named by one rule. It creates the
+          // directory when absent, which is the handler's own behavior.
+          resolveSessionFenceTmp({
+            projectDir: input.projectDir,
+            conversationId,
+          });
+    const scratchRoot =
+      scratch === undefined ? undefined : snapshotIdentityScratchRoot(scratch);
+    const taskRoot = snapshotIdentityScratchRoot(input.liveTaskRoot.read());
+    return {
+      ...(scratchRoot !== undefined ? { scratchRoot } : {}),
+      ...(taskRoot !== undefined ? { taskRoot } : {}),
+    };
+  };
 }
 
 /** ADR-0098: conditional exposure of the rescan seam (same rationale as `lastReadLedgerOption`). */

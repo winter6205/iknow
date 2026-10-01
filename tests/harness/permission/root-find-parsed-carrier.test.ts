@@ -7,6 +7,14 @@
  * the search-root judgment walk the parse's command nodes and operand words
  * instead of `splitShellSegments`' segments.
  *
+ * Every row that must still DENY carries a mutating search, because spec SC6
+ * removed the deny for a read-only root search and a read-only row would now be
+ * answering a different question (that one lives in
+ * `root-find-readonly-allowance.test.ts`). What this file still measures is
+ * CARRIER: that the same root walk, however it is spelled, is found by the same
+ * ordered fold. A mutating predicate is the probe for that, because the root
+ * fact and the expression are judged on the same runs.
+ *
  * The contract is that the ANSWER does not move. Every row is asserted to carry
  * `parseForSecurity(...).kind === "ok"` first, so a green row cannot be passing
  * on the parser-unavailable degrade scan by accident; the row's `why` then names
@@ -21,6 +29,7 @@ import assert from "node:assert/strict";
 import {
   findDangerousPattern,
   isDangerousCommand,
+  type DangerousPatternId,
 } from "../../../src/harness/permission/hard-walls.js";
 import { parseForSecurity } from "../../../src/harness/permission/shell-parse.js";
 
@@ -29,6 +38,14 @@ describe("hard-wall: root find — SC-S3-2 parsed-path carrier", () => {
     readonly command: string;
     readonly deny: boolean;
     readonly why: string;
+    /**
+     * The id a deny must carry, when the row's point is that a DIFFERENT wall
+     * answers. Two rows need it: a heredoc body handed to an interpreter is
+     * judged by the substitution arm, which runs BEFORE this fold in the
+     * original too, so `bash <<'EOF' … find . … EOF` has always been reported as
+     * `destructive-rm` rather than as the walk. Absent means the walk id.
+     */
+    readonly id?: DangerousPatternId;
   }> = [
     // ABSTAIN — pipeline negation: `!` is a counted token with no word fact, so
     // the tree cannot say which node it led; the splitter's answer is kept.
@@ -54,23 +71,23 @@ describe("hard-wall: root find — SC-S3-2 parsed-path carrier", () => {
     { command: "cd / && find > /dev/null", deny: false, why: "ABSTAIN bare" },
     // A trailing redirect does not blind the operands that ARE words.
     {
-      command: "cd / && find . > /",
+      command: "cd / && find . -delete > /",
       deny: true,
       why: "operand before redirect",
     },
-    { command: "cd / && find / > /dev/null", deny: true, why: "explicit root" },
+    { command: "cd / && find / -delete > /dev/null", deny: true, why: "explicit root" },
     {
-      command: "cd / && find . | wc -l",
+      command: "cd / && find . -delete | wc -l",
       deny: true,
       why: "pipeline keeps order",
     },
     {
-      command: "cd / && timeout 5 find .",
+      command: "cd / && timeout 5 find . -delete",
       deny: true,
       why: "wrapper fold on argv",
     },
-    { command: "cd /\nf\\ind .", deny: true, why: "strip re-armed on argv" },
-    { command: "f\\ind /", deny: true, why: "strip re-armed on argv" },
+    { command: "cd /\nf\\ind . -delete", deny: true, why: "strip re-armed on argv" },
+    { command: "f\\ind / -delete", deny: true, why: "strip re-armed on argv" },
     // RELAXATION (licensed) — the splitter read the redirect TARGET as a search
     // root; the tree knows `/` belongs to `>`, not to `find`.
     {
@@ -85,19 +102,24 @@ describe("hard-wall: root find — SC-S3-2 parsed-path carrier", () => {
       deny: false,
       why: "RELAXATION quote-blind split",
     },
-    // SPLICE — body lines join the fold at their own offset.
+    // SPLICE — body lines join the fold at their own offset. These two bodies
+    // reach the fold with a MUTATING search: the read-only spelling of each
+    // (`…\nfind .\nEOF`) is a read-only root search like any other and is
+    // covered in `root-find-readonly-allowance.test.ts`.
     {
-      command: "bash <<'EOF'\ncd /\nfind .\nEOF",
+      command: "bash <<'EOF'\ncd /\nfind . -delete\nEOF",
       deny: true,
       why: "SPLICE shell-code body",
+      id: "destructive-rm",
     },
     {
-      command: "cd / && bash <<'EOF'\nfind .\nEOF",
+      command: "cd / && bash <<'EOF'\nfind . -delete\nEOF",
       deny: true,
       why: "SPLICE body after folded cd",
+      id: "destructive-rm",
     },
     {
-      command: "cat <<'EOF'\ncd /\nEOF\nfind ..",
+      command: "cat <<'EOF'\ncd /\nEOF\nfind .. -delete",
       deny: true,
       why: "SPLICE body line then real walk",
     },
@@ -134,7 +156,11 @@ describe("hard-wall: root find — SC-S3-2 parsed-path carrier", () => {
       );
       const hit = findDangerousPattern(row.command);
       if (row.deny) {
-        assert.deepEqual(hit, { id: "root-find-walk", pattern: "find" });
+        if (row.id === undefined) {
+          assert.deepEqual(hit, { id: "root-find-walk", pattern: "find" });
+        } else {
+          assert.equal(hit?.id, row.id, row.why);
+        }
         assert.equal(isDangerousCommand(row.command), true);
       } else {
         assert.equal(hit, null, `unexpected deny: ${JSON.stringify(hit)}`);

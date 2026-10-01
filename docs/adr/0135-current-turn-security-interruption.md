@@ -1,0 +1,8 @@
+# 0135. Interrupt the current turn after consecutive confirmed security violations
+
+Date: 2026-09-30
+Status: accepted
+
+Issue #1170 exposed a session-wide violation accumulator whose notification did not reliably stop ongoing work. Count confirmed security violations within the current user turn; the third consecutive violation interrupts that turn while retaining the conversation. Repeated hits of one rule count. An admitted and successfully executed tool call resets the streak; ordinary denial, review unavailability, timeout, cleanup failure, and other unsuccessful non-violation outcomes neither increment nor reset it. Each new user turn starts at zero. Preserve existing immediate handling of high-severity violations and each command's non-overridable protection independently of this threshold.
+
+On threshold, stop further model requests and tool scheduling, cancel in-flight calls and this turn's owned workers and finite background jobs, and collect bounded cleanup evidence. Do not stop unrelated tasks or earlier persistent services. Use the existing cancelled outcome with a structured security cause and cleanup state, preserving ADR-0029's closed stop-reason contract and ADR-0108's in-flight closeout. The trade-off is to contain repeated unsafe attempts during one turn without terminating a recoverable session or counting routine operational failures as unsafe intent. Normal and evaluation hosts must use the same escalation policy for the routes they actually expose; evaluation remains foreground-only unless separately changed. Acceptance is defined by [Hard-wall denial alignment](../../specs/hard-wall-denial-alignment.md).

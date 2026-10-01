@@ -211,8 +211,12 @@ describe("hard-wall: per-segment rules keep first claim over the bare branch", (
   });
 
   it("the root-find fold runs before the bare branch", () => {
-    assert.equal(patternId("find /"), "root-find-walk");
-    assert.equal(patternId("cd / && find ."), "root-find-walk");
+    // The precedence being pinned is the ORDER, so the representative is a
+    // mutating root search: spec SC6 stopped denying read-only root searches
+    // outright, and an allow would make this assert nothing about order. The
+    // read-only rows' own answers live in `root-find-readonly-allowance.test.ts`.
+    assert.equal(patternId("find / -delete"), "root-find-walk");
+    assert.equal(patternId("cd / && find . -delete"), "root-find-walk");
   });
 
   it("empty string returns null", () => {

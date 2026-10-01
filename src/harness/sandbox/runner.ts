@@ -14,6 +14,15 @@ import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { ToolExecutionError } from "../errors.js";
 import type { BwrapFence } from "./bwrap.js";
 import { createSandboxServer } from "./server/index.js";
+import {
+  NOT_STARTED_CLEANUP,
+  confirmedStopped,
+  isProcessGroupGone,
+  sendSignalToProcessGroup,
+  unconfirmedCleanup,
+  waitForProcessGroupGone,
+  type CleanupEvidence,
+} from "./cleanup-result.js";
 
 /** Default output truncation cap for runInSandbox, aligned with bash.ts's existing MAX_OUTPUT_CODE_POINTS. */
 export const DEFAULT_MAX_OUTPUT_CODE_POINTS = 12_000;
@@ -26,9 +35,6 @@ const DEFAULT_KILL_GRACE_MS = 2_000;
  * unkillable group would hang the caller forever.
  */
 const GROUP_SETTLE_MS = 250;
-
-/** Poll interval while waiting for the process group to disappear. */
-const GROUP_POLL_MS = 20;
 
 /** signal→exit-code mapping: shell convention = 128 + signal number. */
 export const SIGNAL_EXIT_CODES: Readonly<Record<string, number>> =
@@ -79,6 +85,24 @@ export interface SpawnWithStopSignalOptions {
   readonly env?: NodeJS.ProcessEnv;
   /** Test seam; production callers should use the two-second default. */
   readonly killGraceMs?: number;
+  /**
+   * ADR-0134: this run's own runtime deadline. The timer lives here, beside
+   * the process, so expiry runs the same TERM/grace/KILL teardown an abort
+   * does and the resulting SpawnResult carries the same CleanupEvidence —
+   * a deadline is a real stop, not a frontend wait that gives up early.
+   *
+   * The caller owns the value; this layer only enforces it. It is NOT nested
+   * inside any other clock: the highest enforced deadline for a foreground
+   * Bash call is the one the model supplied.
+   */
+  readonly deadlineMs?: number;
+  /**
+   * How long the escalation waits for the process group to disappear after the
+   * last signal before declaring the cleanup unconfirmed. Defaults to
+   * GROUP_SETTLE_MS; lowering it only shortens the wait for the *verdict*,
+   * never the kill route itself.
+   */
+  readonly groupObserveMs?: number;
 }
 
 export interface SpawnResult {
@@ -86,6 +110,20 @@ export interface SpawnResult {
   readonly signal: NodeJS.Signals | null;
   readonly stdout: string;
   readonly stderr: string;
+  /**
+   * What the bounded cleanup actually observed for the process group. Absent
+   * only when the child never ran (spawn failed, so there is no group to
+   * report on); `not_started` means no teardown was requested.
+   */
+  readonly cleanup?: CleanupEvidence;
+  /**
+   * ADR-0134: true when the run was ended by its own `deadlineMs` rather than
+   * by a caller abort, a natural exit or a spawn failure. The process plane
+   * cannot tell an abort from a deadline on its own, so the caller records the
+   * cause on the way in and this flag is the read-back of it — the two
+   * outcomes must stay distinguishable downstream.
+   */
+  readonly deadlineExpired?: boolean;
 }
 
 export interface SpawnWithStopSignalResult {
@@ -117,11 +155,18 @@ export function truncateByCodePoint(text: string, max: number): string {
  *
  * Fast path: a tree that TERM can take drains within the grace window and
  * settles immediately (no wasted 2s wait).
+ *
+ * Every terminal transition carries CleanupEvidence: a stop is confirmed only
+ * when the group was probed and found absent. A failed signal or a bounded
+ * observation that ended with members alive both settle as `unconfirmed` — the
+ * chain closes on a deadline either way, so the caller is never left waiting
+ * and never told a lie about what is still running.
  */
 function createTreeTeardown(
   child: ChildProcess,
   graceMs: number,
-  settle: (outcome: SpawnResult) => void,
+  observeMs: number,
+  settle: (outcome: SpawnResult, evidence: CleanupEvidence) => void,
   killedOutcome: () => SpawnResult
 ): {
   stop: () => void;
@@ -136,6 +181,33 @@ function createTreeTeardown(
   let teardownRequested = false;
   /** Process group confirmed empty (or judged no longer governable) — the teardown chain is closed out here. */
   let groupClear = false;
+  /** First non-ESRCH signal failure of this chain; turns the verdict into `unconfirmed`. */
+  let teardownFailure: string | undefined;
+
+  const signalGroup = (pgid: number, signal: NodeJS.Signals): void => {
+    sendSignalToProcessGroup(pgid, signal, (detail) => {
+      teardownFailure ??= detail;
+    });
+  };
+
+  /** Exit condition of the bounded chain: observed gone, or a deadline / failure produced an unconfirmed verdict. */
+  const closeOut = (pgid: number, gone: boolean): void => {
+    groupClear = true;
+    if (gone) {
+      finish(confirmedStopped(pgid));
+      return;
+    }
+    finish(
+      unconfirmedCleanup(
+        pgid,
+        teardownFailure !== undefined
+          ? "teardown_failed"
+          : "observation_expired",
+        teardownFailure ??
+          "process group still alive when the bounded observation ended"
+      )
+    );
+  };
 
   /**
    * Single settle point (single-wins): honoured once the direct child has
@@ -143,12 +215,12 @@ function createTreeTeardown(
    * out" — the group-emptiness decision stays at the call sites, this function
    * does not re-judge it.
    */
-  const finish = (): void => {
+  const finish = (evidence: CleanupEvidence): void => {
     // EXIT: already settled, or the direct child has not acknowledged yet (nothing to honour).
     if (settled || closeOutcome === undefined) return;
     settled = true;
     if (killTimer !== undefined) clearTimeout(killTimer);
-    settle(closeOutcome);
+    settle(closeOutcome, evidence);
   };
 
   /**
@@ -159,16 +231,31 @@ function createTreeTeardown(
   const close = (outcome: SpawnResult): void => {
     closeOutcome = outcome;
     const pid = child.pid;
-    // EXIT: no teardown in flight → natural exit; teardown closed out / group
-    // empty on the spot / pid unavailable → nothing left to wait for, settle.
-    if (
-      !teardownRequested ||
-      groupClear ||
-      pid === undefined ||
-      !groupAlive(pid)
-    ) {
-      finish();
+    if (!teardownRequested) {
+      // No teardown was ever requested: this is a natural exit, not a stop.
+      finish(NOT_STARTED_CLEANUP);
+      return;
     }
+    // EXIT: teardown closed out, or pid unavailable → nothing left to wait for.
+    if (groupClear || pid === undefined) {
+      finish(
+        unconfirmedCleanup(
+          pid ?? -1,
+          teardownFailure !== undefined
+            ? "teardown_failed"
+            : "observation_expired",
+          teardownFailure ?? "process group was never observed gone"
+        )
+      );
+      return;
+    }
+    // EXIT: group empty on the spot → the observation confirms the stop.
+    if (isProcessGroupGone(pid)) {
+      closeOut(pid, true);
+      return;
+    }
+    // Members survived the direct child's exit — the armed SIGKILL escalation
+    // still owns settlement for this group.
   };
 
   const stop = (): void => {
@@ -176,28 +263,26 @@ function createTreeTeardown(
     // EXIT: idempotent — already settled or teardown already in flight, or pid unavailable (nothing to kill).
     if (settled || teardownRequested || pid === undefined) return;
     teardownRequested = true;
-    killProcessGroupLocal(pid, "SIGTERM");
+    signalGroup(pid, "SIGTERM");
     killTimer = setTimeout(() => {
-      killProcessGroupLocal(pid, "SIGKILL");
+      signalGroup(pid, "SIGKILL");
       // SIGKILL cannot be ignored either, but landing on the group takes a
       // tick; once the window is spent the chain closes unconditionally — an
       // unkillable group (D state) must not hang the caller.
-      void waitForGroupGone(pid, GROUP_SETTLE_MS).then(() => {
-        groupClear = true;
+      void waitForProcessGroupGone(pid, observeMs).then((gone) => {
         // close has not arrived yet (uninterruptible child) → fall back to the
         // SIGKILL outcome, otherwise the promise hangs forever.
         closeOutcome ??= killedOutcome();
-        finish();
+        closeOut(pid, gone);
       });
     }, graceMs);
     // Deliberately not unref'd: when close arrives before the group drains
     // (exactly the incident shape), this timer is the only settlement path —
     // unref'ing it would leave the caller's promise hanging forever.
-    void waitForGroupGone(pid, graceMs).then((gone) => {
-      // EXIT: group not empty within the grace window → the escalation chain (killTimer) takes over settlement.
+    void waitForProcessGroupGone(pid, observeMs).then((gone) => {
+      // EXIT: group not empty within the observation window → the escalation chain (killTimer) takes over settlement.
       if (!gone) return; // the escalation takes over
-      groupClear = true;
-      finish();
+      closeOut(pid, true);
     });
   };
 
@@ -208,6 +293,22 @@ function createTreeTeardown(
   };
 
   return { stop, close, failed };
+}
+
+/**
+ * The two bounded-teardown budgets, resolved once. Both are per-caller
+ * overrides of a default with the same meaning — how long the escalation
+ * waits before escalating, and how long it then waits for the group to
+ * vanish — so they are read together rather than inlined per call site.
+ */
+function teardownBudgets(options: SpawnWithStopSignalOptions): {
+  readonly graceMs: number;
+  readonly observeMs: number;
+} {
+  return {
+    graceMs: options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
+    observeMs: options.groupObserveMs ?? GROUP_SETTLE_MS,
+  };
 }
 
 /**
@@ -239,17 +340,28 @@ export function spawnWithStopSignal(
     stderr += chunk;
   });
 
-  // The teardown sequence is consolidated in one place: shared **only by this
-  // foreground exec path** (abort / tier timeout / natural exit), so the two
-  // sides cannot drift apart. Background bash_stop goes through a different
-  // implementation (background/manager.ts + createStopHandle in
-  // sandbox/server/spawn.ts), outside this function's coverage.
+  // The teardown sequence is consolidated in one place: shared by the
+  // foreground exec path (abort / tier timeout / natural exit) and by the
+  // background server path, which drives the same shape through
+  // `createStopHandle` in sandbox/server/spawn.ts. Both planes report the same
+  // CleanupEvidence vocabulary, so a stop cannot be reported two different ways.
+  const { graceMs, observeMs } = teardownBudgets(options);
+  // ADR-0134: the deadline's own cause, recorded by the timer that fires it and
+  // read back on the single settlement path. A caller abort reaching the
+  // teardown first wins over an expired deadline, which is why the flag is
+  // set by the timer rather than inferred from a stop.
+  let deadlineFired = false;
   const teardown = createTreeTeardown(
     child,
-    options.killGraceMs ?? DEFAULT_KILL_GRACE_MS,
-    (outcome) => {
+    graceMs,
+    observeMs,
+    (outcome, evidence) => {
       options.signal?.removeEventListener("abort", teardown.stop);
-      resolveDone(outcome);
+      resolveDone({
+        ...outcome,
+        cleanup: evidence,
+        ...(deadlineFired ? { deadlineExpired: true } : {}),
+      });
     },
     () => ({ code: null, signal: "SIGKILL", stdout, stderr })
   );
@@ -269,36 +381,60 @@ export function spawnWithStopSignal(
   if (options.signal?.aborted) teardown.stop();
   else options.signal?.addEventListener("abort", teardown.stop, { once: true });
 
+  // ADR-0134: the runtime deadline rides the same teardown entry as an abort,
+  // so an expiring deadline produces the same bounded TERM/grace/KILL route and
+  // the same CleanupEvidence an abort does.
+  const clearDeadline = armRunDeadline({
+    deadlineMs: options.deadlineMs,
+    onExpire: () => {
+      deadlineFired = true;
+      teardown.stop();
+    },
+  });
+  child.once("close", clearDeadline);
+  child.once("error", clearDeadline);
+
   return { child, done };
 }
 
-/** Process-group liveness probe: true if any member is present (EPERM is undecidable → conservatively treated as present). */
-function groupAlive(pgid: number): boolean {
-  try {
-    process.kill(-pgid, 0);
-    return true;
-  } catch (error) {
-    // EXIT: ESRCH = group no longer exists → false; other errnos (EPERM etc.)
-    // are undecidable → conservatively treated as present, keeping the
-    // escalation chain in charge of settlement.
-    return (error as NodeJS.ErrnoException).code !== "ESRCH";
-  }
-}
-
 /**
- * Bounded poll until the process group disappears: emptied within the window →
- * true; window spent → decided by the last liveness probe. Group teardown is
- * best-effort and always bounded, never hanging the caller on an unkillable group.
+ * ADR-0134: arm this run's runtime deadline, or arm nothing at all.
+ *
+ * A non-positive or absent `deadlineMs` means "no deadline" — the same reading
+ * `teardownBudgets` gives the grace pair — so the timer is not armed rather
+ * than armed with a delay that would fire immediately.
+ *
+ * The returned cancel is what a settlement path (natural exit, abort, spawn
+ * failure) calls: a timer that outlived its run would keep the event loop
+ * alive for the rest of its duration after nobody is waiting on it.
+ *
+ * Deliberately not unref'd: on the deadline path this timer is the only thing
+ * that can end a command the caller is still waiting on, and unref'ing it
+ * would let the process exit out from under a live call.
  */
-async function waitForGroupGone(pgid: number, capMs: number): Promise<boolean> {
-  const deadline = Date.now() + capMs;
-  while (Date.now() < deadline) {
-    if (!groupAlive(pgid)) return true;
-    await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
+function armRunDeadline(args: {
+  readonly deadlineMs: number | undefined;
+  readonly onExpire: () => void;
+}): () => void {
+  const { deadlineMs, onExpire } = args;
+  let timer: NodeJS.Timeout | undefined;
+  if (deadlineMs !== undefined && deadlineMs > 0) {
+    timer = setTimeout(() => {
+      // Disarm first: the handler that runs next may cancel, and cancelling an
+      // already-fired timer is a no-op it must not have to know about.
+      timer = undefined;
+      onExpire();
+    }, deadlineMs);
   }
-  return !groupAlive(pgid);
+  return (): void => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+      timer = undefined;
+    }
+  };
 }
 
+/** Process-group liveness probe: true if any member is present (EPERM is undecidable → conservatively treated as present). */
 export function signalExitCode(signal: NodeJS.Signals | null): number {
   return signal === null ? 1 : (SIGNAL_EXIT_CODES[signal] ?? 1);
 }
@@ -318,6 +454,19 @@ export interface SandboxRunResult {
   readonly stdout: string;
   /** Already truncated to maxOutputCodePoints. */
   readonly stderr: string;
+  /**
+   * Bounded-teardown evidence for the fence's process group. A timeout or an
+   * abort that could not confirm disappearance reports `unconfirmed` here
+   * instead of an exit code that reads like a clean finish. Absent only when
+   * the fence never started (startup failure path, no group to report on).
+   */
+  readonly cleanup?: CleanupEvidence;
+  /**
+   * ADR-0134: true when this run ended because its own `deadlineMs` expired
+   * (see SandboxRunOptions.deadlineMs). Absent for every run without a
+   * deadline, so a pre-ADR-0134 consumer reads an unchanged result.
+   */
+  readonly deadline_expired?: boolean;
 }
 
 export interface SandboxRunOptions {
@@ -329,6 +478,14 @@ export interface SandboxRunOptions {
   readonly maxOutputCodePoints?: number;
   /** SIGTERM→SIGKILL grace period passed through to spawnWithStopSignal; default 2s. */
   readonly killGraceMs?: number;
+  /**
+   * ADR-0134: this run's runtime deadline, enforced by the process plane (see
+   * SpawnWithStopSignalOptions.deadlineMs). Undefined = no deadline, the
+   * pre-ADR-0134 shape every non-Bash consumer still uses.
+   */
+  readonly deadlineMs?: number;
+  /** Bounded wait for process-group disappearance before reporting `unconfirmed`; default GROUP_SETTLE_MS. */
+  readonly groupObserveMs?: number;
 }
 
 export async function runInSandbox(
@@ -340,7 +497,7 @@ export async function runInSandbox(
   // short-lived protocol. With the same-process router shape this is just a
   // function call, no IPC cost.
   const server = createSandboxServer();
-  return server.exec({
+  const result = await server.exec({
     kind: "exec",
     fence: opts.fence,
     cwd: opts.cwd,
@@ -352,41 +509,18 @@ export async function runInSandbox(
     ...(opts.killGraceMs !== undefined
       ? { killGraceMs: opts.killGraceMs }
       : {}),
+    ...(opts.deadlineMs !== undefined ? { deadlineMs: opts.deadlineMs } : {}),
+    ...(opts.groupObserveMs !== undefined
+      ? { groupObserveMs: opts.groupObserveMs }
+      : {}),
   });
-}
-
-function killProcessGroupLocal(pid: number, signal: NodeJS.Signals): void {
-  try {
-    process.kill(-pid, signal);
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
-  }
-}
-
-/**
- * Reused by the server: send a signal to the detached process group, swallow
- * ESRCH (group already gone), report other errors via `log` (never throw —
- * kill escalation is best-effort; failure = incomplete reap, which must not
- * block the main flow).
- *
- * Why a shared helper: the inlined version in server/index.ts and the runner's
- * local version disagreed on error behaviour (runner throws, server logs); the
- * server shape requires never-throw (a throwing kill would surface as typed
- * `server_unreachable`, while reaping is internal cleanup that must not be
- * escalated into an observable fault surface). Externally only the
- * best-effort `killProcessGroup` path is exposed; the runner keeps its local
- * strict version internally.
- */
-export function killProcessGroup(
-  pid: number,
-  signal: NodeJS.Signals,
-  log?: (msg: string) => void
-): void {
-  try {
-    process.kill(-pid, signal);
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ESRCH") return;
-    log?.(`killProcessGroup: kill -${pid} ${signal} failed: ${String(error)}`);
-  }
+  return {
+    exitCode: result.exitCode,
+    stdout: result.stdout,
+    stderr: result.stderr,
+    ...(result.cleanup !== undefined ? { cleanup: result.cleanup } : {}),
+    ...(result.deadline_expired !== undefined
+      ? { deadline_expired: result.deadline_expired }
+      : {}),
+  };
 }

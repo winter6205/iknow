@@ -2,10 +2,11 @@
  * SessionHub T6 test: violation kill-session wiring on the serve/TUI entry.
  *
  * Serve/TUI is long-running, so a mid-tier escalation must NOT set
- * process.exitCode. hard_wall already returns execution_failed to the model;
- * the kill latch must not remap the engine stopReason to protocolError
- * (that persist path drops the assistant delta and undoes ADR-0108 keep).
- * The violation event is still written to the JSONL trace when traceOut is set.
+ * process.exitCode. ADR-0135 additionally requires the third confirmed
+ * violation to interrupt the current turn only: the turn stops as
+ * `cancelled` with a structured security cause, the session survives, and
+ * the next user turn starts its streak at zero. The violation event is still
+ * written to the JSONL trace when traceOut is set.
  *
  * The serve product path injects agentVersion → a session root record
  * (carrying the agent_version field) is written at run end. This file is
@@ -73,8 +74,11 @@ function makeViolationDeps(): LoopEngineDeps {
       assistantResult({ texts: [], toolCalls: [toolCall] }),
       assistantResult({ texts: [], toolCalls: [{ ...toolCall, id: "u2" }] }),
       assistantResult({ texts: [], toolCalls: [{ ...toolCall, id: "u3" }] }),
-      assistantResult({ texts: [], toolCalls: [{ ...toolCall, id: "u4" }] }),
-      assistantResult({ texts: ["final answer"] }),
+      // Second user turn: proves the session is retained and that its own
+      // streak starts at zero. The stub model is a FIFO queue, so this
+      // response is reached by the follow-up turn ONLY if the third denial
+      // really did prevent a further model request in the first turn.
+      assistantResult({ texts: ["second turn"] }),
     ],
   });
   return { adapter, executor, registry, maxTurns: 8 };
@@ -114,7 +118,7 @@ function makeViolationDepsAbortOnFourthStep(
 }
 
 describe("SessionHub violation kill (serve entry)", () => {
-  it("mid-tier escalation keeps engine stopReason and assistant history; does not touch exitCode", async () => {
+  it("the third confirmed violation interrupts the turn, retains the session, and starts the next turn at zero", async () => {
     const savedExitCode = process.exitCode;
     process.exitCode = 0;
     try {
@@ -130,14 +134,52 @@ describe("SessionHub violation kill (serve entry)", () => {
         conversationId: convId,
         text: "do something dangerous",
       });
-      // Kill latch is observability only: engine completed; remapping to
-      // protocolError would drop this assistant delta on persist (SC4).
-      assert.equal(res.turn.answer.stopReason, "completed");
-      assert.equal(res.turn.answer.finalText, "final answer");
+      // ADR-0135 / SC11: the third confirmed violation interrupts THIS turn.
+      // The stop reason is the existing `cancelled` (ADR-0029's closed set is
+      // untouched) — the previous contract, which ran the model to a
+      // `completed` answer after the threshold, is exactly what the spec
+      // rejects. The session is retained, which is the other half of it.
+      assert.equal(res.turn.answer.stopReason, "cancelled");
       const loaded = await store.load(convId);
       assert.ok(
         loaded.messages.some((m) => m.role === "assistant"),
-        "assistant turns after hard_wall must remain on disk"
+        "assistant turns before the interruption must remain on disk"
+      );
+      // The interruption is structured, not just a stop: the live DTO
+      // carries the cause and the per-item cleanup list.
+      const liveOutcome = res.turn.answer.outcome;
+      const liveInterruption =
+        liveOutcome?.terminal === "known"
+          ? liveOutcome.securityInterruption
+          : undefined;
+      assert.ok(
+        liveInterruption !== undefined,
+        "the turn answer carries the security cause"
+      );
+      assert.equal(liveInterruption?.tier, "mid");
+      assert.equal(liveInterruption?.tool, "dangerous");
+      assert.equal(liveInterruption?.confirmedViolations, 3);
+      assert.deepEqual(liveInterruption?.cleanup, []);
+
+      // Session retained: a follow-up turn still runs on the same session.
+      const followUp = await hub.postMessage({
+        conversationId: convId,
+        text: "are you still there?",
+      });
+      assert.equal(followUp.turn.answer.stopReason, "completed");
+      // Reaching this response is itself the proof that turn 1 stopped after
+      // its third denial: the queue had exactly three denial waves before it,
+      // so a 4th in-turn model request would have consumed this answer.
+      assert.equal(followUp.turn.answer.finalText, "second turn");
+      // A new user turn starts its streak at zero: its own outcome carries
+      // no security cause even though the session already had three denials.
+      const followOutcome = followUp.turn.answer.outcome;
+      assert.equal(
+        followOutcome?.terminal === "known"
+          ? followOutcome.securityInterruption
+          : undefined,
+        undefined,
+        "the count must not leak into the next user turn"
       );
       // Serve must never kill the process: exitCode stays 0.
       assert.equal(process.exitCode, 0);
@@ -157,20 +199,42 @@ describe("SessionHub violation kill (serve entry)", () => {
       assert.ok(lines.length >= 1, `expected violation record, got: ${raw}`);
       assert.match(lines[0] ?? "", /"conversation_id":"[^"]+"/);
       assert.match(lines[0] ?? "", /hard_wall/);
-      // Integration assertion: the session root record written at run end
-      // carries the agent_version injected by serve.
+      // Integration assertion: every session root record written at run end
+      // carries the agent_version injected by serve. One per postMessage, so
+      // this test's two turns produce two.
       const allLines = raw.trim().split("\n");
       const roots = allLines.filter((l) =>
         l.includes('"record_type":"session"')
       );
       assert.equal(
         roots.length,
-        1,
-        `expected exactly 1 session root record, got: ${allLines.join(" | ")}`
+        2,
+        `expected one session root record per turn, got: ${allLines.join(" | ")}`
       );
-      const root = JSON.parse(roots[0]!) as Record<string, unknown>;
-      assert.equal(root["conversation_id"], convId);
-      assert.equal(root["agent_version"], getVersion());
+      for (const line of roots) {
+        const root = JSON.parse(line) as Record<string, unknown>;
+        assert.equal(root["conversation_id"], convId);
+        assert.equal(root["agent_version"], getVersion());
+      }
+      // The interrupted turn's own trace records the security cause, the
+      // confirmed count and the (here empty) cleanup list — this is the
+      // evidence T8's trace work correlates (SC12).
+      const violations = allLines.filter((l) =>
+        l.includes('"record_type":"violation"')
+      );
+      // Two records exist for one escalation: the operator notification
+      // (`tier: "mid-escalation"`) and the structured interruption report
+      // (`tier: "mid"` + cleanup). The report is the one carrying the cause.
+      const cause = violations
+        .map((l) => JSON.parse(l) as { detail?: Record<string, unknown> })
+        .map((v) => v.detail ?? {})
+        .find(
+          (d) => d["confirmedViolations"] !== undefined && "cleanup" in d
+        );
+      assert.ok(cause !== undefined, "a structured cause record was written");
+      assert.equal(cause?.["tier"], "mid");
+      assert.equal(cause?.["confirmedViolations"], 3);
+      assert.deepEqual(cause?.["cleanup"], []);
     } finally {
       process.exitCode = savedExitCode;
     }

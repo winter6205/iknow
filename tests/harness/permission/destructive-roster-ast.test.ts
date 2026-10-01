@@ -320,8 +320,17 @@ describe("the `builtin` fold reaches the destructive arms only", () => {
   // The walk keeps its own wrapper set, so folding `builtin` here must not
   // newly deny a root walk it never named — the unfused twin still denies.
   it("keeps a root walk behind `builtin` out of the walk arm", () => {
-    assert.equal(liveHit("cd / && builtin find ."), null);
-    assert.equal(id(liveHit("cd / && find .")), "root-find-walk");
+    // The claim is that `builtin` is NOT folded by the walk's own wrapper set,
+    // so the two sides must differ in WHICH WALL answers, not merely in whether
+    // a deny exists. Both rows below carry `-delete`, because spec SC6 stopped
+    // denying a read-only root search at all — an allow on both sides would
+    // make this assert nothing about the wrapper set. Unfused, the ordered walk
+    // fold keeps first claim and reports the walk; folded behind `builtin`, the
+    // destructive command-word arm owns it instead.
+    const folded = liveHit("cd / && builtin find . -delete");
+    assert.equal(id(folded), "destructive-rm");
+    assert.equal(desc(folded), " -delete");
+    assert.equal(id(liveHit("cd / && find . -delete")), "root-find-walk");
   });
 });
 

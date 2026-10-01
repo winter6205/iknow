@@ -49,6 +49,7 @@ import type { SecurityReviewRoute } from "../permission/security-review.js";
 import { errorMessage } from "../errors.js";
 import { createPermissionPolicy } from "./permission.js";
 import { TIMEOUT_TIER_MS, type AciCatalog, type AciToolDef } from "./types.js";
+import type { CleanupEvidence } from "../sandbox/cleanup-result.js";
 
 /**
  * Compile-time pin (ADR-0127 H3): `createAciExecutor` passes the route to the
@@ -136,6 +137,20 @@ export interface AciExecutorOptions {
  * routeOneCall (the 5-step middleware is unchanged).
  */
 export function createAciExecutor(opts: AciExecutorOptions): Executor {
+  // ADR-0132/ADR-0133: the fallback policy deliberately carries NO host root
+  // context, and that is the whole point rather than a gap. This default is
+  // reached only by a caller that supplied no policy — the bare-ACI prototype
+  // and its tests, which have no session identity, no `taskRoot` cell and no
+  // scratch pad. A cleanup exception is only ever the REMOVAL of a
+  // destructive-rm finding, and establishing one requires roots that name a
+  // real directory; with no session context there is nothing to name, so every
+  // verdict here stays byte-identical to the pre-ADR-0132 behavior.
+  //
+  // Both real production entries pass a policy that DOES carry roots
+  // (build-engine's main session, the worker's own pad). Routing the default
+  // through some inferred root instead would be the actual defect: a guessed
+  // `process.cwd()` is a cleanup scope nobody established, and it is read as
+  // one by the very arm that is supposed to require a host-owned fact.
   const policy = opts.policy ?? createPermissionPolicy();
   // Build a registry-compatible surface: if catalog was passed, wrap it as a
   // Registry. Otherwise expect opts.registry to have been provided.
@@ -287,6 +302,12 @@ function emitOnDecision(
       sources: policy.sources,
       hardWalls: policy.hardWalls,
       defaultByCategory: policy.defaultByCategory,
+      // The observer must reach the same verdict as the gate that actually
+      // enforces it: without the mode and the host's root context, a call the
+      // policy admits is reported here as a different decision than the one
+      // the runtime applies.
+      mode: policy.mode,
+      ...(policy.hostRoots !== undefined ? { hostRoots: policy.hostRoots } : {}),
     })
   );
 }
@@ -535,9 +556,16 @@ async function routeOneCall(opts: {
     );
   }
 
-  // No abort / no timeout: if inner already returned cancelled/timeout
-  // (executor.runOne normalizes when signal.aborted), top up the bash
-  // partial (if any) and pass through.
+  // ADR-0134: bash declares `timeoutTier: "unbounded"` and enforces its own
+  // runtime deadline in the process plane, so an expiry arrives here as an
+  // ordinary successful handler return whose payload says the deadline fired.
+  // `withBashDeadline` restores the pre-existing per-call outcome exactly
+  // (same envelope, same salvaged partial, plus the cleanup evidence).
+  //
+  // The already-failed check below runs first because it is observationally
+  // inert here: an `execution_failed` result is never a bash deadline expiry
+  // (`extractBashDeadline` requires an `ok` payload), so both orders return
+  // the same value for every input.
   if (
     result.kind === "execution_failed" &&
     (result.message === "cancelled" || result.message === "timeout")
@@ -545,7 +573,7 @@ async function routeOneCall(opts: {
     return result; // partial can only come from an ok payload; this is already failed
   }
 
-  return result;
+  return withBashDeadline(result, def, call.id);
 }
 
 /**
@@ -739,13 +767,109 @@ function withPartial(
   base: { kind: "execution_failed"; toolUseId: string; message: string },
   partial: { stdout?: string; stderr?: string } | undefined,
   background: boolean = false
-): ToolExecutionResult {
+): Extract<ToolExecutionResult, { readonly kind: "execution_failed" }> {
   if (partial === undefined && !background) return base;
   return {
     ...base,
     ...(partial !== undefined ? { partial } : {}),
     ...(background ? { background: true } : {}),
   };
+}
+
+/**
+ * ADR-0134: the final normalization arm, kept out of `routeOneCall` so the
+ * per-call routing stays readable and its branch count stays honest.
+ *
+ * bash declares `timeoutTier: "unbounded"` and enforces its own runtime
+ * deadline in the process plane, so an expiry arrives here as an ordinary
+ * successful handler return whose payload says the deadline fired. This arm
+ * restores the pre-existing per-call outcome exactly: the same
+ * `execution_failed` / `message: "timeout"` envelope the tier clock used to
+ * produce, with the same salvaged partial, plus the structured cleanup
+ * evidence. It is a per-call failure only — no loop StopReason (ADR-0091).
+ *
+ * A caller abort that raced the deadline is normalized by the caller above
+ * this point, so reaching here means the deadline is the cause.
+ */
+function withBashDeadline(
+  result: ToolExecutionResult,
+  def: AciToolDef | undefined,
+  toolUseId: string
+): ToolExecutionResult {
+  const expired = extractBashDeadline(result, def);
+  if (expired === undefined) return result;
+  return withDeadlineEvidence(
+    withPartial(
+      { kind: "execution_failed", toolUseId, message: "timeout" },
+      extractBashPartial(result, def)
+    ),
+    expired.cleanup
+  );
+}
+
+/**
+ * ADR-0134: read a bash deadline expiry out of an otherwise-ok payload.
+ *
+ * Returns undefined for every result that is not a bash ok payload that says
+ * its deadline fired, so a caller can branch on one value instead of
+ * re-parsing the JSON. The cleanup evidence is taken from the same payload and
+ * is never invented here: an expiry that reached this point with no evidence
+ * is reported without one rather than as a fabricated confirmation.
+ */
+function extractBashDeadline(
+  result: ToolExecutionResult,
+  def: AciToolDef | undefined
+): { readonly cleanup: CleanupEvidence | undefined } | undefined {
+  if (def?.name !== "bash" || result.kind !== "ok") return undefined;
+  const first = result.payload[0];
+  if (!first || first.type !== "text") return undefined;
+  const obj = parseJsonObject(first.text);
+  if (obj === undefined) return undefined;
+  if (obj["deadline_expired"] !== true) return undefined;
+  const cleanup = obj["cleanup"];
+  return { cleanup: isCleanupEvidence(cleanup) ? cleanup : undefined };
+}
+
+/**
+ * Decode a tool payload's JSON text into a record, or undefined when it is not
+ * one. The deadline reader needs only the object behind the flag; parsing is
+ * kept here so a malformed payload is rejected by shape rather than by a field
+ * access that would have to be guarded at every read.
+ */
+function parseJsonObject(text: string): Record<string, unknown> | undefined {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (typeof parsed !== "object" || parsed === null) return undefined;
+  return parsed as Record<string, unknown>;
+}
+
+/** Shape guard for the discriminated cleanup result crossing the JSON seam.
+ *  A payload that does not carry a recognized state yields no evidence. */
+function isCleanupEvidence(value: unknown): value is CleanupEvidence {
+  if (typeof value !== "object" || value === null) return false;
+  const state = (value as { state?: unknown }).state;
+  return (
+    state === "not_started" ||
+    state === "confirmed_stopped" ||
+    state === "unconfirmed"
+  );
+}
+
+/** Attach cleanup evidence to a failure result. Additive: a failure with no
+ *  evidence (a caller abort whose teardown never ran, a spawn failure) keeps
+ *  the byte-identical shape it had before ADR-0134. The parameter is narrowed
+ *  to the `execution_failed` variant because only a failure may carry
+ *  evidence — a successful call has no teardown to report. */
+function withDeadlineEvidence(
+  result: Extract<ToolExecutionResult, { readonly kind: "execution_failed" }>,
+  cleanup: CleanupEvidence | undefined
+): ToolExecutionResult {
+  if (cleanup === undefined) return result;
+  return { ...result, cleanup };
 }
 
 function observeDetachedRejection(

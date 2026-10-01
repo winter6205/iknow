@@ -1,7 +1,8 @@
-import { existsSync, mkdirSync, readdirSync, type Dirent } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, realpathSync, type Dirent } from "node:fs";
 import { dirname, join } from "node:path";
 import { sanitizeConversationSegment } from "../session-roots.js";
 import { MAIN_SESSION_FENCE_TMP_DIR_NAME } from "../../shared/session-tree-names.js";
+import type { CleanupRootSnapshot } from "../permission/cleanup-roots.js";
 
 /** Host path of the main-session fence tmp dir under a session folder. */
 export function mainSessionFenceTmpPath(sessionFolder: string): string {
@@ -53,6 +54,60 @@ export function resolveSessionFenceTmp(input: {
     );
   }
   return undefined;
+}
+
+/**
+ * ADR-0132/ADR-0133: this identity's own scratch root, resolved once per call
+ * so the permission wall and the Bash handler read the SAME path.
+ *
+ * The `realpath` is the point, not a normalization: the bounded cleanup
+ * exceptions establish containment by resolving symlinks, and a snapshot that
+ * kept an unresolved ancestor spelling would let a linked scratch path be
+ * compared against a different real directory than the one the fence mounts.
+ *
+ * An unresolvable path yields `undefined`, which every consumer reads as "this
+ * call has no cleanup scope" — the fail-toward-deny direction, never a
+ * fabricated root. The empty string is NOT an acceptable stand-in: the
+ * classifier treats a defined root as a real path and resolves `$TMPDIR`
+ * operands against it, so `""` turned `rm -f $TMPDIR/etc/hostname` into a
+ * claimed-inside-scratch target and removed a real hard-wall finding. Absence
+ * and "the empty path" are different facts and only the first is safe.
+ */
+export function snapshotIdentityScratchRoot(
+  tmpDir: string
+): string | undefined {
+  try {
+    return realpathSync(tmpDir);
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * The per-call root context the Bash handler hands to BOTH the fence-side
+ * `$TMPDIR` decision and permission admission. One function, one value, so the
+ * two gates cannot measure the same command against two different scratch
+ * roots — the disagreement ADR-0132 forbids.
+ *
+ * `tmpDir` is the value the handler actually injects, so the snapshot and the
+ * environment the command runs under cannot drift apart.
+ */
+export function snapshotBashCleanupRoots(input: {
+  /** The value this call injects as `$TMPDIR` (already resolved or a fallback). */
+  readonly tmpDir: string;
+  /** The call's frozen working directory — the `taskRoot` the fence runs in. */
+  readonly waveRoot: string;
+}): CleanupRootSnapshot {
+  const scratchRoot = snapshotIdentityScratchRoot(input.tmpDir);
+  const taskRoot = snapshotIdentityScratchRoot(input.waveRoot);
+  // Conditional spreads, not empty-string placeholders: the snapshot type
+  // documents an absent root as "the host established no cleanup scope", and
+  // the wall's all-or-nothing arm is only sound when absence is genuinely
+  // distinguishable from a path.
+  return {
+    ...(scratchRoot !== undefined ? { scratchRoot } : {}),
+    ...(taskRoot !== undefined ? { taskRoot } : {}),
+  };
 }
 
 /** `<subagents>/<taskId>/` — new worker record + pad directory (ADR-0074). */

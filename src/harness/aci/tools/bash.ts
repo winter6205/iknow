@@ -8,8 +8,10 @@ import {
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { ToolExecutionError } from "../../errors.js";
-import { isDangerousCommand } from "../permission.js";
-import { commandContainsSensitivePath } from "../../permission/hard-walls.js";
+import {
+  commandContainsSensitivePath,
+  findDangerousPattern,
+} from "../../permission/hard-walls.js";
 import { validateReadonlyCommand } from "./bash-readonly.js";
 import {
   BASE_ENV_WHITELIST,
@@ -55,7 +57,10 @@ import type {
   BackgroundTaskManager,
 } from "../../background/manager.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
-import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
+import {
+  resolveSessionFenceTmp,
+  snapshotBashCleanupRoots,
+} from "../../sandbox/fence-tmp.js";
 import {
   unboundFenceErofsGuidance,
   unboundFenceBackgroundNotice,
@@ -66,11 +71,119 @@ import { FENCE_WRITE_GUIDANCE, resolveWithinRoot } from "./helpers.js";
 import { extractSingleReadPath } from "./bash-read-extract.js";
 import { assertNoBashGrepSubstitution } from "./role-substitution.js";
 import type { LastReadLedgerHost } from "../last-read-ledger.js";
+import type { CleanupEvidence } from "../../sandbox/cleanup-result.js";
+import { NOT_STARTED_CLEANUP } from "../../sandbox/cleanup-result.js";
+import type { BashForegroundDeadlineErrorCode } from "../types.js";
+import {
+  BASH_FOREGROUND_DEADLINE_ERROR_REASONS,
+  DEFAULT_FOREGROUND_BASH_TIMEOUT_MS,
+} from "../types.js";
+import { ToolInputValidationError } from "../../errors.js";
+
+/**
+ * The longest deadline a host timer can hold. `setTimeout` stores its delay in
+ * a 32-bit signed integer, so anything at or beyond 2^31 ms wraps to ~1 ms and
+ * fires almost immediately — the classic "silently clamped to a short timer"
+ * failure. Rejecting there is a representation limit, not a runtime policy.
+ *
+ * One constant for both planes: the background plane validates against the
+ * same bound (`MAX_BACKGROUND_TIMEOUT_MS`), so a value the Bash handler accepts
+ * is a value the manager can represent.
+ */
+export const MAX_BASH_TIMEOUT_MS = 2_147_483_647;
+
+/**
+ * ADR-0134: a rejected `timeout_ms`.
+ *
+ * Named variant, not a message: a caller branches on the class (the Executor
+ * maps `ToolInputValidationError` by class identity to `kind:
+ * "validation_failed"`) or on the `code` field, and never on a substring. It
+ * extends `ToolInputValidationError` so the model still sees a
+ * `ToolExecutionError` message through the existing sanitizing seam.
+ *
+ * `cleanup` is `not_started` by construction: this is thrown before any fence
+ * is built, any process is spawned or any timer is armed, so there is no
+ * process group whose disappearance could be reported — and the field exists
+ * so that fact is stated rather than left for the reader to infer.
+ */
+export class BashTimeoutInputError extends ToolInputValidationError {
+  override readonly name: string = "BashTimeoutInputError";
+  readonly code: BashForegroundDeadlineErrorCode;
+  readonly cleanup: CleanupEvidence;
+  constructor(code: BashForegroundDeadlineErrorCode, received: unknown) {
+    super(
+      `bash: timeout_ms ${BASH_FOREGROUND_DEADLINE_ERROR_REASONS[code]} (received ${renderReceived(received)})`
+    );
+    this.code = code;
+    this.cleanup = NOT_STARTED_CLEANUP;
+  }
+}
+
+/** How the offending value is echoed back. `JSON.stringify` cannot render a
+ *  NaN / Infinity, and a bare `String(...)` would print an empty line for null
+ *  and an empty string — both read as "no value was given", which is the one
+ *  reading that is wrong. */
+function renderReceived(value: unknown): string {
+  if (value === null) return "null";
+  if (typeof value === "number") return String(value);
+  if (typeof value === "string") return JSON.stringify(value);
+  return Object.prototype.toString.call(value);
+}
+
+/**
+ * ADR-0134: classify a raw `timeout_ms`.
+ *
+ * Returns the accepted deadline, or the named code that rejects it. The order
+ * matters and is total: a string never reaches the numeric checks, and a
+ * non-finite value is reported as such instead of as "not whole" (NaN and
+ * Infinity are both non-integer, so checking integrality first would name the
+ * wrong cause).
+ */
+function classifyDeadline(
+  value: unknown
+): { readonly ok: true; readonly deadlineMs: number } | { readonly ok: false; readonly code: BashForegroundDeadlineErrorCode } {
+  if (value === undefined) {
+    return { ok: true, deadlineMs: DEFAULT_FOREGROUND_BASH_TIMEOUT_MS };
+  }
+  if (typeof value !== "number") return { ok: false, code: "not_a_number" };
+  if (!Number.isFinite(value)) return { ok: false, code: "not_finite" };
+  if (!Number.isInteger(value)) return { ok: false, code: "not_whole" };
+  if (value <= 0) return { ok: false, code: "not_positive" };
+  if (value > MAX_BASH_TIMEOUT_MS) {
+    return { ok: false, code: "unrepresentable" };
+  }
+  return { ok: true, deadlineMs: value };
+}
+
+/**
+ * The handler's single entry into `classifyDeadline`: resolve a raw
+ * `timeout_ms` to the deadline the run plane enforces, or throw the typed
+ * rejection.
+ *
+ * The throw is deliberately here rather than at the call site so the handler
+ * reads as "resolve, then use" and cannot acquire a second validation site
+ * later — the two arms (foreground / background) both consume this one value.
+ */
+function resolveBashDeadline(value: unknown): number {
+  const deadline = classifyDeadline(value);
+  if (!deadline.ok) throw new BashTimeoutInputError(deadline.code, value);
+  return deadline.deadlineMs;
+}
 
 interface BashInput {
   readonly command?: unknown;
   /** background?: boolean — defaults to false (foreground, existing path). */
   readonly background?: unknown;
+  /**
+   * ADR-0134: optional finite runtime budget in milliseconds. Foreground:
+   * the invocation's execution deadline (replacing the build tier's 300s).
+   * Background with a value: one deadline, frozen at launch and never
+   * extended by polling. Background without a value: the persistent-service
+   * lifecycle, with no runtime deadline. `unknown` here because the schema is
+   * the first validator and a wrong type must fail as a typed input error,
+   * not be coerced.
+   */
+  readonly timeout_ms?: unknown;
 }
 
 export interface CreateBashToolOptions {
@@ -338,6 +451,7 @@ async function runForegroundBash(
     effectiveEgressPolicyFactory,
     toolOpts: opts,
     ctx,
+    deadlineMs,
   } = args;
   // The protected-fence pair (inventory + credential read mask) is resolved
   // ONCE for this call through the single wiring point, against the
@@ -383,6 +497,11 @@ async function runForegroundBash(
       signal: ctx?.signal,
       env: fenceEnv,
       maxOutputCodePoints: DEFAULT_MAX_OUTPUT_CODE_POINTS,
+      // ADR-0134: the real runtime deadline. It reaches the process plane, so
+      // expiry tears the process group down through the existing bounded
+      // TERM/grace/KILL route and reports its CleanupEvidence — this is not a
+      // frontend wait that returns while the command keeps running.
+      deadlineMs: deadlineMs,
     },
     egress.session
   );
@@ -414,7 +533,6 @@ async function runForegroundBash(
   if (finalPath.kind === "throw") throw finalPath.throwError;
   return finalPath.envelope;
 }
-
 /**
  * Parameter type for `runForegroundBash` (split out to keep that function
  * under 60 lines — S5 soft gate).
@@ -446,6 +564,13 @@ interface RunForegroundBashArgs {
   // surfaces don't require field-by-field plumbing here.
   toolOpts: CreateBashToolOptions | undefined;
   ctx?: ToolExecutionContext;
+  /**
+   * ADR-0134: this invocation's resolved runtime deadline in milliseconds —
+   * the model-supplied value, or `DEFAULT_FOREGROUND_BASH_TIMEOUT_MS` when the
+   * model omitted `timeout_ms`. Resolved and validated by the handler before
+   * this function is called, so the run path never re-reads raw input.
+   */
+  deadlineMs: number;
 }
 
 /**
@@ -878,6 +1003,20 @@ function assembleBashToolResult(
       code: result.exitCode,
       stdout,
       stderr,
+      // ADR-0134: how this run ended, as two additive fields. A call that
+      // finished on its own carries neither, so the model-visible JSON is
+      // byte-identical to the pre-ADR-0134 shape for every call no deadline
+      // and no teardown touched. `not_started` is withheld for the same
+      // reason: it asserts nothing happened, so it is not worth a key on every
+      // ordinary call. The states that DO carry a claim (`confirmed_stopped` /
+      // `unconfirmed`) are always reported, and are never dropped.
+      ...(result.deadline_expired === true
+        ? { deadline_expired: true }
+        : {}),
+      ...(result.cleanup !== undefined &&
+      result.cleanup.state !== "not_started"
+        ? { cleanup: result.cleanup }
+        : {}),
     }),
     // bash stdout/stderr take the observation side channel (meta); the TUI
     // reads it for the 5-line tail preview (bypassing encodeToolResults
@@ -955,10 +1094,37 @@ export function createBashTool(
     input: unknown,
     ctx?: ToolExecutionContext
   ): Promise<unknown> => {
-    const command = (input as BashInput | null)?.command;
+    const bashInput = input as BashInput | null;
+    const command = bashInput?.command;
     if (typeof command !== "string" || command.length === 0)
       throw new ToolExecutionError("bash: command must be a non-empty string");
-    if (isDangerousCommand(command))
+    // ADR-0134: the ONE validation of `timeout_ms`, ahead of every gate that
+    // could do work, in `resolveBashDeadline`. A rejected value therefore
+    // creates no fence, no egress session, no process, no background registry
+    // entry and no timer — the contract is "fails before launch", and this is
+    // the only place that can guarantee it. Both the foreground and the
+    // background arm read their input from this one result, so the two can
+    // never disagree about what a legal value is.
+    const deadline = resolveBashDeadline(bashInput?.timeout_ms);
+    // ADR-0132/ADR-0133: the per-call root context is resolved HERE, ahead of
+    // the dangerous-command gate, because the gate is one of the two consumers
+    // ADR-0132 requires to share it with permission admission. Hoisting it
+    // above the gate costs nothing on the reject path (both values are cheap
+    // reads of already-configured holders) and is what lets the handler answer
+    // with the SAME roots the policy answered with — the disagreement the ADR
+    // forbids. `resolveBashFenceTmp` is called once and the one value feeds
+    // the snapshot, the fence env and the fs policy below.
+    const waveRoot: string = opts?.liveTaskRoot
+      ? opts.liveTaskRoot.read()
+      : cwd;
+    const tmpDir = resolveBashFenceTmp(opts, ctx?.conversationId, () => {
+      if (fallbackFenceTmp === undefined) {
+        fallbackFenceTmp = mkdtempSync(join(tmpdir(), "iknow-fence-tmp-"));
+      }
+      return fallbackFenceTmp;
+    });
+    const cleanupRoots = snapshotBashCleanupRoots({ tmpDir, waveRoot });
+    if (findDangerousPattern(command, cleanupRoots) !== null)
       throw new ToolExecutionError(
         `bash: dangerous command rejected: ${command}`
       );
@@ -974,19 +1140,18 @@ export function createBashTool(
     // background split so both arms are covered. Not a hard-wall — the
     // rules and refusal shape live in role-substitution.ts.
     assertNoBashGrepSubstitution(command);
+    // ADR-0131: the handler reads the SAME shared classification the
+    // permission wall admitted on (`commandContainsSensitivePath` is the
+    // `confirmed` arm of `classifySensitivePathEvidence`). It must not
+    // re-derive this with a broader rule of its own: a command permission
+    // admitted is never rejected here for a sensitive path. An `unresolved`
+    // match is deliberately NOT refused at this gate — it has no interactive
+    // review route here, and inventing a denial the wall did not reach would
+    // price an unresolved question as a confirmed violation.
     if (commandContainsSensitivePath(command))
       throw new ToolExecutionError(
         `bash: command targets a sensitive path: ${command}`
       );
-    // Batch snapshot per handler call: read the cell once at entry and
-    // freeze it as waveRoot, threading through the whole path (foreground
-    // fence / background spawn get the same value) — later cell flips
-    // inside the handler cannot leak into this call. liveTaskRoot absent →
-    // fall back to the factory-captured cwd (legacy parity: without a cell
-    // the path is byte-identical to V1).
-    const waveRoot: string = opts?.liveTaskRoot
-      ? opts.liveTaskRoot.read()
-      : cwd;
     // The UNBOUND_FENCE decision shares waveRoot's vintage: read the live
     // holder once at entry and freeze — foreground fence / background
     // spawn / EROFS feedback all use this single snapshot; a mid-handler
@@ -1002,37 +1167,21 @@ export function createBashTool(
       workspaceRoot,
       yolo,
     } = snapshotFenceInputs(opts, cwd);
-    const tmpDir = resolveBashFenceTmp(opts, ctx?.conversationId, () => {
-      if (fallbackFenceTmp === undefined) {
-        fallbackFenceTmp = mkdtempSync(join(tmpdir(), "iknow-fence-tmp-"));
-      }
-      return fallbackFenceTmp;
-    });
     // Only after the validation chain passes do we choose foreground /
     // background — dangerous-command and sensitive-path gates run on both
     // sides first (background does not bypass security checks).
-    if ((input as BashInput | null)?.background === true) {
-      // ADR-0097: the background spawn shares the foreground fence
-      // construction seam (sandbox discipline G3): `--unshare-net` is
-      // always present; egress likewise only via the egress seam.
-      // Secret roundtrip: recordCommand keeps the original placeholder-form
-      // input.command (placeholders land on disk); command carries the
-      // restored real value (used for spawn, never persisted).
-      const bgCommand = opts?.secretRegistry
-        ? restore(command, opts.secretRegistry)
-        : command;
-      // The background path shares the same waveRoot as the foreground
-      // path: handleBackground passes waveRoot to manager.spawn →
-      // defaultBackgroundSpawn builds its createFsPolicy / createBwrapFence
-      // around the same root. ADR-0092: the already-frozen fence snapshot
-      // is forwarded via BackgroundSpawnRequest — foreground and background
-      // fence sets are equal on the fs-mode axis (sandbox discipline G3).
+    if (bashInput?.background === true) {
+      // ADR-0134: omission (undefined) is a deliberate distinction from the
+      // 10 s foreground default, so it is read off the raw input, not off the
+      // resolved `deadline` — a background job without a value keeps the
+      // persistent-service lifecycle and gets no runtime deadline at all.
       return await handleBackground(
-        {
-          finalCommand: bgCommand,
-          recordCommand: command,
+        buildBackgroundSpawnInput({
+          command,
+          timeoutMs: bashInput.timeout_ms as number | undefined,
           cwd: waveRoot,
-        },
+          secretRegistry: opts?.secretRegistry,
+        }),
         opts ?? {},
         ctx,
         {
@@ -1080,6 +1229,7 @@ export function createBashTool(
     return runForegroundBash({
       finalCommand,
       command,
+      deadlineMs: deadline,
       waveRoot,
       fsMode,
       homeRoot,
@@ -1098,7 +1248,7 @@ export function createBashTool(
   return Object.freeze({
     name: "bash",
     description:
-      "Run shell commands inside the bwrap sandbox for builds, scripts, or one-shot operations without a dedicated tool; pair with read_file / grep / glob / edit_file / write_file for file work inside the fence. Returns {code, stdout, stderr}; stdout/stderr truncated at 12000 code points per stream. Hard-walls reject obvious destructive patterns and sensitive-path targets before spawn; non-hard-wall commands go through the normal permission flow. For long-running services (http servers, daemons, continuous watchers), set background: true — the call returns {task_id, log_path} immediately and the process keeps running beyond the call, outside the build-tier timeout; then read the log tail with bash_output(task_id, max_bytes?) (default 12 KB, cap 100 KB) and terminate the process group with bash_stop(task_id) (SIGTERM, 2-second grace, then SIGKILL; idempotent). Network egress leaves the fence only through the egress proxy seam: allowed domains pass, everything else is denied with [network_denied], and --unshare-net is always in effect. Substitution walls read the parsed command, so spelling decides the outcome: `$(...)` and backtick command substitution recurse through the same judgment as the top-level command (`echo $(date)` passes, and an inner command that is denied on its own is denied inside the parentheses), a third nesting level arrives as an ask, `${VAR}` names land in three buckets — a secret-shaped name such as `API_KEY` or `TOKEN` is a hard wall, a base-env name such as `PATH` passes, an unfamiliar name asks — `<(...)` and `>(...)` process substitution recurses for a plain receiver (`diff <(sort a) <(sort b)`) and is a hard wall for an interpreter receiver (`bash <(...)`, `python3 <(...)`), and quoted text is data: single quotes, `#` comments and a quoted heredoc delimiter handed to a text command (`cat <<'EOF'`) carry no wall findings, while an interpreter reading a heredoc has its body judged as code. Use the `<<<SECRET_N>>>` placeholder when a command needs a secret value — the harness restores the real value before spawn, so the placeholder is the form that appears in your call and in the record. Use the redirect-to-file idiom when you want a command's output later or the text runs long: `cmd > $TMPDIR/out.txt`, then read_file / grep that file. Use the fixed-filename idiom when several commands share one artifact: pick one name in the session tmp dir and pass it by path (`sort a.txt > $TMPDIR/a.sorted`, `grep -f $TMPDIR/patterns.txt app.py`), which keeps values in files instead of in shell variables that end with the call. " +
+      "Run shell commands inside the bwrap sandbox for builds, scripts, or one-shot operations without a dedicated tool; pair with read_file / grep / glob / edit_file / write_file for file work inside the fence. Returns {code, stdout, stderr}; stdout/stderr truncated at 12000 code points per stream. Hard-walls reject obvious destructive patterns and sensitive-path targets before spawn; non-hard-wall commands go through the normal permission flow. For long-running services (http servers, daemons, continuous watchers), set background: true — the call returns {task_id, log_path} immediately and the process keeps running after the call; then read the log tail with bash_output(task_id, max_bytes?) (default 12 KB, cap 100 KB) and terminate the process group with bash_stop(task_id) (SIGTERM, 2-second grace, then SIGKILL; idempotent). Set timeout_ms to give one call a finite runtime budget: a foreground call runs until it finishes or its budget expires (10 seconds when omitted), and a background job is terminated when the budget measured from its launch expires — reading the log or polling status does not extend it, so a job you keep checking still ends on time; a background call without timeout_ms keeps running until you stop it. Network egress leaves the fence only through the egress proxy seam: allowed domains pass, everything else is denied with [network_denied], and --unshare-net is always in effect. Substitution walls read the parsed command, so spelling decides the outcome: `$(...)` and backtick command substitution recurse through the same judgment as the top-level command (`echo $(date)` passes, and an inner command that is denied on its own is denied inside the parentheses), a third nesting level arrives as an ask, `${VAR}` names land in three buckets — a secret-shaped name such as `API_KEY` or `TOKEN` is a hard wall, a base-env name such as `PATH` passes, an unfamiliar name asks — `<(...)` and `>(...)` process substitution recurses for a plain receiver (`diff <(sort a) <(sort b)`) and is a hard wall for an interpreter receiver (`bash <(...)`, `python3 <(...)`), and quoted text is data: single quotes, `#` comments and a quoted heredoc delimiter handed to a text command (`cat <<'EOF'`) carry no wall findings, while an interpreter reading a heredoc has its body judged as code. Use the `<<<SECRET_N>>>` placeholder when a command needs a secret value — the harness restores the real value before spawn, so the placeholder is the form that appears in your call and in the record. Use the redirect-to-file idiom when you want a command's output later or the text runs long: `cmd > $TMPDIR/out.txt`, then read_file / grep that file. Use the fixed-filename idiom when several commands share one artifact: pick one name in the session tmp dir and pass it by path (`sort a.txt > $TMPDIR/a.sorted`, `grep -f $TMPDIR/patterns.txt app.py`), which keeps values in files instead of in shell variables that end with the call. " +
       FENCE_WRITE_GUIDANCE,
     inputSchema: {
       type: "object",
@@ -1107,7 +1257,13 @@ export function createBashTool(
         background: {
           type: "boolean",
           description:
-            "When true, run the command in the background: returns {task_id, log_path} immediately and the process keeps running after the call, managed by the task registry. Use for long-lived servers or daemons; pair with bash_output (read the log) and bash_stop (terminate). Defaults to false (foreground).",
+            "When true, run the command in the background: returns {task_id, log_path} immediately and the process keeps running after the call, managed by the task registry. Use for long-lived servers or daemons; pair with bash_output (read the log) and bash_stop (terminate). Add timeout_ms to give the background job a finite runtime budget measured from launch; leave it out to keep a task running until you stop it. Defaults to false (foreground).",
+        },
+        timeout_ms: {
+          type: "integer",
+          minimum: 1,
+          description:
+            "Runtime budget for this call, in whole milliseconds (positive). Foreground: how long the command may run before it is terminated; omit it for the 10-second default. Background: the job's deadline, measured from launch and not extended by reading the log or polling status; omit it for a task that runs until bash_stop. A value that is zero, negative, fractional, or too large for a host timer is rejected before anything starts.",
         },
       },
       required: ["command"],
@@ -1118,7 +1274,13 @@ export function createBashTool(
       category: "execute" as const,
       isConcurrencySafe: false,
       interruptBehavior: "cancel" as const,
-      timeoutTier: "build" as const,
+      // ADR-0134: the handler owns this tool's clock now (the validated
+      // `timeout_ms`, or the 10 s default), and it enforces it in the process
+      // plane. `unbounded` is the honest declaration that the ACI layer adds
+      // no second timer above it — a `build` tier would abort a 10-minute
+      // `timeout_ms` at 5 minutes, which is the nesting this tier used to
+      // impose. Other tools' tiers are untouched.
+      timeoutTier: "unbounded" as const,
     },
   });
 }
@@ -1139,6 +1301,10 @@ interface BackgroundSpawnInput {
   readonly finalCommand: string;
   readonly recordCommand: string;
   readonly cwd: string;
+  /** ADR-0134: the validated finite runtime budget, or undefined to keep the
+   *  persistent-service lifecycle. Validation happens in the handler before
+   *  this value exists, so the manager never sees an unchecked number. */
+  readonly timeoutMs?: number;
 }
 
 /**
@@ -1250,6 +1416,41 @@ function buildBackgroundSpawnRequest(args: {
           },
         }
       : {}),
+    // ADR-0134: the finite runtime budget, spread-guarded so an omitted
+    // timeout_ms reaches the manager as a request with no deadline at all
+    // (persistent service), never as a synthesised default.
+    ...(input.timeoutMs !== undefined ? { timeoutMs: input.timeoutMs } : {}),
+  };
+}
+
+/**
+ * Assemble the background branch's per-call inputs.
+ *
+ * ADR-0097: the background spawn shares the foreground fence construction seam
+ * (sandbox discipline G3) — `--unshare-net` always present, egress only via
+ * the seam. Secret roundtrip: `recordCommand` keeps the original
+ * placeholder-form input (placeholders land on disk), `finalCommand` carries
+ * the restored real value (used for spawn, never persisted). `cwd` is the
+ * waveRoot frozen at handler entry, so the background fence is built around
+ * the same root the foreground fence uses (ADR-0092 set-equality, G3).
+ *
+ * ADR-0134: `timeoutMs` is spread in only when supplied — omission must
+ * reach the manager as a request with no deadline at all, never as a
+ * synthesised default.
+ */
+function buildBackgroundSpawnInput(args: {
+  readonly command: string;
+  readonly timeoutMs: number | undefined;
+  readonly cwd: string;
+  readonly secretRegistry: SecretRegistry | undefined;
+}): BackgroundSpawnInput {
+  return {
+    finalCommand: args.secretRegistry
+      ? restore(args.command, args.secretRegistry)
+      : args.command,
+    recordCommand: args.command,
+    cwd: args.cwd,
+    ...(args.timeoutMs !== undefined ? { timeoutMs: args.timeoutMs } : {}),
   };
 }
 

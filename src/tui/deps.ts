@@ -481,6 +481,16 @@ export async function buildTuiDeps(
     surface: "tui",
     memory: { enabled: true },
     todoDir: todoProjectDir,
+    // ADR-0132: the current identity's session scratch, read live. Same
+    // source as the `onToolEvent` attribution above, so the two gates — the
+    // one that admits the cleanup and the Bash handler that runs it — measure
+    // the same session. `soleId()` is deliberately the SOLE-inflight reader:
+    // while two sessions are running there is no single "this identity" to
+    // scope a deletion to, and the reader reports none, which every consumer
+    // reads as no exception (the fail-toward-deny direction). An assembly-time
+    // id would instead freeze one session's pad into an engine that later
+    // serves another — the cross-identity deletion ADR-0132 withholds.
+    sessionConversationId: opts.soleInflightId,
     // ADR-0088: the registry root follows the session pool, not workspaceRoot.
     tasksDir,
     // ADR-0099: project memory follows the same tree, not workspaceRoot.

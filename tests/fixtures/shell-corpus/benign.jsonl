@@ -8,6 +8,7 @@
 {"command": "dd if=/dev/zero of=/dev/sda"}
 {"command": "> /tmp/x"}
 {"command": "find /"}
+{"command": "find / -delete"}
 {"command": "[[ a == b ]]"}
 {"command": "echo hi &&"}
 {"command": "echo\\ test"}

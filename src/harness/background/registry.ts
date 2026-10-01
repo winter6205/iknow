@@ -28,6 +28,18 @@ import { join } from "node:path";
 export type BackgroundTaskStatus = "running" | "exited" | "killed" | "dead";
 
 /**
+ * Why a task reached its terminal state (ADR-0134). The first trigger to
+ * arrive owns the task's terminal transition; a later competing trigger
+ * (natural exit / stop / deadline / shutdown) observes this cause instead of
+ * overwriting it, so a race never rewrites history.
+ */
+export type BackgroundTerminationCause =
+  | "exit"
+  | "stop_requested"
+  | "deadline_expired"
+  | "shutdown";
+
+/**
  * Persisted record (ADR-0021): snake_case field names = wire contract,
  * together with the task_id format (`bg-` + 12 hex) forming the sole mapping
  * for bash_output / bash_stop inputs. exit_code defaults to null (running
@@ -49,6 +61,26 @@ export interface BackgroundTaskRecord {
   readonly created_at: string;
   readonly log_path: string;
   readonly starttime?: number;
+  /**
+   * ADR-0134: the model-supplied finite runtime budget, in milliseconds, as
+   * validated at launch. Absent = the persistent-service lifecycle: no
+   * runtime deadline exists for this task. Persisted alongside deadline_at so
+   * a record read back from disk still states which contract the task runs
+   * under.
+   */
+  readonly timeout_ms?: number;
+  /**
+   * ADR-0134: the one absolute instant this task's deadline expires, frozen
+   * at launch (created_at + timeout_ms). Polling, log reads and stop requests
+   * never recompute it, so a restored record reports the same clock the host
+   * armed. Absent on a persistent-service task.
+   */
+  readonly deadline_at?: string;
+  /**
+   * ADR-0134: why the task became terminal. Absent while the task is running;
+   * set once, by the transition that won the race.
+   */
+  readonly termination_cause?: BackgroundTerminationCause;
 }
 
 /**

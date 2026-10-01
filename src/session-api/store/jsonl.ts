@@ -203,7 +203,77 @@ export interface SessionOutcomeRecord {
    * supplier detail, loads with the key simply absent.
    */
   readonly supplierDetail?: SupplierStopDetail;
+  /**
+   * ADR-0135: why a turn was interrupted for security, carrying the bounded
+   * cleanup evidence for the work that turn owned.
+   *
+   * Present only when the turn was actually stopped by the escalation (a
+   * confirmed-violation threshold, or the pre-existing high-severity immediate
+   * handling). An ordinary `cancelled` — a user Ctrl+C — leaves it absent, so
+   * "the user stopped this" and "the harness stopped this" never share a
+   * shape. ADR-0029's closed StopReason set is untouched: the reason stays
+   * `cancelled` and this field is what distinguishes the cause.
+   *
+   * Every cancelled item is listed, including the ones whose teardown could
+   * not be confirmed — a partial cleanup is recorded, not truncated away.
+   */
+  readonly securityInterruption?: SecurityInterruptionRecord;
 }
+
+/**
+ * ADR-0135 security-interruption evidence as persisted on a turn outcome.
+ *
+ * `cleanup` is the per-item report: which work this turn owned, what was
+ * actually done to it, and whether disappearance was proven. `unconfirmed`
+ * is a real outcome, never a stop that silently became a success.
+ */
+export interface SecurityInterruptionRecord {
+  /**
+   * The engine's turn id for the turn that was interrupted (the same id the
+   * harness trace writes on its `turn` record). Present so a reviewer can bind
+   * this cause to one specific trace row instead of correlating by ordering —
+   * two turns in one session are otherwise indistinguishable by position alone.
+   *
+   * Optional because the executor observes the turn id only when the engine
+   * passes one to `executeAll` (a direct-handler / worker caller does not);
+   * absence means "no turn identity was available", never a synthesized one.
+   */
+  readonly turnId?: string;
+  /** `mid` = threshold reached; `high` = existing immediate handling. */
+  readonly tier: "mid" | "high";
+  /** The tool whose result tripped the escalation. */
+  readonly tool: string;
+  /** Consecutive confirmed violations that produced this interruption. */
+  readonly confirmedViolations: number;
+  /** Bounded per-item cleanup evidence for the interrupted turn's work. */
+  readonly cleanup: ReadonlyArray<SecurityInterruptionItem>;
+}
+
+/** One turn-owned work item and the outcome of cancelling it. */
+export interface SecurityInterruptionItem {
+  readonly kind: "subagent" | "background_task";
+  readonly id: string;
+  readonly state: "stop_requested" | "confirmed_stopped" | "unconfirmed";
+  /** Typed cause for `unconfirmed`; absent otherwise. */
+  readonly reason?: string;
+  /**
+   * The plane's own bounded cleanup verdict, mirroring
+   * `CleanupEvidence` (sandbox/cleanup-result.ts). `not_started` is honest
+   * here: a stop request whose disappearance was never observed.
+   */
+  readonly cleanup: SecurityInterruptionCleanup;
+}
+
+export type SecurityInterruptionCleanup =
+  | { readonly state: "not_started" }
+  | { readonly state: "confirmed_stopped"; readonly pgid: number; readonly task_id?: string }
+  | {
+      readonly state: "unconfirmed";
+      readonly reason: string;
+      readonly pgid: number;
+      readonly detail: string;
+      readonly task_id?: string;
+    };
 
 /** All record shapes after the header (in file order). */
 export type SessionTailRecord =
@@ -707,10 +777,104 @@ function isOutcomeRecord(value: unknown): value is SessionOutcomeRecord {
   }
   // Absent is the backward-compatible shape; a present value must be one the
   // adapter can actually normalize to.
+  if (
+    "supplierDetail" in value &&
+    !isSupplierStopDetail(value["supplierDetail"])
+  ) {
+    return false;
+  }
   return (
-    !("supplierDetail" in value) ||
-    isSupplierStopDetail(value["supplierDetail"])
+    !("securityInterruption" in value) ||
+    isSecurityInterruption(value["securityInterruption"])
   );
+}
+
+/* ADR-0135: the security-interruption record is validated structurally, not
+ * trusted. A persisted `confirmed_stopped` is a claim a reviewer will act on,
+ * so a record that does not carry the identity and the evidence it asserts is
+ * rejected with the file rather than projected as a clean stop. */
+
+function isSecurityInterruptionCleanup(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  const state = value["state"];
+  if (state === "not_started") return true;
+  if (typeof value["pgid"] !== "number") return false;
+  if (value["task_id"] !== undefined && typeof value["task_id"] !== "string") {
+    return false;
+  }
+  if (state === "confirmed_stopped") return true;
+  return (
+    state === "unconfirmed" &&
+    typeof value["reason"] === "string" &&
+    typeof value["detail"] === "string"
+  );
+}
+
+function isSecurityInterruptionItem(value: unknown): boolean {
+  if (!isSecurityInterruptionItemShape(value)) return false;
+  const record = value as Record<string, unknown>;
+  // The summary state and the evidence must agree. A record claiming
+  // `confirmed_stopped` while its own evidence says no teardown was ever
+  // started is a fabricated stop, and it is the one claim in this record a
+  // reviewer would act on — so it is rejected rather than projected.
+  const evidenceState = (record["cleanup"] as { state: string }).state;
+  return interruptionStatesAgree(record["state"] as string, evidenceState);
+}
+
+/** The identity + evidence shape of one item, before any cross-field check. */
+function isSecurityInterruptionItemShape(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value["kind"] !== "subagent" && value["kind"] !== "background_task") {
+    return false;
+  }
+  if (typeof value["id"] !== "string") return false;
+  if (!INTERRUPTION_ITEM_STATES.has(value["state"] as string)) {
+    return false;
+  }
+  if (value["reason"] !== undefined && typeof value["reason"] !== "string") {
+    return false;
+  }
+  return isSecurityInterruptionCleanup(value["cleanup"]);
+}
+
+/** The summary states an item may carry. */
+const INTERRUPTION_ITEM_STATES: ReadonlySet<string> = new Set([
+  "stop_requested",
+  "confirmed_stopped",
+  "unconfirmed",
+]);
+
+/**
+ * Whether an item's summary state and its cleanup evidence tell the same story.
+ *
+ * A summary stop is a claim a reviewer acts on, so it must be backed by the
+ * evidence's own confirmation: `confirmed_stopped` needs a confirmed teardown,
+ * and `unconfirmed` must not be dressed up with one. `stop_requested` claims
+ * nothing about the teardown, so the evidence is free.
+ */
+function interruptionStatesAgree(
+  state: string,
+  evidenceState: string
+): boolean {
+  if (state === "confirmed_stopped") {
+    return evidenceState === "confirmed_stopped";
+  }
+  if (state === "unconfirmed") {
+    return evidenceState !== "confirmed_stopped";
+  }
+  return true;
+}
+
+function isSecurityInterruption(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (value["tier"] !== "mid" && value["tier"] !== "high") return false;
+  if (value["turnId"] !== undefined && typeof value["turnId"] !== "string") {
+    return false;
+  }
+  if (typeof value["tool"] !== "string") return false;
+  if (typeof value["confirmedViolations"] !== "number") return false;
+  const cleanup = value["cleanup"];
+  return Array.isArray(cleanup) && cleanup.every(isSecurityInterruptionItem);
 }
 
 /** The tail-record arms that only join `records` (see the parse loop):
