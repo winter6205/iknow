@@ -41,8 +41,10 @@ import {
   existsSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -575,6 +577,166 @@ describe("T8 real-bwrap: credential reads are masked-value-or-nothing (SC4 matri
       const w = observe(runMaskedFence(`echo ok > '${probe}'`));
       assert.equal(w.status, 0, `workspace write failed: ${w.stderr}`);
       assert.equal(readFileSync(probe, "utf8").trim(), "ok");
+    }
+  );
+
+  it.skipIf(
+    SKIP || spawnSync("gh", ["--version"], { stdio: "ignore" }).status !== 0
+  )(
+    "GitHub CLI starts with safe defaults without exposing the host configuration",
+    () => {
+      const config = join(HOME, ".config", "gh", "config.yml");
+      const maskedHosts = join(TMP, "gh-cli-masked-hosts.yml");
+      const privateConfig =
+        "git_protocol: ssh\neditor: PRIVATE-CONFIG-FIXTURE\n";
+      writeFileSync(config, privateConfig);
+      writeFileSync(
+        maskedHosts,
+        "github.com:\n  oauth_token: fake_fixture_token\n"
+      );
+      try {
+        const cli = observe(
+          runMaskedFence("gh config get git_protocol", {
+            egressBinds: [{ src: maskedHosts, dest: GH }],
+          })
+        );
+        assert.equal(cli.status, 0, `GitHub CLI must start: ${cli.stderr}`);
+        assert.equal(
+          cli.stdout.trim(),
+          "https",
+          "the fence uses safe defaults"
+        );
+
+        const read = observe(runMaskedFence(`cat '${config}'`));
+        assert.equal(read.status, 0, read.stderr);
+        assert.ok(!read.stdout.includes("PRIVATE-CONFIG-FIXTURE"));
+        assert.ok(!read.stdout.includes("git_protocol: ssh"));
+
+        const write = observe(runMaskedFence(`echo changed > '${config}'`));
+        assert.notEqual(
+          write.status,
+          0,
+          "host configuration remains read-only"
+        );
+        assert.equal(readFileSync(config, "utf8"), privateConfig);
+
+        const sourceWrite = observe(
+          runMaskedFence(
+            `for p in '${TMP}'/protected-credential-cover/gh-default-config-*/config.yml; do echo changed > "$p" || exit $?; done`
+          )
+        );
+        assert.notEqual(
+          sourceWrite.status,
+          0,
+          "generated sources remain read-only"
+        );
+        const coverRoot = join(TMP, "protected-credential-cover");
+        for (const dir of readdirSync(coverRoot).filter((name) =>
+          name.startsWith("gh-default-config-")
+        )) {
+          assert.equal(
+            readFileSync(join(coverRoot, dir, "config.yml"), "utf8"),
+            "{}\n"
+          );
+        }
+      } finally {
+        rmSync(config, { force: true });
+        rmSync(maskedHosts, { force: true });
+      }
+    }
+  );
+
+  it.skipIf(
+    SKIP || spawnSync("gh", ["--version"], { stdio: "ignore" }).status !== 0
+  )(
+    "GitHub CLI defaults and masked credentials survive the oversized-subtree cover",
+    () => {
+      const ghDir = join(HOME, ".config", "gh");
+      const config = join(ghDir, "config.yml");
+      const maskedHosts = join(TMP, "gh-fallback-masked-hosts.yml");
+      const files = Array.from({ length: 513 }, (_, i) =>
+        join(ghDir, `extra-${i}`)
+      );
+      writeFileSync(config, "git_protocol: ssh\n");
+      writeFileSync(
+        maskedHosts,
+        "github.com:\n  oauth_token: fake_fallback_token\n"
+      );
+      for (const file of files)
+        writeFileSync(file, "PRIVATE-SIBLING-FIXTURE\n");
+      try {
+        const cli = observe(
+          runMaskedFence("gh config get git_protocol", {
+            egressBinds: [{ src: maskedHosts, dest: GH }],
+          })
+        );
+        assert.equal(cli.status, 0, cli.stderr);
+        assert.equal(cli.stdout.trim(), "https");
+        const sibling = observe(runMaskedFence(`cat '${files[0]}'`));
+        assert.notEqual(sibling.status, 0);
+        assert.ok(!sibling.stdout.includes("PRIVATE-SIBLING-FIXTURE"));
+      } finally {
+        for (const file of [...files, config, maskedHosts])
+          rmSync(file, { force: true });
+      }
+    }
+  );
+
+  it.skipIf(SKIP)(
+    "a symlinked GitHub configuration does not expose a protected target",
+    () => {
+      const config = join(HOME, ".config", "gh", "config.yml");
+      symlinkSync(AWS, config);
+      try {
+        const read = observe(runMaskedFence(`cat '${config}'`));
+        assert.notEqual(read.status, 0);
+        assert.ok(!read.stdout.includes(AWS_SENTINEL));
+        assert.equal(
+          readFileSync(AWS, "utf8"),
+          `[default]\naws_access_key_id = ${AWS_SENTINEL}\n`
+        );
+      } finally {
+        rmSync(config, { force: true });
+      }
+    }
+  );
+
+  it.skipIf(
+    SKIP || spawnSync("gh", ["--version"], { stdio: "ignore" }).status !== 0
+  )(
+    "a tampered generated config is preserved but never used by GitHub CLI",
+    () => {
+      const config = join(HOME, ".config", "gh", "config.yml");
+      const maskedHosts = join(TMP, "gh-tamper-masked-hosts.yml");
+      writeFileSync(config, "git_protocol: ssh\n");
+      writeFileSync(
+        maskedHosts,
+        "github.com:\n  oauth_token: fake_tamper_token\n"
+      );
+      const extra = { egressBinds: [{ src: maskedHosts, dest: GH }] };
+      let source: string | undefined;
+      try {
+        assert.equal(
+          runMaskedFence("gh config get git_protocol", extra).status,
+          0
+        );
+        const coverRoot = join(TMP, "protected-credential-cover");
+        const directory = readdirSync(coverRoot).find((name) =>
+          name.startsWith("gh-default-config-")
+        );
+        assert.ok(directory);
+        source = join(coverRoot, directory, "config.yml");
+        writeFileSync(source, "git_protocol: ssh\n");
+        const cli = observe(
+          runMaskedFence("gh config get git_protocol", extra)
+        );
+        assert.equal(cli.status, 0, cli.stderr);
+        assert.equal(cli.stdout.trim(), "https");
+        assert.equal(readFileSync(source, "utf8"), "git_protocol: ssh\n");
+      } finally {
+        if (source !== undefined) writeFileSync(source, "{}\n");
+        for (const file of [config, maskedHosts]) rmSync(file, { force: true });
+      }
     }
   );
 });

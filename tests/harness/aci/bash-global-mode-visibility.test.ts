@@ -18,7 +18,7 @@ import { EventEmitter } from "node:events";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { afterAll, afterEach, beforeEach, describe, it, vi } from "vitest";
 
@@ -39,8 +39,11 @@ const { defaultBackgroundSpawn } =
   await import("../../../src/harness/background/manager.ts");
 const { READ_ONLY_SYSTEM_PATHS, OPTIONAL_HOST_RO_PREFIXES } =
   await import("../../../src/harness/sandbox/fs-policy.ts");
-const { createProtectedTargetInventory, protectedTargetBindPaths, materializeProtectedTargets } =
-  await import("../../../src/harness/sandbox/protected-targets.ts");
+const {
+  createProtectedTargetInventory,
+  protectedTargetBindPaths,
+  materializeProtectedTargets,
+} = await import("../../../src/harness/sandbox/protected-targets.ts");
 
 function makeFakeChild(pid = 47181) {
   const child = Object.assign(new EventEmitter(), {
@@ -89,6 +92,38 @@ function roBindIndex(argv: readonly string[], root: string): number {
 function hasHostRootBind(argv: readonly string[]): boolean {
   return argv.some(
     (arg, i) => arg === "--bind" && argv[i + 1] === "/" && argv[i + 2] === "/"
+  );
+}
+
+/** A synthetic gh config and its immutable source are one paired cover,
+ * not a per-root home/install read whitelist. Accept neither mount alone. */
+function isDefaultGhConfigBind(
+  argv: readonly string[],
+  index: number
+): boolean {
+  const src = argv[index + 1] ?? "";
+  const dest = argv[index + 2] ?? "";
+  const hostConfig = join(homedir(), ".config", "gh", "config.yml");
+  const sourceRoot = src === dest ? src : dirname(dirname(src));
+  if (basename(sourceRoot) !== "protected-credential-cover") return false;
+  const hasConfigCover = argv.some(
+    (arg, i) =>
+      arg === "--ro-bind" &&
+      argv[i + 2] === hostConfig &&
+      dirname(dirname(argv[i + 1] ?? "")) === sourceRoot &&
+      basename(dirname(argv[i + 1] ?? "")).startsWith("gh-default-config-")
+  );
+  const hasSourceProtection = argv.some(
+    (arg, i) =>
+      arg === "--ro-bind" &&
+      argv[i + 1] === sourceRoot &&
+      argv[i + 2] === sourceRoot
+  );
+  return (
+    hasConfigCover &&
+    hasSourceProtection &&
+    ((basename(src) === "config.yml" && dest === hostConfig) ||
+      (src === sourceRoot && dest === sourceRoot))
   );
 }
 
@@ -148,9 +183,9 @@ describe("bash global-mode visibility (ADR-0092 wiring)", () => {
     // This assembly's materialized name-pattern matches are protected targets
     // like any concrete entry, so they belong in the allow-list too (#1155);
     // the retired per-root read whitelist stays retired either way.
-    const materializedDests = materializeProtectedTargets(inventory).targets.map(
-      (b) => b.path
-    );
+    const materializedDests = materializeProtectedTargets(
+      inventory
+    ).targets.map((b) => b.path);
     const protectedDests = new Set([
       ...protectedTargetBindPaths(inventory).map((b) => b.path),
       ...materializedDests,
@@ -169,6 +204,7 @@ describe("bash global-mode visibility (ADR-0092 wiring)", () => {
       const src = argv[i + 1] ?? "";
       const dest = argv[i + 2] ?? "";
       if (allowedRoBindTargets.has(src) || src === taskRoot) return false;
+      if (isDefaultGhConfigBind(argv, i)) return false;
       if (src === dest && protectedDests.has(src)) return false; // T7 block
       if (
         // T8 per-file covers sit UNDER a credential-arm subtree bind (e.g.

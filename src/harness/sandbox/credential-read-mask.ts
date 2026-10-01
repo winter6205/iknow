@@ -4,6 +4,7 @@ import {
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   readdirSync,
   writeFileSync,
 } from "node:fs";
@@ -323,6 +324,56 @@ function credentialMaskEntries(
   return out;
 }
 
+/** Reuse only an intact, private regular file created in the session cover.
+ * A planted symlink/hardlink or arbitrary content is never a config source. */
+function hasDefaultGhConfig(directory: string): boolean {
+  if (!isDirectory(directory) || !topLevelMatches(directory, ["config.yml"])) {
+    return false;
+  }
+  const source = join(directory, "config.yml");
+  if (!isRegularFile(source)) return false;
+  const stat = lstatSync(source);
+  return (
+    stat.nlink === 1 &&
+    stat.size === 3 &&
+    readFileSync(source, "utf8") === "{}\n"
+  );
+}
+
+/** GitHub CLI reads config.yml before it can consume the masked hosts.yml.
+ * Supply defaults, never host configuration or aliases. The source is
+ * session-owned and its directory is rebound read-only before it is exposed.
+ * Symlinks and non-regular config paths receive no compatibility override. */
+function defaultGhConfigBind(
+  entry: ProtectedTargetEntry,
+  coverRoot: string
+): CredentialMaskFenceBind | undefined {
+  if (
+    entry.targetClass !== "github_cli_credential" ||
+    entry.rule.kind !== "subtree" ||
+    entry.bindPath === undefined
+  )
+    return undefined;
+  const dest = join(entry.bindPath, "config.yml");
+  if (!isRegularFile(dest)) return undefined;
+  mkdirSync(coverRoot, { recursive: true });
+  const digest = createHash("sha256").update(dest).digest("hex").slice(0, 24);
+  let directory = join(coverRoot, `gh-default-config-${digest}`);
+  if (existsSync(directory)) {
+    if (hasDefaultGhConfig(directory)) {
+      // EXIT: intact session-owned defaults preserve the stable mount path.
+      return { src: join(directory, "config.yml"), dest };
+    }
+    // EXIT: a tampered source stays untouched; mint a fresh safe view instead.
+    directory = mkdtempSync(join(coverRoot, "gh-default-config-"));
+  } else {
+    mkdirSync(directory, { mode: 0o700 });
+  }
+  const src = join(directory, "config.yml");
+  writeFileSync(src, "{}\n", { mode: 0o600, flag: "wx" });
+  return { src, dest };
+}
+
 /** Tokens masking one planned entry: per-file `/dev/null` covers or the
  *  empty-subtree fallback. Deduplicated across entries via `masked`; every
  *  dest that actually reaches argv is appended to `emittedExactFileMasks`,
@@ -403,10 +454,15 @@ export function credentialReadMaskArgs(
     const colliding = binds.filter((bind) =>
       coveredBy(bind.dest, path, subtree)
     );
+    const defaultConfig = defaultGhConfigBind(entry, coverRoot);
+    if (defaultConfig !== undefined) {
+      // The source must not be writable through its session-scratch spelling.
+      rebinds.push("--ro-bind", coverRoot, coverRoot);
+      // Explicit egress overrides retain their existing final-mount priority.
+      colliding.unshift(defaultConfig);
+    }
     const plan = planCredentialCover(entry, coverRoot, colliding);
-    covers.push(
-      ...coverTokensForPlan(plan, path, masked, exactFileMaskPaths)
-    );
+    covers.push(...coverTokensForPlan(plan, path, masked, exactFileMaskPaths));
     // Re-emit the sentinel binds above the masks so the masked value stays
     // reachable (coordination, not contradiction). Under the fallback cover
     // the placeholder dir already carries each dest's mount point.
