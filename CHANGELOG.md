@@ -723,6 +723,25 @@ hardcoded defaults` for those three fields only; other fields unchanged.
 
 ### Removed
 
+- **The optional Harbor adapter under `scripts/harbor/` is retired, whole (issue
+  #1175, 2026-10-02)**:
+  the 10-file adapter — package, bundle script, agent, `ask` output parser,
+  attribution, and its own pytest suite — was an optional Terminal-Bench driver
+  layered beside the product, not a stage of it, so it retires as one bounded
+  context rather than file by file. Nothing native depended on it: no product
+  module, npm script, workflow, or TypeScript config referenced the package, and
+  its attribution core had no consumer outside the adapter's own tests, so
+  splitting that core out would have added an unused module in its place. The
+  evaluation and trace paths users actually run are unchanged — `--eval-state`
+  and its `runState` handling (ADR-0130) stay as they are, and so does the
+  native JSONL trace written by `--trace-out`; the adapter's `--ak trace_out=true`
+  only ever asked `ask` for that same `--trace-out` directory, and its artifacts
+  stay in `/logs/agent/`, so the pilot report and the `### Added` entry above
+  remain valid as a record of what was measured. Live doc references to the
+  deleted path were reworded in place; measurements, counts, and the
+  `docs/evidence/adr-0130/terminal-bench-2-1-pilot.md` report are untouched
+  historical evidence and are labelled as such.
+
 - **`.json` compatibility double-write mirrors dropped (2026-08-23)**: session save
   and head-move persistence no longer write `<id>.json` mirror files — the
   single-file JSONL is the only history format. `load()` keeps a `.json` fallback

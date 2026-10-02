@@ -1,5 +1,13 @@
 # Evidence: iknow on Terminal-Bench 2.1, first scored pilot (#1167, 2026-09-29)
 
+> **Historical evidence (retired in #1175).** This file is the record of what
+> was actually measured in September 2026, kept as written — it is not a
+> runnable path. The Harbor adapter that drove this pilot was retired in
+> #1175, so the results below are **not reproducible in-tree**: no re-run,
+> no re-count, and no re-derivation is expected from them. The product
+> surfaces underneath are unchanged — `--eval-state` (ADR-0130) and the
+> native JSONL trace still work.
+
 External-capability measurement of the iknow harness driving
 `minimax-cn/MiniMax-M3.1-Flash-Preview` over
 `terminal-bench/terminal-bench-2-1`, under ADR-0130 eval state.

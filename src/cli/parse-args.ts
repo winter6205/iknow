@@ -164,7 +164,7 @@ function evalStateRequested(
  *   - `iknow ask --eval-state "<task>"` — the flag precedes the query, so it is
  *     an option (the published ADR-0130 shape).
  *   - `iknow ask "<task>" --eval-state` — the flag follows the query, so it is
- *     an option (the harbor adapter's shape).
+ *     an option (the post-query shape).
  *   - `iknow ask grep --eval-state in src/config` — the flag sits **between**
  *     two of the operator's words. It is one of their words: it stays in the
  *     query and never opens the posture.

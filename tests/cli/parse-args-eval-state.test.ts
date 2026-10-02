@@ -491,7 +491,7 @@ describe("parseArgs --eval-state: the posture is detected in a flag position onl
     assert.equal(before.evalState, true);
     assert.equal(before.query, "do the task");
     assert.equal(before.query.includes(EVAL_STATE_FLAG), false);
-    // The same flag after the query text (the harbor adapter's shape).
+    // The same flag after the query text (the post-query shape).
     const after = parseArgs({ argv: ["ask", "do the task", EVAL_STATE_FLAG] });
     assert.equal(after.evalState, true);
     assert.equal(after.query, "do the task");

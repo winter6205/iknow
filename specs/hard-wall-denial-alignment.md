@@ -98,8 +98,8 @@ These are the expected implementation surfaces; the architecture review may refi
 - `src/harness/aci/aci-executor.ts`, `src/harness/sandbox/runner.ts`, and `src/harness/sandbox/server/` — runtime deadline, process-group escalation, bounded cleanup result.
 - `src/harness/background/manager.ts` — finite background deadline enforcement and stop-confirmation state; explicit timeout omission preserves persistent services.
 - `src/harness/sandbox/violation-handling.ts`, `src/harness/sandbox/violation-executor.ts`, and the CLI/Serve turn assembly — per-turn counting, immediate scheduling stop, owned-work cancellation, and retained-session outcome.
-- `src/harness/trace/jsonl.ts`, normal `ask`/Serve trace assembly, and `scripts/harbor/iknow_harbor/agent.py` — structured raw evidence and trace enablement for evaluated trials.
-- Existing hard-wall, Bash, runner, background-manager, violation, trace, and Harbor adapter test suites; the exact tests and any additions are proposed in the verification matrix, not run here.
+- `src/harness/trace/jsonl.ts`, normal `ask`/Serve trace assembly, and `scripts/harbor/iknow_harbor/agent.py` (retired in #1175) — structured raw evidence and trace enablement for evaluated trials.
+- Existing hard-wall, Bash, runner, background-manager, violation, and trace test suites, plus the Harbor adapter test suite (retired in #1175); the exact tests and any additions are proposed in the verification matrix, not run here.
 
 ## Success Criteria
 
@@ -157,7 +157,7 @@ The existing closed `StopReason` contract distinguishes `cancelled` from `timeou
 - ADR-0091 and ADR-0108 own per-call timeout, cancellation, and in-flight closeout semantics. This spec changes the finite Bash timeout input/default without redefining Loop Engine `StopReason`.
 - ADR-0128 / ADR-0129 continue to own canonical read policy and protected filesystem effect enforcement. A root-search policy relaxation does not remove those controls.
 - ADR-0130 keeps hard walls active in `eval state`; eval scores alone are not evidence that the filesystem fence works.
-- Existing foreground Bash, explicit background task manager, TERM/grace/KILL cleanup, JSONL trace service, and Harbor task-result/grader surfaces are reused. The evaluator's raw result stays authoritative for benchmark pass/fail.
+- Existing foreground Bash, explicit background task manager, TERM/grace/KILL cleanup, JSONL trace service, and Harbor task-result/grader surfaces are reused (the Harbor surfaces were retired in #1175). The evaluator's raw result stays authoritative for benchmark pass/fail.
 
 ### Changes required by this spec
 
