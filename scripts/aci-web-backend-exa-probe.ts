@@ -2,7 +2,10 @@
  * Real-network Exa probe for the ACI web backend (specs/aci-web-backend.md).
  *
  * Hits api.exa.ai for real; not collected by the default `npm test` run.
- * Missing / blank `EXA_API_KEY` → print Not run and exit 0; never mock the
+ * The key is resolved through the real config chain (`loadIknowEnv`), so both
+ * supported carriers count: `web.exaApiKey` in `~/.iknow/settings.json` (literal
+ * or `${EXA_API_KEY}`) and the `EXA_API_KEY` env var / `.env.local` / `.env`.
+ * No usable key anywhere → print Not run and exit 0; never mock the
  * call and claim the acceptance criterion passed.
  * With a key → one run exercises both createWebSearchTool (Exa search) and
  * createWebFetchTool (Exa contents), backend=exa + key (the reading-intent
@@ -23,15 +26,29 @@ import {
   createWebSearchTool,
   SEARCH_TIMEOUT_MS,
 } from "../src/harness/aci/tools/web-search.js";
+import { loadIknowEnv, EXA_API_KEY_ENV_KEY } from "../src/config/env.js";
 
-const NOT_RUN = "Not run: npm run probe:aci-web-backend (EXA_API_KEY unset)";
+const NOT_RUN =
+  "Not run: npm run probe:aci-web-backend (no Exa key: set web.exaApiKey in ~/.iknow/settings.json, or export EXA_API_KEY)";
 const FETCH_URL = "https://example.com/";
 const SEARCH_QUERY = "example.com official site";
 
-function resolveExaApiKey(env: NodeJS.ProcessEnv): string | undefined {
-  const raw = env.EXA_API_KEY;
-  if (raw === undefined || raw.trim() === "") return undefined;
-  return raw.trim();
+/**
+ * Resolve the Exa key through the real config chain, not `process.env` alone: the
+ * settings carrier (`web.exaApiKey`, literal or `${EXA_API_KEY}`) is the primary way a
+ * normal install configures this backend, so a probe that only reads the environment
+ * would report "Not run" for a correctly configured user — a silent false-pass on the
+ * very criterion this probe exists to prove.
+ */
+function resolveExaApiKey(cwd: string): string | undefined {
+  try {
+    return loadIknowEnv(cwd).web.exaApiKey;
+  } catch {
+    // A missing llm.model / unregistered route makes loadIknowEnv throw before the web
+    // section is read; that is a settings problem, not a reason to skip the network run.
+    const raw = process.env[EXA_API_KEY_ENV_KEY];
+    return raw === undefined || raw.trim() === "" ? undefined : raw.trim();
+  }
 }
 
 function redactKey(text: string, key: string): string {
@@ -44,7 +61,7 @@ function firstResultUrl(searchOutput: string): string | undefined {
 }
 
 async function main(): Promise<void> {
-  const apiKey = resolveExaApiKey(process.env);
+  const apiKey = resolveExaApiKey(process.cwd());
   if (apiKey === undefined) {
     console.log(NOT_RUN);
     process.exit(0);

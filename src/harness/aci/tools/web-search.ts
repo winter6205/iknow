@@ -371,7 +371,7 @@ function assertBackendConfig(
     throw toToolExecutionError(
       createSearchBackendError({
         kind: "missing_key",
-        message: `backend "exa" is selected but no API key resolved — set ${EXA_API_KEY_ENV_KEY} (env / .env.local / .env), or unset ${SEARCH_BACKEND_ENV_KEY} to fall back to the default bing backend`,
+        message: `backend "exa" is selected but no API key resolved — set web.backendKey in ~/.iknow/settings.json (or ${EXA_API_KEY_ENV_KEY} via env / .env.local / .env), or unset ${SEARCH_BACKEND_ENV_KEY} to fall back to the default bing backend`,
       })
     );
   }
@@ -383,7 +383,7 @@ function assertBackendConfig(
     throw toToolExecutionError(
       createSearchBackendError({
         kind: "backend_unset_with_key",
-        message: `${KEYED_BACKEND_ENV_KEYS[id]} is set but ${SEARCH_BACKEND_ENV_KEY} is unset — set ${SEARCH_BACKEND_ENV_KEY}=${id} to use it, or remove the key to stay on the default bing backend`,
+        message: `${KEYED_BACKEND_ENV_KEYS[id]} is set but ${SEARCH_BACKEND_ENV_KEY} is unset — set web.searchBackend="${id}" in ~/.iknow/settings.json (or ${SEARCH_BACKEND_ENV_KEY}=${id}) to use it, or remove the key to stay on the default bing backend`,
       })
     );
   }

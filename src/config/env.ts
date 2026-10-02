@@ -273,6 +273,15 @@ export interface ChatEnv {
  * Reads go through this module's unified process.env > .env.local > .env
  * priority (env.ts SSOT, same loading chain as the LLM key); tools never read
  * process.env directly.
+ *
+ * Each vendor key additionally falls back to `settings.web.backendKey`
+ * (the user-layer settings file), so a normal install configures the backend
+ * and its key in one place without authoring an env file. That field is
+ * vendor-neutral: it is routed into the slot of whichever backend
+ * `web.searchBackend` resolved to. Env still wins: the settings value is the
+ * last source before "no key", matching the `web.searchBackend` chain. A
+ * settings value may itself be a `${VAR}` placeholder, which resolves through
+ * the same process.env > .env.local > .env order.
  */
 
 /** Project naming — env var name for web_search backend selection. */
@@ -1201,6 +1210,36 @@ export function loadIknowEnv(
   // unbuildable route is silently absent so the worker falls back to modelRaw.
   const subagentModel = resolveSubagentModel(mergedSettings);
 
+  // web_search backend selection, fallback chain
+  // env > settings.web.searchBackend > default bing (mirrors the maxTurns
+  // precedent). env unset returns undefined (not folded with explicit
+  // "bing"); illegal settings-side values were already dropped in
+  // parseWeb; illegal env-side values still throw a typed error (a louder
+  // misconfiguration surface).
+  // Explicit T=SearchBackendId: the helper's T extends string would
+  // otherwise be inferred by TS to the wide string type, losing the
+  // literal union.
+  // Note: `?? "bing"` makes IknowEnv.searchBackend never undefined — the
+  // tri-state "unset != explicit bing" survives only at the helper return
+  // layer and is folded by the time it reaches WebSearchToolDeps.backend
+  // (so the backend_unset_with_key fail-closed defense is test-path-only;
+  // restoring it needs undefined carried in the IknowEnv layer, a separate task).
+  const webSearchBackend: SearchBackendId =
+    envOptionalEnum<SearchBackendId>({
+      file,
+      key: SEARCH_BACKEND_ENV_KEY,
+      values: SEARCH_BACKEND_VALUES,
+    }) ??
+    mergedSettings.web?.searchBackend ??
+    "bing";
+  // The settings-side key belongs to the backend that was actually selected, so the
+  // field name stays vendor-neutral: a config written for exa keeps working if the
+  // selection changes to a backend that later becomes real. Keyed by the same closed
+  // set as searchBackend; "bing" has no key and therefore no settings slot.
+  const settingsWebKey = expandPlaceholders(mergedSettings.web?.backendKey, file);
+  const settingsKeyFor = (id: SearchBackendId): string | undefined =>
+    id === webSearchBackend ? settingsWebKey : undefined;
+
   return {
     llm: {
       baseUrl: transport.baseUrl,
@@ -1304,43 +1343,40 @@ export function loadIknowEnv(
       searchUrl: envOptional({ file, key: "IKNOW_WEB_SEARCH_URL" }),
       // Optional egress proxy: empty → undefined (network-guard direct connect). Only explicit config takes effect.
       proxy: envOptional({ file, key: "IKNOW_WEB_PROXY" }),
-      // web_search backend selection, fallback chain
-      // env > settings.web.searchBackend > default bing (mirrors the maxTurns
-      // precedent). env unset returns undefined (not folded with explicit
-      // "bing"); illegal settings-side values were already dropped in
-      // parseWeb; illegal env-side values still throw a typed error (a louder
-      // misconfiguration surface).
-      // Explicit T=SearchBackendId: the helper's T extends string would
-      // otherwise be inferred by TS to the wide string type, losing the
-      // literal union.
-      // Note: `?? "bing"` makes IknowEnv.searchBackend never undefined — the
-      // tri-state "unset != explicit bing" survives only at the helper return
-      // layer and is folded by the time it reaches WebSearchToolDeps.backend
-      // (so the backend_unset_with_key fail-closed defense is test-path-only;
-      // restoring it needs undefined carried in the IknowEnv layer, a separate task).
-      searchBackend:
-        envOptionalEnum<SearchBackendId>({
-          file,
-          key: SEARCH_BACKEND_ENV_KEY,
-          values: SEARCH_BACKEND_VALUES,
-        }) ??
-        mergedSettings.web?.searchBackend ??
-        "bing",
-      // Vendor-keyed backend API keys — literal or `${VAR}` placeholder
-      // resolved by expandPlaceholders (same chain as settings.llm.apiKey);
-      // empty / "yes" / placeholder resolution failure → undefined (never silent empty strings).
-      exaApiKey: expandPlaceholders(
-        envOptional({ file, key: EXA_API_KEY_ENV_KEY }),
-        file
-      ),
+      searchBackend: webSearchBackend,
+      // Vendor-keyed backend API keys — literal or `${VAR}` placeholder resolved by the
+      // shared `expandPlaceholders` primitive (the same value grammar and placeholder
+      // guard that `settings.llm.apiKey` uses, via `isApiKeyOrPlaceholder` on the
+      // settings side); empty / "yes" / placeholder resolution failure → undefined
+      // (never a silent empty string, never a raw "${VAR}").
+      //
+      // Fallback chain per key, mirroring web.searchBackend above:
+      //   process.env > .env.local / .env (both inside envGet) > settings.web.backendKey > undefined
+      //
+      // The env rung is **resolved before** the `??`, deliberately: envOptional only maps
+      // length-0 → undefined, so an env file holding a dotenv stub (`EXA_API_KEY=yes`) or an
+      // unresolvable `${VAR}` is "present" and would short-circuit the settings fallback —
+      // discarding a usable settings key and silently downgrading to the default backend.
+      // Expanding first makes the chain first-USABLE-wins, matching the empty/whitespace
+      // fall-through envOptional already provides.
+      //
+      // `settings.web.backendKey` is vendor-neutral, so it is routed into the slot of the
+      // backend that was actually selected (`settingsKeyFor`) — a config written today
+      // keeps working if another backend becomes selectable, and no vendor is baked into
+      // the field name. Tavily / Brave remain reachable the same way their env vars
+      // always were, which is what `assertBackendConfig`'s `backend_unset_with_key` guard
+      // names.
+      exaApiKey:
+        expandPlaceholders(envOptional({ file, key: EXA_API_KEY_ENV_KEY }), file) ??
+        settingsKeyFor("exa"),
       tavilyApiKey: expandPlaceholders(
         envOptional({ file, key: TAVILY_API_KEY_ENV_KEY }),
         file
-      ),
+      ) ?? settingsKeyFor("tavily"),
       braveApiKey: expandPlaceholders(
         envOptional({ file, key: BRAVE_API_KEY_ENV_KEY }),
         file
-      ),
+      ) ?? settingsKeyFor("brave"),
     },
     // Auto-compact config arm (passed through to harness/compress/ via LoopEngineDeps.compress).
     // Threshold sanity validation (threshold >= window rejected) belongs to

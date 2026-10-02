@@ -34,8 +34,12 @@ import {
   isWebEnvConfigError,
   SEARCH_BACKEND_ENV_KEY,
   SEARCH_BACKEND_VALUES,
+  EXA_API_KEY_ENV_KEY,
+  TAVILY_API_KEY_ENV_KEY,
+  BRAVE_API_KEY_ENV_KEY,
 } from "../../src/config/env.ts";
 import { WEB_SEARCH_BACKEND_VALUES } from "../../src/config/settings.ts";
+import { resolveWebCapability } from "../../src/config/aci-web-backend.ts";
 import {
   installTestProviderApiKey,
   withTestLlmProvider,
@@ -63,7 +67,15 @@ describe("web.searchBackend 闭集 parity", () => {
 });
 
 // Guard against ambient env pollution: mirrors env.test.ts's ENV_KEYS cleanup discipline so unset assertions are trustworthy.
-const ENV_KEYS = [SEARCH_BACKEND_ENV_KEY] as const;
+// The three vendor keys MUST be in this list: a developer's shell commonly exports EXA_API_KEY, and
+// env wins over settings — without the cleanup, every "settings-only" key assertion below would
+// silently read the ambient value instead of the fixture.
+const ENV_KEYS = [
+  SEARCH_BACKEND_ENV_KEY,
+  EXA_API_KEY_ENV_KEY,
+  TAVILY_API_KEY_ENV_KEY,
+  BRAVE_API_KEY_ENV_KEY,
+] as const;
 beforeEach(() => {
   for (const key of ENV_KEYS) delete process.env[key];
   installTestProviderApiKey();
@@ -274,5 +286,316 @@ describe("loadIknowEnv — web.searchBackend 回退链", () => {
     );
     const env = loadEnvAt(cwd, home);
     assert.equal(env.web.searchBackend, "bing");
+  });
+});
+
+/**
+ * `settings.web.backendKey` — the settings-side carrier for the key of the **selected**
+ * backend, so a normal install configures backend + key in one file without authoring an
+ * env file. Deliberately vendor-neutral: env.ts routes it into the slot of whatever
+ * `searchBackend` resolved to, so no vendor is baked into the field name and a config
+ * keeps working when the selection changes.
+ *
+ * Contract pinned here:
+ *  - value shape: a literal or a `${VAR}` / `$VAR` placeholder (guarded by
+ *    isApiKeyOrPlaceholder, same discipline as llm.apiKey); illegal placeholder residue and
+ *    non-strings drop the field (drop-not-throw).
+ *  - a key-only section (no searchBackend) is legal — the backend falls back to "bing".
+ *  - `web` stays user-layer only: the project file's web section is dropped by the allowlist,
+ *    so a cloned repo can never ship a key.
+ *  - env chain: process.env > .env.local/.env > settings > undefined (env still wins, matching
+ *    web.searchBackend).
+ *  - a settings `${VAR}` that fails to resolve → undefined, never the literal "${VAR}" leaking
+ *    downstream into an Authorization header.
+ */
+describe("settings.web.backendKey — settings surface", () => {
+  it("accepts a literal key", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "literal-exa-key" } }),
+      {}
+    );
+    const settings = loadIknowSettings({ cwd, home });
+    assert.equal(settings.web?.backendKey, "literal-exa-key");
+  });
+
+  it("accepts a ${VAR} placeholder and preserves it verbatim for env.ts to resolve", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "${EXA_API_KEY}" } }),
+      {}
+    );
+    const settings = loadIknowSettings({ cwd, home });
+    assert.equal(settings.web?.backendKey, "${EXA_API_KEY}");
+  });
+
+  it("trims surrounding whitespace on a literal", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { backendKey: "  padded-key  " } }),
+      {}
+    );
+    assert.equal(loadIknowSettings({ cwd, home }).web?.backendKey, "padded-key");
+  });
+
+  it("drops illegal `${` residue and non-strings (drop-not-throw)", async () => {
+    for (const bad of ["${}", "${1BAD}", "${UNCLOSED"]) {
+      const { home, cwd } = await makeSettings(
+        withModel({ web: { searchBackend: "exa", backendKey: bad } }),
+        {}
+      );
+      const settings = loadIknowSettings({ cwd, home });
+      // searchBackend survives, the illegal key does not.
+      assert.equal(settings.web?.searchBackend, "exa", `backend kept for bad=${String(bad)}`);
+      assert.equal(settings.web?.backendKey, undefined, `backendKey dropped for bad=${String(bad)}`);
+    }
+    for (const bad of [123, true, null, [], {}]) {
+      const { home, cwd } = await makeSettings(
+        withModel({ web: { searchBackend: "exa", backendKey: bad } }),
+        {}
+      );
+      const settings = loadIknowSettings({ cwd, home });
+      assert.equal(settings.web?.searchBackend, "exa");
+      assert.equal(settings.web?.backendKey, undefined, `backendKey dropped for bad=${String(bad)}`);
+    }
+  });
+
+  it("a bare `$` that forms no `$VAR` is kept as a literal (aligns with llm.apiKey)", async () => {
+    // analyzePlaceholderSyntax only treats `${` residue as illegal; `foo$bar` is a legal
+    // literal (settings.ts:1090-1093). Pinned here so a future tightening of that rule
+    // surfaces as a deliberate change rather than a silent behavior shift.
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { backendKey: "has $ but no var" } }),
+      {}
+    );
+    assert.equal(loadIknowSettings({ cwd, home }).web?.backendKey, "has $ but no var");
+  });
+
+  it("drops an empty / whitespace-only key", async () => {
+    for (const bad of ["", "   "]) {
+      const { home, cwd } = await makeSettings(
+        withModel({ web: { backendKey: bad } }),
+        {}
+      );
+      assert.equal(loadIknowSettings({ cwd, home }).web, undefined);
+    }
+  });
+
+  it("a key-only section survives (searchBackend falls back to bing at the env layer)", async () => {
+    const { home, cwd } = await makeSettings(withModel({ web: { backendKey: "k" } }), {});
+    const settings = loadIknowSettings({ cwd, home });
+    assert.equal(settings.web?.searchBackend, undefined);
+    assert.equal(settings.web?.backendKey, "k");
+    assert.equal(loadEnvAt(cwd, home).web.searchBackend, "bing");
+  });
+
+  it("no per-vendor settings fields — one vendor-neutral backendKey", async () => {
+    // The settings surface is deliberately vendor-neutral. Per-vendor settings fields
+    // would bake a vendor into the config and would be dead config for the backends
+    // that are still `not_shipped` stubs. TAVILY_API_KEY / BRAVE_API_KEY stay env-only.
+    const { home, cwd } = await makeSettings(
+      withModel({
+        web: {
+          searchBackend: "exa",
+          backendKey: "k-exa",
+          exaApiKey: "k-via-old-field",
+          tavilyApiKey: "k-tavily",
+          braveApiKey: "k-brave",
+        },
+      }),
+      {}
+    );
+    const settings = loadIknowSettings({ cwd, home });
+    assert.equal(settings.web?.backendKey, "k-exa");
+    const serialized = JSON.stringify(settings);
+    for (const stale of ["k-via-old-field", "k-tavily", "k-brave"]) {
+      assert.ok(!serialized.includes(stale), `${stale} must not survive parsing`);
+    }
+    // ...and the env side still resolves the other vendors from their env vars, unchanged.
+    process.env[TAVILY_API_KEY_ENV_KEY] = "env-tavily";
+    process.env[BRAVE_API_KEY_ENV_KEY] = "env-brave";
+    try {
+      const withEnv = loadEnvAt(cwd, home);
+      assert.equal(withEnv.web.exaApiKey, "k-exa");
+      assert.equal(withEnv.web.tavilyApiKey, "env-tavily");
+      assert.equal(withEnv.web.braveApiKey, "env-brave");
+    } finally {
+      delete process.env[TAVILY_API_KEY_ENV_KEY];
+      delete process.env[BRAVE_API_KEY_ENV_KEY];
+    }
+  });
+
+  it("backendKey routes into the slot of the SELECTED backend, not a fixed vendor", async () => {
+    // This is the point of the vendor-neutral name: whatever `searchBackend` resolved to
+    // receives the key, so a config written today keeps working if the selection moves to
+    // a backend that becomes real, and no vendor is hard-coded in the field name.
+    const cases = [
+      { backend: "exa", slot: "exaApiKey" },
+      { backend: "tavily", slot: "tavilyApiKey" },
+      { backend: "brave", slot: "braveApiKey" },
+    ] as const;
+    for (const { backend, slot } of cases) {
+      const { home, cwd } = await makeSettings(
+        withModel({ web: { searchBackend: backend, backendKey: "the-one-key" } }),
+        {}
+      );
+      const env = loadEnvAt(cwd, home);
+      assert.equal(env.web[slot], "the-one-key", `${backend} → ${slot}`);
+      for (const other of cases.filter((c) => c.slot !== slot)) {
+        assert.equal(env.web[other.slot], undefined, `${backend} must not fill ${other.slot}`);
+      }
+    }
+  });
+
+  it("searchBackend=bing has no key slot, so backendKey lands nowhere", async () => {
+    // bing is the zero-key default path (absent from KEYED_BACKEND_ENV_KEYS); the key
+    // is simply unused rather than erroring.
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "bing", backendKey: "unused" } }),
+      {}
+    );
+    const env = loadEnvAt(cwd, home);
+    assert.equal(env.web.searchBackend, "bing");
+    assert.equal(env.web.exaApiKey, undefined);
+    assert.equal(env.web.tavilyApiKey, undefined);
+    assert.equal(env.web.braveApiKey, undefined);
+  });
+
+  it("web 在项目允许名单外 → 项目层的 key 被丢弃，user 层的 key 胜出（不泄漏到克隆仓库）", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "user-key" } }),
+      { web: { searchBackend: "exa", backendKey: "attacker-key" } }
+    );
+    const warnings: string[] = [];
+    const settings = loadIknowSettings({ cwd, home, onWarn: (m) => warnings.push(m) });
+    assert.equal(settings.web?.backendKey, "user-key");
+    assert.ok(
+      !JSON.stringify(settings).includes("attacker-key"),
+      "project-layer key must never reach the merged settings"
+    );
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"web"/);
+  });
+});
+
+describe("loadIknowEnv — backendKey 回退链（env 优先，settings 兜底）", () => {
+  it("settings literal, no env → the literal key is used", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "literal-key" } }),
+      {}
+    );
+    assert.equal(loadEnvAt(cwd, home).web.exaApiKey, "literal-key");
+  });
+
+  it("settings ${VAR} placeholder → resolved from process.env", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "${EXA_API_KEY}" } }),
+      {}
+    );
+    process.env[EXA_API_KEY_ENV_KEY] = "resolved-from-process-env";
+    try {
+      assert.equal(loadEnvAt(cwd, home).web.exaApiKey, "resolved-from-process-env");
+    } finally {
+      delete process.env[EXA_API_KEY_ENV_KEY];
+    }
+  });
+
+  it("env wins over a settings literal", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "settings-key" } }),
+      {}
+    );
+    process.env[EXA_API_KEY_ENV_KEY] = "env-key";
+    try {
+      assert.equal(loadEnvAt(cwd, home).web.exaApiKey, "env-key");
+    } finally {
+      delete process.env[EXA_API_KEY_ENV_KEY];
+    }
+  });
+
+  it("env wins over a settings ${VAR} placeholder", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "${EXA_API_KEY}" } }),
+      {}
+    );
+    process.env[EXA_API_KEY_ENV_KEY] = "env-key-wins";
+    try {
+      assert.equal(loadEnvAt(cwd, home).web.exaApiKey, "env-key-wins");
+    } finally {
+      delete process.env[EXA_API_KEY_ENV_KEY];
+    }
+  });
+
+  it("unresolvable settings placeholder → undefined, never the literal ${VAR}", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "${IKNOW_TEST_UNSET_VAR}" } }),
+      {}
+    );
+    const key = loadEnvAt(cwd, home).web.exaApiKey;
+    // Leak check first: a surviving raw "${...}" string would reach an auth header.
+    assert.ok(
+      key === undefined || !key.includes("${"),
+      `a raw placeholder must never leak downstream, got: ${String(key)}`
+    );
+    assert.equal(key, undefined);
+  });
+
+  it("a dotenv-style 'yes' placeholder → undefined", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "yes" } }),
+      {}
+    );
+    assert.equal(loadEnvAt(cwd, home).web.exaApiKey, undefined);
+  });
+
+  it(".env.local beats a settings literal (the middle precedence tier)", async () => {
+    // The documented chain is process.env > .env.local/.env > settings > no key.
+    // The other env-tier cases only cover process.env; without this one, a regression
+    // that let settings outrank the env file would stay green.
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "settings-loses" } }),
+      {}
+    );
+    await writeFile(join(cwd, ".env.local"), `${EXA_API_KEY_ENV_KEY}=file-wins\n`);
+    assert.equal(loadEnvAt(cwd, home).web.exaApiKey, "file-wins");
+  });
+
+  it("an unusable .env.local value falls through to settings (first USABLE wins, not first non-empty)", async () => {
+    // `envOptional` only maps length-0 → undefined, so an env file holding a dotenv
+    // stub or an unresolvable placeholder is "present" and would short-circuit the
+    // settings fallback — discarding a perfectly good settings key and silently
+    // downgrading to the default backend. These pin that the chain is first-usable-wins.
+    for (const stub of ["yes", "  ", "${IKNOW_TEST_UNSET_VAR}"]) {
+      const { home, cwd } = await makeSettings(
+        withModel({ web: { searchBackend: "exa", backendKey: "settings-good-key" } }),
+        {}
+      );
+      await writeFile(join(cwd, ".env.local"), `${EXA_API_KEY_ENV_KEY}=${stub}\n`);
+      assert.equal(
+        loadEnvAt(cwd, home).web.exaApiKey,
+        "settings-good-key",
+        `settings must win over an unusable .env.local value: ${stub}`
+      );
+    }
+  });
+
+  it("no env, no settings → undefined (default bing has no key)", async () => {
+    const { home, cwd } = await makeSettings(withModel({}), {});
+    const env = loadEnvAt(cwd, home);
+    assert.equal(env.web.exaApiKey, undefined);
+    assert.equal(env.web.tavilyApiKey, undefined);
+    assert.equal(env.web.braveApiKey, undefined);
+  });
+
+  it("settings-only config resolves the capability to exa on both legs (the whole point)", async () => {
+    const { home, cwd } = await makeSettings(
+      withModel({ web: { searchBackend: "exa", backendKey: "settings-only-key" } }),
+      {}
+    );
+    const env = loadEnvAt(cwd, home);
+    const capability = resolveWebCapability({
+      backend: env.web.searchBackend,
+      exaApiKey: env.web.exaApiKey,
+      tavilyApiKey: env.web.tavilyApiKey,
+      braveApiKey: env.web.braveApiKey,
+    });
+    assert.deepEqual(capability, { searchEngine: "exa", fetchEngine: "exa" });
   });
 });

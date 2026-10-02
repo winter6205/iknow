@@ -563,6 +563,26 @@ export interface IknowSettingsWeb {
    * typed error for illegal env values).
    */
   searchBackend?: "bing" | "exa" | "tavily" | "brave";
+  /**
+   * The API key for the **selected** backend. A literal or a `${VAR}` / `$VAR`
+   * placeholder (same value shape as `llm.apiKey`; guarded by `isApiKeyOrPlaceholder`
+   * here, resolved by env.ts's `expandPlaceholders`). This is the settings-side carrier
+   * so a normal install does not have to author an env file:
+   * `web.backendKey: "sk-..."` → the real key, `web.backendKey: "${EXA_API_KEY}"` →
+   * still read from the environment. Illegal placeholder residue → drop the field
+   * (drop-not-throw, mirroring apiKey).
+   *
+   * Deliberately vendor-neutral: env.ts routes this value into the key slot of
+   * whatever `searchBackend` resolved to, so a config written for one backend keeps
+   * working when another becomes selectable, and no vendor is baked into the field name.
+   * (Today `BACKENDS` in web-search.ts ships only `exa`; `tavily` / `brave` are
+   * `not_shipped` stubs, so a key paired with one of them still lands in its slot and
+   * simply stays unused until the backend is implemented.)
+   *
+   * Precedence stays env-first (`process.env` / `.env.local` / `.env` all win); the
+   * settings value is the last source before "no key".
+   */
+  backendKey?: string;
 }
 
 /**
@@ -1622,8 +1642,14 @@ function parseWeb(raw: unknown): IknowSettingsWeb | undefined {
   ) {
     out.searchBackend = raw.searchBackend as IknowSettingsWeb["searchBackend"];
   }
-  if (out.searchBackend === undefined) return undefined;
-  return out;
+  // Vendor keys: literal-or-placeholder, same value shape as llm.apiKey. Each is
+  // independent of searchBackend — a section carrying only a key is legal (the
+  // backend then falls back to the default "bing").
+  if (isApiKeyOrPlaceholder(raw.backendKey)) out.backendKey = raw.backendKey.trim();
+  // undefinedWhenEmpty, not a hand-written `=== undefined` chain: only defined
+  // values are ever assigned above, so key count is exactly the emptiness test,
+  // and a new field needs no edit here (settings.ts:806).
+  return undefinedWhenEmpty(out);
 }
 
 /**
@@ -1662,20 +1688,20 @@ function mergePlugins(
   return out;
 }
 
-/** Web tool config: merge the web layer — project fields take priority, uncovered user fields are kept. */
-function mergeWeb(
-  user: IknowSettingsWeb | undefined,
-  project: IknowSettingsWeb | undefined
-): IknowSettingsWeb | undefined {
-  if (!user && !project) return undefined;
-  const out: IknowSettingsWeb = {};
-  if (project?.searchBackend !== undefined) {
-    out.searchBackend = project.searchBackend;
-  } else if (user?.searchBackend !== undefined) {
-    out.searchBackend = user.searchBackend;
-  }
-  if (out.searchBackend === undefined) return undefined;
-  return out;
+/**
+ * Web tool config: **user-layer only** — deliberately takes no `project` parameter
+ * (same shape as `mergePlugins`).
+ *
+ * `web` is not in `PROJECT_SETTINGS_ALLOWED_KEYS`, and `filterProjectSettingsKeys`
+ * runs as an argument to `mergeSettings`, so a project file's `web` section is
+ * stripped before `parseWeb` ever sees it. Spelling that as a no-project signature
+ * instead of a project > user pick keeps the invariant local and makes a future
+ * allowlist widening fail loudly at the signature rather than silently letting a
+ * cloned project file contribute a backend API key.
+ */
+function mergeWeb(user: IknowSettingsWeb | undefined): IknowSettingsWeb | undefined {
+  if (!user) return undefined;
+  return user;
 }
 
 /**
@@ -1910,8 +1936,10 @@ function mergeSettings(
   );
   // LSP config section (all optional, defaults resolved at the consumer).
   const lsp = mergeLsp(parseLsp(userRaw.lsp), parseLsp(projectRaw.lsp));
-  // Web tool config (web_search backend selection; the env > settings fallback chain is in env.ts).
-  const web = mergeWeb(parseWeb(userRaw.web), parseWeb(projectRaw.web));
+  // Web tool config (web_search backend selection + vendor API keys; user-layer only —
+  // the project layer's web section was already dropped by the allowlist, see mergeWeb).
+  // The env > settings fallback chain is in env.ts.
+  const web = mergeWeb(parseWeb(userRaw.web));
   // User command hooks (userRaw only; project hooks were dropped by the allowlist).
   const hooks = mergeHooks(
     parseHooks(userRaw.hooks),
