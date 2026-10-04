@@ -6,7 +6,7 @@
  */
 import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   mkdtemp,
   rm,
@@ -26,6 +26,7 @@ import {
 } from "../../../src/session-api/store/index.ts";
 import type { SessionFileV1 } from "../../../src/session-api/store/index.ts";
 import type { SessionStoreError } from "../../../src/session-api/store/index.ts";
+import type { AnthropicNativeMessage } from "../../../src/harness/index.ts";
 
 let store: SessionStore;
 let baseDir: string;
@@ -66,6 +67,21 @@ beforeAll(async () => {
 afterAll(async () => {
   await rm(baseDir, { recursive: true, force: true });
 });
+
+async function withIsolatedSessionStores<T>(
+  projectRoot: string,
+  run: (writer: SessionStore, reopenReader: () => SessionStore) => Promise<T>
+): Promise<T> {
+  const isolatedBaseDir = await mkdtemp(join(tmpdir(), "iknow-list-store-"));
+  try {
+    return await run(
+      new SessionStore(isolatedBaseDir, projectRoot),
+      () => new SessionStore(isolatedBaseDir, projectRoot)
+    );
+  } finally {
+    await rm(isolatedBaseDir, { recursive: true, force: true });
+  }
+}
 
 // -- resolveProjectSessionDir (pure function contract) -----------------------
 
@@ -446,69 +462,266 @@ describe("SessionStore.list", () => {
   });
 
   it("skips sessions with no assistant text (issue #96)", async () => {
-    // Empty messages array → bootstrap ghost, nothing to show in the sidebar.
-    await store.save({
-      id: "list-empty",
-      file: sampleFile({ id: "list-empty" }),
-    });
-    // Assistant message whose text is only whitespace → also treated as empty.
-    await store.save({
-      id: "list-blank",
-      file: sampleFile({
-        id: "list-blank",
-        overrides: {
-          messages: [
-            {
-              role: "user" as const,
-              content: [{ type: "text" as const, text: "q" }],
-            },
-            {
-              role: "assistant" as const,
-              content: [{ type: "text" as const, text: "   " }],
-            },
-          ],
-        },
-      }),
-    });
-    // Assistant message with only a tool_use block (no text) → interrupted
-    // mid-tool-use, nothing to show → also treated as empty.
-    await store.save({
-      id: "list-toolonly",
-      file: sampleFile({
-        id: "list-toolonly",
-        overrides: {
-          messages: [
-            {
-              role: "user" as const,
-              content: [{ type: "text" as const, text: "q" }],
-            },
-            {
-              role: "assistant" as const,
-              content: [
-                {
-                  type: "tool_use" as const,
-                  id: "t1",
-                  name: "noop",
-                  input: {},
-                },
+    const prefix = `list-filter-${randomUUID()}`;
+    const cases: ReadonlyArray<{
+      readonly label: string;
+      readonly id: string;
+      readonly messages: SessionFileV1["messages"];
+    }> = [
+      { label: "bootstrap", id: `${prefix}-empty`, messages: [] },
+      {
+        label: "user-only",
+        id: `${prefix}-user-only`,
+        messages: [userMsgShape("question")],
+      },
+      {
+        label: "whitespace-only",
+        id: `${prefix}-blank`,
+        messages: [userMsgShape("question"), assistantMsgShape("  \t\n")],
+      },
+      {
+        label: "tool-only",
+        id: `${prefix}-tool-only`,
+        messages: [
+          userMsgShape("question"),
+          {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: `${prefix}-tool`,
+                name: "noop",
+                input: {},
+              },
+            ],
+          },
+        ],
+      },
+      {
+        label: "thinking-only",
+        id: `${prefix}-thinking-only`,
+        messages: [
+          userMsgShape("question"),
+          {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "analysis", signature: "sig" },
+            ],
+          },
+        ],
+      },
+    ];
+
+    await withIsolatedSessionStores(
+      `/proj/${prefix}`,
+      async (writer, reopenReader) => {
+        for (const { id, messages } of cases) {
+          await writer.save({
+            id,
+            file: sampleFile({ id, overrides: { messages } }),
+          });
+        }
+        const entries = await reopenReader().list();
+        for (const { id, label } of cases) {
+          assert.ok(
+            !entries.some((entry) => entry.conversation_id === id),
+            `${label} session must not be listed`
+          );
+        }
+      }
+    );
+  });
+
+  it("keeps a prior answer visible when the latest assistant event only calls a tool", async () => {
+    const id = `list-tool-head-${randomUUID()}`;
+    const toolId = `${id}-tool`;
+    const latestMessage: AnthropicNativeMessage = {
+      role: "assistant",
+      content: [{ type: "tool_use", id: toolId, name: "noop", input: {} }],
+    };
+
+    await withIsolatedSessionStores(
+      `/proj/${id}`,
+      async (writer, reopenReader) => {
+        await writer.save({
+          id,
+          file: sampleFile({
+            id,
+            overrides: {
+              messages: [
+                userMsgShape("question"),
+                assistantMsgShape("saved answer"),
               ],
             },
+          }),
+        });
+        await writer.appendEvents({ id, events: [latestMessage] });
+
+        const reader = reopenReader();
+        const loaded = await reader.load(id);
+        assert.ok(
+          loaded.messages.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.content.some(
+                (block) => block.type === "tool_use" && block.id === toolId
+              )
+          ),
+          "reopened transcript must include the persisted head tool call"
+        );
+        assert.ok(
+          loaded.messages.some(
+            (message) =>
+              message.role === "assistant" &&
+              message.content.some(
+                (block) =>
+                  block.type === "text" && block.text === "saved answer"
+              )
+          ),
+          "reopened transcript must retain the earlier assistant answer"
+        );
+
+        const entry = (await reader.list()).find(
+          (item) => item.conversation_id === id
+        );
+        assert.ok(
+          entry,
+          "session with an earlier answer must remain discoverable"
+        );
+        assert.equal(entry.lastFinalText, "saved answer");
+      }
+    );
+  });
+
+  const latestNonDisplayableMessages: ReadonlyArray<{
+    readonly label: string;
+    readonly message: AnthropicNativeMessage;
+  }> = [
+    {
+      label: "thinking-only",
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "analysis", signature: "sig" }],
+      },
+    },
+    {
+      label: "whitespace-only",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: " \t\n" }],
+      },
+    },
+  ];
+
+  it.each(latestNonDisplayableMessages)(
+    "keeps the earlier preview when the latest assistant message is $label",
+    async ({ message }) => {
+      const id = `list-preview-${randomUUID()}`;
+      await withIsolatedSessionStores(
+        `/proj/${id}`,
+        async (writer, reopenReader) => {
+          await writer.save({
+            id,
+            file: sampleFile({
+              id,
+              overrides: {
+                messages: [
+                  userMsgShape("question"),
+                  assistantMsgShape("earlier answer"),
+                ],
+              },
+            }),
+          });
+          await writer.appendEvents({ id, events: [message] });
+
+          const entry = (await reopenReader().list()).find(
+            (item) => item.conversation_id === id
+          );
+          assert.ok(
+            entry,
+            "earlier non-empty assistant text keeps the session visible"
+          );
+          assert.equal(entry.lastFinalText, "earlier answer");
+        }
+      );
+    }
+  );
+
+  it("uses the latest non-empty assistant text as the preview", async () => {
+    const id = `list-latest-answer-${randomUUID()}`;
+    await withIsolatedSessionStores(
+      `/proj/${id}`,
+      async (writer, reopenReader) => {
+        await writer.save({
+          id,
+          file: sampleFile({
+            id,
+            overrides: {
+              messages: [
+                userMsgShape("question"),
+                assistantMsgShape("earlier answer"),
+              ],
+            },
+          }),
+        });
+        await writer.appendEvents({
+          id,
+          events: [
+            userMsgShape("follow-up"),
+            assistantMsgShape("latest answer"),
           ],
-        },
-      }),
-    });
-    const entries = await store.list();
-    assert.ok(
-      !entries.some((e) => e.conversation_id === "list-empty"),
-      "empty session must not be listed"
+        });
+
+        const entry = (await reopenReader().list()).find(
+          (item) => item.conversation_id === id
+        );
+        assert.ok(entry);
+        assert.equal(entry.lastFinalText, "latest answer");
+      }
     );
-    assert.ok(
-      !entries.some((e) => e.conversation_id === "list-blank"),
-      "whitespace-only session must not be listed"
-    );
-    assert.ok(
-      !entries.some((e) => e.conversation_id === "list-toolonly"),
-      "tool_use-only session must not be listed"
+  });
+
+  it("hides a rewound session when its current head has no assistant text", async () => {
+    const id = `list-rewound-user-only-${randomUUID()}`;
+    await withIsolatedSessionStores(
+      `/proj/${id}`,
+      async (writer, reopenReader) => {
+        await writer.save({
+          id,
+          file: sampleFile({
+            id,
+            overrides: {
+              messages: [
+                userMsgShape("question"),
+                assistantMsgShape("older answer"),
+              ],
+            },
+          }),
+        });
+        await writer.rewindToHead({ id, head: "e0" });
+
+        const jsonlPath = join(
+          resolveConversationDir({
+            projectDir: writer.getProjectDir(),
+            conversationId: id,
+          }),
+          `${id}.jsonl`
+        );
+        const rawJsonl = await readFile(jsonlPath, "utf8");
+        assert.ok(
+          rawJsonl.includes('"text":"older answer"'),
+          "rewind must retain the abandoned assistant event in JSONL"
+        );
+
+        const reader = reopenReader();
+        assert.deepEqual((await reader.load(id)).messages, [
+          userMsgShape("question"),
+        ]);
+        assert.ok(
+          !(await reader.list()).some((entry) => entry.conversation_id === id),
+          "a hidden historical answer must not make a user-only head visible"
+        );
+      }
     );
   });
 

@@ -1697,20 +1697,24 @@ function errMsg(err: unknown): string {
   return err instanceof Error ? err.message : String(err);
 }
 
-/** Extract joined text from the most recent assistant message ("" if none). */
+/**
+ * Extract joined text from the most recent assistant message with
+ * non-whitespace text ("" if none).
+ */
 function lastAssistantText(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): string {
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i];
     if (msg.role !== "assistant") continue;
-    return msg.content
+    const text = msg.content
       .filter(
         (b): b is Extract<AnthropicContentBlock, { type: "text" }> =>
           b.type === "text"
       )
       .map((b) => b.text)
       .join(" ");
+    if (text.trim()) return text;
   }
   return "";
 }
