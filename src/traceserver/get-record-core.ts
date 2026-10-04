@@ -22,9 +22,12 @@
  */
 import {
   collectToolResults,
-  dereferenceTraceMessages,
+  dereferenceDispatchEvidenceWithStatus,
+  dereferenceTraceMessagesWithStatus,
   messageContentBlocks,
   messageRole,
+  renderTraceText,
+  type DereferencedDispatchEvidence,
   type ProjectedToolResult,
 } from "./project-tool-results.js";
 import { createJsonlTraceReader } from "./reader.js";
@@ -143,11 +146,18 @@ export function createGetRecordCore(
     // Read-side addressing already walks the two-level tree: filePath comes
     // from findConversationTraceFile.
     const parts = await addressParts(found.match.row, parsed.detail, filePath);
-    return JSON.stringify(
-      parsed.partIndex === undefined
-        ? manifestOf(found.match, parsed, parts)
-        : windowOf(found.match, parsed, parts)
+    if (parsed.partIndex !== undefined) {
+      return JSON.stringify(windowOf(found.match, parsed, parts));
+    }
+    // The exact final request of every governed invocation, resolved. The
+    // inventory arm is where it belongs: the window arm is a character window,
+    // and full request bodies there would defeat the read unit the caller
+    // budgets with.
+    const evidence = await dereferenceDispatchEvidenceWithStatus(
+      found.match.row["dispatch_evidence"],
+      { traceFilePath: filePath }
     );
+    return JSON.stringify(manifestOf(found.match, parsed, parts, evidence));
   };
 }
 
@@ -238,6 +248,14 @@ function parseDetail(value: unknown): Detail {
   return value;
 }
 
+/**
+ * Wire value of the manifest's `evidence_gap`. It is present only when a
+ * referenced body was refused or unreadable, which is what stops the
+ * fail-closed `parts: []` from reading as "this record has no content" (a
+ * trace copied without its referenced bodies is the portable-copy case).
+ */
+const EVIDENCE_GAP_UNREADABLE = "unreadable_referenced_body";
+
 /** One addressable part: coordinates + full text. Both the window arm and the manifest arm answer from this single list, so they cannot disagree. */
 interface AddressablePart {
   readonly messageIndex?: number;
@@ -254,6 +272,13 @@ interface AddressablePart {
   readonly role?: string;
 }
 
+/** What addressing produced: the addressable parts, how many messages survived dereference, and whether a referenced body was refused or unreadable. */
+interface AddressableRecord {
+  readonly parts: ReadonlyArray<AddressablePart>;
+  readonly messageCount: number;
+  readonly evidenceGap: boolean;
+}
+
 /**
  * The addressable parts of one record, chosen by `detail`.
  *
@@ -268,20 +293,19 @@ async function addressParts(
   row: TraceRecordRow,
   detail: Detail,
   traceFilePath: string
-): Promise<{
-  readonly parts: ReadonlyArray<AddressablePart>;
-  readonly messageCount: number;
-}> {
+): Promise<AddressableRecord> {
   const messages = Array.isArray(row["messages"]) ? row["messages"] : [];
   // Pass traceFilePath, not traceDir — blob directory = dirname(filePath)/blobs.
-  const dereferenced = await dereferenceTraceMessages(messages, {
+  const dereferenced = await dereferenceTraceMessagesWithStatus(messages, {
     traceFilePath,
   });
   if (detail === "tool_results") {
-    const results: readonly ProjectedToolResult[] =
-      collectToolResults(dereferenced);
+    const results: readonly ProjectedToolResult[] = collectToolResults(
+      dereferenced.messages
+    );
     return {
-      messageCount: dereferenced.length,
+      messageCount: dereferenced.messages.length,
+      evidenceGap: dereferenced.evidenceGap,
       parts: results.map((result, index) => ({
         partIndex: index,
         text: result.text,
@@ -294,10 +318,10 @@ async function addressParts(
     };
   }
   const parts: AddressablePart[] = [];
-  dereferenced.forEach((message, messageIndex) => {
+  dereferenced.messages.forEach((message, messageIndex) => {
     // Read role (when a string) off the dereferenced message. When
     // unreadable, omit role — dereference degradation to an empty array is
-    // already handled inside dereferenceTraceMessages and cannot occur on the
+    // already handled inside the dereference step and cannot occur on the
     // normal path. Consistent with detail=tool_results parts: the field is
     // absent, never null/undefined.
     const role = messageRole(message);
@@ -310,27 +334,28 @@ async function addressParts(
       });
     });
   });
-  return { parts, messageCount: dereferenced.length };
+  return {
+    parts,
+    messageCount: dereferenced.messages.length,
+    evidenceGap: dereferenced.evidenceGap,
+  };
 }
 
 /**
- * A part's text: whatever form it was stored in — a bare string as itself,
- * everything else (content block objects etc.) as its JSON text. This is
- * the single rendering rule: one place, so the manifest's `chars` and the
+ * A part's text, via the reader's single rendering rule (also applied to the
+ * resolved request bodies): one rule, so the manifest's `chars` and the
  * window's `text` cannot evolve apart.
  */
 function renderPart(part: unknown): string {
-  return typeof part === "string" ? part : JSON.stringify(part);
+  return renderTraceText(part);
 }
 
 /** Manifest arm: record scalars + coordinates and sizes of addressable parts, no content. */
 function manifestOf(
   match: RecordMatch,
   parsed: ResolvedRequest,
-  addressable: {
-    readonly parts: ReadonlyArray<AddressablePart>;
-    readonly messageCount: number;
-  }
+  addressable: AddressableRecord,
+  evidence: DereferencedDispatchEvidence
 ): Record<string, unknown> {
   rejectUnusedWindowCoordinates(parsed);
   const scoped = parsed.messageIndex !== undefined;
@@ -353,6 +378,20 @@ function manifestOf(
       // rendered, consistent with the other part fields in this file.
       ...(part.role === undefined ? {} : { role: part.role }),
     })),
+    // What the model was actually asked, per governed invocation, in row order.
+    // Additive: a record whose row carries no `dispatch_evidence` — the
+    // historical full-mode shape — keeps exactly the keys it had, so the field
+    // is the difference between "no governed invocation recorded" and "a reader
+    // that never dereferenced the evidence".
+    ...(evidence.entries.length > 0
+      ? { final_request_evidence: evidence.entries }
+      : {}),
+    // Absent on a fully readable record; present when either channel refused or
+    // could not read a referenced body, so the omissions above read as an
+    // evidence gap rather than as "this record has no content".
+    ...(addressable.evidenceGap || evidence.evidenceGap
+      ? { evidence_gap: EVIDENCE_GAP_UNREADABLE }
+      : {}),
   };
 }
 
@@ -360,10 +399,7 @@ function manifestOf(
 function windowOf(
   match: RecordMatch,
   parsed: ResolvedRequest,
-  addressable: {
-    readonly parts: ReadonlyArray<AddressablePart>;
-    readonly messageCount: number;
-  }
+  addressable: AddressableRecord
 ): Record<string, unknown> {
   const part = selectParts(addressable.parts, parsed, addressable)[0]!;
   const { fromChar, count } = parsed;

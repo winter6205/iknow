@@ -15,6 +15,8 @@ import type { CompactReason } from "../harness/compress/index.js";
 import type { CodeRestoreSkip } from "./store/code-preimage.js";
 import type { SecurityInterruptionRecord } from "./store/jsonl.js";
 import type { SessionStoreErrorKind } from "./store/errors.js";
+import type { RecoveryStatus } from "./store/recovery-status.js";
+import type { RecoveredFileOperation } from "./store/recovery-reconcile.js";
 
 /** Max user message length (code units). */
 export const MAX_MESSAGE_CHARS = 8000;
@@ -253,7 +255,27 @@ export interface SessionSummary {
   readonly json_mode: boolean;
   readonly turn_count: number;
   readonly prior_count: number;
+  /**
+   * ADR-0136 §4: how the last session-entry recovery classified this session,
+   * plus the reconciled per-operation detail behind that verdict (SC11).
+   * Present only on the entry surfaces that actually RAN recovery (`getSession`
+   * and the host open paths) — absent on every non-entry projection, so a
+   * client can never read "not recovered" out of a field it never populated.
+   * `recovery in progress` is deliberately NOT a variant here: a host renders
+   * it from `RECOVERY_IN_PROGRESS_LABEL` while the entry promise is in flight.
+   *
+   * `operations` travels WITH the status rather than beside it: a surface that
+   * reports "recovered" without the per-file verdicts is the SC11 gap, and the
+   * restored context itself is deliberately absent from the wire — a host seeds
+   * its own next turn from it, it is not a response payload.
+   */
+  readonly recovery?: SessionRecoveryView;
 }
+
+/** The status vocabulary plus the reconciled operations, as one shape. */
+export type SessionRecoveryView = RecoveryStatus & {
+  readonly operations: ReadonlyArray<RecoveredFileOperation>;
+};
 
 export interface CreateSessionRequest {
   // caller_role retired on the harness path; no longer accepted on the wire

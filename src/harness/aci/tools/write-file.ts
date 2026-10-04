@@ -8,7 +8,7 @@
  * comments/strings is accepted.
  */
 
-import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
@@ -29,6 +29,7 @@ import {
   type PreimageCapture,
   type PreimageOpts,
 } from "../preimage-port.js";
+import { publishFile } from "../../../util/atomic-file-publish.js";
 
 /**
  * ADR-0084 — typed rejection from the last-read gate (a criterion the model
@@ -334,7 +335,7 @@ async function commitWrite(
     absentBefore: ctx.absentBefore,
   });
   try {
-    await writeFile(target, params.content, "utf8");
+    await publishFile(target, params.content);
   } catch (error) {
     throw asToolExecutionError(`[write_file] cannot write ${target}`, error);
   }

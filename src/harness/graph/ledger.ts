@@ -9,10 +9,12 @@
  * not implement ledger logic.
  *
  * Lifecycle:
- *   1. **Creation**: `ensure()` is called only after the first `run_graph`'s
+ *   1. **Creation**: `ensure()` is called after the first `run_graph`'s
  *      `nodes` pass `validateGraph`; `exists()` is false before that. A failed
  *      validation leaves no trace — `ledgerFor` lazily creates the object, but
- *      `exists()` stays false and the frozen set stays empty.
+ *      `exists()` stays false and the frozen set stays empty. The one other
+ *      caller is the restore seed (below), which only creates a ledger for a
+ *      session that already ran a graph.
  *   2. **Survives the overlay**: closing and reopening graph mode keeps the
  *      same ledger for the same conversation — `LiveGraphLedger` hangs beside
  *      `GraphModeContext` on the session runtime, not inside a `GraphAssembly`
@@ -30,8 +32,12 @@
  * as invalid-topology rejection).
  *
  * Process death / cross-process resume: the ledger is not persisted to JSONL.
- * Resuming from a transcript starts from an empty ledger; old freeze
- * semantics die with the old process — intended product behaviour, not a bug.
+ * What survives a kill is the session's DURABLE graph facts, and
+ * `seedRestoredGraphNodes` folds those back into this in-memory ledger at
+ * session open — so "done stays done" now crosses the process boundary
+ * through the durable fact stream instead of dying with the process. The seed
+ * is in-memory only: it writes no record, restores no process, and its
+ * verdict is rebuilt from the log by every later open.
  *
  * `LiveGraphLedgerHost` is a thin per-conversationId resolver: one hub's many
  * session ledgers are created and destroyed through it; single-session entry
@@ -159,6 +165,74 @@ export interface LiveGraphLedgerHost {
   readonly destroyAll: () => void;
   /** Test-observable: number of created session ledgers (anonymous singleton excluded). */
   readonly size: () => number;
+}
+
+/**
+ * One node as the restored facts state it. Deliberately structural: the
+ * recovery reader's own per-node view satisfies it without harness/graph
+ * importing session-api (the boundary above), so the two sides cannot drift
+ * through an adapter that could be wrong in either direction.
+ *
+ * The two arms are the whole contract: a node whose LAST anchored fact is
+ * `done`/`failed` is settled and must not be dispatched again; a node whose
+ * last fact is `running` was dispatched with an unknown outcome, so it is
+ * neither settled nor failed and stays resolvable for an explicit next call.
+ */
+export type RestoredGraphNodeView =
+  | {
+      readonly nodeId: string;
+      readonly state: "settled";
+      /** `done` / `failed` freeze; `skipped` was never dispatched and does
+       *  not freeze — the same rule a live settlement obeys. */
+      readonly status: SettleStatus;
+      /** Output a downstream node needs; absent = recorded status only. */
+      readonly output?: string;
+    }
+  | {
+      readonly nodeId: string;
+      readonly state: "in_flight";
+      /** Always "unknown": an interrupted dispatch has no outcome to report. */
+      readonly outcome: "unknown";
+    };
+
+/**
+ * Fold a restored session's per-node view into the live ledger, in memory
+ * only. This is the seam that makes durable graph state reach dispatch: the
+ * handler's `isFrozen` check and the residual-subgraph merge already refuse to
+ * re-run a frozen id, so seeding turns the restored facts into exactly the
+ * behaviour an in-process settlement produces — a settled node is not
+ * re-dispatched, and its `done` output is threaded into downstream tasks that
+ * omit it.
+ *
+ * Why seed at session open rather than consult the restored view at each
+ * dispatch: the ledger is keyed by `conversationId` and outlives a worktree
+ * rebind, so a seeded verdict survives the engine rebuild a rebind performs
+ * (the chat path deliberately does not rewire the ledger there), whereas a
+ * per-dispatch view would have to be re-supplied to every rebuilt engine. One
+ * seeding point, one owner, no second rule.
+ *
+ * In-flight nodes are deliberately NOT frozen: an interrupted dispatch has an
+ * unknown outcome, and freezing it would either bar a real rescue submission
+ * or read as a failure that never happened.
+ *
+ * Idempotent: `freeze` is last-write-wins per id, so re-running this for the
+ * same view converges instead of accumulating.
+ */
+export function seedRestoredGraphNodes(
+  ledger: LiveGraphLedger | undefined,
+  nodes: ReadonlyArray<RestoredGraphNodeView>
+): void {
+  // No ledger = no live graph on this surface: stay a no-op rather than
+  // inventing a container for a verdict nothing will read.
+  if (ledger === undefined || nodes.length === 0) return;
+  // Restored facts prove this session ran a graph, which is the same fact
+  // `ensure()` records for a first validated call — and `freeze` is inert
+  // until the ledger exists.
+  ledger.ensure();
+  for (const node of nodes) {
+    if (node.state !== "settled") continue;
+    ledger.freeze(node.nodeId, node.status, node.output);
+  }
 }
 
 export function createLiveGraphLedgerHost(): LiveGraphLedgerHost {

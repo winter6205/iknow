@@ -3,6 +3,8 @@
 Date: 2026-07-31
 Status: accepted
 
+> **Scoped amendment (2026-10-03, ADR-0136):** Decision 10's chat content-trace exclusion is superseded for new-format persistent native sessions by [the native checkpoint contract](0136-native-session-checkpoint-architecture.md). Final SDK-request evidence is enabled by default there. Decisions 12–14's trace failure/durability boundaries remain unchanged; this is an accepted target contract, not a claim that the new writer is implemented.
+
 ## Context
 
 GH issue (winter6205/iknow) — spawned from the Session API migration. When an AI run goes wrong, the developer has no content-level record (LLM messages, tool arguments, tool results) to inspect. The existing `LoopTrace` at `src/harness/loop-trace.ts` (017 spec) records _loop health_ metadata only (turn index / supplier stop / tool call kind / duration / timeout / signal aborted) and **strictly excludes payload** (per `docs/CONTEXT.md` `LoopTrace` _Avoid_: "stuffing input/output/token/cost (B-layer fields) into the trace"; translated from the Chinese entry). The new TraceService fills the _content_ gap for **A-scenario (developer local debug)** — a JSONL file the dev can `grep`. B-scenario (production OTel export) is explicitly out of scope; the 017 spec's "conditional remediation layer" forbids the OTel span/metric tree outright (translated from the Chinese entry), and OTel GenAI semconv is still shifting (v1.37 / v1.41 / v1.42 between 2024-2026, with messages moved from event to attribute and `execute_tool` span name forced to include tool name).

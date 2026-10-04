@@ -13,16 +13,20 @@
  * reserved backend stub lives in observability-bridge).
  */
 
-import { appendFileSync, mkdirSync, writeFileSync } from "node:fs";
-import { createHash, randomUUID } from "node:crypto";
+import { appendFileSync, mkdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
 import { dirname, join } from "node:path";
 import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import { maybeRotate, type TraceRotationOptions } from "./rotation.js";
+import { storeMaskedBody, writeTraceBody } from "./trace-body.js";
 import type {
   TraceService,
   LlmCallRecord,
+  DispatchEvidenceEntry,
+  DispatchEvidenceInput,
   ToolCallRecord,
   TurnRecord,
+  TraceStatus,
   SessionRecord,
   SandboxCmdRecord,
   VerificationRecord,
@@ -89,15 +93,6 @@ function sameSecretSet(
   return left.every((value) => rightSet.has(value));
 }
 
-function isAlreadyPresentError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "EEXIST"
-  );
-}
-
 /**
  * Shape tag for blob payloads (ADR-0036 amendment). Anthropic `content` has
  * two legal shapes — block array and plain string; the `{kind, v}` wrapper
@@ -116,14 +111,16 @@ interface BlobPayload {
  * content (empty string / empty array / null) is addressed the same way — it
  * has its own sha, no inline special case; body duplication is what dedup
  * actually saves (ADR-0071).
+ *
+ * Storage itself is `storeMaskedBody`, the same primitive the
+ * dispatch-evidence channel uses; only the payload wrapper and the ref shape
+ * differ here.
  */
 function toBlobReferences(
   messages: ReadonlyArray<unknown>,
   traceDir: string,
   outputMask: ReturnType<typeof createOutputMask>
 ): Array<{ role: unknown; content: { sha: string; bytes: number } }> {
-  const blobsDir = join(traceDir, "blobs");
-  mkdirSync(blobsDir, { recursive: true });
   return messages.map((message) => {
     if (
       typeof message !== "object" ||
@@ -143,24 +140,54 @@ function toBlobReferences(
       kind: typeof content === "string" ? "str" : "blocks",
       v: content,
     };
+    // `?? "null"`: JSON.stringify drops undefined, and a content body must
+    // never be unaddressable.
     const serialized = JSON.stringify(payload) ?? "null";
-    const masked = outputMask.mask(serialized);
-    const bytes = Buffer.byteLength(masked, "utf8");
-    const sha = createHash("sha256").update(masked, "utf8").digest("hex");
-    try {
-      writeFileSync(join(blobsDir, sha), masked, {
-        encoding: "utf8",
-        flag: "wx",
-      });
-    } catch (error) {
-      if (!isAlreadyPresentError(error)) throw error;
-    }
-    return { role, content: { sha, bytes } };
+    return {
+      role,
+      content: storeMaskedBody(traceDir, serialized, outputMask.mask),
+    };
   });
 }
 
 /**
- * SC20 follow-up: mask known secret values in the serialized JSONL line.
+ * Content-address every dispatch-evidence body of one call.
+ *
+ * Bodies go through the same storage primitive as `writeTraceBody` (mask →
+ * address → write-if-missing), so masking still happens before addressing; the
+ * `messages` channel keeps its own `{kind, v}` wrapper and its exact ref shape,
+ * which existing tests pin.
+ *
+ * `outcome` is settled here, not inferred later: transport retry re-enters the
+ * model call sequentially, so the row's status describes its LAST entry, and
+ * every earlier entry is a failed attempt (ADR-0136 D8). A non-ok row has no
+ * successful entry at all.
+ */
+function toDispatchEvidenceEntries(
+  evidence: ReadonlyArray<DispatchEvidenceInput>,
+  poolDir: string,
+  mask: (text: string) => string,
+  status: TraceStatus
+): DispatchEvidenceEntry[] {
+  return evidence.map((entry, index) => {
+    const settled = status === "ok" && index === evidence.length - 1;
+    return {
+      invocationId: entry.invocationId,
+      stream: entry.stream,
+      messages: writeTraceBody(poolDir, entry.messages, mask),
+      ...(entry.system !== undefined
+        ? { system: writeTraceBody(poolDir, entry.system, mask) }
+        : {}),
+      ...(entry.tools !== undefined
+        ? { tools: writeTraceBody(poolDir, entry.tools, mask) }
+        : {}),
+      outcome: settled ? "ok" : "failed",
+    };
+  });
+}
+
+/**
+ * Mask known secret values in the serialized JSONL line.
  *
  * This is intentionally coarse — we serialize the entire line, mask the
  * resulting string with the current secret values, and emit the masked
@@ -265,6 +292,23 @@ export function createJsonlTraceService(
             currentOutputMask()
           );
         } catch (err) {
+          recordFailure(err);
+          return undefined;
+        }
+      }
+      if (record.dispatchEvidence !== undefined) {
+        try {
+          fullLine.dispatch_evidence = toDispatchEvidenceEntries(
+            record.dispatchEvidence,
+            targetDir,
+            currentOutputMask().mask,
+            record.status
+          );
+        } catch (err) {
+          // Same no-inline-fallback rule as the messages channel above: a
+          // partially retained evidence set is withheld whole rather than
+          // written as a row that reads as complete (ADR-0136 D9 — trace
+          // failure is counted, never re-dispatched).
           recordFailure(err);
           return undefined;
         }

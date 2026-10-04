@@ -38,7 +38,6 @@ import type { SubagentCapacityHolder } from "../harness/subagent/manager.js";
 import type { WorktreeOnMutateHolder } from "../harness/isolation/worktree-gate.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
-import { randomUUID } from "node:crypto";
 import type { MemoryLiveFlags } from "../harness/memory/index.js";
 import type { RuntimeBundle } from "../cli/runtime.js";
 import type { AskUser } from "../harness/permission/types.js";
@@ -58,8 +57,13 @@ import {
   resolveProjectSessionDir,
   resolveSubagentTraceDir,
 } from "../session-api/store/session-store.js";
-import { createPreimageCapture } from "../session-api/store/preimage-capture.js";
+import {
+  createPreimageCapture,
+  type FileIntentRecorder,
+} from "../session-api/store/preimage-capture.js";
 import type { PreimageCapture } from "../harness/aci/preimage-port.js";
+import type { RuntimePersistenceBinder } from "../shared/runtime-persistence.js";
+import type { AnthropicNativeMessage } from "../harness/index.js";
 import { readWorkerInFlightToolName } from "../session-api/store/index.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import { resolveTasksDir } from "../harness/background/paths.js";
@@ -177,6 +181,26 @@ export interface BuildTuiDepsOptions {
    *  tools fill it via the capture closure built below; the hub drains it when
    *  appending this session's `tool_result` events. Absent → no capture. */
   readonly preimageLedger?: import("../session-api/store/preimage-ledger.js").PreimageLedgerHost;
+  /** ADR-0136 §3: the durable per-file intent recorder the capture writes
+   *  through. Without it a TUI write leaves blobs + ledger entries and NO
+   *  recoverable intent, so a crash mid-write has nothing for recovery to
+   *  reconcile. Supplied as a recorder (not a store) because the bridge owns
+   *  the store and is assembled after this layer — see run.tsx's late-bound
+   *  `bridgeRef` recorder. Absent → blobs only (pre-ADR-0136 behavior). */
+  readonly fileIntentRecorder?: FileIntentRecorder;
+  /**
+   * ADR-0136: the host-built runtime-persistence binder, forwarded verbatim to
+   * `buildHarnessEngine` so the engine's session-resolved consumers (the
+   * `run_graph` handler and the subagent manager) publish their facts to
+   * storage. The engine is assembled without session identity, so this is a
+   * binder and each consumer resolves its own sink. Host-supplied because a
+   * binder must be built over the store and writer queue the session owner
+   * holds — never over a second store here. The turn-level sink is the hub's
+   * own (injected into the per-run deps), so this option is only about the
+   * assembly-time consumers. Absent → no persistence requests, behavior
+   * byte-identical.
+   */
+  readonly runtimePersistence?: RuntimePersistenceBinder<AnthropicNativeMessage>;
   /** Test seam: userHome override (default homedir()). */
   readonly userHome?: string;
   /** Test seam: cwd override (default process.cwd()). */
@@ -214,18 +238,15 @@ export interface BuildTuiDepsOptions {
   readonly traceOut?: string;
   /**
    * Current TUI session's conversationId (ADR-0071) — used to derive
-   * `<parent session folder>/subagents/`. The caller (tui/run.tsx) forwards
-   * it after getting soleInflightId from hub-bridge.
+   * `<parent session folder>/subagents/` directly.
    *
-   * Fact: at TUI assembly time (run.tsx's buildTuiDeps call site) nothing is
-   * marked inflight yet — the session is injected by the hub per run and the
-   * engine is built before the first message. So run.tsx currently does not
-   * pass this field and buildTuiDeps uses the randomUUID() fallback (accepted
-   * per SC8: unique per build; re-derived on rebuild / ensureSession). Where
-   * subagent records actually land is the def.conversationId that
-   * subagentManager receives at spawn (hub-bridge postMessage → tool ctx →
-   * manager); the file anchor is
-   * `<projectDir>/<assembly-time id>/subagents/agent-<taskId>.jsonl`.
+   * At TUI assembly time (run.tsx's buildTuiDeps call site) nothing is marked
+   * inflight yet, so this is normally ABSENT. When it is, the assembly passes
+   * `projectDir` instead and the manager derives the per-conversation leaf at
+   * spawn from `def.conversationId` — the same seam the serve hub uses, and the
+   * same path the entry sweep resolves, so a recovery process finds the records.
+   * An assembly-time UUID here would pin them somewhere no later process can
+   * compute.
    */
   readonly conversationId?: string;
   /** Test seam: MCP client factory override (inject a stub to avoid real stdio startup). */
@@ -358,8 +379,9 @@ function presentFields<V>(
  */
 /** ADR-0036: build the pre-write capture seam when the hub shares its ledger
  *  with this assembly. Absent ledger → `undefined` (no capture). The closure
- *  writes blobs + records refs the hub drains at commit; Gate B holds because
- *  deps.ts is host-side and the harness stays clean. */
+ *  writes blobs + records refs the hub drains at commit, and (ADR-0136) records
+ *  the DURABLE per-file intent through `fileIntentRecorder`; Gate B holds
+ *  because deps.ts is host-side and the harness stays clean. */
 function buildTuiPreimageCapture(
   opts: BuildTuiDepsOptions,
   projectDir: string
@@ -370,6 +392,11 @@ function buildTuiPreimageCapture(
     getProjectDir: () => projectDir,
     ledger,
     isEnabled: () => opts.settings?.codeRestore?.enabled !== false,
+    // Absent key (not `undefined` value) when the host supplied no recorder, so
+    // the capture keeps its documented "no recorder" behavior.
+    ...(opts.fileIntentRecorder !== undefined
+      ? { intentRecorder: opts.fileIntentRecorder }
+      : {}),
   });
 }
 
@@ -451,24 +478,31 @@ export async function buildTuiDeps(
   // At TUI assembly time the deps layer cannot know the real conversationId —
   // the session is injected by the hub per run (hub-bridge.ensureSession →
   // mark → subagentManager gets the task def.conversationId), and run.tsx
-  // builds the initial engine while inflight is still empty. Two valid
-  // shapes:
-  //   - (a) caller knows (opts.conversationId present) → use it;
-  //   - (b) caller does not know → assembly-time randomUUID() fallback,
-  //     accepted (unique per build; re-derived at rebuild/ensureSession, with
-  //     the engine-rebuild seam as the transfer point — the hub's buildEngine
-  //     path gets the real conversationId).
-  // Two-phase seam design: assembly-time root + call-time id — the existing
-  // resolveConversationTodoPath in todo-write.ts is isomorphic; do not invent
-  // a new shape.
-  // The TUI bridge's postMessage hook (inflight.mark) forwards the session id
-  // into the tool ctx.conversationId, which is enough for the manager to use
-  // def.conversationId.
-  const subagentsConversationId = opts.conversationId ?? randomUUID();
-  const subagentsDir = resolveSubagentTraceDir({
-    projectDir: todoProjectDir,
-    conversationId: subagentsConversationId,
-  });
+  // builds the initial engine while inflight is still empty. So the root is
+  // resolved in one of two ways, and WHICH one decides whether a recovery
+  // process can find this session's workers:
+  //   - the caller knows the id (opts.conversationId) → derive subagentsDir
+  //     from it, as before;
+  //   - the caller does not → pass `projectDir` and let the manager derive the
+  //     per-conversation leaf at spawn from def.conversationId, which is the
+  //     seam the serve hub already uses.
+  //
+  // WHY not a randomUUID() fallback here: `subagentsDir` takes priority over
+  // `projectDir` in the manager, so an assembly-time UUID would pin every
+  // record under a directory no later process can compute — the entry sweep
+  // resolves `<projectDir>/<conversationId>/subagents` from the real id and
+  // would find nothing, leaving an owned worker that no process can stop or
+  // even see. The per-spawn derivation is the only shape both sides agree on.
+  const knownSubagentsConversationId = opts.conversationId;
+  const subagentsSeam =
+    knownSubagentsConversationId === undefined
+      ? { projectDir: todoProjectDir }
+      : {
+          subagentsDir: resolveSubagentTraceDir({
+            projectDir: todoProjectDir,
+            conversationId: knownSubagentsConversationId,
+          }),
+        };
   // Live-graph ledger host — self-built at the TUI assembly point, hanging on
   // the session runtime parallel to graphMode.
   const liveGraphLedger = opts.liveGraphLedger;
@@ -528,6 +562,10 @@ export async function buildTuiDeps(
     // ADR-0036: pre-write capture seam (undefined when the hub shares no ledger
     // — buildHarnessEngine forwards it straight to the write tools).
     preimageCapture: buildTuiPreimageCapture(opts, todoProjectDir),
+    // ADR-0136: runtime-persistence binder passthrough. Direct passthrough for
+    // the same reason as the cap/gate holders above: build-engine treats an
+    // absent option and `undefined` the same, so no ternary is needed.
+    runtimePersistence: opts.runtimePersistence,
     // Observability seam: tool summary lines — postToolUse projected into TuiToolEvent.
     ...(opts.onToolEvent ? { hooks: wrapTuiHook(opts) } : {}),
     // Test seams: userHome / cwd overrides (same shape as build-engine's).
@@ -537,11 +575,12 @@ export async function buildTuiDeps(
     ...(opts.workspaceRoot ? { workspaceRoot: opts.workspaceRoot } : {}),
     // Stable productRoot passthrough (absent → build-engine bridges to workspaceRoot).
     ...(opts.productRoot ? { productRoot: opts.productRoot } : {}),
-    // Observability floor: subagent lifecycle / content go per-agent
-    // (subagentsDir); `opts.traceOut` is still passed as
-    // subagentDiagnosticsDir (stderr pointer) for old-path compatibility;
-    // when absent the manager internally follows subagentsDir.
-    subagentsDir,
+    // Observability floor: subagent lifecycle / content go per-agent, rooted by
+    // whichever seam the caller could resolve (a known conversationId, else
+    // projectDir for per-spawn derivation). `opts.traceOut` is still passed as
+    // subagentDiagnosticsDir (stderr pointer) for old-path compatibility; when
+    // absent the manager internally follows the same root.
+    ...subagentsSeam,
     // Same store reader the hub's rebuild path injects, so the initial build
     // and every rebind assemble identically.
     subagentActivityReader: readWorkerInFlightToolName,

@@ -191,6 +191,34 @@ export interface SessionFileV1 {
    *  writers omit the key when usage is null and validate the shape when
    *  present (never silently coerce). */
   readonly lastUsage?: TokenUsage;
+  /** ADR-0136: positive identification of a new-format session. Written ONLY
+   *  by the new creation path (the hub's session bootstrap); absent on every
+   *  pre-existing file, and `schemaVersion` is deliberately NOT bumped for it
+   *  (a bumped constant would relabel every old session as new format and make
+   *  a save rewrite its bytes, which the existing-session transition contract
+   *  forbids). Absence = old format, and the field is preserved verbatim by
+   *  the header spread, so one save cannot silently drop it.
+   *  `sanitizeSessionFile` rewrites `schemaVersion` but never this key. */
+  readonly nativeStateFormat?: number;
+}
+
+/** ADR-0136: the native-state format a new-format session declares. Kept
+ *  separate from `CURRENT_SCHEMA_VERSION` — this identifies the recovery
+ *  contract, not the transcript schema. */
+export const NATIVE_STATE_FORMAT_VERSION = 1 as const;
+
+/**
+ * Whether a session file (or its header) is a new-format session — the
+ * positive identification the new recovery path gates on. Deliberately a plain
+ * boolean over the field's presence: absence means old format, and a future
+ * format version is a host-layer admission decision, not this predicate's
+ * business. Takes the narrow structural shape so both `SessionFileV1` and a
+ * parsed JSONL header answer it.
+ */
+export function isNewFormatSession(file: {
+  readonly nativeStateFormat?: number;
+}): boolean {
+  return typeof file.nativeStateFormat === "number";
 }
 
 export const CURRENT_SCHEMA_VERSION = 5 as const;
@@ -227,6 +255,17 @@ export function validateSessionFile(value: unknown): string | null {
   if (typeof obj["updatedAt"] !== "string") {
     return "updatedAt";
   }
+  return firstInvalidOptionalField(obj);
+}
+
+/** The optional-field half of `validateSessionFile`, split out to keep the
+ *  parent inside the complexity budget. Every entry is absent-valid and
+ *  never-coerced: a present value that does not match its shape fails with that
+ *  field name rather than being repaired into something the downstream readers
+ *  would trust. Order is unchanged from the inline form. */
+function firstInvalidOptionalField(
+  obj: Record<string, unknown>
+): string | null {
   // v3: optional `checkpoints` array — validate shape if present, never
   // silently coerce (a malformed checkpoints field would break downstream
   // rewind computation).
@@ -284,7 +323,20 @@ export function validateSessionFile(value: unknown): string | null {
   if (obj["lastUsage"] !== undefined && !isValidUsageRecord(obj["lastUsage"])) {
     return "lastUsage";
   }
+  // ADR-0136: optional new-format marker — absent is valid (every
+  // pre-existing file), a present value must be a positive integer.
+  if (!isValidNativeStateFormat(obj)) return "nativeStateFormat";
   return null;
+}
+
+/** The new-format marker gate. Never coerced: a malformed marker would let the
+ *  recovery path guess whether this file carries restorable state. */
+function isValidNativeStateFormat(obj: Record<string, unknown>): boolean {
+  const value = obj["nativeStateFormat"];
+  return (
+    value === undefined ||
+    (typeof value === "number" && Number.isInteger(value) && value > 0)
+  );
 }
 
 /** Type guard companion to validateSessionFile for callers that want a boolean. */

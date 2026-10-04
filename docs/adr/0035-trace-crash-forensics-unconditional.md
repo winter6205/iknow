@@ -3,6 +3,8 @@
 Date: 2026-08-28
 Status: accepted
 
+> **Scoped amendment (2026-10-03, ADR-0136):** The inherited chat content-trace exclusion is superseded for new-format persistent native sessions by [ADR-0136](0136-native-session-checkpoint-architecture.md). This does not weaken this ADR's lifecycle-evidence scope or imply that current orderly shutdown proves abnormal-host worker termination. Implementation and acceptance remain pending.
+
 Background: the retrospective of a worker-startup-instant-crash PR found that the chat REPL entry defaulted subagent trace to Noop (`build-engine.ts:374-380` / `cli.ts:277-286`) — after an instant crash there was zero on-disk evidence, and incident forensics depended entirely on the serve/TUI entries. Decision: the three lifecycle event kinds `subagent_spawn`/`subagent_state_change`/`subagent_stop` plus a crash-stderr pointer file (`<traceDir>/stderr/<taskId>.log`, masked, 1MiB cap) are written unconditionally at every product entry; the exclusion scope of ADR-0003 D10 "chat REPL does no trace" is **narrowed to content trace** (payload surfaces such as llm_call/turn/tool_call). Lifecycle metadata lines are tiny (measured ~400-600B/line) and do not trigger the interactive-boundary problem that decision originally avoided (write boundaries under ctrl-c / session switching are content-surface semantics).
 
 **Positive / Applied:** reproducing this class of instant crash at any entry now leaves an on-disk evidence chain (structured error fields + full stderr pointer + tail summary); debuggers no longer depend on remembering entry-point switches.

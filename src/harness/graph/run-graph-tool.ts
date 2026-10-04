@@ -35,11 +35,18 @@ import { safeEmitStream } from "../stream.js";
 import type { GraphProgressSnapshot } from "./progress.js";
 import { createGraphProgressTracker } from "./progress.js";
 import { validateGraph, type GraphValidationError } from "./topo.js";
+import { formatNodeError } from "./error-render.js";
 import { runGraph } from "./scheduler.js";
 import { runGraphWithFailureEdges } from "./outcome-scheduler.js";
 import type { FailureEdgeViolation } from "./outcome-scheduler.js";
 import { createSubAgentNodeExecutor } from "./node-executor.js";
 import type { LiveGraphLedger, LiveGraphLedgerHost } from "./ledger.js";
+import type {
+  RuntimeGraphNodeFact,
+  RuntimePersistenceBinder,
+  RuntimePersistenceSink,
+} from "../../shared/runtime-persistence.js";
+import type { AnthropicNativeMessage } from "../model-adapter/types.js";
 import { resolveResidualSubgraph } from "./residual.js";
 import { validateOnFailureEdges } from "./on-failure.js";
 import { createEffortFuse } from "./effort-fuse.js";
@@ -50,6 +57,7 @@ import type {
   GraphSpec,
   NodeContext,
   NodeExecutor,
+  NodeOutcome,
 } from "./types.js";
 
 export interface RunGraphToolDeps {
@@ -75,6 +83,13 @@ export interface RunGraphToolDeps {
    * graph see no change).
    */
   readonly ledger?: LiveGraphLedgerHost;
+  /**
+   * Session-checkpoint plan B: runtime persistence seam. The handler resolves
+   * it per `ctx.conversationId` and records node transitions through it, so a
+   * restarted process does not re-run settled nodes. Absent → no facts
+   * recorded, ledger behavior unchanged.
+   */
+  readonly runtimePersistence?: RuntimePersistenceBinder<AnthropicNativeMessage>;
 }
 
 /** A single node as declared by the model (schema maps one-to-one to this shape). */
@@ -372,38 +387,83 @@ function mergeResidual(
 }
 
 /**
- * Freeze settled ids into the ledger by terminal status. skipped does not
- * freeze; the ledger enforces this at a single point and the handler passes
- * GraphNodeResult.status straight through. Done nodes also write their
- * output into the ledger — the data source for downstream reads.
+ * Is this settlement real? The one definition of that question.
  *
- * On a caller-side cancel, freeze only the genuinely done nodes. Failures
- * on the abort path (the executor's signal.aborted pre-check returning
- * failed, waitFor rejecting as failed under abort) are symptoms of
- * cancellation, not real terminations; freezing them as failed would mean
- * "cancelled = failed-frozen", and the residual-subgraph merge layer would
- * then refuse those ids as frozen-failed, leaving the parent agent unable
- * to rescue unfinished nodes. Since a single run has no "rerun a failed
- * node" semantics, declining to freeze is declining the failed terminal —
- * whether the failure was real is settled by the next residual submission.
- * On a normal settle (no abort), failed still freezes as before.
+ * The in-process ledger freeze and the durable fact are two projections of a
+ * single settlement decision, so they ask here instead of each spelling the
+ * rules out — a rule change cannot land in one projection and miss the other.
  *
- * The fuse path does not reuse cancel's "freeze done only" rule: a failed
- * returned on the fuse path is a **real failure** (sub-agent envelope
- * failed, or entry refused because the fuse tripped), which is semantically
- * different from abort's "cancel-symptom failed". The fuse follows normal
- * settle freeze semantics (both done and failed freeze) — otherwise the
- * next residual subgraph could resubmit those ids and run them again,
- * violating "completed is never replayed" and bypassing mergeResidual's
- * frozen-failed rejection. Cancel semantics (freeze done only) are
- * unchanged — caller-side cancellation is the only branch this function
- * needs to distinguish.
+ *   - `skipped` is not a settlement: the node was never dispatched, and its
+ *     status is a deterministic consequence of an upstream failure that *is*
+ *     recorded, so re-deriving it from validated graph state is the
+ *     continuation rule itself.
+ *   - On a caller-side cancel only `done` is real. A `failed` on the abort
+ *     path (the executor's signal.aborted pre-check returning failed,
+ *     waitFor rejecting as failed under abort) is a symptom of cancellation,
+ *     not a real termination; freezing it as failed would mean "cancelled =
+ *     failed-frozen", and the residual-subgraph merge layer would then refuse
+ *     those ids as frozen-failed, leaving the parent agent unable to rescue
+ *     unfinished nodes. Since a single run has no "rerun a failed node"
+ *     semantics, declining to freeze is declining the failed terminal —
+ *     whether the failure was real is settled by the next residual
+ *     submission.
+ *   - On a normal settle (no abort) `done` and a real `failed` are both real.
+ *     The fuse path is a normal settle and deliberately does not reuse cancel's
+ *     "done only" rule: a failed returned there is a **real failure**
+ *     (sub-agent envelope failed, or entry refused because the fuse tripped),
+ *     so the next residual subgraph must not be able to resubmit it —
+ *     otherwise "completed is never replayed" is violated and mergeResidual's
+ *     frozen-failed rejection is bypassed. Caller-side cancellation is the
+ *     only distinction either projection needs.
  *
- * Only string outputs enter the ledger: the condense layer renders non-
- * string `output` with a `String(...)` fallback, but the ledger is the
- * cross-call durable authority — freezing a `String()`-ified
- * "[object Object]" of an object would later be written into downstream
- * tasks as a real output.
+ * `cancelled` is the flag *as observed by the calling projection*, and the two
+ * projections observe different moments: the fact at the node's own settlement
+ * (`runNodeDurably`), the freeze after the whole graph has converged. So a
+ * settlement can be real at the first moment and unreal at the second — a
+ * failure that settled before a later abort is recorded as a fact while the
+ * ledger declines to freeze it. That asymmetry is deliberate, not a drift bug:
+ * append-only facts are conservative observations, whereas the ledger's cancel
+ * rule is a resubmission policy, and only the fact stream may still say "this
+ * really happened" after the caller has dropped the round.
+ */
+function isRealSettlement(
+  outcome: NodeOutcome,
+  cancelled: boolean
+): outcome is Exclude<NodeOutcome, { readonly status: "skipped" }> {
+  if (outcome.status === "skipped") return false;
+  if (cancelled) return outcome.status === "done";
+  return true;
+}
+
+/**
+ * What a real settlement carries: only a string output travels into either
+ * projection. The condense layer renders a non-string `output` with a
+ * `String(...)` fallback, but the ledger is the cross-call durable authority
+ * and the fact is what a restored session reads — freezing or recording a
+ * `String()`-ified "[object Object]" of an object would later be written into
+ * downstream tasks as a real output.
+ */
+function carriedOutput(outcome: NodeOutcome): string | undefined {
+  if (outcome.status !== "done") return undefined;
+  return typeof outcome.output === "string" ? outcome.output : undefined;
+}
+
+/**
+ * Freeze settled ids into the ledger by terminal status, in one batch pass
+ * after convergence. Done nodes also write their output into the ledger — the
+ * data source for downstream reads.
+ *
+ * This is the in-process, cross-call authority: a cross-call resubmission
+ * reads the ledger, not the fact stream. It is NOT the durability path — a
+ * node's outcome reaches the host's persistence port per node at its own
+ * settlement point (`runNodeDurably`), because a kill inside the scheduler
+ * arrives long before this pass runs.
+ *
+ * Which settlements are real and what a real one carries is decided once, in
+ * `isRealSettlement` and `carriedOutput`; `settlementFact` asks the same two,
+ * so a rule change reaches both projections. What the two do not share is the
+ * moment they ask at — see the `cancelled` note on `isRealSettlement` for the
+ * single asymmetry that follows from it.
  */
 function freezeResults(
   ledger: LiveGraphLedger,
@@ -411,19 +471,136 @@ function freezeResults(
   cancelled: boolean
 ): void {
   for (const result of Object.values(results)) {
-    // Cancel path: only done enters the ledger; failed / skipped stay
-    // available for later residual subgraphs. Fuse path and normal settle
-    // path: done and real failed both enter; skipped is silently ignored by
-    // the ledger's single point.
-    if (cancelled && result.status !== "done") continue;
-    ledger.freeze(
-      result.id,
-      result.status,
-      result.status === "done" && typeof result.output === "string"
-        ? result.output
-        : undefined
-    );
+    if (isRealSettlement(result, cancelled)) {
+      ledger.freeze(result.id, result.status, carriedOutput(result));
+      continue;
+    }
+    // An unreal settlement is split by who has to hear about it, not decided
+    // twice: a never-ran node is still forwarded because the ledger is the one
+    // point that drops it (its `SettleStatus` exists so this pass can hand
+    // `GraphNodeResult.status` over unchanged), while a cancel-symptom
+    // failure never reaches the ledger at all — that id must stay rescuable
+    // for the next residual subgraph.
+    if (result.status === "skipped") {
+      ledger.freeze(result.id, result.status, undefined);
+    }
   }
+}
+
+/**
+ * Node fact for one settlement, the durable twin of what the ledger records
+ * for the same decision: both ask `isRealSettlement` and `carriedOutput`, so
+ * the rules cannot drift, and a real settlement records the same status and
+ * the same string output the ledger would freeze — which is what lets a
+ * restored session and an in-process residual merge read one story. Only the
+ * moment each asks at differs (see `isRealSettlement`).
+ *
+ * A `skipped` node produces nothing for the same reason the ledger does not
+ * freeze it: such a node was never dispatched and its status is a
+ * deterministic consequence of an upstream failure that *is* recorded, so
+ * re-deriving it from validated graph state is the continuation rule itself.
+ *
+ * `undefined` = nothing to record, which leaves this node's dispatch marker as
+ * its last fact: the "dispatched, outcome unknown" state an interrupted run
+ * must be able to tell apart from a node that was never submitted.
+ */
+function settlementFact(
+  nodeId: string,
+  outcome: NodeOutcome,
+  cancelled: boolean
+): RuntimeGraphNodeFact | undefined {
+  if (!isRealSettlement(outcome, cancelled)) return undefined;
+  if (outcome.status === "failed") {
+    return {
+      kind: "graph_node",
+      nodeId,
+      status: "failed",
+      error: outcome.error,
+    };
+  }
+  const output = carriedOutput(outcome);
+  return {
+    kind: "graph_node",
+    nodeId,
+    status: "done",
+    // A done node whose output is not a string is recorded as a status only —
+    // the same rule the freeze applies, asked once.
+    ...(output !== undefined ? { output } : {}),
+  };
+}
+
+/**
+ * Append one fact; a rejection becomes a failed `NodeOutcome` instead of a
+ * throw. Both schedulers already turn a node throw into that same outcome, so
+ * the graph's shape is unchanged — but the message says the node's state could
+ * *not be recorded*, which is the difference between "the work failed" and
+ * "the work's outcome is not durable". Dependents are then skipped by the
+ * scheduler's own fail-fast, so no dependent execution ever runs on state that
+ * was not written. No retry: re-attempting is an unbounded loop over a failing
+ * writer, and whether to try again is the host's call, not this handler's.
+ */
+async function appendNodeFact(
+  sink: RuntimePersistenceSink<AnthropicNativeMessage>,
+  fact: RuntimeGraphNodeFact,
+  undurable: string
+): Promise<NodeOutcome | undefined> {
+  try {
+    await sink.appendOperationFact(fact);
+    return undefined;
+  } catch (err) {
+    return {
+      status: "failed",
+      error: `run_graph: ${undurable}: ${formatNodeError(err)}`,
+    };
+  }
+}
+
+interface DurableNodeRun {
+  /** Host sink for this call; absent = nothing is wired, no facts are written. */
+  readonly sink: RuntimePersistenceSink<AnthropicNativeMessage> | undefined;
+  readonly nodeId: string;
+  /** Whether the caller has cancelled by the time the node settles. */
+  readonly cancelled: () => boolean;
+  /** The node's real work, already gated by the abort / fuse pre-checks. */
+  readonly run: () => Promise<NodeOutcome>;
+}
+
+/**
+ * One node's whole durable lifecycle, awaited at both ends: mark dispatched
+ * *before* the spawn, record the settlement *after* it returns.
+ *
+ * Why not the post-convergence pass: freezing a run's results once the last
+ * wave finished loses every already-settled node to a kill anywhere inside the
+ * scheduler, and it cannot distinguish a node that was dispatched and
+ * interrupted from one that was never submitted. Both facts are per node, so
+ * both are written per node here.
+ *
+ * Ordering is per node and comes from these two awaits alone — no lock, no
+ * queue, no second journal. Cross-node order is the host's writer queue's
+ * business, and the handler deliberately has no per-conversation mutex
+ * (run-graph-concurrency.test.ts pins that).
+ */
+async function runNodeDurably(opts: DurableNodeRun): Promise<NodeOutcome> {
+  const { sink } = opts;
+  // No sink: `run()` is invoked synchronously and its promise returned as-is,
+  // so the unwired path adds no await and neither changes behaviour nor
+  // reorders spawns inside a wave.
+  if (sink === undefined) return opts.run();
+  const undispatched = await appendNodeFact(
+    sink,
+    { kind: "graph_node", nodeId: opts.nodeId, status: "running" },
+    `node "${opts.nodeId}" was not started because its dispatch could not be recorded`
+  );
+  if (undispatched !== undefined) return undispatched;
+  const outcome = await opts.run();
+  const fact = settlementFact(opts.nodeId, outcome, opts.cancelled());
+  if (fact === undefined) return outcome;
+  const unrecorded = await appendNodeFact(
+    sink,
+    fact,
+    `node "${opts.nodeId}" finished as ${outcome.status} but that outcome could not be recorded`
+  );
+  return unrecorded ?? outcome;
 }
 
 export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
@@ -533,6 +710,10 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
       const byId = new Map(nodes.map((n) => [n.id, n]));
       const signal = ctx?.signal;
       const parentTurnId = ctx?.turnId;
+      // Runtime-state sink for this call, resolved once after both validation
+      // gates so a refused submission never touches the persistence authority.
+      // Absent sink → no facts and byte-identical behavior (see runNodeDurably).
+      const factSink = deps.runtimePersistence?.bind(ctx?.conversationId);
       // The effort fuse is installed only on the failure-edge scheduler
       // path: the plain Kahn path enters each id at most once, no counting.
       const fuse = hasFailureEdges ? createEffortFuse() : undefined;
@@ -568,12 +749,22 @@ export function createRunGraphTool(deps: RunGraphToolDeps): AciToolDef {
         const augmentedCtx: NodeContext = Object.freeze({
           outputs: Object.freeze({ ...ledgerOutputs, ...nodeCtx.outputs }),
         });
-        return createSubAgentNodeExecutor({
-          manager: deps.manager,
-          plans: { [id]: { task: renderTask(node, augmentedCtx) } },
-          ...(signal ? { signal } : {}),
-          ...(parentTurnId !== undefined ? { parentTurnId } : {}),
-        })(id, augmentedCtx);
+        // Past both gates, so a dispatched marker really means a spawn
+        // followed: record the node's dispatch and its settlement through the
+        // host's port instead of letting one post-convergence pass speak for
+        // the whole run.
+        return runNodeDurably({
+          sink: factSink,
+          nodeId: id,
+          cancelled: () => signal?.aborted === true,
+          run: () =>
+            createSubAgentNodeExecutor({
+              manager: deps.manager,
+              plans: { [id]: { task: renderTask(node, augmentedCtx) } },
+              ...(signal ? { signal } : {}),
+              ...(parentTurnId !== undefined ? { parentTurnId } : {}),
+            })(id, augmentedCtx),
+        });
       };
       const tracker = createGraphProgressTracker(spec.nodes);
       try {

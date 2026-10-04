@@ -18,8 +18,12 @@
  *
  * No imports from model-adapter / tools: literal unions are redefined with
  * JSDoc pointers to the source files, keeping this bounded context decoupled
- * (same precedent as loop-trace.ts).
+ * (same precedent as loop-trace.ts). `TraceBodyRef` is the one import, from
+ * the neutral `shared/trace-body-contract.ts`, because the body contract is
+ * itself shared with the traceserver read side and cannot be defined twice.
  */
+
+import type { TraceBodyRef } from "../../shared/trace-body-contract.js";
 
 export type TraceStatus = "ok" | "error";
 
@@ -84,6 +88,45 @@ export type CleanupTraceEvidence =
       readonly task_id?: string;
     };
 
+/**
+ * One governed SDK invocation's evidence as the caller observed it: the raw
+ * request body at the dispatch boundary. `recordLlmCall` content-addresses
+ * every value into the session-local pool — the caller holds no trace IO.
+ *
+ * Structurally compatible with the adapter's `SdkDispatchEvidence`, which this
+ * bounded context does not import (header rule).
+ */
+export interface DispatchEvidenceInput {
+  readonly invocationId: string;
+  readonly stream: boolean;
+  readonly messages: ReadonlyArray<unknown>;
+  readonly system?: string;
+  readonly tools?: ReadonlyArray<unknown>;
+}
+
+/**
+ * Persisted form of `DispatchEvidenceInput`: each body retained as an
+ * immutable, masked, trace-permitted blob. `system` / `tools` are absent keys
+ * when the invocation did not carry them — never null, never an empty body.
+ *
+ * `outcome` is the settled verdict for THIS invocation, written on every entry
+ * so no entry can be read without one (ADR-0136 D8: a rejected attempt stays
+ * failed-attempt evidence, never an inferred success). A row with status `ok`
+ * carries `ok` on its last entry and `failed` on every earlier one; a row with
+ * status `error` carries `failed` on all of them.
+ */
+export interface DispatchEvidenceEntry {
+  readonly invocationId: string;
+  readonly stream: boolean;
+  readonly messages: TraceBodyRef;
+  readonly system?: TraceBodyRef;
+  readonly tools?: TraceBodyRef;
+  readonly outcome: DispatchEvidenceOutcome;
+}
+
+/** Settled verdict of one governed invocation; a non-ok row is all-failed. */
+export type DispatchEvidenceOutcome = "ok" | "failed";
+
 export interface LlmCallRecord {
   startedAt: string;
   endedAt: string;
@@ -105,6 +148,17 @@ export interface LlmCallRecord {
    */
   messagesCaptured: boolean;
   messages?: ReadonlyArray<unknown>;
+  /**
+   * Exact final SDK request evidence, one entry per governed invocation in
+   * emission order. Distinct from `messages`: that field is the engine's
+   * pre-projection state, this one is the post-projection request object.
+   *
+   * One model step can hold several invocations (transport retry re-enters
+   * the model call, sequentially, before the step settles), so the row's
+   * `status` describes only the settled outcome. The per-attempt verdict
+   * lives on each persisted entry instead — see `DispatchEvidenceEntry.outcome`.
+   */
+  dispatchEvidence?: ReadonlyArray<DispatchEvidenceInput>;
   status: TraceStatus;
   error?: TraceError;
   /**

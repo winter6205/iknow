@@ -32,8 +32,11 @@ _Avoid_: `spawn_subagent` 的 `model` 参数；父模型当次指定；第二套
 **rewind head**: 落盘的当前头指针（transcript 某条事件 id）。rewind 只改这个指针，不截断 JSONL。进程内工作副本跟它走。
 _Avoid_: 只在内存里 fork；用 `messagesCount` 当下标 SSOT
 
-**代码前像**: 一次成功的 `edit_file` / `write_file` / `symbol-mutate` 改盘之前的文件字节。按 sha256 放在该会话文件夹的 `code-snapshots/`，引用（相对当时活 **taskRoot** 的路径、根身份、前像 sha、后像 sha、写入前该路径是否不存在）写在产生这次写入的转录本事件上。ADR-0121。
-_Avoid_: checkpoint 快照；trace **内容寻址正文池**；整树 shadow repo；用目录扫描当恢复顺序；用空前像字节推断「新建」
+**published checkpoint**: A session-owned, fully published recovery point referencing validated immutable native context and execution state, anchored in the existing event ID/parent/head history. It restores saved state and reconciles later facts without proving task success, replaying execution, or undoing external effects; ADR-0136 defines the accepted target contract.
+_Avoid_: interruption index alone; trace as recovery state; a second history or branch authority; an in-flight memory snapshot treated as published
+
+**代码前像**: The raw bytes captured before a supported file write, with prior absence recorded separately for a new path. Captured pre/post bodies remain in the session's `code-snapshots/`; ADR-0136 adds durable pre-write per-file operation associations for restart reconciliation while ADR-0121 continues to govern explicit manual rewind and capture opt-out.
+_Avoid_: whole-workspace checkpoint; redacted trace payload; shadow repository; filesystem-scan chronology; inferring prior absence from empty bytes or whole-tool success from a matching file
 
 **代码回退**: 沿被放弃的 head 链（含该段内的工人转录本）逆放 **代码前像**；同一路径只属于这一段里的一条转录本、当前字节等于该链最后一次已捕获后像、且活 **taskRoot** 身份一致时，才写回这个活 **taskRoot**（写入前路径不存在则删除该路径，否则写回前像字节）。跨多条转录本的同一路径、漂移或根身份不符则跳过并写入回执；前像 blob 读不到则工作区与 **rewind head** 都不变。ADR-0121。
 _Avoid_: 把 **rewind head** 移动当成已经写回工作区；bash 改动也算已捕获；挂文件监控补 bash 盲区；用事件时间戳或「父链后面接工人链」给同一路径排总序；写到会话文件的 workspaceRoot 上
@@ -47,11 +50,11 @@ _Avoid_: 把模型交付物放进来；当第五个根角色（稳定根清单�
 **后台任务登记（background task registry）**: 活账本 `…/projects/<slug>/tasks/<task_id>.{json,log}`，与会话文件夹同 **home 项目树**、不进 conversation 叶子。池根同会话池。ADR-0021 / ADR-0088。
 _Avoid_: `<workspaceRoot>/.iknow/tasks`；按 checkout 分片；写进会话文件夹
 
-**模型实际所见（what the model saw）**: trace `llm_call.messages` 的语义——那一次调用真正送进模型的累计消息集，含 `<agent_status>` 尾部注入、worker prior messages、compaction 后的摘要视图与 mask 形态。与 **session transcript** **故意不相等**（实测同一会话 `agent_status` 在 trace 14 次 / transcript 11 次），故 trace 不得引用 transcript 来重建它：从增量事件流重算累计数组是**重算不是查表**，会漂移。「所见即所填」不变量的 SSOT 是 ADR-0036（它据此否决 delta/off 写侧模式），不是 ADR-0014。ADR-0036 / ADR-0071。
-_Avoid_: 用 transcript 当 trace 正文源；把两者当同一份记录的两种投影；为省空间截断它；把这个不变量溯源到 ADR-0014（那是 subagent spawn 语义，ADR-0036 误引）
+**模型实际所见（what the model saw）**: The system instructions, complete advertised tool definitions, and ordered effective messages in the exact request supplied to a governed final provider/SDK invocation, retained through trace-permitted representations under existing redaction rules. This request evidence is distinct from the session transcript and native recovery context; it is not a provider receipt or a deterministic replay promise (ADR-0036 / ADR-0071 / ADR-0136).
+_Avoid_: reconstructing from transcript or current configuration; an earlier pre-projection engine state; hashes without retained bodies; treating observed tool calls as the advertised tool definitions
 
-**内容寻址正文池（blobs）**: 会话文件夹内的 `blobs/<sha256>`——正文 mask 后另存**一份**、定长 sha256 当文件名、`flag:"wx"` write-if-missing，读侧按 sha 取回原文。哈希在这里是**命名用法不是摘要用法**：原文一字不少地存着，没有压缩也没有丢失；寿命 = 会话文件夹，删文件夹即回收（承接 ADR-0036 悬置未细化的 rotation orphans 规则）。ADR-0036 / ADR-0071。
-_Avoid_: 当全局共享池（那要自造引用计数 / GC）；当压缩或摘要；让 trace 引用 transcript 正文来代替它
+**内容寻址正文池（blobs）**: The session-local immutable retained-body pool at `blobs/<sha256>`, where identical represented bytes reuse one body and hashes address retained payloads rather than replace them. ADR-0136 extends it to native recovery and trace-permitted representations with separate reader authority and failure contracts; trace is masked before addressing, differently transformed content stays distinct, and lifetime remains the session folder (ADR-0036 / ADR-0071).
+_Avoid_: global deduplication or a second history; digest-only evidence; substituting transcript reconstruction; using a masked trace body as native recovery state; exposing the whole raw pool through trace reading
 
 **continue_pending**: 截断后在**同一会话**把未完成的工具环接着跑完——人对齐路径是 **`/continue`**（skip-append：不追加新任务 user）；有 pending 时的 NL 白名单是次入口。先对人停住（TUI 典型 **Esc**，2026-09-18 键位迁移前是 Ctrl+C）；`run` 前可对盘上 closeout 投影补悬空 `tool_use`。**本次**进模型的 prior 可去掉末尾 **interrupt system message**，盘上那句仍保留。空 Enter 不是续跑；忙着续跑只提示、不顺带 abort。**不是** ACI 工具。
 _Avoid_: continue 工具；把空回车当续跑；续跑时从盘上删掉 interrupt；忙着 `/continue` 自动 abort；把续跑当传输重试；新建 session 挂旧历史；无确认自动续跑
@@ -824,7 +827,7 @@ _Avoid_: 把平台数值写进桥核；把事实页当 spec
 
 ## Relationships
 
-- **代码前像 vs 内容寻址正文池**: 前像是工作区回退载荷，目录 `code-snapshots/`；正文池是 trace 消息体，目录 `blobs/`。失败语义不同：前像写失败则该次写工具失败，trace blob 写失败可吞掉该行。ADR-0121 / ADR-0071。
+- **代码前像 vs 内容寻址正文池**: Raw per-write file payloads stay in `code-snapshots/`; `blobs/` can hold native recovery and trace-permitted represented bodies under ADR-0136. Required recovery/file-evidence writes block dependent execution on failure, while trace remains best-effort; shared bytes do not merge those contracts (ADR-0121 / ADR-0071 / ADR-0136).
 - **代码回退 vs rewind head**: 回退按单条转录本链写回活 **taskRoot**；head 只移动指针。跨转录本同路径、漂移或根身份不符仍移动 head；前像 blob 读不到则 head 不动。ADR-0121 / ADR-0027。
 - **IM 桥 vs SessionHub**: 桥只做 Session HTTP 的外部消费者；session 文件的写者仍只有 hub 所在进程。ADR-0120 / ADR-0110。
 - **IM 桥 vs chat REPL**: 桥走 `iknow serve`；chat REPL 自装配、不经 hub，不在这条路径上。

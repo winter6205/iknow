@@ -75,6 +75,12 @@ function resumeRefusalMessage(err: SubAgentResumeError): string {
       return `${LABEL}: ${err.kind} — task ${err.taskId} is still running; to correct its course, use subagent_stop first, then continue once it reaches a terminal state`;
     case "no_transcript":
       return `${LABEL}: ${err.kind} — task ${err.taskId} has no worker transcript on disk, so its dialogue cannot be replayed; dispatch a fresh spawn_subagent with the full context instead`;
+    case "prior_process_unconfirmed":
+      // The former worker's process is either still running or can no longer
+      // be told apart from an unrelated process, so its dialogue must not be
+      // resumed into a second process. Either way the remedy is the same:
+      // settle the old process first, then retry.
+      return `${LABEL}: ${err.kind} — the previous worker process of task ${err.taskId} is not proven stopped${err.detail === undefined ? "" : ` (${err.detail})`}, so continuing it would risk two live processes behind one task_id; stop or end that process first, then retry the continuation`;
     case "missing_task":
       return `${LABEL}: ${err.kind} — the resume request carried no task text; retry with a non-empty message`;
     case "not_found":

@@ -8,6 +8,7 @@ import {
   type Dirent,
 } from "node:fs";
 import { basename, dirname, join } from "node:path";
+import { BLOBS_DIR_NAME } from "../../shared/session-tree-names.js";
 
 export const TRACE_ROTATION_ENV = "IKNOW_TRACE_ROTATION";
 export const DEFAULT_TRACE_ROTATION = {
@@ -93,8 +94,7 @@ function addFile(files: ManagedFile[], path: string): void {
 function isProtectedFile(path: string): boolean {
   return (
     basename(path) === "subagent.jsonl" ||
-    (basename(path).endsWith(".log") &&
-      basename(dirname(path)) === "stderr")
+    (basename(path).endsWith(".log") && basename(dirname(path)) === "stderr")
   );
 }
 
@@ -136,10 +136,7 @@ function scanForErrorStatus(file: ManagedFile): ErrorScanResult {
       bytesRead < ERROR_SCAN_MAX_BYTES &&
       linesRead < ERROR_SCAN_MAX_LINES
     ) {
-      const amount = Math.min(
-        chunk.length,
-        ERROR_SCAN_MAX_BYTES - bytesRead
-      );
+      const amount = Math.min(chunk.length, ERROR_SCAN_MAX_BYTES - bytesRead);
       const count = readSync(descriptor, chunk, 0, amount, null);
       if (count === 0) {
         if (pending.length > 0 && linesRead < ERROR_SCAN_MAX_LINES) {
@@ -181,7 +178,11 @@ function isActive(file: ManagedFile, now: number, windowMs: number): boolean {
   return now - file.mtimeMs < windowMs;
 }
 
-function deleteIfUnchanged(file: ManagedFile, now: number, windowMs: number): boolean {
+function deleteIfUnchanged(
+  file: ManagedFile,
+  now: number,
+  windowMs: number
+): boolean {
   try {
     const current = statSync(file.path);
     if (
@@ -202,7 +203,10 @@ function deleteIfUnchanged(file: ManagedFile, now: number, windowMs: number): bo
   }
 }
 
-function removeOrphanBlobs(dir: string, retained: readonly ManagedFile[]): void {
+function removeOrphanBlobs(
+  dir: string,
+  retained: readonly ManagedFile[]
+): void {
   if (retained.length === 0) return;
   const oldestSessionMtime = Math.min(
     ...retained
@@ -211,7 +215,7 @@ function removeOrphanBlobs(dir: string, retained: readonly ManagedFile[]): void 
   );
   if (!Number.isFinite(oldestSessionMtime)) return;
 
-  const blobsDir = join(dir, "blobs");
+  const blobsDir = join(dir, BLOBS_DIR_NAME);
   let entries: Dirent[];
   try {
     entries = readdirSync(blobsDir, { withFileTypes: true });
@@ -258,8 +262,7 @@ export function maybeRotate(
       (file) => isSessionFile(file) && !isActive(file, now, activeWindowMs)
     )
     .sort(
-      (left, right) =>
-        left.bytes - right.bytes || left.mtimeMs - right.mtimeMs
+      (left, right) => left.bytes - right.bytes || left.mtimeMs - right.mtimeMs
     );
 
   for (const file of candidates) {

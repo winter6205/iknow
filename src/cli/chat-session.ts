@@ -29,7 +29,11 @@ import {
 } from "./slash.js";
 import type { SessionContext } from "../shared/schema.js";
 import { isIknowError, ValidationError } from "../shared/errors.js";
-import { MaxTurnsExceeded, errorMessage } from "../harness/errors.js";
+import {
+  MaxTurnsExceeded,
+  errorMessage,
+  unwrapRuntimeStateCause,
+} from "../harness/errors.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import { resolveSessionFenceTmp } from "../harness/sandbox/fence-tmp.js";
 import { maxTurnsNotice } from "./max-turns.js";
@@ -102,11 +106,13 @@ import {
 } from "../harness/sandbox/fs-mode.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
+import { seedRestoredGraphNodes } from "../harness/graph/ledger.js";
 import {
   SessionStore,
   type SessionStoreError,
   type SessionFileV1,
   CURRENT_SCHEMA_VERSION,
+  NATIVE_STATE_FORMAT_VERSION,
   extractTitle,
   appendCheckpoint,
   decideCheckpointPersist,
@@ -115,9 +121,28 @@ import {
   toInterruptReason,
   validateGoalText,
   type GoalState,
+  type SessionRecoveryReport,
 } from "../session-api/store/index.js";
+// The shared host-side session-open contract (ADR-0136 §4): the live write root
+// decision and the recovery classification every host shares.
+import {
+  formatRecoveredOperations,
+  isTypedStoreError,
+  openSessionWithRecovery,
+  resolveLiveRoot,
+  storeErrorDetail,
+  type SessionOpenRecovery,
+} from "../session-api/recovery-host.js";
 // Deep import: internal persist-rule helper, deliberately not on the store barrel.
 import { persistedLastUsage } from "../session-api/store/schema.js";
+import { createRuntimePersistenceBinder } from "../session-api/store/index.js";
+import type { RuntimePersistenceSink } from "../shared/runtime-persistence.js";
+import { createSerialQueue } from "../util/serial-queue.js";
+import { isNativeStatePortError } from "../shared/native-state-port.js";
+// Deep import: the recognition layer is not on the harness barrel (same reason
+// as loop-engine's own use) — this seam must substitute secrets exactly as the
+// engine will, or the committed query would not match what the model receives.
+import { recognize } from "../harness/secret-roundtrip/index.js";
 import { isTurnQuery } from "../session-api/turn-projection.js";
 import { projectVerifyHumanView } from "../session-api/verify-human-view.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
@@ -423,6 +448,22 @@ export type ChatLineContext = {
   checkpointStore?: SessionStore;
   /** T1: resolved root persisted when a fresh checkpoint file is bootstrapped. */
   workspaceRoot?: string;
+  /**
+   * ADR-0136: this conversation is NEW format — the chat path is creating it
+   * rather than continuing one anchored by `--resume`. Decides both the
+   * `nativeStateFormat` stamp at file creation and whether an accepted input
+   * publishes a native state. Absent (ask / test entries, and every resumed
+   * session) → old-format posture: nothing stamped, nothing published.
+   */
+  newFormatSession?: boolean;
+  /**
+   * ADR-0136 §3: commit the accepted input BEFORE the dependent model request
+   * is issued. Assembled by runChatSession from the real store; absent (ask /
+   * test entries) → nothing committed at this boundary and the turn runs
+   * exactly as before. The saved-state publication at the same boundary is the
+   * engine's own, not this seam's.
+   */
+  commitAcceptedInput?: ChatAcceptedInputCommit;
   /**
    * ADR-0135: the current user turn's violation scope (counter + owned-work
    * ledger + escalation abort). Replaced at the start of every query line and
@@ -1773,23 +1814,53 @@ async function runChatQueryLine(
         // priorMessages / onStream — the closure must supply chat's
         // priorMessages and wrappedOnStream, or multi-turn history is lost
         // and streaming preview breaks.
+        //
+        // ADR-0136 §3: the accepted input is committed HERE — after the
+        // prefetched text is known and BEFORE the engine can issue its first
+        // model request, which is the request whose failure must not be able to
+        // discard the query. A commit failure propagates out of this round, so
+        // the dependent request is never issued and the turn's catch renders
+        // the typed store error. Both the plain turn and every verify round
+        // enter through this one closure, so neither can bypass the boundary.
+        //
+        // The narrow-seam question the hub had to answer does not arise on this
+        // path: every runHarness here carries accepted user text — a query
+        // line, or a verify round's own user text. There is no silent host wake
+        // that would commit an input nobody typed.
+        const runAcceptedInput = async (
+          effective: string,
+          o: {
+            readonly signal?: AbortSignal;
+            readonly priorMessages?: ReadonlyArray<AnthropicNativeMessage>;
+            readonly onStream?: (event: HarnessStreamEvent) => void;
+          }
+        ) => {
+          const roundPriors = o.priorMessages ?? priorMessages;
+          if (ctx.commitAcceptedInput !== undefined) {
+            await ctx.commitAcceptedInput({ effectiveText: effective });
+          }
+          const outcome = await runHarness(effective, ctx.deps, o.signal, {
+            priorMessages: roundPriors,
+            onStream: o.onStream ?? wrappedOnStream,
+          });
+          acknowledgeChatSubagentDrain(ctx, pendingDrain.pendingText);
+          return outcome;
+        };
         const runOutcome =
           verifyDispatch !== undefined && ctx.verifyConfig !== undefined
             ? await runVerifyLoop({
                 runFn: (text, o) =>
-                  attachPrefetch(text).then(async (effective) => {
-                    const outcome = await runHarness(
-                      effective,
-                      ctx.deps,
-                      o?.signal,
-                      {
-                        priorMessages: o?.priorMessages ?? priorMessages,
-                        onStream: o?.onStream ?? wrappedOnStream,
-                      }
-                    );
-                    acknowledgeChatSubagentDrain(ctx, pendingDrain.pendingText);
-                    return outcome;
-                  }),
+                  attachPrefetch(text).then((effective) =>
+                    runAcceptedInput(effective, {
+                      ...(o?.signal !== undefined ? { signal: o.signal } : {}),
+                      ...(o?.priorMessages !== undefined
+                        ? { priorMessages: o.priorMessages }
+                        : {}),
+                      ...(o?.onStream !== undefined
+                        ? { onStream: o.onStream }
+                        : {}),
+                    })
+                  ),
                 userText: verifyDispatch.userText,
                 completionMode: verifyDispatch.completionMode,
                 config: ctx.verifyConfig,
@@ -1811,19 +1882,15 @@ async function runChatQueryLine(
                         manager: ctx.subagentManager,
                       }),
               })
-            : await attachPrefetch(query).then(async (effective) => {
-                const outcome = await runHarness(
-                  effective,
-                  ctx.deps,
-                  chatTurnSignal(ctx),
-                  {
-                    priorMessages,
-                    onStream: wrappedOnStream,
-                  }
-                );
-                acknowledgeChatSubagentDrain(ctx, pendingDrain.pendingText);
-                return outcome;
-              });
+            : await attachPrefetch(query).then((effective) =>
+                runAcceptedInput(effective, {
+                  signal: chatTurnSignal(ctx),
+                  priorMessages,
+                  ...(wrappedOnStream !== undefined
+                    ? { onStream: wrappedOnStream }
+                    : {}),
+                })
+              );
         const { result, trace } = runOutcome;
         // Ctrl+C interrupt feedback — prompt whether the checkpoint was
         // saved, only when cancelled. The cancelled judgment matches
@@ -1885,6 +1952,15 @@ async function runChatQueryLine(
         // no usable turnCount / messages, and appendCheckpoint can't
         // produce delta>0).
         if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+          await appendChatTurnOutcome({
+            store: ctx.checkpointStore,
+            conversationId: ctx.state.conversationId,
+            result: s.result,
+            priorMessages: s.priorMessages,
+            // `ctx.state.messages` is only reassigned AFTER this hook (see the
+            // continuation below), so the post-run list is `result.messages`.
+            finalMessages: s.result.messages,
+          });
           await persistChatSessionCheckpoint({
             store: ctx.checkpointStore,
             conversationId: ctx.state.conversationId,
@@ -2161,7 +2237,8 @@ async function processSlash(opts: {
         store,
         conversationId,
         effect,
-        ctx.workspaceRoot
+        ctx.workspaceRoot,
+        ctx.newFormatSession === true
       );
       if (pinned.stderr !== undefined || ctx.verifyConfig === undefined) {
         return pinned;
@@ -2283,7 +2360,8 @@ async function goalPin(
   store: SessionStore,
   conversationId: string,
   effect: Extract<SlashEffect, { type: "goal" }>,
-  workspaceRoot?: string
+  workspaceRoot: string | undefined,
+  newFormat: boolean
 ): Promise<ProcessChatLineResult> {
   const text = effect.text.trim();
   if (text.length === 0) {
@@ -2297,7 +2375,12 @@ async function goalPin(
   if (invalid !== null) {
     return { quit: false, output: "", stderr: `goal rejected: ${invalid}` };
   }
-  const loaded = await loadGoalTarget(store, conversationId, workspaceRoot);
+  const loaded = await loadGoalTarget(
+    store,
+    conversationId,
+    workspaceRoot,
+    newFormat
+  );
   if (!loaded.ok) return loaded.result;
   return savePinnedGoal(
     store,
@@ -2314,7 +2397,8 @@ async function goalPin(
 async function loadGoalTarget(
   store: SessionStore,
   conversationId: string,
-  workspaceRoot?: string
+  workspaceRoot: string | undefined,
+  newFormat: boolean
 ): Promise<
   | { ok: true; file: SessionFileV1 }
   | { ok: false; result: ProcessChatLineResult }
@@ -2330,7 +2414,9 @@ async function loadGoalTarget(
         ok: true,
         file: freshSessionFile(
           conversationId,
-          requireSessionWorkspaceRoot(workspaceRoot)
+          requireSessionWorkspaceRoot(workspaceRoot),
+          false,
+          newFormat
         ),
       };
     }
@@ -2345,17 +2431,28 @@ async function loadGoalTarget(
   }
 }
 
-/** Minimal legal SessionFileV1 (shape consistent with persistChatSessionCheckpoint's reconstruction). */
+/** Minimal legal SessionFileV1 — the ONE place a session file is created on
+ *  this path (the `/goal` fresh pin, the in-turn commit bootstrap, and the
+ *  post-run checkpoint write all route here, so the ADR-0136 marker cannot be
+ *  stamped at one site and forgotten at another).
+ *
+ *  `newFormat` stamps `nativeStateFormat` and is true only for a session this
+ *  host itself is creating. `store.save` never stamps it, so this is the only
+ *  place an old-format session could be relabelled — which is what keeps
+ *  `unsupported_format` honest for every session the chat path did not create
+ *  (SC23). */
 function freshSessionFile(
   conversationId: string,
-  workspaceRoot: string
+  workspaceRoot: string,
+  jsonMode: boolean,
+  newFormat: boolean
 ): SessionFileV1 {
   const now = new Date().toISOString();
   return {
     schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: conversationId,
     messages: [],
-    jsonMode: false,
+    jsonMode,
     turnCount: 0,
     updatedAt: now,
     title: "",
@@ -2363,6 +2460,7 @@ function freshSessionFile(
     sanitized_at: now,
     checkpoints: [],
     workspaceRoot,
+    ...(newFormat ? { nativeStateFormat: NATIVE_STATE_FORMAT_VERSION } : {}),
   };
 }
 
@@ -2423,13 +2521,184 @@ function typedGoalError(err: unknown, conversationId: string): string {
 }
 
 function formatChatError(err: unknown): string {
+  // ADR-0136: a native-state publication failure is correctness-critical and
+  // the operator has to see WHICH class it was, not only the prose — the code
+  // is what tells "rejected before any write" from "a required write did not
+  // finish", i.e. whether the input itself was kept.
+  //
+  // WHY the unwrap: the engine is the publication owner now, and it raises a
+  // failed sink as `RuntimeStatePersistenceError` carrying the typed port
+  // error in `cause`. Reading only the top-level error would report a bare
+  // wrapper class and lose exactly the distinction above; the wrapper's own
+  // message carries the boundary, so the code comes from the cause and the
+  // text from the wrapper. The hub unwraps the same way through the same
+  // helper, so the two hosts cannot drift into different dialects.
+  const typed = unwrapRuntimeStateCause(err);
+  if (isNativeStatePortError(typed)) {
+    return `错误 [${typed.code}]: ${(err as Error).message}`;
+  }
   if (isIknowError(err)) {
     return `错误 [${err.code}]: ${err.message}`;
+  }
+  // SessionStore typed errors are plain objects by contract, so neither the
+  // `instanceof` branch nor String() below can name them — a garbage --resume id
+  // renders as "[object Object]". Name the kind instead; it is the whole value
+  // of the error.
+  if (isTypedStoreError(err)) {
+    return `错误 [${err.kind}]: ${storeErrorDetail(err)}`;
   }
   if (err instanceof Error) {
     return `错误: ${err.message}`;
   }
   return `错误: ${String(err)}`;
+}
+
+/**
+ * Fail-closed stop for a blocked session-entry recovery (ADR-0136 §4). The
+ * session's selected published state could not be read, and the host refuses
+ * to substitute a transcript projection or an older checkpoint for it — so the
+ * session does not open. The report travels with the error so the
+ * classification stays inspectable by the caller that reports it.
+ */
+export class ChatRecoveryBlockedError extends Error {
+  readonly report: SessionRecoveryReport;
+
+  constructor(report: SessionRecoveryReport) {
+    const status = report.status as { reason: string; detail: string };
+    super(
+      `session ${report.conversationId} recovery blocked (${status.reason}): ${status.detail}`
+    );
+    this.name = "ChatRecoveryBlockedError";
+    this.report = report;
+    Object.setPrototypeOf(this, new.target.prototype);
+  }
+}
+
+/**
+ * Operator-facing recovery line. ONE renderer so the chat path, the TUI, and
+ * the HTTP surface cannot drift into three spellings of the same state, and so
+ * the machine codes stay greppable next to the prose.
+ *
+ * This is operator UI only (SC26): it is written to the operator sink and never
+ * routed into a model prompt, a tool description, or a system instruction.
+ */
+export function formatChatRecoveryStatus(
+  report: SessionRecoveryReport
+): string {
+  const status = report.status;
+  // SC11: the per-file facts behind the verdict travel in the same line, so
+  // "recovered" can never read as "every file is fine" when one tool's whole
+  // result is still unknown.
+  const operations =
+    report.operations.length === 0
+      ? ""
+      : `；文件操作: ${formatRecoveredOperations(report.operations)}`;
+  switch (status.status) {
+    case "recovered":
+      // The published state replaces the context only when the tail after its
+      // anchor was never settled (see `restoredContextOf`). A settled tail is
+      // the turn's own completed protocol and IS kept, so claiming a restore
+      // there would be false. `outcome.state` is the same discriminator the
+      // restore gate uses, so the line cannot drift from the behavior.
+      return report.outcome.state === "unknown"
+        ? `[recovery] recovered — 已恢复 ${report.savedMessageCount} 条已保存上下文${operations}`
+        : `[recovery] recovered — 末轮已结算，保留完整 ${report.savedMessageCount} 条之后的会话历史（已保存状态未覆盖该轮回复）${operations}`;
+    case "needs handling":
+      return `[recovery] needs handling — ${status.handling
+        .map((h) => `${h.relPath} (${h.reason}, ${h.toolUseId})`)
+        .join("; ")}，需人工确认后再继续`;
+    case "blocked":
+      return `[recovery] blocked (${status.reason}): ${status.detail} — 不回退到会话记录重建或更旧的检查点`;
+    case "unsupported_format":
+      return "[recovery] unsupported_format — 该会话早于可恢复的原生状态格式，旧数据未改动；请用新会话继续";
+    case "no_published_state":
+      return "[recovery] no_published_state — 该会话尚未发布过可恢复状态（不是错误）";
+  }
+}
+
+/**
+ * ADR-0136 §4: session-entry recovery for the chat path.
+ *
+ * Runs ONCE per open, at the resume entry — not on every `store.load`, which
+ * this path also calls from the goal auto-loop, `/goal`, and the closing
+ * checkpoint write. The shared host contract does the classifying and takes no
+ * engine deps, which is the structural reason it cannot issue a model or tool
+ * call, resend the saved user input, continue a goal, or relaunch a worker.
+ *
+ * The next turn's context is the SAVED native state
+ * (`recovery.restoredContext`), never a projection of the transcript; the
+ * transcript seed is used only when the contract restored nothing.
+ *
+ * Throws `ChatRecoveryBlockedError` on `blocked`: the host must not open a
+ * session whose selected state is unreadable, because every alternative is a
+ * silent reconstruction.
+ */
+export async function recoverChatSessionEntry(opts: {
+  readonly store: SessionStore;
+  readonly conversationId: string;
+  /** LIVE write root every recorded `relPath` resolves against, from the
+   *  shared `resolveLiveRoot`. */
+  readonly taskRoot: string;
+  /** Identity of that root, from the same derivation the hub's
+   *  `rootIdentityFor` uses (`mainCheckoutOf`) — recovery must not re-derive
+   *  it, or a second derivation could compare unequal to every captured
+   *  identity. */
+  readonly liveRootIdentity: string;
+  /** The transcript projection the resume seed produced; used only for the
+   *  outcomes that restored no state. */
+  readonly seedMessages: ReadonlyArray<AnthropicNativeMessage>;
+  /** Session-scoped live-graph ledger host. Absent → no seeding, and the graph
+   *  scheduler keeps its pre-restore behaviour. */
+  readonly liveGraphLedger?: LiveGraphLedgerHost;
+  /** Operator sink; defaults to stderr. */
+  readonly write?: (line: string) => void;
+}): Promise<{
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly recovery: SessionOpenRecovery;
+}> {
+  const write = opts.write ?? writeErr;
+  const recovery = await openSessionWithRecovery({
+    store: opts.store,
+    conversationId: opts.conversationId,
+    roots: {
+      resolve: () => opts.taskRoot,
+      identityOf: () => opts.liveRootIdentity,
+    },
+    // This entry point owns no worker registry and runs no sweep, so it has
+    // nothing to report from one. The empty result is the contract's explicit
+    // "nothing to sweep" value, NOT a claim that workers are gone: every
+    // restored worker fact still reduces to `needsHandling`, because no stop
+    // evidence is supplied for any of them.
+    sweepOwnedWorkers: async () => ({
+      workers: [],
+      unreadable: [],
+      unrecorded: [],
+      excluded: [],
+    }),
+    onProgress: write,
+  });
+  write(formatChatRecoveryStatus(recovery));
+  if (recovery.status.status === "blocked") {
+    throw new ChatRecoveryBlockedError(recovery);
+  }
+  // Durable graph facts are the only record that survives the process that
+  // wrote them, so the restored per-node view is folded into the live ledger
+  // here — in memory only, once per open, and never on `blocked` (this session
+  // is not opening). The ledger outlives a rebind, so the verdict survives the
+  // engine rebuild a rebind performs.
+  seedRestoredGraphNodes(
+    opts.liveGraphLedger?.ledgerFor(opts.conversationId),
+    recovery.operationFacts?.graphNodes ?? []
+  );
+  // `blocked` already threw and the remaining two outcomes restored nothing,
+  // so the transcript seed stands and the session behaves as it always did.
+  return {
+    messages:
+      recovery.restoredContext === null
+        ? opts.seedMessages
+        : (recovery.restoredContext as ReadonlyArray<AnthropicNativeMessage>),
+    recovery,
+  };
 }
 
 /**
@@ -2444,11 +2713,22 @@ function formatChatError(err: unknown): string {
  *
  * **Failure semantics**: SessionStore.load only throws typed
  * SessionStoreError (not_found | parse_failed | schema_invalid | io_error).
- * All typed errors are **non-blocking** — return empty messages + a warn
- * callback (one stderr line); callers keep the conversationId anchor so
- * later checkpoints still write back to the same `<id>.jsonl` instead of
- * fragmenting into a new id. Unknown throws (defensive — the store only
- * throws typed) are rethrown as-is.
+ * A DAMAGED log is non-blocking — return empty messages + a warn callback (one
+ * stderr line); callers keep the conversationId anchor so later checkpoints
+ * still write back to the same `<id>.jsonl` instead of fragmenting into a new
+ * id. Unknown throws (defensive — the store only throws typed) are rethrown
+ * as-is.
+ *
+ * `not_found` is the exception and it PROPAGATES. Resuming an existing session
+ * is the implemented capability; resuming an id that does not exist was never
+ * implemented, and no status variant describes it — so the typed error is the
+ * whole answer. Degrading here used to print "从空开始（仍锚定 <id> 续写）" and
+ * then die one step later inside `openSessionWithRecovery`, which throws the
+ * same `not_found`: the operator got a promise and a crash from one command.
+ * It would also have been the wrong outcome if that throw were absent, because
+ * continuing would let a checkpoint CREATE the very session the operator asked
+ * to resume. This matches what the TUI entry already does — its `openSession`
+ * calls the same host contract and rejects rather than creating.
  */
 export async function seedResumeMessages(opts: {
   readonly store: SessionStore | undefined;
@@ -2471,6 +2751,10 @@ export async function seedResumeMessages(opts: {
       throw err;
     }
     const kind = (err as SessionStoreError).kind;
+    // EXIT: entry-addressed-a-missing-conversation — matches the TUI entry and
+    // `openSessionWithRecovery`. Only a DAMAGED log degrades to a warning; a
+    // missing conversation is rejected, never turned into a new session.
+    if (kind === "not_found") throw err;
     const id = opts.id;
     const warnFor = (k: SessionStoreError["kind"]) => (): void =>
       writeErr(`恢复会话 ${id} 失败: [${k}]，从空开始（仍锚定 ${id} 续写）`);
@@ -2508,6 +2792,62 @@ export async function seedResumeMessages(opts: {
  * continue — never crash the REPL, never block exit (the second Ctrl+C
  * only bounded-waits 1s).
  */
+/**
+ * ADR-0126: persist the settled turn's terminal outcome — the chat REPL's
+ * mirror of `SessionHub.appendTurnOutcome`. Anchored on the persisted head
+ * (the turn's terminal message event), so the identity stays stable for a
+ * `/continue` that appended no human message.
+ *
+ * Why the chat path needs this at all: session-entry recovery (ADR-0136 §4)
+ * replaces the model context with the published native state ONLY when the
+ * post-anchor tail was never settled, and it reads "settled" from this
+ * record. Without it every clean chat resume read as unsettled, so recovery
+ * discarded the last completed assistant turn and a resumed session could not
+ * recall its own previous answer. The hub already wrote it; this closes the
+ * gap rather than inventing a second settled-ness signal.
+ *
+ * Skipped when the turn appended nothing: the head still points at the
+ * PREVIOUS turn's terminal event, and writing there would overwrite that
+ * turn's outcome with this one's stop reason.
+ */
+async function appendChatTurnOutcome(opts: {
+  readonly store: SessionStore;
+  readonly conversationId: string;
+  readonly result: RunResult;
+  readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+  /** Post-run message list (`result.messages`); `ctx.state.messages` is only
+   *  reassigned after this hook, so it is still the pre-run value here. */
+  readonly finalMessages: ReadonlyArray<AnthropicNativeMessage>;
+}): Promise<void> {
+  if (opts.finalMessages.length <= opts.priorMessages.length) return;
+  const turnId = await readChatTurnHead(opts.store, opts.conversationId);
+  if (turnId === null) return;
+  await opts.store.appendOutcome({
+    id: opts.conversationId,
+    turnId,
+    stopReason: opts.result.stopReason,
+    ...(opts.result.supplierDetail !== undefined
+      ? { supplierDetail: opts.result.supplierDetail }
+      : {}),
+  });
+}
+
+/** The head event to anchor a turn outcome on, or null when there is none to
+ *  anchor to. A first turn's session file does not exist until the checkpoint
+ *  write that follows bootstraps it, so `readHead` answers `not_found` rather
+ *  than null — that is "no terminal event yet", not a failure to report. */
+async function readChatTurnHead(
+  store: SessionStore,
+  conversationId: string
+): Promise<string | null> {
+  try {
+    return await store.readHead(conversationId);
+  } catch (err) {
+    if (isTypedStoreError(err) && err.kind === "not_found") return null;
+    throw err;
+  }
+}
+
 export async function persistChatSessionCheckpoint(opts: {
   readonly store: SessionStore;
   readonly conversationId: string;
@@ -2516,6 +2856,11 @@ export async function persistChatSessionCheckpoint(opts: {
   readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
   /** Resolved root for a new conversation bootstrap. */
   readonly workspaceRoot?: string;
+  /** ADR-0136: this conversation id is one the chat path is CREATING, so a
+   *  file it bootstraps here is stamped `nativeStateFormat`. Omitted on the
+   *  `--resume` path — a resumed session, old format or not, is never
+   *  relabelled (SC23). */
+  readonly newFormat?: boolean;
   /** stderr notice on write failure / corrupted file (silent by default — observer discipline). */
   readonly warn?: (line: string) => void;
 }): Promise<void> {
@@ -2539,19 +2884,12 @@ export async function persistChatSessionCheckpoint(opts: {
       // fields; parse_failed / schema_invalid → the existing file for this
       // conversationId is unusable, rebuild from current progress (an
       // unusable file must not block this turn's write).
-      session = {
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        conversation_id: conversationId,
-        messages: [],
+      session = freshSessionFile(
+        conversationId,
+        requireSessionWorkspaceRoot(workspaceRoot),
         jsonMode,
-        turnCount: 0,
-        updatedAt: new Date().toISOString(),
-        title: "",
-        cwd: requireSessionWorkspaceRoot(workspaceRoot),
-        sanitized_at: new Date().toISOString(),
-        checkpoints: [],
-        workspaceRoot: requireSessionWorkspaceRoot(workspaceRoot),
-      };
+        opts.newFormat === true
+      );
     }
     const now = new Date().toISOString();
     const turnCount = session.turnCount + result.turnCount;
@@ -2613,8 +2951,7 @@ export async function persistChatSessionCheckpoint(opts: {
 
 /**
  * Chat-path in-turn commit hook: append harness-produced messages to the
- * session JSONL log immediately. The chat path has no serialize queue;
- * bare store IO as today.
+ * session JSONL log immediately.
  *
  * On the first commit the JSONL may not exist (new sessions don't pre-write
  * the file before run, or legacy .json-only sessions): bootstrap the file /
@@ -2623,6 +2960,12 @@ export async function persistChatSessionCheckpoint(opts: {
  * session) → use getPriors()' in-memory messages (history before this run).
  * Underlying store IO faults propagate as typed store errors, never
  * swallowed.
+ *
+ * `enqueue` is the host's per-session writer queue, so this append and the
+ * saved-state publication that shares the file are ORDERED against each other
+ * instead of racing — one writer, one order, no second lock. The queue is not
+ * re-entrant and does not need to be: nothing here runs inside a queued task,
+ * and a failed commit still rejects only its own caller.
  *
  * The chat REPL is NOT a preimage-capture host (specs/code-restore.md): its
  * engine assembles no capture port, so nothing feeds a ledger and this hook
@@ -2637,9 +2980,20 @@ export function createChatSessionCommitHook(opts: {
   readonly getPriors: () => ReadonlyArray<AnthropicNativeMessage>;
   /** Resolved root for a new conversation bootstrap. */
   readonly workspaceRoot?: string;
+  /** ADR-0136: stamp the marker on a file this hook bootstraps. True only for
+   *  a conversation the chat path is creating; a `--resume` continuation
+   *  leaves an existing (possibly old-format) session unstamped (SC23). */
+  readonly newFormat?: boolean;
+  /** The per-session writer queue this append must be ordered on. Absent when
+   *  the caller owns no publication seam (direct hook use), where the append is
+   *  then the only writer to the file and needs no ordering. */
+  readonly enqueue?: <T>(work: () => Promise<T>) => Promise<T>;
 }): (messages: ReadonlyArray<AnthropicNativeMessage>) => Promise<void> {
-  const { store, conversationId, jsonMode, getPriors, workspaceRoot } = opts;
-  return async (messages) => {
+  const { store, conversationId, jsonMode, getPriors, workspaceRoot, enqueue } =
+    opts;
+  const append = async (
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): Promise<void> => {
     try {
       await store.appendEvents({
         id: conversationId,
@@ -2663,20 +3017,12 @@ export function createChatSessionCommitHook(opts: {
       // Same shape as persistChatSessionCheckpoint's not_found branch: a
       // brand-new v3 file whose history comes from getPriors (in-memory
       // messages before this run).
-      const now = new Date().toISOString();
-      base = {
-        schemaVersion: CURRENT_SCHEMA_VERSION,
-        conversation_id: conversationId,
-        messages: [],
+      base = freshSessionFile(
+        conversationId,
+        requireSessionWorkspaceRoot(workspaceRoot),
         jsonMode,
-        turnCount: 0,
-        updatedAt: now,
-        title: "",
-        cwd: requireSessionWorkspaceRoot(workspaceRoot),
-        sanitized_at: now,
-        checkpoints: [],
-        workspaceRoot: requireSessionWorkspaceRoot(workspaceRoot),
-      };
+        opts.newFormat === true
+      );
       priors = getPriors();
     }
     await store.save({
@@ -2692,6 +3038,168 @@ export function createChatSessionCommitHook(opts: {
       events: [...messages],
     });
   };
+  return enqueue === undefined
+    ? append
+    : (messages) => enqueue(() => append(messages));
+}
+
+/** ADR-0136 §3 — the accepted-input commit of one chat turn. */
+export type ChatAcceptedInputCommit = (input: {
+  /** Post-prefetch text — exactly the string the dependent request carries. */
+  readonly effectiveText: string;
+}) => Promise<void>;
+
+/**
+ * Commit the accepted input, so the caller may issue the dependent model
+ * request only if the write completed.
+ *
+ * The engine never commits the user query (it commits assistant / tool_result
+ * batches only), so unlike the hub there is no lazy commit prefix to consume:
+ * the chat path owes an explicit commit. `commit` is this path's own
+ * store-backed commit hook, reused verbatim — including its JSONL bootstrap —
+ * so the accepted input lands through one append authority and can never be
+ * written twice.
+ *
+ * NOT the saved-state publication. That boundary belongs to the engine
+ * (loop-engine's own `accepted_input` publication, which carries the full
+ * context and fires before the first model request); publishing a second
+ * snapshot here anchored at the read head would be a duplicate of it, so this
+ * seam writes the transcript and nothing else.
+ *
+ * SINGLE WRITER. The store is lock-free (ADR-0110) and the hub funnels
+ * appends through its per-session queue; the chat REPL is single-writer by
+ * construction — one line at a time — and `commit` now rides the per-session
+ * writer queue, so this seam and the engine's saved-state publication cannot
+ * interleave. What the single-await chain does NOT give is ORDER between two
+ * in-flight writes; the queue supplies exactly that, without adding a writer.
+ * Two hosts on one session id is the pre-existing lock-free caveat every
+ * other chat-path append already carries; this seam adds no new writer.
+ */
+export function createChatAcceptedInputCommit(opts: {
+  /** Supplies the adapter / recognition settings the engine itself will use,
+   *  so the committed message is the engine's own construction. */
+  readonly deps: LoopEngineDeps;
+  readonly commit: (
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ) => Promise<void>;
+  /** False on the `--resume` posture: this seam writes nothing into a session
+   *  it may not have created, and the closing checkpoint is its only writer
+   *  there (SC23). */
+  readonly newFormat: boolean;
+}): ChatAcceptedInputCommit {
+  const { deps, commit, newFormat } = opts;
+  return async ({ effectiveText }) => {
+    if (!newFormat) return;
+    await commit([chatAcceptedInputMessage(deps, effectiveText)]);
+  };
+}
+
+/**
+ * The exact user message the engine appends for `text` — loop-engine `run()`'s
+ * own construction: recognition-layer substitution first, then the adapter's
+ * `encodeUserText`. Byte-for-byte agreement is load-bearing, not cosmetic:
+ * the closing checkpoint save LCP-aligns the in-memory projection against the
+ * chain this seam committed, so a mismatch would fork a new branch at the
+ * query and orphan the published anchor.
+ */
+function chatAcceptedInputMessage(
+  deps: LoopEngineDeps,
+  userText: string
+): AnthropicNativeMessage {
+  const effective =
+    deps.secretsMode !== "block" && deps.secretRegistry !== undefined
+      ? recognize(userText, deps.secretRegistry).replaced
+      : userText;
+  return deps.adapter.encodeUserText(effective);
+}
+
+/**
+ * The chat session's persistence wiring, assembled once per session: the
+ * in-turn commit hook, the accepted-input commit built on top of it, and the
+ * session-bound runtime-persistence sink the engine publishes its boundaries
+ * through.
+ *
+ * One factory so the wiring cannot be assembled two ways — the commit hook is
+ * the accepted-input commit's append authority, and `runChatSession` installs
+ * the returned `commit` as `deps.commitMessages`; the input commit and the
+ * engine's publications run on the same chain.
+ */
+export function createChatSessionPersistence(opts: {
+  readonly store: SessionStore;
+  readonly conversationId: string;
+  readonly newFormat: boolean;
+  readonly jsonMode: boolean;
+  readonly getPriors: () => ReadonlyArray<AnthropicNativeMessage>;
+  readonly workspaceRoot?: string;
+  /** The engine deps the turns will run with (adapter / recognition settings). */
+  readonly deps: LoopEngineDeps;
+}): {
+  readonly commit: (
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ) => Promise<void>;
+  readonly commitAcceptedInput: ChatAcceptedInputCommit;
+  /**
+   * The engine's session-bound persistence sink (ADR-0136), or absent on the
+   * `--resume` / old-format posture: those sessions are never written by the
+   * binder at all, so the engine issues no persistence request for them (SC23).
+   */
+  readonly runtimePersistence:
+    RuntimePersistenceSink<AnthropicNativeMessage> | undefined;
+} {
+  /**
+   * The chat path's half of the host writer discipline (ADR-0110), built once
+   * per session — a queue per turn would let two turns interleave, which is the
+   * whole hazard it removes.
+   *
+   * WHY a queue and not the REPL's single await chain: within one turn the
+   * engine appends a settled tool result as each parallel call returns (SC4),
+   * and `appendOperationFact` is read-modify-write on a deliberately lock-free
+   * store, so two facts landing together would both compute their anchor from
+   * the same stale read. The commit append shares the same file, so it takes
+   * this queue too: the hazard the queue exists for is read-modify-write
+   * against a lock-free store, and a commit append landing inside a
+   * publication's read-append window is the same hazard as two facts racing.
+   *
+   * A plain queue is correct here and need not be re-entrant: nothing on this
+   * path enqueues from inside a queued task — re-entrancy is the hub's
+   * requirement, where the slot wraps a whole turn.
+   */
+  const writerQueue = createSerialQueue();
+  const commit = createChatSessionCommitHook({
+    store: opts.store,
+    conversationId: opts.conversationId,
+    jsonMode: opts.jsonMode,
+    getPriors: opts.getPriors,
+    ...(opts.workspaceRoot !== undefined
+      ? { workspaceRoot: opts.workspaceRoot }
+      : {}),
+    newFormat: opts.newFormat,
+    enqueue: (work) => writerQueue(work),
+  });
+  return {
+    commit,
+    commitAcceptedInput: createChatAcceptedInputCommit({
+      deps: opts.deps,
+      commit,
+      newFormat: opts.newFormat,
+    }),
+    // Absent on the resumed posture, so the engine issues no persistence
+    // request at all there rather than issuing one that is skipped.
+    runtimePersistence: opts.newFormat
+      ? createRuntimePersistenceBinder({
+          store: opts.store,
+          serialize: (_id, work) => writerQueue(work),
+          // SC23 gate at the layer the contract names it to: a session this
+          // host may not have created is skipped, never written.
+          shouldPublish: () => opts.newFormat,
+          // No `signal`: the only abort signal this composition root owns is
+          // the per-turn controller, which Ctrl+C fires on purpose so the
+          // turn's post-run checkpoint still persists. Wiring it here would
+          // turn a normal interrupt into a publication failure, and a chat
+          // session owns no host-shutdown signal to pass instead.
+        }).bind(opts.conversationId)
+      : undefined,
+  };
 }
 
 /** Kind-guard + writeErr + EXIT for store.load in auto/HITL paths.
@@ -2706,16 +3214,7 @@ function skipChatAutoOnLoadError(err: unknown, conversationId: string): void {
 
 /** Narrow a throw to SessionStoreError (typed-kind member) vs other failures. */
 function isSessionStoreErrorKind(err: unknown): boolean {
-  if (err === null || typeof err !== "object") return false;
-  const kind = (err as { kind?: unknown }).kind;
-  return (
-    kind === "write_failed" ||
-    kind === "not_found" ||
-    kind === "parse_failed" ||
-    kind === "schema_invalid" ||
-    kind === "io_error" ||
-    kind === "concurrent_write"
-  );
+  return isTypedStoreError(err);
 }
 
 function resolveQuiet(optsQuiet: boolean | undefined): boolean {
@@ -2890,6 +3389,10 @@ function assembleChatSessionContext(input: {
   readonly checkpointStore: SessionStore;
   readonly wrappedDeps: LoopEngineDeps;
   readonly wrapChatDeps: (base: LoopEngineDeps) => LoopEngineDeps;
+  /** ADR-0136: the resume signal resolved by the caller (see runChatSession). */
+  readonly newFormatSession: boolean;
+  /** ADR-0136: commit the accepted input before its model call. */
+  readonly commitAcceptedInput: ChatAcceptedInputCommit | undefined;
 }): ChatLineContext {
   const { opts, state, abortController, checkpointStore, wrappedDeps } = input;
   return {
@@ -2903,6 +3406,10 @@ function assembleChatSessionContext(input: {
     ...(opts.liveGraphLedger ? { liveGraphLedger: opts.liveGraphLedger } : {}),
     abortController,
     checkpointStore,
+    newFormatSession: input.newFormatSession,
+    ...(input.commitAcceptedInput !== undefined
+      ? { commitAcceptedInput: input.commitAcceptedInput }
+      : {}),
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),
@@ -2999,9 +3506,13 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   //     identical to a fresh session.
   //   - load OK → messages come from the file; the first turn's
   //     processChatLine prior already sees the history, no extra wiring.
-  //   - typed load failure → empty messages + one stderr warning; the
-  //     conversationId anchor is still kept — later turns' checkpoints write
-  //     back to the same `<id>.jsonl` instead of fragmenting into a new id.
+  //   - DAMAGED log → empty messages + one stderr warning; the conversationId
+  //     anchor is still kept — later turns' checkpoints write back to the same
+  //     `<id>.jsonl` instead of fragmenting into a new id.
+  //   - `not_found` → propagates. `--resume <id>` on a conversation that does
+  //     not exist is rejected here, at the earliest point, so the operator gets
+  //     one typed error instead of the "从空开始" promise this branch used to
+  //     print one step before `openSessionWithRecovery` threw the same thing.
   //     Unknown (defensive) errors rethrow as-is.
   const { messages: seeded, warn: resumeWarn } = await seedResumeMessages({
     store: opts.resumeId !== undefined ? checkpointStore : undefined,
@@ -3009,8 +3520,30 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   });
   resumeWarn?.();
 
+  // ADR-0136 §4: session-entry recovery, on the resume entry only. The seed
+  // above is the transcript projection; where a published state exists, the
+  // restored context is that state's SAVED native sequence instead, and a
+  // `blocked` classification stops the session here rather than letting the
+  // seed stand in for state that could not be read. A fresh session has
+  // nothing to recover from (and no file to read), so it skips recovery
+  // entirely rather than reporting a classification nobody asked for.
+  const entry =
+    opts.resumeId !== undefined
+      ? await recoverChatSessionEntry({
+          store: checkpointStore,
+          conversationId,
+          taskRoot: resolveLiveRoot({
+            boundRoot: opts.workspaceRoot,
+            cwd: process.cwd(),
+          }),
+          liveRootIdentity: mainCheckoutOf(opts.workspaceRoot ?? process.cwd()),
+          seedMessages: seeded,
+          liveGraphLedger: opts.liveGraphLedger,
+        })
+      : { messages: seeded };
+
   const state: CliChatState = {
-    messages: Object.freeze([...seeded]),
+    messages: Object.freeze([...entry.messages]),
     jsonMode: opts.jsonMode,
     session: opts.session,
     conversationId,
@@ -3037,15 +3570,28 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   // per-root rebuild after rebind share the same wrapping semantics
   // (violation executor + conversationId + commitMessages hook), so rebuilds
   // cannot drift.
-  const commitHook = createChatSessionCommitHook({
+  //
+  // ADR-0136: `--resume` is the ONLY new-format signal. The id is
+  // `conversationId ?? resumeId ?? randomUUID()`, so a resume anchor means this
+  // host is continuing a session it may not have created — that file is never
+  // stamped and never published into (SC23). `createChatSessionPersistence`
+  // returns every half of the wiring from one place: the in-turn commit hook,
+  // the accepted-input commit built on it, and the engine's session-bound
+  // persistence sink (absent on the resumed posture, so the engine issues no
+  // request at all there).
+  const newFormatSession = opts.resumeId === undefined;
+  const persistence = createChatSessionPersistence({
     store: checkpointStore,
     conversationId,
+    newFormat: newFormatSession,
     jsonMode: state.jsonMode,
     getPriors: () => state.messages,
     ...(opts.workspaceRoot !== undefined
       ? { workspaceRoot: opts.workspaceRoot }
       : {}),
+    deps: opts.deps,
   });
+  const commitHook = persistence.commit;
   const wrapChatDeps = (base: LoopEngineDeps): LoopEngineDeps => ({
     ...base,
     executor: wrapWithViolationHook({
@@ -3071,6 +3617,12 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     // still persisted by the closing checkpoint). A caller-injected
     // commitMessages takes precedence.
     commitMessages: base.commitMessages ?? commitHook,
+    // ADR-0136: the engine's saved-state sink for this session. Installed on
+    // the wrapped deps (not only on the initial assembly) so a per-root rebuild
+    // keeps publishing to the same session. Absent on the resumed posture.
+    ...(persistence.runtimePersistence !== undefined
+      ? { runtimePersistence: persistence.runtimePersistence }
+      : {}),
   });
   const wrappedDeps: LoopEngineDeps = wrapChatDeps(opts.deps);
   const ctx = assembleChatSessionContext({
@@ -3080,6 +3632,10 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
     checkpointStore,
     wrappedDeps,
     wrapChatDeps,
+    newFormatSession,
+    // The commit is a no-op on the `--resume` posture, so it is installed
+    // unconditionally and the format decision stays in one place.
+    commitAcceptedInput: persistence.commitAcceptedInput,
   });
 
   const interactive = isInteractive();

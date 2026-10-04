@@ -3,6 +3,8 @@
 Date: 2026-09-08
 Status: accepted
 
+> **Scoped extension (2026-10-03, ADR-0136):** Decision 3's body-pool scope extends to native recovery and trace-permitted represented bodies for new-format persistent sessions under [ADR-0136](0136-native-session-checkpoint-architecture.md). Identical represented content remains immutable and session-local; raw recovery and masked trace retain separate consumer/failure contracts. Trace readers must follow trace-permitted references, not expose all bodies in the shared pool. Raw per-write `code-snapshots/` remain separate. Other decisions continue to apply; implementation is pending.
+
 > **Amendment 2026-09-13** (ADR-0088): Decision 2 — "the background-task registry stays at `stateAnchor` / workspace `.iknow/tasks`" — is **superseded**. The registry still does not enter the conversation-folder leaf, but it lands in the sibling `tasks/` directory of the same home project tree. The retirement of the legacy `sessions/` layout still follows Decision 7 (no automatic migration).
 >
 > **Amendment 2026-09-13** (ADR-0087): the session pool root is `home/.iknow` (or an explicit `dataDir`), not `<workspaceRoot>/.iknow`. The path literals in Decision 1 remain valid as written; an earlier implementation bound `baseDir` to the workspace shard, conflicting with this ADR, and is hereby retracted.
@@ -11,13 +13,13 @@ Status: accepted
 
 One conversation's record surface is scattered across **five anchors** keyed by the same `conversationId` yet sharing no location (measured 2026-09-08):
 
-| State                    | Anchor                                                                                          | Source                                |
-| ------------------------ | ----------------------------------------------------------------------------------------------- | ------------------------------------- |
-| session transcript       | `<dataDir>/sessions/<basename(cwd)>-<sha1[:12]>/`                                               | `session-store.ts:107-110`            |
-| todos                    | `~/.iknow/todos/<surface>/<conversationId>/todos.md`                                            | `todo-write.ts:450-456`               |
-| background-task registry | `<stateAnchor>/.iknow/tasks` (now `<pool>/projects/<slug>/tasks`, per the ADR-0088 amendment above) | `build-engine.ts:667`(ADR-0021 D1.3)  |
-| trace                    | `./trace/<conversationId>.jsonl`(**relative to cwd**)                                           | `cli.ts:77`                           |
-| worktrees                | `<repoRoot>/.iknow/worktrees/<leaf>`                                                            | `worktree-gate.ts:548-556`            |
+| State                    | Anchor                                                                                              | Source                               |
+| ------------------------ | --------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| session transcript       | `<dataDir>/sessions/<basename(cwd)>-<sha1[:12]>/`                                                   | `session-store.ts:107-110`           |
+| todos                    | `~/.iknow/todos/<surface>/<conversationId>/todos.md`                                                | `todo-write.ts:450-456`              |
+| background-task registry | `<stateAnchor>/.iknow/tasks` (now `<pool>/projects/<slug>/tasks`, per the ADR-0088 amendment above) | `build-engine.ts:667`(ADR-0021 D1.3) |
+| trace                    | `./trace/<conversationId>.jsonl`(**relative to cwd**)                                               | `cli.ts:77`                          |
+| worktrees                | `<repoRoot>/.iknow/worktrees/<leaf>`                                                                | `worktree-gate.ts:548-556`           |
 
 Three defects were measured:
 

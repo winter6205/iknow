@@ -3,6 +3,8 @@
 Date: 2026-09-22
 Status: accepted
 
+> **Scoped extension (2026-10-03, ADR-0136):** [ADR-0136](0136-native-session-checkpoint-architecture.md) adds durable pre-write per-file intent associations for restart reconciliation, so a missing/error tool result cannot erase applicable captured write evidence. It preserves raw `code-snapshots/`, explicit capture opt-out, and this ADR's manual-rewind root/drift/chronology safeguards. Automatic recovery retains verified effects; it does not perform code rewind. This target protocol is not implemented yet.
+
 Rewind keeps moving only the **rewind head**. Workspace restore is a separate choice: successful `edit_file` / `write_file` / `symbol-mutate` calls store a **代码前像** (sha256 blob under the session folder's `code-snapshots/`) and stamp the sha on that tool's transcript event, including whether the path was absent before that write. **代码回退** walks the abandoned head chain, including worker transcripts spawned inside it, and writes a file back on the live **taskRoot** only when that path's refs come from a single transcript, its current bytes still equal that chain's last captured post-image, and the live **taskRoot** identity matches. A created path (absent before the write) is deleted; any other match writes the preimage bytes back. The transcript stays the only history authority (ADR-0027). Blobs are immutable `wx` payloads, not a second ledger (ADR-0071 D4, ADR-0036, ADR-0110).
 
 ## Why not

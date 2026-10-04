@@ -13,6 +13,10 @@ import { constants as osConstants } from "node:os";
 import { fileURLToPath } from "node:url";
 import { parseArgs, type ParsedCli } from "./cli/parse-args.js";
 import { runChatSession } from "./cli/chat-session.js";
+import {
+  isTypedStoreError,
+  storeErrorDetail,
+} from "./session-api/recovery-host.js";
 // Subagent worker headless re-entry: the child process returns early from main dispatch.
 import {
   renderWorkerError,
@@ -215,6 +219,20 @@ function printCliError(err: unknown): void {
     );
     return;
   }
+  // A SessionStore typed error is a plain object by contract, so neither
+  // `instanceof Error` nor String() can name it — an unreadable session would
+  // serialize as "[object Object]". Mirrors the workspace_root branch above:
+  // the kind is the code.
+  if (isTypedStoreError(err)) {
+    writeErr(
+      JSON.stringify({
+        error: "session_store",
+        code: err.kind,
+        message: storeErrorDetail(err),
+      })
+    );
+    return;
+  }
   if (err instanceof Error) {
     writeErr(
       JSON.stringify({
@@ -247,6 +265,10 @@ function printChatError(err: unknown): void {
   }
   if (isIknowError(err)) {
     writeErr(`错误 [${err.code}]: ${err.message}`);
+    return;
+  }
+  if (isTypedStoreError(err)) {
+    writeErr(`错误 [${err.kind}]: ${storeErrorDetail(err)}`);
     return;
   }
   if (err instanceof Error) {

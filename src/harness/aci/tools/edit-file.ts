@@ -13,7 +13,7 @@
  *     `[edit_file] old_str matched N times, provide more context or set replace_all`.
  */
 
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 
 import type { AciToolDef } from "../types.js";
 import { ToolExecutionError } from "../../errors.js";
@@ -29,6 +29,7 @@ import {
   capturePreimageBeforeWrite,
   type PreimageCapture,
 } from "../preimage-port.js";
+import { publishFile } from "../../../util/atomic-file-publish.js";
 import { resolveSessionFenceTmp } from "../../sandbox/fence-tmp.js";
 
 const TOOL_NAME = "edit_file";
@@ -205,7 +206,7 @@ export function createEditFileTool(
       postBytes: replaced,
       absentBefore: false,
     });
-    await writeFile(absPath, replaced, "utf8");
+    await publishFile(absPath, replaced);
 
     // Success-path seam: callback fires only after the write succeeds. Failure
     // paths stay silent, so a disposed LSP notifier is never falsely told to

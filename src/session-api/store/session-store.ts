@@ -53,10 +53,15 @@ import {
   withCheckpointAnchors,
 } from "./checkpoint.js";
 import type {
+  FileIntentTarget,
   ParsedSessionLog,
   PreimageRef,
+  PublishedNativeStateSelection,
   SessionEventRecord,
+  SessionFileIntentRecord,
   SessionHeadRecord,
+  SessionNativeStateRecord,
+  SessionOperationFactRecord,
   SessionOutcomeRecord,
   SessionTitleRecord,
   SessionTailRecord,
@@ -72,6 +77,7 @@ import {
   messageEventId,
   parseSessionJsonl,
   projectSessionLog,
+  resolvePublishedNativeState,
   resolveTitleText,
   resolveTurnOutcomes,
   serializeSessionLog,
@@ -79,11 +85,30 @@ import {
   sessionFileToJsonl,
 } from "./jsonl.js";
 import {
+  fileIntentInputField,
+  isNativeStateSha,
+  nativeStateInputField,
+  operationFactInputField,
+  parseNativeStateBody,
+  readNativeStateBody,
+  writeNativeStateBody,
+} from "./native-state-store.js";
+import {
   buildRewindTargetsFromLog,
   type LedgerRewindTarget,
 } from "./rewind-targets.js";
 import type { SessionFileV1 } from "./schema.js";
-import { extractTitle, sanitizeSessionFile } from "./schema.js";
+import {
+  extractTitle,
+  isNewFormatSession,
+  sanitizeSessionFile,
+} from "./schema.js";
+import type {
+  NativeStateBoundary,
+  NativeStateMessage,
+  NativeStateSnapshot,
+} from "../../shared/native-state-port.js";
+import type { RuntimeOperationFact } from "../../shared/runtime-persistence.js";
 import { MAX_WORKSPACE_ROOT_CHARS } from "../../config/workspace-root.js";
 import {
   MAX_ROOT_DETAIL_CHARS,
@@ -100,6 +125,21 @@ import {
 } from "../../shared/session-tree-names.js";
 
 export type SessionBindingStatus = "unbound" | "invalid" | "bound";
+
+/**
+ * One operation-fact append. `anchorEventId` and `baseBodySha` are deliberately
+ * NOT here: they name the log this fact is appended to, so the store resolves
+ * them from the log it is the single writer of (see `appendOperationFact`).
+ */
+export interface AppendOperationFactInput {
+  /** Store session id — the identity the transcript is keyed by. */
+  readonly id: string;
+  /** Stable caller-supplied fact identity; a repeat is deduped, not doubled. */
+  readonly factId: string;
+  readonly fact: RuntimeOperationFact<NativeStateMessage>;
+  /** Turn the fact belongs to, when the turn identity is known. */
+  readonly turnId?: string;
+}
 
 /** Metadata returned by list(); intentionally excludes messages.
  *
@@ -626,6 +666,217 @@ export class SessionStore {
   }
 
   /**
+   * ADR-0136: publish one complete native state. ORDER IS THE CONTRACT —
+   * validate the snapshot, write the immutable body, and ONLY THEN append the
+   * `native_state` record. A record is the sole selectability signal, so a
+   * failure anywhere before that append leaves the prior state selected and an
+   * orphan body behind, which is harmless and is not progress. Never append
+   * first.
+   *
+   * The record carries a content address, not the state, so republishing an
+   * unchanged snapshot reuses one body (content-addressed dedup) and appends
+   * one more line.
+   *
+   * `boundary` and the snapshot's own `boundary` must agree: the record is
+   * read without dereferencing the body, so two different values would let a
+   * reader act on a boundary the state never had.
+   *
+   * MUST be called under the hub serialize queue (same posture as
+   * appendEvents/appendTitle/appendOutcome — the store stays lock-free).
+   * Throws: not_found | write_failed (legacy-only / body write / record
+   *   append) | parse_failed | schema_invalid (the failed field is the
+   *   snapshot's own — "messages", "boundary", … — or "anchorEventId") |
+   *   io_error
+   */
+  async appendNativeState(opts: {
+    readonly id: string;
+    readonly anchorEventId: string;
+    readonly boundary: NativeStateBoundary;
+    readonly snapshot: NativeStateSnapshot;
+  }): Promise<{
+    readonly record: SessionNativeStateRecord;
+    readonly bodySha: string;
+    readonly messageCount: number;
+  }> {
+    const { id, anchorEventId, boundary, snapshot } = opts;
+    const field = nativeStateInputField(anchorEventId, boundary, snapshot);
+    if (field !== null) throw invalidFor(id, field);
+    const path = this.jsonlPath(id);
+    const log = await this.readJsonlLog(id, path, {
+      legacyIsWriteFailed: true,
+    });
+    if (!log.events.some((e) => e.id === anchorEventId)) {
+      throw invalidFor(id, "anchorEventId");
+    }
+    // Body first: the record must never reference state that is not complete.
+    let bodySha: string;
+    try {
+      bodySha = await writeNativeStateBody(
+        this.conversationDir(id),
+        JSON.stringify(snapshot)
+      );
+    } catch (err) {
+      throw writeFailedFor(id, err);
+    }
+    const record: SessionNativeStateRecord = {
+      type: "native_state",
+      anchorEventId,
+      bodySha,
+      boundary,
+      messageCount: snapshot.messages.length,
+      createdAt: new Date().toISOString(),
+    };
+    await this.appendTailRecord(id, path, record);
+    return { record, bodySha, messageCount: record.messageCount };
+  }
+
+  /**
+   * ADR-0136: persist the durable file-write intent for EVERY target of one
+   * tool call, BEFORE the targets are mutated. Anchored at the CURRENT
+   * persisted head — the assistant tool_use event is committed before any
+   * call in that response is dispatched, so that head is a real branch
+   * anchor. No persisted head yet is a typed failure, never a silent null
+   * anchor.
+   *
+   * `captured:false` records the existing `codeRestore.enabled` suppression so
+   * recovery reports the effect UNVERIFIED rather than inferring completion; a
+   * suppressed intent therefore carries no preimage reference.
+   *
+   * MUST be called under the hub serialize queue (store stays lock-free).
+   * Throws: not_found | write_failed (legacy-only / IO) | parse_failed |
+   *   schema_invalid (field "toolUseId" or "targets") | io_error
+   */
+  async appendFileIntent(opts: {
+    readonly id: string;
+    readonly toolUseId: string;
+    readonly targets: ReadonlyArray<FileIntentTarget>;
+    readonly captured: boolean;
+  }): Promise<{ readonly record: SessionFileIntentRecord }> {
+    const { id, toolUseId, targets, captured } = opts;
+    const field = fileIntentInputField(toolUseId, targets, captured);
+    if (field !== null) throw invalidFor(id, field);
+    const path = this.jsonlPath(id);
+    const log = await this.readJsonlLog(id, path, {
+      legacyIsWriteFailed: true,
+    });
+    if (log.head === null) throw invalidFor(id, "anchorEventId");
+    const record: SessionFileIntentRecord = {
+      type: "file_intent",
+      toolUseId,
+      anchorEventId: log.head,
+      targets,
+      captured,
+      createdAt: new Date().toISOString(),
+    };
+    await this.appendTailRecord(id, path, record);
+    return { record };
+  }
+
+  /**
+   * ADR-0136: append ONE operation fact — a settled tool result with its
+   * per-file associations, a graph node transition, or owned-worker progress.
+   * Append-only: a fact is never rewritten, and a published state is never
+   * mutated because of it.
+   *
+   * ORDER IS THE CONTRACT: the append POSITION is the fact's association with
+   * the published state it follows, so this appends in arrival order and never
+   * reorders. `anchorEventId` (the persisted head) and `baseBodySha` (the last
+   * `native_state` body in the same log) are resolved HERE, not taken from the
+   * caller: the store is the only writer of the log, so resolving from it means
+   * a fact's base can never disagree with the transcript it was appended to.
+   * A per-sink memory of the same value would be a second authority that could
+   * drift after a crash.
+   *
+   * DEDUP: a repeated append of a `factId` already in the log is a no-op, so a
+   * retried or replayed append cannot double-count one settled operation
+   * (SC27 — a second open must add no duplicate receipt).
+   *
+   * A session with no persisted head has no anchor to append after, so it is a
+   * typed failure rather than a synthetic anchor.
+   *
+   * MUST be called under the hub serialize queue (store stays lock-free).
+   * Throws: not_found | write_failed (legacy-only / IO) | parse_failed |
+   *   schema_invalid (field "factId", "fact", or "anchorEventId") | io_error
+   */
+  async appendOperationFact(input: AppendOperationFactInput): Promise<void> {
+    const { id, factId, fact, turnId } = input;
+    const field = operationFactInputField(factId, fact);
+    if (field !== null) throw invalidFor(id, field);
+    const path = this.jsonlPath(id);
+    const log = await this.readJsonlLog(id, path, {
+      legacyIsWriteFailed: true,
+    });
+    if (log.head === null) throw invalidFor(id, "anchorEventId");
+    if (log.records.some((rec) => isSameFactId(rec, factId))) return;
+    const record: SessionOperationFactRecord = {
+      type: "operation_fact",
+      factId,
+      anchorEventId: log.head,
+      baseBodySha: lastPublishedBodySha(log),
+      ...(turnId === undefined ? {} : { turnId }),
+      fact,
+      createdAt: new Date().toISOString(),
+    };
+    await this.appendTailRecord(id, path, record);
+  }
+
+  /**
+   * ADR-0136: read side for session entry — the selected published state as
+   * derived from the selected head chain, every on-chain file intent with its
+   * chain position (so the caller can tell "after the selected state" from
+   * "before it"), and whether the file is new format at all. No body is
+   * dereferenced here: validation and failure classification belong to
+   * `readPublishedNativeStateBody`, which reports missing / corrupt /
+   * schema-invalid as three distinct typed outcomes.
+   *
+   * Read-only; same error surface as readHead.
+   * Throws: not_found | parse_failed | schema_invalid | io_error
+   */
+  async loadPublishedNativeState(opts: {
+    readonly id: string;
+  }): Promise<PublishedNativeStateSelection & { readonly newFormat: boolean }> {
+    const { id } = opts;
+    const log = await this.readJsonlLog(id, this.jsonlPath(id), {
+      legacyIsWriteFailed: false,
+    });
+    return {
+      ...resolvePublishedNativeState(log),
+      newFormat: isNewFormatSession(log.header),
+    };
+  }
+
+  /**
+   * Read + validate one published state's body. The three failure kinds are
+   * deliberately distinct so an entry reader can fail closed and tell them
+   * apart: a missing body (`not_found`), damaged bytes (`parse_failed`), and a
+   * body that is not a valid state (`schema_invalid`) must never be collapsed
+   * into "nothing published", which would silently fall back to transcript
+   * reconstruction or an older state.
+   *
+   * `bodySha` is gated to sha256's alphabet before any filesystem access — a
+   * persisted record is history, not a licence to read outside the folder.
+   * Throws: not_found | parse_failed | schema_invalid | io_error
+   */
+  async readPublishedNativeStateBody(opts: {
+    readonly id: string;
+    readonly bodySha: string;
+  }): Promise<NativeStateSnapshot> {
+    const { id, bodySha } = opts;
+    if (!isNativeStateSha(bodySha)) throw invalidFor(id, "bodySha");
+    let bytes: Buffer;
+    try {
+      bytes = await readNativeStateBody(this.conversationDir(id), bodySha);
+    } catch (err) {
+      throw this.attachBodyError(id, err);
+    }
+    try {
+      return parseNativeStateBody(bytes);
+    } catch (err) {
+      throw this.attachBodyError(id, err);
+    }
+  }
+
+  /**
    * ADR-0126: read-only projection of the ACTIVE head chain's turn outcomes —
    * the message-event ids of that chain (root → head, index-aligned with
    * `load()`'s messages) plus the outcome recorded for each of them. Outcomes
@@ -998,6 +1249,62 @@ export class SessionStore {
     return join(this.conversationDir(id), `${id}${SESSION_JSONL_EXT}`);
   }
 
+  /** Append one off-chain record line. Shared by the two ADR-0136 writers —
+   *  neither touches the message chain or the head pointer. */
+  private async appendTailRecord(
+    id: string,
+    path: string,
+    record: SessionTailRecord
+  ): Promise<void> {
+    try {
+      await appendFile(path, `${JSON.stringify(record)}\n`, "utf8");
+    } catch (err) {
+      throw writeFailedFor(id, err);
+    }
+  }
+
+  /** Map a body-pool failure onto the store's error vocabulary WITHOUT
+   *  collapsing the states an entry reader must tell apart: an absent body, a
+   *  body whose bytes are damaged, and a body that is not a valid state stay
+   *  three distinct kinds. A real IO fault stays `io_error` so it can never be
+   *  read as "nothing was published".
+   *
+   *  The kind set is the body pool's own, spelled out. A `bodySha` the caller
+   *  rejected before any filesystem access is `schema_invalid` at the call
+   *  site, so no `invalid_sha` branch can be reached here. */
+  private attachBodyError(id: string, err: unknown): SessionStoreError {
+    if (err instanceof Error) {
+      return { kind: "io_error", conversation_id: id, cause: errMsg(err) };
+    }
+    const e = err as {
+      kind?: string;
+      reason?: unknown;
+      field?: unknown;
+    };
+    if (e.kind === "native_state_body_missing") {
+      return { kind: "not_found", conversation_id: id };
+    }
+    if (e.kind === "native_state_body_corrupt") {
+      return {
+        kind: "parse_failed",
+        conversation_id: id,
+        reason: typeof e.reason === "string" ? e.reason : "unknown",
+      };
+    }
+    if (e.kind === "native_state_body_schema_invalid") {
+      return {
+        kind: "schema_invalid",
+        conversation_id: id,
+        field: typeof e.field === "string" ? e.field : "snapshot",
+      };
+    }
+    // EXIT: a throw that is neither an `Error` nor one of the pool's typed
+    // kinds is not this store's vocabulary to interpret. Re-throwing it keeps
+    // an unrelated failure from being filed as a schema violation of the
+    // snapshot; the three cases above are the complete set.
+    throw err;
+  }
+
   /** readFile that tolerates absence: null on ENOENT, io_error otherwise. */
   private async tryReadFile(path: string, id: string): Promise<string | null> {
     try {
@@ -1353,6 +1660,32 @@ function isEnoent(err: unknown): boolean {
   return (
     err instanceof Error && (err as NodeJS.ErrnoException).code === "ENOENT"
   );
+}
+
+function invalidFor(id: string, field: string): SessionStoreError {
+  return { kind: "schema_invalid", conversation_id: id, field };
+}
+
+/** Whether an existing record already carries this `factId` (the dedup key). */
+function isSameFactId(record: SessionTailRecord, factId: string): boolean {
+  return record.type === "operation_fact" && record.factId === factId;
+}
+
+/** The `bodySha` of the last state published in this log, or null when the
+ *  session has published none. File order IS the publication order, so no
+ *  timestamp comparison is involved. */
+function lastPublishedBodySha(log: ParsedSessionLog): string | null {
+  for (let i = log.records.length - 1; i >= 0; i--) {
+    const record = log.records[i];
+    if (record !== undefined && record.type === "native_state") {
+      return record.bodySha;
+    }
+  }
+  return null;
+}
+
+function writeFailedFor(id: string, err: unknown): SessionStoreError {
+  return { kind: "write_failed", conversation_id: id, cause: errMsg(err) };
 }
 
 function isInvalidWorkspaceRootError(err: unknown): boolean {

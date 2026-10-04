@@ -11,8 +11,8 @@
  *  - resolvePermissionMode (`--auto-mode` / IKNOW_PERMISSION_MODE initial
  *    value) + createSessionGrants (always-grant persistence) + injection
  *    into deps and TuiApp;
- *  - session resume: `iknow tui <id>` → loadSessionFile → attachSession
- *    → initialSession prop;
+ *  - session resume: `iknow tui <id>` → openSession (read + ADR-0136
+ *    recovery) → attachSession → initialSession prop;
  *  - `<TuiApp bridge askBridge toolEventSink cwd dataDir permissionMode
  *    sessionGrants info initialSession onQuit/>`, onQuit triggers
  *    renderer.destroy.
@@ -68,7 +68,13 @@ import { securityReviewRouteFromAsk } from "../harness/build-engine.js";
 import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
 import { resolveTraceRoot } from "../cli/trace-root.js";
 import { createToolEventSink, TuiApp, type TuiAppProps } from "./app.js";
-import { attachSession, type TuiSessionState } from "./session-state.js";
+import {
+  attachSession,
+  recoveryNoticeLines,
+  type TuiLoadedSessionFile,
+  type TuiSessionRecovery,
+  type TuiSessionState,
+} from "./session-state.js";
 import { createSessionGrants } from "../harness/permission/session-grants.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
@@ -79,6 +85,9 @@ import {
 } from "../harness/graph/mode.js";
 import { createLiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import { createPreimageLedger } from "../session-api/store/preimage-ledger.js";
+import { createNativeStatePort } from "../session-api/store/native-state-port-host.js";
+import type { SessionStore } from "../session-api/store/session-store.js";
+import { NativeStatePortError } from "../shared/native-state-port.js";
 import {
   loadIknowSettings,
   resolveFsIsolationMode,
@@ -297,6 +306,25 @@ function drainTuiStdin(stdin: TuiTerminalStdin): void {
     if (chunk === null || chunk === undefined) return;
     // Discard: these bytes are replies to this process's own queries and belong to no caller.
   }
+}
+
+/**
+ * Startup resume attach. A log the entry could not read has no session view to
+ * attach, so its classification goes to stderr before the first render instead
+ * of being dropped — the operator is told why nothing opened, and nothing is
+ * reconstructed (spec §2.1).
+ */
+function attachOpenedSession(
+  file: TuiLoadedSessionFile | null,
+  recovery: TuiSessionRecovery
+): TuiSessionState | undefined {
+  if (file === null) {
+    process.stderr.write(
+      `${recoveryNoticeLines({ messages: [], recovery }).join("\n")}\n`
+    );
+    return undefined;
+  }
+  return attachSession(file, recovery);
 }
 
 /**
@@ -738,7 +766,13 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // The initial TUI engine is built before createTuiBridge, so bind this
     // host seam late to the Hub that owns dirty-root persistence. Mutates
     // cannot reach the seam until the bridge has been created below.
-    const bridgeRef: { hub?: ReturnType<typeof createTuiBridge>["hub"] } = {};
+    // ADR-0136: the store is bound the same way, for the durable file-intent
+    // recorder — the bridge owns the single store instance and the engine
+    // assembly must not build a second one over the same files.
+    const bridgeRef: {
+      hub?: ReturnType<typeof createTuiBridge>["hub"];
+      store?: SessionStore;
+    } = {};
     // worktree-host.ts factory assembly (the TUI-seam version of the
     // name pass-through fix; unit-testable). Manual destructuring silently
     // drops new WorktreeProvisionContext fields while still compiling — a
@@ -784,6 +818,40 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       worktreeOnMutateHolder,
       liveGraphLedger,
       preimageLedger,
+      // ADR-0136 §3: every TUI write records its durable per-file intent
+      // through the bridge's store. No store yet means no write can be in
+      // flight (the first turn needs the bridge), and a write that cannot
+      // record its intent must not proceed — the same fail-closed posture a
+      // throwing capture port has.
+      fileIntentRecorder: {
+        recordFileIntent: (request) => {
+          const store = bridgeRef.store;
+          if (store === undefined) {
+            return Promise.reject(
+              new NativeStatePortError(
+                "PERSIST_FAILED",
+                "TUI store is not ready: refusing a write that cannot record its file intent"
+              )
+            );
+          }
+          return createNativeStatePort({ store }).recordFileIntent(request);
+        },
+      },
+      // ADR-0136 §3: the ASSEMBLY-TIME persistence consumers — the subagent
+      // manager (`noteWorkerDispatched`, which captures worker identity and
+      // writes the identity record a recovery process needs) and the graph
+      // handler — read this binder at construction, so the hub's per-turn deps
+      // overlay never reached them and a TUI worker recorded no identity at
+      // all. The HUB owns the one binder (built over its own store, writer
+      // queue and shutdown signal); this delegate forwards to that object
+      // rather than constructing a second writer authority, and is late-bound
+      // for the same reason `fileIntentRecorder` is: the engine is assembled
+      // before the bridge exists, while every bind happens on a spawn, which
+      // can only run through the bridge.
+      runtimePersistence: {
+        bind: (sessionId) =>
+          bridgeRef.hub?.runtimePersistenceBinder().bind(sessionId),
+      },
       sessionGrants,
       // ADR-0019: pass workspaceRoot to the build-engine identity / memory /
       // skill seams. The startup workspace is also the stable productRoot —
@@ -955,6 +1023,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     });
     // Once the bridge is ready, backfill the late-bound hub reference (see bridgeRef above).
     bridgeRef.hub = bridge.hub;
+    // Same backfill point for the durable file-intent recorder's store: the
+    // bridge owns the single SessionStore for this process.
+    bridgeRef.store = bridge.store;
     // The same backfill point feeds shutdownExtensions (the /quit path).
     hubRef.current = bridge.hub;
     // Settings hot-reload: subscribe to EnvLoader — settings file changes →
@@ -973,8 +1044,12 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
 
     let initialSession: TuiSessionState | undefined;
     if (options.sessionId) {
-      const file = await bridge.loadSessionFile(options.sessionId);
-      initialSession = attachSession(file);
+      // ADR-0136 §4: the startup resume is a session ENTRY, so it runs the same
+      // open (one projection read + recovery) the in-app picker runs. The
+      // in-progress label has no notice lane to land in before the first
+      // render, so only the classified status reaches the view.
+      const { file, recovery } = await bridge.openSession(options.sessionId);
+      initialSession = attachOpenedSession(file, recovery);
     }
 
     onQuitBridge = {

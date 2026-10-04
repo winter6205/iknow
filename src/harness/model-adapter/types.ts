@@ -9,7 +9,8 @@
  * `ModelAdapter.step`'s `request` carries an optional `onStream` observer
  * (streaming event contract SSOT `../stream.ts`); only the streaming arm
  * consumes it — non-streaming arms ignore it, and when absent, behavior is
- * byte-identical to before.
+ * byte-identical to before. The optional `onDispatch` observer (evidence only,
+ * see `SdkDispatchEvidence`) has the same absent-means-unchanged rule.
  */
 
 import type { HarnessStreamEvent } from "../stream.js";
@@ -207,6 +208,28 @@ export interface CountTokensResult {
   readonly inputTokens: number;
 }
 
+/**
+ * Evidence of one governed SDK invocation, read off the final request object
+ * at the dispatch boundary (after outbound / tool / instruction projection).
+ *
+ * Per-invocation identity (`invocationId`) is deliberately separate from any
+ * later content identity: two attempts whose bodies coincide are still two
+ * invocations. Carries the request body only — no credentials, no transport
+ * headers, and no claim that a response was received.
+ */
+export interface SdkDispatchEvidence {
+  /** Unique per governed SDK invocation, minted before dispatch. */
+  readonly invocationId: string;
+  /** True when this invocation takes the streaming arm. */
+  readonly stream: boolean;
+  /** The exact ordered `messages` array handed to the SDK. */
+  readonly messages: ReadonlyArray<unknown>;
+  /** Present only when the request carried system instructions. */
+  readonly system?: string;
+  /** Present only when the request advertised tool definitions. */
+  readonly tools?: ReadonlyArray<unknown>;
+}
+
 /** Model adapter interface. */
 export interface ModelAdapter {
   /** Atomic validate + project: returns AssistantTurnResult or throws ProtocolError. */
@@ -214,9 +237,15 @@ export interface ModelAdapter {
     state: LoopState,
     // Optional onStream — streaming-event observer, consumed by the streaming
     // arm only; offline adapters / non-streaming arms ignore it.
+    // Optional onDispatch — best-effort observer of the final SDK request
+    // object, called once per attempt before dispatch. It is evidence only:
+    // a throwing observer never fails, retries, or re-dispatches the call.
     request: {
       tools?: unknown;
+      /** Assembled system instructions for this turn; absent → not sent. */
+      system?: string;
       onStream?: (event: HarnessStreamEvent) => void;
+      onDispatch?: (evidence: SdkDispatchEvidence) => void;
     },
     signal?: AbortSignal // run's third argument passed through verbatim; offline implementations may ignore it
   ) => Promise<AssistantTurnResult>;

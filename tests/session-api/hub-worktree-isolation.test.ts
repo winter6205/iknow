@@ -144,10 +144,44 @@ const writeCall = {
   input: { path: "hello.txt", content: "should never land in the main repo" },
 };
 
+/** Conversations that already carry the committed assistant tool_use event. */
+const seededHeads = new Set<string>();
+
+/**
+ * ADR-0136 §3 items 3+4: the assistant tool_use event is committed BEFORE any
+ * call in its response is dispatched, and the write's durable file intent is
+ * anchored at that persisted head. Driving the executor directly (as this file
+ * does, instead of the model loop) has no such commit, so the capture would
+ * have no anchor — seed the event once per conversation to keep the fixture on
+ * the same precondition production always satisfies. Every assertion below is
+ * about the worktree gate, not the transcript.
+ */
+async function seedToolUseHead(conversationId: string): Promise<void> {
+  if (seededHeads.has(conversationId)) return;
+  seededHeads.add(conversationId);
+  await store.appendEvents({
+    id: conversationId,
+    events: [
+      {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: writeCall.id,
+            name: writeCall.name,
+            input: writeCall.input,
+          },
+        ],
+      },
+    ],
+  });
+}
+
 async function runMutate(
   deps: LoopEngineDeps,
   conversationId: string
 ): Promise<ToolExecutionResult> {
+  await seedToolUseHead(conversationId);
   const [result] = await deps.executor.executeAll(
     [writeCall],
     undefined,

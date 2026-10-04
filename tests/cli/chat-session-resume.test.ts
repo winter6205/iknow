@@ -167,16 +167,37 @@ describe("seedResumeMessages — T4 seed helper", () => {
     assert.equal(r.warn, undefined);
   });
 
-  it("not_found → messages=[],warn 回调触发且文案含 [not_found] 与 id", async () => {
+  // A conversation that does not exist is REJECTED, not degraded. This case used
+  // to assert the opposite — that `not_found` returns an empty seed and warns
+  // "从空开始" — which is what made one `--resume` command print a promise and
+  // then die in `openSessionWithRecovery`. It now asserts the rejection, and
+  // strictly more: the typed kind survives, the promise is never printed, and
+  // no session is created on the way out.
+  it("not_found → typed error propagates; nothing is warned, nothing is created", async () => {
     const s = await storeFor();
-    const r = await seedResumeMessages({ store: s, id: "ghost" });
-    assert.deepEqual(r.messages, []);
-    assert.equal(typeof r.warn, "function");
-    r.warn!();
-    const text = capturedStderr();
-    assert.match(text, /恢复会话 ghost 失败/);
-    assert.match(text, /\[not_found\]/);
-    assert.match(text, /仍锚定 ghost/);
+    const id = "ghost";
+    await assert.rejects(
+      () => seedResumeMessages({ store: s, id }),
+      (err: unknown) => {
+        // A typed SessionStoreError, not a bare Error: the store contract is
+        // that these carry a string `kind`, and the entry contract is that a
+        // missing conversation is rejected with that typed error intact.
+        assert.equal(typeof err, "object");
+        assert.equal(err instanceof Error, false);
+        assert.equal((err as { kind?: string }).kind, "not_found");
+        return true;
+      }
+    );
+    // The false promise must be gone: no "从空开始" line for a missing id.
+    assert.equal(capturedStderr(), "");
+    // And the rejection must not have written a session where there was none.
+    await assert.rejects(
+      () => s.load(id),
+      (err: unknown) => {
+        assert.equal((err as { kind?: string }).kind, "not_found");
+        return true;
+      }
+    );
   });
 
   it("parse_failed → 写入垃圾 JSON 后 warn 触发 [parse_failed]", async () => {
@@ -395,31 +416,34 @@ describe("resume 续跑集成(seed 步骤 + processChatLine 接线)", () => {
     });
   });
 
-  it("not_found → seed 返空 + 锚点保留;后续 completed 写回同一 <id>.jsonl(anchor-preserved 验收)", async () => {
+  // The anchor-preservation guarantee still holds for a DAMAGED log — that is
+  // the only case left that degrades to a warning (see the schema_invalid case
+  // below, which asserts seed-empty + warn + id kept, and the checkpoint
+  // write-back case above, which covers the anchor surviving a real save). What
+  // is no longer true is that a conversation which does not exist at all
+  // degrades: it is rejected, and it must not be brought into existence by the
+  // command that failed to find it.
+  it("not_found → 拒绝进入 processChatLine,且不会把不存在的会话建出来", async () => {
     const s = await storeFor();
     const id = "anchor-keep";
-    // No file exists (seed must take the not_found branch).
-    const seeded = await seedResumeMessages({ store: s, id });
-    assert.deepEqual(seeded.messages, []);
-    assert.equal(typeof seeded.warn, "function");
-    seeded.warn!();
-    assert.match(capturedStderr(), new RegExp(`恢复会话 ${id} 失败`));
-
-    // state.messages = [], conversationId = id (anchor kept). One completed
-    // round should land in <id>.json, not fragment into a new UUID.
-    const ctx = makeCtx({
-      responses: [assistantResult({ texts: ["hello"] })],
-      checkpointStore: s,
-      workspaceRoot: process.cwd(),
-      stateOverrides: {
-        conversationId: id,
-        messages: Object.freeze([...seeded.messages]),
-      },
-    });
-    await processChatLine({ line: "hi", ctx });
-    const file = await s.load(id);
-    assert.equal(file.turnCount, 1);
-    assert.equal(file.conversation_id, id, "写回同一 <id>.json,锚点保留");
+    // No file exists: the seed must REJECT rather than hand an empty context to
+    // the turn path, which would have written a turn into a session the operator
+    // asked to resume but that was never there.
+    await assert.rejects(
+      () => seedResumeMessages({ store: s, id }),
+      (err: unknown) => {
+        assert.equal((err as { kind?: string }).kind, "not_found");
+        return true;
+      }
+    );
+    assert.equal(capturedStderr(), "", "不存在不得再打印“从空开始”");
+    await assert.rejects(
+      () => s.load(id),
+      (err: unknown) => {
+        assert.equal((err as { kind?: string }).kind, "not_found");
+        return true;
+      }
+    );
   });
 
   it("resume 文件 checkpoints=null(畸形)→ seed 空 + warn [schema_invalid] + 锚点保留", async () => {

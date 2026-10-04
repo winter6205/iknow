@@ -80,6 +80,8 @@
 
 ### 2.1 Product & data
 
+**Native execution checkpoints and recovery — plans A/B/C implemented and merged; repair + joined acceptance in progress (spec `session-checkpoint-architecture`, ADR-0136, issue #1182).** The contract in [specs/session-checkpoint-architecture.md](../specs/session-checkpoint-architecture.md) combines saved native context/runtime state, durable captured file progress, visible session-entry recovery, and actual-request trace evidence. All three implementation plans have landed and merged: `6f991fb7d` (storage and host recovery), `da34fa386` + `b3d8b3c91` (runtime, graph, owned workers), `5b6b753e4` (exact final-request trace evidence), merged as `60968adb4`. What is still missing is the host half: no host binds the harness runtime persistence port, so the fresh-process reopen proofs and the session-host worker-stop hooks have no producer, and the spec's 29-criterion joined acceptance matrix has not been run. No crash, PTY, or per-criterion acceptance result is claimed.
+
 | Gap                          | Description                                                                                                                       |
 | ---------------------------- | --------------------------------------------------------------------------------------------------------------------------------- |
 | **Production auth**          | authorization is carried by per-tool-call decisions in the harness ACI decor layer; full ACL / approval flows await an ADR        |

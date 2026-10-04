@@ -11,6 +11,10 @@
  * session tmp nests under homeRoot (production shape, as in
  * workspace-mode-fence.test.ts). Sentinels are random per run and asserted
  * ABSENT from every collected output.
+ *
+ * The fence-visible PATH is pinned to a system-only PATH for this file (see
+ * SYSTEM_PATH) so every command below resolves the same binaries regardless of
+ * what the host PATH happens to shadow.
  */
 
 import assert from "node:assert/strict";
@@ -22,6 +26,7 @@ import {
   mkdtempSync,
   readFileSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,11 +34,55 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 
 import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts";
 
+/**
+ * Binary-resolution pin — a test-environment fix, not a product change.
+ *
+ * This file drives the production call site, so the fence env is assembled
+ * from `process.env` at call time (`envIsolation.filter(process.env)` in
+ * src/harness/verify/sandbox-run.ts) and `PATH` is in `BASE_ENV_WHITELIST`
+ * (src/harness/sandbox/env-isolation.ts), which makes bwrap emit
+ * `--setenv PATH <host PATH>`. On a host whose PATH leads with a runtime shim
+ * directory that shadows `rm` with a recoverable-delete wrapper, the sandboxed
+ * `rm -f` execs the wrapper and its own failure text replaces the kernel
+ * refusal the fence assertion depends on — the fence stays intact, only WHICH
+ * `rm` the sandbox resolved changed. Pinning the fence-visible PATH to a
+ * system-only PATH for this file makes every case below depend on the fence
+ * rather than on the host's binary shadowing. The system-only fence PATH is
+ * not new to this repo: tests/harness/sandbox/backup-receipt-fence.test.ts and
+ * tests/harness/isolation/protected-target-ebusy-guidance.test.ts pin the same
+ * `/usr/bin:/bin` VALUE, though they hand it to createBwrapFence's `env` option
+ * and never touch `process.env` — this file pins the process env instead
+ * because the production call site above reads `process.env` and offers no env
+ * option.
+ *
+ * The command text stays exactly what a user would type (`rm -f '<key>'`, never
+ * an absolute `/bin/rm`): the ENVIRONMENT is pinned, not the assertion
+ * special-cased. The unlink case also carries a writable-path control proving
+ * `rm -f` in the pinned PATH really works, so the credential refusal can only
+ * be the fence's read-only mount.
+ */
+const SYSTEM_PATH = "/usr/bin:/bin";
+
+/**
+ * Skip decision taken under the SAME PATH the run uses: `bwrap` is probed with
+ * `PATH: SYSTEM_PATH` in an explicit env instead of the inherited one, because
+ * everything this file executes after the beforeAll pin resolves under that
+ * PATH — the production probe (requireBwrap, src/harness/sandbox/runner.ts)
+ * and the `ssh-keygen` fixture alike. Deciding on the host PATH at module load
+ * would skip a host whose `bwrap` sits outside SYSTEM_PATH, then fail the
+ * fixture setup anyway.
+ */
 function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
+  const probe = spawnSync("bwrap", ["--version"], {
+    stdio: "ignore",
+    env: { ...process.env, PATH: SYSTEM_PATH },
+  });
+  return probe.status === 0;
 }
 
 const SKIP = !hasBwrap();
+/** Host PATH as of this module's load — the value to put back on teardown. */
+const SAVED_PATH = process.env.PATH;
 
 const scratch: string[] = [];
 function scratchDir(prefix: string): string {
@@ -81,6 +130,9 @@ async function run(command: string): Promise<RunOutput> {
 }
 
 beforeAll(() => {
+  // Hermetic binary resolution for every case below, fixture setup included —
+  // restored verbatim in afterAll, so nothing leaks into a sibling suite.
+  process.env.PATH = SYSTEM_PATH;
   if (SKIP) return;
   mkdirSync(join(HOME, ".ssh"), { recursive: true, mode: 0o700 });
   mkdirSync(SESSION_TMP, { recursive: true });
@@ -95,6 +147,8 @@ beforeAll(() => {
 });
 
 afterAll(() => {
+  if (SAVED_PATH === undefined) delete process.env.PATH;
+  else process.env.PATH = SAVED_PATH;
   for (const p of scratch.splice(0)) {
     rmSync(p, { recursive: true, force: true });
   }
@@ -140,6 +194,28 @@ describe("wired verify fence: protected credential reads are masked-value-or-not
       );
       assert.match(r.stderr, /Read-only file system|Device or resource busy/);
       assert.equal(readFileSync(KEY, "utf8"), before, "bytes unchanged");
+    }
+  );
+
+  it.skipIf(SKIP)(
+    "anti-vacuity control: the same `rm -f` really deletes under this fence, so the refusal above is the read-only mount",
+    async () => {
+      // If `rm` were absent or broken in the pinned PATH, the credential case
+      // would still fail — proving nothing about the fence. Under the SAME
+      // fence, `rm -f` on a WRITABLE path inside the task root must exit 0 and
+      // really remove the file, so the HIGH-1 refusal can only come from the
+      // fence's read-only mount over the credential subtree. The control file
+      // is a synthetic scratch fixture inside TASK — swept by the afterAll
+      // scratch loop whether or not the command removed it.
+      const control = join(TASK, "rm-writable-control.txt");
+      writeFileSync(control, "deletable-by-design\n");
+      const r = await run(`rm -f '${control}'`);
+      assert.equal(r.exitCode, 0, r.stderr);
+      assert.equal(
+        existsSync(control),
+        false,
+        "the writable-path file must actually be gone"
+      );
     }
   );
 

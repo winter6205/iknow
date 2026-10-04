@@ -39,12 +39,14 @@ import Anthropic, {
   APIError,
   APIUserAbortError,
 } from "@anthropic-ai/sdk";
+import { randomUUID } from "node:crypto";
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
   LoopState,
   ModelAdapter,
+  SdkDispatchEvidence,
   TokenUsage,
 } from "./types.js";
 import type {
@@ -893,6 +895,57 @@ export function buildMessageParams(
 }
 
 /**
+ * A declared-`void` observer may still be async; a returned thenable needs an
+ * explicit handler so its rejection cannot surface as an unhandled rejection.
+ */
+function isPromiseLike(value: unknown): value is Promise<unknown> {
+  return (
+    typeof value === "object" &&
+    value !== null &&
+    typeof (value as { catch?: unknown }).catch === "function"
+  );
+}
+
+/**
+ * Report the exact request object this invocation will dispatch.
+ *
+ * The single source is `params` — the post-projection object handed to the SDK
+ * — because pre-projection engine state is not an oracle for the final request.
+ * Called once per attempt (transport retry re-enters `step`, so a retry is a
+ * second invocation with its own id), and before the arm branch so a rejected
+ * `create` or a broken stream still leaves its evidence behind.
+ *
+ * Best-effort by contract: observer failures are swallowed so evidence can
+ * never fail, retry, or re-dispatch a model call (same MUST-NOT-throw rule as
+ * `safeEmitStream`). Credentials and transport headers are not part of the
+ * evidence, and emission claims no provider receipt.
+ */
+function emitDispatchEvidence(
+  params: MessageCreateParamsNonStreaming,
+  onDispatch: ((evidence: SdkDispatchEvidence) => void) | undefined,
+  stream: boolean
+): void {
+  if (onDispatch === undefined) return;
+  // The SDK type also admits a text-block array for `system`; the request body
+  // built here only ever carries the assembled string.
+  const system = typeof params.system === "string" ? params.system : undefined;
+  const evidence: SdkDispatchEvidence = {
+    invocationId: randomUUID(),
+    stream,
+    messages: params.messages,
+    ...(system !== undefined ? { system } : {}),
+    ...(params.tools !== undefined ? { tools: params.tools } : {}),
+  };
+  try {
+    const returned: unknown = onDispatch(evidence);
+    if (isPromiseLike(returned)) void returned.catch(() => {});
+  } catch {
+    // Swallow observer faults: evidence failure must not back-flow into the
+    // dispatch path.
+  }
+}
+
+/**
  * Real Anthropic adapter factory.
  *
  * step delegates to `client.messages.create(params, { signal })`; the
@@ -924,10 +977,14 @@ export function createRealAnthropicAdapter(
       // request.system flows from LoopAdapter.step through to SDK params.
       system?: string;
       onStream?: (event: HarnessStreamEvent) => void;
+      onDispatch?: (evidence: SdkDispatchEvidence) => void;
     },
     signal?: AbortSignal
   ): Promise<AssistantTurnResult> {
     const params = buildMessageParams(opts, state, request);
+    // Evidence first, then the arm branch: the record of what was attempted
+    // must exist even when the attempt fails.
+    emitDispatchEvidence(params, request.onDispatch, opts.stream === true);
     // Stream / non-stream routing: all branch logic of the step body lives
     // here; business behavior is carried by `stepStreamArm` and the
     // existing create arm respectively.

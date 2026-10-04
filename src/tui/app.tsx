@@ -88,6 +88,7 @@ import {
   attachSession,
   canInterrupt,
   createDraftSession,
+  recoveryNoticeLines,
   seedInputHistory,
   sessionCompacted,
   sessionRewound,
@@ -352,6 +353,7 @@ import {
   type SubagentWake,
 } from "../harness/subagent/host-wake.js";
 import { extractTitle } from "../session-api/store/schema.js";
+import { RECOVERY_IN_PROGRESS_LABEL } from "../session-api/store/recovery-status.js";
 
 /** Local re-export of the chromeReserveRows line-account cap and the
  *  visible-line-count helpers (actual SSOT is prompt-input.tsx, so two
@@ -2934,8 +2936,18 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     let opened: TuiSessionState | undefined = existing;
     if (!existing) {
       try {
-        const file = await props.bridge.loadSessionFile(id);
-        const attached = attachSession(file);
+        // ADR-0136 §4: session ENTRY. The in-progress label goes up before the
+        // entry promise and the classified status replaces it on resolve; it is
+        // a host transient, never an outcome recovery can return.
+        setNotice({ lines: [RECOVERY_IN_PROGRESS_LABEL] });
+        const { file, recovery } = await props.bridge.openSession(id);
+        if (file === null) {
+          // The log is unreadable: the classification is what the operator
+          // needs, and there is no transcript to render or reconstruct.
+          setNotice({ lines: recoveryNoticeLines({ messages: [], recovery }) });
+          return;
+        }
+        const attached = attachSession(file, recovery);
         opened = attached;
         setSessions((prev) => ({ ...prev, [id]: attached }));
         // First attach seeds input history from the transcript so ↑ recall
@@ -5255,7 +5267,13 @@ function turnLaneNoticeFor(
   session: TuiSessionState | undefined
 ): Notice | undefined {
   const notice = session?.outputLimitNotice;
-  return notice === undefined ? undefined : { lines: [notice] };
+  // ADR-0136: a session open carries its recovery status in the same lane, so
+  // the restored state and the truncation notice never hide one another.
+  const recovery = recoveryNoticeLines(session);
+  if (notice === undefined && recovery.length === 0) return undefined;
+  return {
+    lines: [...recovery, ...(notice === undefined ? [] : [notice])],
+  };
 }
 
 /**

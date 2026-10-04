@@ -13,6 +13,7 @@
  *    lastUsage through (wire has it → state has it; wire lacks it → null).
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
+import { spawnSync } from "node:child_process";
 import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +24,14 @@ import {
 import { DEFAULT_STRATEGY_CONTEXT_WINDOW } from "../../src/config/env.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.js";
 import { ValidationError } from "../../src/shared/errors.js";
-import { CURRENT_SCHEMA_VERSION } from "../../src/session-api/store/schema.js";
+import {
+  CURRENT_SCHEMA_VERSION,
+  NATIVE_STATE_FORMAT_VERSION,
+  resolveSubagentTraceDir,
+  SessionStore,
+} from "../../src/session-api/store/index.js";
+import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.js";
+import { writeWorkerIdentityRecord } from "../../src/harness/subagent/worker-identity-record.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
@@ -1178,5 +1186,145 @@ describe("hub-bridge abortSessionForegroundWork（本会话前景扇出）", () 
 
     expect(bridge.abortSessionForegroundWork("conv-a")).toEqual(["fg"]);
     expect(killed).toEqual(["fg"]);
+  });
+});
+
+/**
+ * F5 of issue #1182's repair round: the TUI entry surface called
+ * `openSessionWithRecovery` with no `sweepOwnedWorkers`, so `workerSweep` was
+ * undefined on every TUI reopen and no unprovable stop was ever reported. The
+ * field is now REQUIRED on the shared contract, so the omission is a compile
+ * error; what these cases pin is that the sweep the bridge passes is really the
+ * session's own and really runs BEFORE the report.
+ */
+describe("hub-bridge openSession 扫本会话 worker（ADR-0136 §4 / SC16-17）", () => {
+  let baseDir: string;
+
+  const deadPid = (): number => {
+    // A pid that has already exited: the sweep's own probe confirms the stop,
+    // so the worker it accounts for needs no handling.
+    const gone = spawnSync("sh", ["-c", "exit 0"], { encoding: "utf8" });
+    if (gone.pid === undefined) throw new Error("no pid to record");
+    return gone.pid;
+  };
+
+  /** A session with a published state and one recorded worker fact, plus (unless
+   *  `record` is absent) a real identity record for that worker under the
+   *  sweep's own root. */
+  async function seedWorker(
+    id: string,
+    record?: { readonly pid: number; readonly starttime: number }
+  ): Promise<SessionStore> {
+    const projectIdentityRoot = deriveProjectIdentityRoot({ cwd: baseDir });
+    const store = new SessionStore(baseDir, projectIdentityRoot);
+    await store.save({
+      id,
+      file: {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: id,
+        title: "",
+        cwd: baseDir,
+        sanitized_at: new Date().toISOString(),
+        messages: [],
+        jsonMode: false,
+        turnCount: 0,
+        updatedAt: new Date().toISOString(),
+        checkpoints: [],
+        nativeStateFormat: NATIVE_STATE_FORMAT_VERSION,
+      } as SessionFileV1,
+    });
+    await store.appendEvents({
+      id,
+      events: [
+        { role: "user", content: [{ type: "text", text: "go" }] },
+        { role: "assistant", content: [{ type: "text", text: "ok" }] },
+      ],
+    });
+    await store.appendNativeState({
+      id,
+      anchorEventId: "e1",
+      boundary: "input",
+      snapshot: {
+        boundary: "input",
+        messages: [{ role: "user", content: [{ type: "text", text: "go" }] }],
+      },
+    });
+    await store.appendOperationFact({
+      id,
+      factId: "f-worker",
+      fact: {
+        kind: "worker_progress",
+        taskId: "task-1",
+        ownership: "background",
+        state: "running",
+        ...(record !== undefined
+          ? { process: { pid: record.pid, startTime: record.starttime } }
+          : {}),
+        transcriptPath: "/workers/task-1.jsonl",
+      },
+    });
+    if (record !== undefined) {
+      const subagentsDir = resolveSubagentTraceDir({
+        projectDir: store.getProjectDir(),
+        conversationId: id,
+      });
+      writeWorkerIdentityRecord(subagentsDir, {
+        task_id: "task-1",
+        ownership: "background",
+        worker_state: "running",
+        pid: record.pid,
+        starttime: record.starttime,
+        transcript_path: join(subagentsDir, "task-1.jsonl"),
+        session_id: id,
+      });
+    }
+    return store;
+  }
+
+  beforeEach(async () => {
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-tui-sweep-"));
+  });
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+  });
+
+  const open = (id: string) =>
+    createTuiBridge({
+      dataDir: baseDir,
+      workspaceRoot: baseDir,
+      deps: makeDeps([]),
+      inflight: createInflightRegistry(),
+    }).openSession(id);
+
+  test("扫到停透证明的 worker → 报告 recovered（无 sweep 时必是 needs handling）", async () => {
+    const id = "tui-sweep-proven";
+    await seedWorker(id, { pid: deadPid(), starttime: 1 });
+
+    const { recovery } = await open(id);
+
+    expect(recovery.status).toEqual({ status: "recovered" });
+    expect(recovery.operationFacts?.workers[0]?.needsHandling).toBe(false);
+    expect(recovery.operationFacts?.workers[0]?.stopEvidence).toEqual({
+      state: "confirmed_stopped",
+      pid: recovery.operationFacts?.workers[0]?.process?.pid,
+    });
+  });
+
+  test("扫不到的 worker → 报告 needs handling，绝不谎称已停", async () => {
+    const id = "tui-sweep-unproved";
+    // A recorded worker with no identity record on disk: the sweep has nothing
+    // to verify, so the report must keep it unsettled (ADR-0136 §4 / SC17)
+    // rather than read the missing evidence as a stop.
+    await seedWorker(id);
+
+    const { recovery } = await open(id);
+
+    expect(recovery.status).toEqual({
+      status: "needs handling",
+      handling: [],
+      workers: ["task-1"],
+    });
+    expect(recovery.operationFacts?.workers[0]?.needsHandling).toBe(true);
+    expect(recovery.operationFacts?.workers[0]?.stopEvidence).toBeNull();
   });
 });

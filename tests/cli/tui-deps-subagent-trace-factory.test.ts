@@ -18,7 +18,7 @@
 
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
@@ -38,6 +38,7 @@ const mockState = vi.hoisted(() => ({
     once: (event: string | symbol, ...args: unknown[]) => unknown;
   }>,
   capturedSubagentsDir: undefined as string | undefined,
+  capturedProjectDir: undefined as string | undefined,
   capturedDiagnosticsDir: undefined as string | undefined,
 }));
 
@@ -51,6 +52,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
     ...actual,
     createSubAgentManager: vi.fn((opts: Parameters<typeof realCreate>[0]) => {
       mockState.capturedSubagentsDir = opts.subagentsDir;
+      mockState.capturedProjectDir = opts.projectDir;
       mockState.capturedDiagnosticsDir = opts.diagnosticsDir;
       const fakeSpawn: (
         def: unknown,
@@ -198,14 +200,18 @@ describe("buildTuiDeps — subagent trace 接线 (T5 per-agent 形态)", () => {
     expect(mockState.capturedDiagnosticsDir).toBe(scratchDir);
   });
 
-  it("不配 conversationId → TUI 派生一个 fallback conversationId, subagentsDir 仍注入 manager", async () => {
-    // ADR-0071: the TUI entry requires every spawn to locate
-    // <parent session folder>/subagents/. Even when the caller omits
-    // conversationId, the assembly layer falls back to randomUUID() so the
-    // per-agent layout is always writable — no longer dependent on caller
-    // configuration. Verify the derived capturedSubagentsDir ends with
-    // /subagents (independent of the conversationId segment: once the manager
-    // gets the derived dir, it creates it).
+  it("不配 conversationId → 传 projectDir 而非不可计算的 subagentsDir,由 manager 按 spawn 推导", async () => {
+    // ADR-0071 wants every spawn under <parent session folder>/subagents/. At TUI
+    // assembly the caller does not know the conversationId, and `subagentsDir`
+    // takes priority over `projectDir` in the manager — so pinning an
+    // assembly-time randomUUID() there would write every worker record under a
+    // directory no later process can compute. The entry sweep resolves
+    // <projectDir>/<conversationId>/subagents from the real id and would find
+    // nothing, leaving an owned worker no process can stop or even see.
+    //
+    // So the un-known-id case must use the per-spawn derivation seam instead,
+    // and this asserts the absence of the uncomputable dir as the load-bearing
+    // part — not merely that some directory was passed.
     const deps = await buildTuiDeps(makeBundle("sk-test-tui-trace-off"), {
       askUser: createNoAskUser(),
       userHome: join(fixtureRoot, "home"),
@@ -213,22 +219,24 @@ describe("buildTuiDeps — subagent trace 接线 (T5 per-agent 形态)", () => {
     });
     shutdown = deps.shutdown;
 
-    // No conversationId passed → the TUI falls back to an internal randomUUID, still
-    // deriving subagentsDir and injecting it into the manager (captured field non-empty).
-    assert.ok(
-      mockState.capturedSubagentsDir !== undefined,
-      "TUI 必须给 manager 一个 subagentsDir,即便 caller 没传 conversationId"
+    assert.equal(
+      mockState.capturedSubagentsDir,
+      undefined,
+      "caller 未传 conversationId 时不得注入 subagentsDir,否则记录会落在无法推导的目录"
     );
-    assert.match(
-      mockState.capturedSubagentsDir!,
-      /\/subagents$/,
-      `subagentsDir 应以 /subagents 收尾, 实际 ${mockState.capturedSubagentsDir}`
+    assert.ok(
+      mockState.capturedProjectDir !== undefined,
+      "TUI 必须传 projectDir,让 manager 用 def.conversationId 在 spawn 时推导每会话叶子"
     );
 
-    // diagnosticsDir defaults to falling back to subagentsDir (the stderr pointer follows the parent dir)
-    assert.equal(
-      mockState.capturedDiagnosticsDir,
-      mockState.capturedSubagentsDir
+    // The stderr pointer is still supplied — it falls back to the manager's own
+    // trace root when no subagentsDir is present, which is a STABLE path rather
+    // than the assembly-time UUID the old shape produced. The load-bearing
+    // assertion is the two above; this one only guards against the pointer
+    // being dropped entirely.
+    assert.ok(
+      mockState.capturedDiagnosticsDir !== undefined,
+      "stderr 指针必须仍然提供,否则子进程 stderr 无处落盘"
     );
   });
 });

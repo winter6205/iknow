@@ -174,6 +174,103 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Added
 
+- **Native session checkpoints: a published native-context snapshot survives an abnormal
+  exit, and file writes are durable before they mutate (spec `session-checkpoint-architecture`,
+  ADR-0136, plan A 2026-10-03)**:
+  before a model turn starts, the host publishes the session's native context as a
+  content-addressed body under `<session>/blobs/native/<sha256>` plus an append-only
+  `native_state` record anchored at the accepted input's own event. Selection is derived
+  from the event/head chain alone — no timestamp ordering, no independent current-state
+  pointer, no branch registry — and the body is always written before the reference, so a
+  failed body write leaves nothing selectable. On reopen, `openSessionWithRecovery` selects
+  the published state, restores that saved context as the next turn's model context, and
+  classifies the session as `recovered` / `needs handling` / `blocked` /
+  `unsupported_format` / `no_published_state`; recovery is read-only and issues no model
+  or tool call. A missing, corrupt, or invalid body fails closed as `blocked` rather than
+  falling back to transcript reconstruction. Separately, every `write_file` / `edit_file` /
+  `symbol-mutate` now appends a durable per-file intent before touching its target — so a
+  multi-file call keeps an association for every target instead of last-write-wins — and
+  publishes each target atomically (staged write + rename), leaving a target's bytes wholly
+  old or wholly new and never partial. With `codeRestore.enabled: false` the write still
+  proceeds and is recorded as unverified rather than blocking or claiming completion.
+  Old-format sessions are detected by a new-format marker written only at session creation,
+  so an existing session is never relabelled and its bytes are never rewritten. Terminal,
+  tool-batch, and compaction boundaries, plus worker/graph runtime facts, are the parallel
+  plan B and plan C surface and are deliberately absent here.
+
+- **Session saved state: the harness now emits typed runtime persistence requests
+  (spec `session-checkpoint-architecture`, plan B, 2026-10-03)**:
+  `src/shared/runtime-persistence.ts` declares one dependency-neutral port, and the loop
+  engine, the `run_graph` handler, and the subagent manager each publish through it. The
+  harness owns no session file, no store error type, and no independent head; a host that
+  wires nothing sees byte-identical behavior, and every write site awaits the port and
+  blocks its dependent execution on failure.
+  - Loop: the accepted user input is published before the first model dispatch; each
+    settled tool result appends a fact carrying its tool-use id, batch position and batch
+    size, so a result is durable while an earlier call of the same batch is still blocked
+    and protocol order is reconstructible without replaying the batch. A batch is published
+    as a whole state only once every returned result — tool errors included — is in the
+    saved context, and never for a cancelled batch or a detached ADR-0134 handler that is
+    still running. Compaction publishes the exact post-compaction context on both the
+    proactive and the reactive path; the terminal publication carries the observed stop
+    reason and never a completeness verdict, which stays the host's call under ADR-0126.
+  - Graph: node facts are written per node at its own settlement point rather than in one
+    post-convergence pass, which is where a kill inside the scheduler previously lost every
+    already-settled node. A dispatched node is marked before the spawn, so an interrupted
+    node is distinguishable from one that was never submitted, and a failed node carries its
+    error. The cancel, string-output and `skipped` rules have a single definition that both
+    the in-process ledger and the fact stream call, so the two cannot drift. No
+    `nextNodeIds`, no second journal, no per-conversation mutex.
+  - Workers: a per-task identity record captures pid plus `/proc` start time, so a recycled
+    pid is never signalled and an unreadable identity is a needs-handling answer rather than
+    a "stopped" one. The worker is deliberately not detached, so the background-task
+    process-group helpers are not reused — this worker shares the host's group and signalling
+    it would take the host down with it; liveness is pid-granular instead, carrying over the
+    start-time read and the cleanup evidence vocabulary. Continuation is refused until the
+    exact prior process is proven gone.
+  - Recovery-critical writes that cannot be awaited (the worker spawn seam is synchronous by
+    contract) write their own durable record first, treat the fact as a projection of it, and
+    surface a rejected append explicitly with its cause.
+  - Plan status, including which acceptance clauses remain open and which single owner each
+    one has, is recorded per-clause in
+    `docs/implementation-plans/session-checkpoint-runtime-workers.md` and
+    `docs/implementation-plans/session-checkpoint-storage-recovery.md`. After all three plans
+    merged, the remaining host-side work has named owners rather than a sibling plan: the
+    fresh-process reopen halves sit with the host-side runtime persistence adapter that no host
+    binds yet, the session-host abnormal-exit hook and the reopen sweep sit with the
+    session-host entry path (`stopOwnedWorkers()` still has no caller, and `resumeTask` still
+    gates on the in-memory task map), per-file associations sit with this plan's write-capture
+    seam, and SC24 and SC25 are combined acceptance across all three plans and are not claimed
+    here.
+  - Model-input surface: three new model-visible strings, not one. The
+    `prior_process_unconfirmed` continuation refusal and the two `undurable` node-failure
+    sentences in `src/harness/graph/run-graph-tool.ts` (a node that was not started because
+    its dispatch could not be recorded; a node that finished as `done` but whose outcome
+    could not be recorded) each carry a STATIC lock
+    (`tests/subagent/subagent-continue-refusal-text.test.ts`,
+    `tests/harness/graph/graph-undurable-text.test.ts`) and their trajectory gaps are
+    registered in `docs/guides/prompt-development.md`; no tool description, tool schema, or
+    system prefix changed.
+
+- **Session traces: reopening a trace now shows the exact request that was sent, and says so
+  when it cannot (spec `session-checkpoint-architecture`, ADR-0136, plan C, 2026-10-03)**:
+  every governed SDK invocation is retained with the request object as it was finally
+  dispatched — post-injection, post-compaction, post-instruction- and post-tool-projection —
+  under a new `dispatch_evidence` row, one identity per invocation even when two calls reuse
+  the same bodies, carrying that attempt's outcome so a rejected or stream-failed call stays
+  attached to the invocation it belongs to. Bodies are masked before they are hashed and
+  stored, so the session-local pool `<session>/blobs/<sha256>` shares one immutable body per
+  distinct masked representation while the raw native recovery bodies stay physically out of
+  reach. On reopen, the `get-record` manifest arm returns `final_request_evidence` — the
+  complete dereferenced request rather than a hash — through one address gate that authorizes
+  only the bodies the selected trace references, so an unrelated raw checkpoint body in the
+  same pool can neither be read nor enumerated. A trace copied without its referenced bodies
+  is reported as an explicit `evidence_gap: "unreadable_referenced_body"` with fail-closed
+  empty parts, so missing evidence cannot read as a record that had no content. Capture is
+  best-effort: a capture or storage failure never re-dispatches the model call, credentials
+  and transport headers are never captured, and a reader gets no new export command, bundle,
+  or UI.
+
 - **Harbor adapter: `--ak trace_out=true` retains the per-turn trajectory as a trial
   artifact (2026-09-29)**:
   the adapter previously kept only the merged `ask` stream, so the Terminal-Bench pilot

@@ -61,7 +61,7 @@
  *     `writeFile` that follows it.
  */
 import { fileURLToPath } from "node:url";
-import { readFile, writeFile } from "node:fs/promises";
+import { readFile } from "node:fs/promises";
 
 import type { CancellationToken } from "vscode-jsonrpc/node";
 
@@ -76,6 +76,7 @@ import {
   type PreimageCapture,
   type PreimageOpts,
 } from "../preimage-port.js";
+import { publishFile } from "../../../util/atomic-file-publish.js";
 import {
   DEFAULT_LSP_REQUEST_TIMEOUT_MS,
   compileValidator,
@@ -617,7 +618,7 @@ async function applyWorkspaceEdit(
   const written: string[] = [];
   for (const { filePath, next } of staged) {
     try {
-      await writeFile(filePath, next, "utf8");
+      await publishFile(filePath, next);
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       throw new ToolExecutionError(

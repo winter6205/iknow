@@ -52,6 +52,24 @@ Secret handling converged from three disconnected patches into a **single-layer 
 | `specs/` (live index: `specs/README.md`) | Module specs still in force |
 | `docs/adr/`                              | Architecture decisions      |
 
+## Planned native checkpoint and recovery contract
+
+[ADR-0136](adr/0136-native-session-checkpoint-architecture.md) defines the accepted target architecture; its active specification is indexed in [specs/README.md](../specs/README.md). Product implementation and crash/PTY acceptance have not started.
+
+| Existing capability                                                 | Target responsibility                                                                                                                                                                                     |
+| ------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Session storage and host (`src/session-api/`, persistent CLI hosts) | Publish immutable native state through the existing event/head and single-writer boundary; retain intermediate facts; coordinate selected-session recovery and visible status.                            |
+| Harness (`src/harness/`)                                            | Supply exact native execution state and independently settled progress through a neutral persistence port; retain graph outcomes and owned worker identity; keep execution/permission admission explicit. |
+| Trace writer and reader (`src/harness/trace/`, `src/traceserver/`)  | Capture the actual final SDK request, apply existing redaction, retain exact represented-body references, and read only trace-permitted content.                                                          |
+
+The event ID/parent/head chain remains the sole branch/history authority. Checkpoints carry immutable native context/runtime payload references, not a second history. Required state bodies and enabled per-file associations are saved before the dependent model request or file mutation. Ordinary captured writes publish atomically per file; a multi-file tool is not a transaction.
+
+Entry recovery restores the saved context and reconciles later facts without replaying tools, compaction, graph nodes, or workers. It preserves verified completed effects, reports uncertainty, and keeps manual code rewind separate. Owned subagents stop after abnormal host exit; unrelated/persistent Bash services retain their existing lifecycle.
+
+The session-local `blobs/` pool may hold native recovery and differently redacted trace representations with separate consumer authority and failure handling; raw file pre/postimages remain in `code-snapshots/`. No expiry, quota GC, global deduplication, or new export interface is introduced. Existing sessions are retained without migration or compatibility.
+
+Three implementation plans are maintained in `docs/implementation-plans/` for separate worktrees. Shared-file changes are resolved at integration, and one combined acceptance matrix covers the joined system. These are documentation deliverables, not shipped capability.
+
 ## Interaction design (product surface)
 
 Multi-turn chat / REPL is a **host-layer** concern. See:

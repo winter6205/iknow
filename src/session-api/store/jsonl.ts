@@ -29,6 +29,27 @@
  *      the message chain, so abandoned fork branches never leak into
  *      projection; a turn with no outcome record projects as unknown (never a
  *      synthesized completion).
+ *   6. native state record (ADR-0136): `{type:"native_state", anchorEventId,
+ *      bodySha, boundary, messageCount}` — a REFERENCE to an immutable body
+ *      under `<sessionFolder>/blobs/native/`, not the body itself. Off-chain
+ *      like the title/outcome records (it never moves head or
+ *      maxEventIndex) and anchored to a message event id, so selection is
+ *      derived from the event/head chain alone.
+ *   7. file intent record (ADR-0136): `{type:"file_intent", toolUseId,
+ *      anchorEventId, targets, captured}` — the durable per-file write
+ *      intent,
+ *      written BEFORE the target is mutated and carrying EVERY target of a
+ *      multi-file call (the in-memory preimage ledger is last-write-wins per
+ *      toolUseId). `captured:false` records the `codeRestore.enabled`
+ *      suppression so recovery reports the effect UNVERIFIED instead of
+ *      inferring completion.
+ *   8. operation fact record (ADR-0136): `{type:"operation_fact", factId,
+ *      anchorEventId, baseBodySha, turnId?, fact, createdAt}` — one settled or
+ *      dispatched operation that happened BETWEEN two published states (a tool
+ *      result with its per-file associations, a graph node transition, owned
+ *      worker progress). Off-chain like every other ADR-0136 record, so it is
+ *      never projected into the session file and never selectable as a
+ *      checkpoint.
  *
  * Named EXIT (exception class): `drop-trailing-corrupt-line` — if the last
  * non-empty line fails JSON.parse, drop that line and still load (the only
@@ -55,6 +76,16 @@ import type {
   SupplierStopDetail,
   TokenUsage,
 } from "../../harness/index.js";
+import type {
+  FileIntentTarget,
+  NativeStateBoundary,
+  NativeStateMessage,
+} from "../../shared/native-state-port.js";
+import type {
+  RuntimeGraphNodeFact,
+  RuntimeOperationFact,
+  RuntimeWorkerFact,
+} from "../../shared/runtime-persistence.js";
 import type { CheckpointRecord, GoalState, SessionFileV1 } from "./schema.js";
 import { sanitizeSessionFile } from "./schema.js";
 
@@ -95,6 +126,10 @@ export interface SessionHeaderRecord {
    *  file-minus-messages spread, same add-on posture as goal/workspaceRoot.
    *  Shape is validated on load by sanitizeSessionFile, not here. */
   readonly lastUsage?: TokenUsage;
+  /** ADR-0136: new-format marker, carried by the same header spread as the
+   *  file's other optional add-ons. Absent = old format (see
+   *  `isNewFormatSession`). */
+  readonly nativeStateFormat?: number;
 }
 
 /** Content-addressed preimage reference a successful workspace write leaves
@@ -266,7 +301,11 @@ export interface SecurityInterruptionItem {
 
 export type SecurityInterruptionCleanup =
   | { readonly state: "not_started" }
-  | { readonly state: "confirmed_stopped"; readonly pgid: number; readonly task_id?: string }
+  | {
+      readonly state: "confirmed_stopped";
+      readonly pgid: number;
+      readonly task_id?: string;
+    }
   | {
       readonly state: "unconfirmed";
       readonly reason: string;
@@ -275,12 +314,101 @@ export type SecurityInterruptionCleanup =
       readonly task_id?: string;
     };
 
+/**
+ * ADR-0136: reference to one published native state. The record carries the
+ * content address of an immutable body under
+ * `<sessionFolder>/blobs/native/` (native-state-store.ts) — never the body
+ * itself, so publishing a state costs one line in the transcript and the
+ * immutable content is shared.
+ *
+ * Off-chain in the same posture as the title/outcome records: it never moves
+ * `head` or `maxEventIndex`, so a rewound-away branch's state can never be
+ * selected. Selection is derived from the event/head chain
+ * (`resolvePublishedNativeState`) — no timestamp ordering, no independent
+ * current-state pointer, no branch registry.
+ */
+export interface SessionNativeStateRecord {
+  readonly type: "native_state";
+  /** Message event id this state is anchored to. Selectable only when it is
+   *  on the selected head chain. */
+  readonly anchorEventId: string;
+  /** sha256 hex of the immutable body under `<sessionFolder>/blobs/native/`. */
+  readonly bodySha: string;
+  /** Which boundary published this state. */
+  readonly boundary: NativeStateBoundary;
+  readonly messageCount: number;
+  readonly createdAt: string;
+}
+
+/** The durable record reuses the PORT's target shape verbatim — the request
+ *  the harness hands the host and the line recovery reads back are ONE
+ *  contract, declared once in `shared/native-state-port.ts`. Re-exported here
+ *  because the record layer is where callers already import it from.
+ *  `preimageSha` is absent exactly when the record is `captured:false`; an
+ *  empty preimage never implies absence, `absentBefore` is the evidence. */
+export type { FileIntentTarget };
+
+/**
+ * ADR-0136: durable file write intent, written BEFORE the target is mutated.
+ *
+ * `anchorEventId` is the persisted head at capture time — the assistant
+ * tool_use event is already committed before any call in that response is
+ * dispatched, so that head is a real branch anchor rather than a guess.
+ * `captured:false` is a real outcome, not an absent record: the existing
+ * `codeRestore.enabled` opt-out suppressed evidence capture, and the record
+ * exists so recovery reports the effect UNVERIFIED instead of silently
+ * inferring completion. Off-chain, like the other non-message records.
+ */
+export interface SessionFileIntentRecord {
+  readonly type: "file_intent";
+  readonly toolUseId: string;
+  readonly anchorEventId: string;
+  readonly targets: ReadonlyArray<FileIntentTarget>;
+  readonly captured: boolean;
+  readonly createdAt: string;
+}
+
+/**
+ * ADR-0136: one operation fact appended between two published states.
+ *
+ * THE APPEND POSITION IS THE ORDER — it is the only thing that says which
+ * published state a fact belongs after, and a sink must append in the order it
+ * receives facts. `baseBodySha` names that state for convenience (the last
+ * state this sink published, `null` before the first one); it is NOT a second,
+ * separately-maintained order to keep in step, and nothing in the append path
+ * may reorder or rewrite a fact. A published state is never mutated, and a
+ * fact is never deleted.
+ *
+ * `factId` is caller-supplied and stable across a repeated append of the same
+ * fact, which is what makes the dedup on append decidable (SC27: a repeated
+ * open must not add a duplicate receipt).
+ *
+ * `anchorEventId` is the persisted head at append time and must be on the
+ * selected head chain for the fact to be usable, exactly like the other
+ * ADR-0136 records.
+ */
+export interface SessionOperationFactRecord {
+  readonly type: "operation_fact";
+  readonly factId: string;
+  readonly anchorEventId: string;
+  /** `bodySha` of the last state this sink published; null when none yet. */
+  readonly baseBodySha: string | null;
+  /** Turn the fact belongs to, when the turn identity is known. */
+  readonly turnId?: string;
+  /** The fact itself, in the harness's own vocabulary. */
+  readonly fact: RuntimeOperationFact<NativeStateMessage>;
+  readonly createdAt: string;
+}
+
 /** All record shapes after the header (in file order). */
 export type SessionTailRecord =
   | SessionEventRecord
   | SessionHeadRecord
   | SessionTitleRecord
-  | SessionOutcomeRecord;
+  | SessionOutcomeRecord
+  | SessionNativeStateRecord
+  | SessionFileIntentRecord
+  | SessionOperationFactRecord;
 
 export type SessionJsonlRecord = SessionHeaderRecord | SessionTailRecord;
 
@@ -410,9 +538,10 @@ export function parseSessionJsonl(raw: string): ParsedSessionLog {
       continue;
     }
     if (isOffChainRecord(rec)) {
-      // ADR-0113 / ADR-0126: title and outcome records never change
-      // head/maxEventIndex, they only ride along in records (and are resolved
-      // against the head chain on read).
+      // ADR-0113 / ADR-0126 / ADR-0136: title, outcome, native-state,
+      // file-intent and operation-fact records never change
+      // head/maxEventIndex, they only ride
+      // along in records (and are resolved against the head chain on read).
       tail.push(rec);
       continue;
     }
@@ -608,6 +737,68 @@ export function resolveTurnOutcomes(log: ParsedSessionLog): {
     outcomes.set(rec.turnId, rec);
   }
   return { messageEventIds: chain.map((e) => e.id), outcomes };
+}
+
+/** One on-chain file intent plus where its anchor sits on the selected chain,
+ *  so a reader can tell "after the selected state" from "before it". */
+export interface FileIntentPosition {
+  readonly record: SessionFileIntentRecord;
+  /** Index into `PublishedNativeStateSelection.messageEventIds`; always a real
+   *  position (an intent whose anchor left the chain is not reported). */
+  readonly anchorIndex: number;
+}
+
+/** The chain-derived view of what a session has published. */
+export interface PublishedNativeStateSelection {
+  /** Head chain event ids, root → head (index = chain position). */
+  readonly messageEventIds: ReadonlyArray<string>;
+  /** The selected published state: the LAST `native_state` record in file
+   *  order whose anchor is on the head chain. null when none qualifies — a
+   *  session never synthesizes a state it did not publish. */
+  readonly selected: SessionNativeStateRecord | null;
+  /** Chain position of the selected anchor; -1 when nothing is selected. */
+  readonly anchorIndex: number;
+  /** Every on-chain file intent, in file order, each with its chain
+   *  position. Additive, never collapsed: repeated intents for one anchor
+   *  stay distinct records. */
+  readonly fileIntents: ReadonlyArray<FileIntentPosition>;
+}
+
+/**
+ * ADR-0136: the selected published native state, resolved against one
+ * transcript's active head chain — the same off-chain resolution
+ * `resolveTurnOutcomes` does, so a rewound-away or compacted-away branch's
+ * state is excluded here, which is why the record is off-chain in the first
+ * place. Later records win for the same anchor (append-only re-record).
+ *
+ * Selection comes from the event/head chain ONLY: no timestamp comparison, no
+ * independent current-state pointer, no branch registry. Pure.
+ */
+export function resolvePublishedNativeState(
+  log: ParsedSessionLog
+): PublishedNativeStateSelection {
+  const chain = headChainEvents(log);
+  const messageEventIds = chain.map((e) => e.id);
+  const positionOf = new Map(messageEventIds.map((id, i) => [id, i]));
+  let selected: SessionNativeStateRecord | null = null;
+  let anchorIndex = -1;
+  const fileIntents: FileIntentPosition[] = [];
+  for (const rec of log.records) {
+    if (rec.type === "native_state") {
+      const at = positionOf.get(rec.anchorEventId);
+      if (at !== undefined) {
+        selected = rec;
+        anchorIndex = at;
+      }
+      continue;
+    }
+    if (rec.type === "file_intent") {
+      const at = positionOf.get(rec.anchorEventId);
+      if (at !== undefined) fileIntents.push({ record: rec, anchorIndex: at });
+      continue;
+    }
+  }
+  return { messageEventIds, selected, anchorIndex, fileIntents };
 }
 
 /**
@@ -877,11 +1068,263 @@ function isSecurityInterruption(value: unknown): boolean {
   return Array.isArray(cleanup) && cleanup.every(isSecurityInterruptionItem);
 }
 
+/** Keyed off the boundary union declared in the neutral port so a new member
+ *  fails compilation here until it is listed — the on-disk record can never
+ *  accept a boundary the publisher does not produce. */
+const NATIVE_STATE_BOUNDARY_MEMBERS: Record<NativeStateBoundary, true> = {
+  input: true,
+  tool_batch: true,
+  compaction: true,
+  terminal: true,
+};
+
+export function isNativeStateBoundary(
+  value: unknown
+): value is NativeStateBoundary {
+  return (
+    typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(NATIVE_STATE_BOUNDARY_MEMBERS, value)
+  );
+}
+
+function isNativeStateRecord(
+  value: unknown
+): value is SessionNativeStateRecord {
+  return (
+    isRecord(value) &&
+    value["type"] === "native_state" &&
+    typeof value["anchorEventId"] === "string" &&
+    typeof value["bodySha"] === "string" &&
+    isNativeStateBoundary(value["boundary"]) &&
+    typeof value["messageCount"] === "number" &&
+    typeof value["createdAt"] === "string"
+  );
+}
+
+/** A target is structurally checked, not trusted: `relPath` / `rootIdentity`
+ *  are what recovery resolves the live file against, so an empty one is
+ *  unresolvable rather than cosmetic — the same rule the append path applies
+ *  before it writes. The sha keys are blob filenames; a present value must at
+ *  least be a string here, and the sha256 alphabet gate belongs to the read
+ *  path, which is where the value becomes a path segment. */
+function isFileIntentTarget(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  if (!isNonEmptyString(value["relPath"])) return false;
+  if (!isNonEmptyString(value["rootIdentity"])) return false;
+  if (typeof value["absentBefore"] !== "boolean") return false;
+  return (
+    isOptionalShaField(value, "preimageSha") &&
+    isOptionalShaField(value, "postimageSha")
+  );
+}
+
+function isNonEmptyString(value: unknown): boolean {
+  return typeof value === "string" && value.length > 0;
+}
+
+function isOptionalShaField(
+  value: Record<string, unknown>,
+  key: string
+): boolean {
+  return value[key] === undefined || typeof value[key] === "string";
+}
+
+function isFileIntentRecord(value: unknown): value is SessionFileIntentRecord {
+  return (
+    isRecord(value) &&
+    value["type"] === "file_intent" &&
+    typeof value["toolUseId"] === "string" &&
+    typeof value["anchorEventId"] === "string" &&
+    typeof value["captured"] === "boolean" &&
+    typeof value["createdAt"] === "string" &&
+    Array.isArray(value["targets"]) &&
+    (value["targets"] as ReadonlyArray<unknown>).every(isFileIntentTarget)
+  );
+}
+
+/**
+ * Keyed off the harness's own fact unions so a new member fails compilation
+ * here until it is listed — the on-disk record can never accept a status,
+ * state, or kind the harness does not produce.
+ */
+const GRAPH_NODE_STATUS_MEMBERS: Record<RuntimeGraphNodeFact["status"], true> =
+  {
+    running: true,
+    done: true,
+    failed: true,
+    skipped: true,
+  };
+
+const WORKER_OWNERSHIP_MEMBERS: Record<RuntimeWorkerFact["ownership"], true> = {
+  foreground: true,
+  background: true,
+};
+
+const WORKER_STATE_MEMBERS: Record<RuntimeWorkerFact["state"], true> = {
+  starting: true,
+  running: true,
+  completed: true,
+  failed: true,
+  stopped: true,
+  needs_handling: true,
+};
+
+type PersistedOperationFact = RuntimeOperationFact<NativeStateMessage>;
+
+/**
+ * Per-kind shape checks, keyed off the fact union (the same table-over-a-Record
+ * discipline as the content-block validators). `startTime` is `number | null`
+ * and a null stays null: a synthesized value would turn "cannot confirm this
+ * worker stopped" into a false "stopped", which is the one answer the spec
+ * forbids inventing.
+ */
+const FACT_VALIDATORS = new Map<
+  PersistedOperationFact["kind"],
+  (fact: Record<string, unknown>) => boolean
+>([
+  ["tool_result", isToolResultFact],
+  ["graph_node", isGraphNodeFact],
+  ["worker_progress", isWorkerFact],
+]);
+
+function isToolResultFact(fact: Record<string, unknown>): boolean {
+  return (
+    isNonEmptyString(fact["toolUseId"]) &&
+    isBatchIndex(fact["batchPosition"]) &&
+    isBatchIndex(fact["batchSize"]) &&
+    isNativeMessageLike(fact["resultMessage"]) &&
+    isOptionalFileAssociations(fact["files"]) &&
+    (fact["turnId"] === undefined || typeof fact["turnId"] === "string")
+  );
+}
+
+function isGraphNodeFact(fact: Record<string, unknown>): boolean {
+  return (
+    isNonEmptyString(fact["nodeId"]) &&
+    hasMember(GRAPH_NODE_STATUS_MEMBERS, fact["status"]) &&
+    isOptionalString(fact["output"]) &&
+    isOptionalString(fact["error"])
+  );
+}
+
+function isWorkerFact(fact: Record<string, unknown>): boolean {
+  return (
+    isNonEmptyString(fact["taskId"]) &&
+    hasMember(WORKER_OWNERSHIP_MEMBERS, fact["ownership"]) &&
+    hasMember(WORKER_STATE_MEMBERS, fact["state"]) &&
+    isOptionalProcessIdentity(fact["process"]) &&
+    isOptionalString(fact["transcriptPath"]) &&
+    isOptionalString(fact["toolUseId"])
+  );
+}
+
+/** Process IDENTITY, not a handle: pid + the raw start time, nothing that can
+ *  reach a live process. An unknown start time is `null`, never a guess. */
+function isOptionalProcessIdentity(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!isRecord(value)) return false;
+  return (
+    typeof value["pid"] === "number" &&
+    (value["startTime"] === null || typeof value["startTime"] === "number")
+  );
+}
+
+/** Record-layer message check (role + content array). Block-level shape is the
+ *  published-snapshot validator's job — this layer only has to reject a line
+ *  that cannot be projected at all. */
+function isNativeMessageLike(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    typeof value["role"] === "string" &&
+    Array.isArray(value["content"])
+  );
+}
+
+function isOptionalFileAssociations(value: unknown): boolean {
+  if (value === undefined) return true;
+  return (
+    Array.isArray(value) &&
+    (value as ReadonlyArray<unknown>).every(isFileOperationRecord)
+  );
+}
+
+function isFileOperationRecord(value: unknown): boolean {
+  return (
+    isRecord(value) &&
+    isNonEmptyString(value["relPath"]) &&
+    isNonEmptyString(value["rootIdentity"]) &&
+    typeof value["absentBefore"] === "boolean" &&
+    isOptionalShaField(value, "preimageSha") &&
+    isOptionalShaField(value, "postimageSha") &&
+    (value["published"] === undefined ||
+      typeof value["published"] === "boolean")
+  );
+}
+
+function isBatchIndex(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value >= 0;
+}
+
+function isOptionalString(value: unknown): boolean {
+  return value === undefined || typeof value === "string";
+}
+
+function hasMember(
+  members: Record<string, true>,
+  value: unknown
+): value is keyof typeof members {
+  return (
+    typeof value === "string" &&
+    Object.prototype.hasOwnProperty.call(members, value)
+  );
+}
+
+/**
+ * A fact payload's failed field name, or null when well-formed. Exported
+ * because the append path validates the SAME function the read path does — a
+ * record that can be written must be a record that can be read back.
+ */
+export function factPayloadField(value: unknown): string | null {
+  if (!isRecord(value) || typeof value["kind"] !== "string") return "fact";
+  const validate = FACT_VALIDATORS.get(
+    value["kind"] as PersistedOperationFact["kind"]
+  );
+  if (validate === undefined || !validate(value)) return "fact";
+  return null;
+}
+
+function isOperationFactRecord(
+  value: unknown
+): value is SessionOperationFactRecord {
+  return (
+    isRecord(value) &&
+    value["type"] === "operation_fact" &&
+    isNonEmptyString(value["factId"]) &&
+    isNonEmptyString(value["anchorEventId"]) &&
+    (value["baseBodySha"] === null ||
+      typeof value["baseBodySha"] === "string") &&
+    (value["turnId"] === undefined || typeof value["turnId"] === "string") &&
+    typeof value["createdAt"] === "string" &&
+    factPayloadField(value["fact"]) === null
+  );
+}
+
 /** The tail-record arms that only join `records` (see the parse loop):
- *  extracted so adding the outcome arm costs parseSessionJsonl no decision
+ *  extracted so adding an off-chain arm costs parseSessionJsonl no decision
  *  point of its own. */
 function isOffChainRecord(
   value: unknown
-): value is SessionTitleRecord | SessionOutcomeRecord {
-  return isTitleRecord(value) || isOutcomeRecord(value);
+): value is
+  | SessionTitleRecord
+  | SessionOutcomeRecord
+  | SessionNativeStateRecord
+  | SessionFileIntentRecord
+  | SessionOperationFactRecord {
+  return (
+    isTitleRecord(value) ||
+    isOutcomeRecord(value) ||
+    isNativeStateRecord(value) ||
+    isFileIntentRecord(value) ||
+    isOperationFactRecord(value)
+  );
 }

@@ -42,6 +42,7 @@ import {
   MessageCommitError,
   ProtocolError,
   PromptTooLongError,
+  RuntimeStatePersistenceError,
   SkipAppendEmptyPriorError,
   SkipAppendWithTextError,
   TransportRetryExhaustedError,
@@ -65,6 +66,7 @@ import type {
   CountTokensResult,
   LoopState,
   RunResult,
+  SdkDispatchEvidence,
   StopReason,
   SupplierStopDetail,
   TokenUsage,
@@ -96,6 +98,11 @@ import {
   TRANSPORT_RETRY_DETAIL_INVISIBLE_TIMEOUT,
 } from "./stream.js";
 import { splitStreamingMarkdown } from "../shared/streaming-block-freeze.js";
+import type {
+  RuntimeOperationFact,
+  RuntimePersistenceSink,
+  RuntimeSavedStateRequest,
+} from "../shared/runtime-persistence.js";
 import type { RaceTimers } from "./race-timers.js";
 import { lastNonEmptyAssistant } from "./last-nonempty-assistant.js";
 import {
@@ -225,10 +232,9 @@ function toToolCallCause(result: {
  * on `toolName` — so repeating its kind keeps the row readable rather than
  * dropping the field a consumer may filter on.
  */
-function errorMessageFor(
-  result: ToolExecutionResult
-): string {
-  return result.kind === "execution_failed" || result.kind === "validation_failed"
+function errorMessageFor(result: ToolExecutionResult): string {
+  return result.kind === "execution_failed" ||
+    result.kind === "validation_failed"
     ? result.message
     : result.kind;
 }
@@ -297,6 +303,10 @@ export interface LoopAdapter {
       /** Resolved per turn from deps.system?.(); when undefined the system field is not sent. */
       system?: string;
       onStream?: (event: HarnessStreamEvent) => void;
+      /** Best-effort observer of the final SDK request object,
+       *  called once per attempt before dispatch. Evidence only — the engine
+       *  appends to a local array and never lets it affect control flow. */
+      onDispatch?: (evidence: SdkDispatchEvidence) => void;
     },
     signal?: AbortSignal // LoopAdapter is consumed directly by Loop Engine, so it must accept signal
   ) => Promise<AssistantTurnResult>;
@@ -522,6 +532,23 @@ export interface LoopEngineDeps {
     thinkingMs?: number
   ) => Promise<void>;
   /**
+   * Runtime-state persistence seam (session saved-state plan B). When present,
+   * the engine publishes a full saved state at each boundary the spec names
+   * (accepted input, settled tool batch, compaction, settled terminal turn) and
+   * appends a fact as each tool call returns, so a fresh process can recover
+   * without re-deriving the turn from the transcript.
+   *
+   * Session-bound, like `commitMessages`: the host injects an
+   * already-constructed sink in its per-run deps overlay, because the engine is
+   * assembled without session identity. Every call site awaits it; a throwing
+   * sink blocks the dependent execution instead of falling back (same rule as
+   * `commitMessagesOrThrow`, and the reason the two are always paired).
+   *
+   * Field absent → zero persistence requests, behavior byte-identical to
+   * before this seam existed.
+   */
+  readonly runtimePersistence?: RuntimePersistenceSink<AnthropicNativeMessage>;
+  /**
    * Status-bar injection seam (ADR-0028). When present, stepWithTrace
    * appends the freshly computed current state (last_tool + unchecked
    * todo section) immutably as a user message to the tail of the current
@@ -682,6 +709,206 @@ async function commitMessagesOrThrow(
   } catch (err) {
     throw new MessageCommitError(err);
   }
+}
+
+// ---------------------------------------------------------------------------
+// Runtime-state persistence (session saved-state plan B)
+// ---------------------------------------------------------------------------
+//
+// The neutral port is the engine's only seam for session state: the engine
+// decides *what* a boundary means and hands over the exact context or fact, the
+// host owns storage. Absent port → every helper below is a no-op, so an
+// unwired run keeps exactly its prior behavior.
+//
+// Failure policy mirrors the commit hook: a rejected write is wrapped and
+// rethrown, never retried and never swallowed, because each of these writes is
+// what makes a durable boundary durable. A swallowed rejection would let the
+// run continue as if the state were saved. `boundary` names the write that
+// failed (a saved-state boundary, or an operation fact kind) so a caller can
+// tell which one lost — the commit chain and the runtime-state chain are
+// independent seams and must not be confused when a run aborts.
+
+/**
+ * Run-scoped box for the frozen prompt prefix (plan B2: a reopened session must
+ * not need current settings to re-assemble its context).
+ *
+ * Two writers, one box. Every model request overwrites it with the exact
+ * `system` it is about to send, so a publication that follows a request carries
+ * that request's bytes rather than a re-derivation. A run's first publication
+ * precedes any request, so it seeds the box from the same per-turn seam
+ * instead — once per run, shared by every boundary, so two publications of one
+ * run cannot disagree about the prefix their context was assembled against.
+ */
+interface FrozenSystemPrefix {
+  /**
+   * False until the seam has been resolved once. `resolved` is what separates
+   * "this run has not asked yet" from "asked, and the answer was no prefix":
+   * without it a seam that yields nothing would be re-resolved at every
+   * boundary.
+   */
+  resolved: boolean;
+  prefix: string | undefined;
+}
+
+function createFrozenSystemPrefix(): FrozenSystemPrefix {
+  return { resolved: false, prefix: undefined };
+}
+
+/**
+ * Publish one full saved state, attaching the run's frozen prompt prefix.
+ *
+ * The assembly field is attached here rather than at each site so that "every
+ * boundary carries the prefix" is structural, not per-call-site discipline.
+ * Absent prefix → no `assembly` key at all, mirroring the request itself (a
+ * run that sends no `system` has no frozen prefix to publish). A rejecting
+ * `deps.system` aborts the run here exactly as it does at the request path: the
+ * state is not published with a prefix nobody could resolve. No-op without the
+ * port, and then also without resolving the seam — an unwired run must not pay
+ * for an assembly it never reports.
+ */
+async function publishSavedStateOrThrow(
+  deps: LoopEngineDeps,
+  frozen: FrozenSystemPrefix,
+  request: Omit<RuntimeSavedStateRequest<AnthropicNativeMessage>, "assembly">
+): Promise<void> {
+  const sink = deps.runtimePersistence;
+  if (sink === undefined) return;
+  if (!frozen.resolved) {
+    frozen.prefix = await deps.system?.();
+    frozen.resolved = true;
+  }
+  try {
+    await sink.publishSavedState(
+      frozen.prefix === undefined
+        ? request
+        : { ...request, assembly: { systemPrefix: frozen.prefix } }
+    );
+  } catch (err) {
+    throw new RuntimeStatePersistenceError(request.boundary, err);
+  }
+}
+
+/** Append one operation fact; no-op without the port. */
+async function appendOperationFactOrThrow(
+  deps: LoopEngineDeps,
+  fact: RuntimeOperationFact<AnthropicNativeMessage>
+): Promise<void> {
+  const sink = deps.runtimePersistence;
+  if (sink === undefined) return;
+  try {
+    await sink.appendOperationFact(fact);
+  } catch (err) {
+    throw new RuntimeStatePersistenceError(fact.kind, err);
+  }
+}
+
+/**
+ * Whether a result is a *settled* operation. `background: true` is the
+ * ADR-0134 detached-handler receipt — the caller already got a failure while
+ * the handler kept running, so the operation is outstanding and must not be
+ * recorded as settled anywhere. Every other result, a returned tool error
+ * included, is a settled receipt.
+ */
+function isSettledToolResult(result: ToolExecutionResult): boolean {
+  return !(result.kind === "execution_failed" && result.background === true);
+}
+
+/**
+ * Whether an assistant turn's tool batch has a settled end: every call it made
+ * produced a result, and none of those results belongs to an operation that is
+ * still running. The call-count half matters because the batch boundary is a
+ * claim about the context — a result array shorter than the batch means some
+ * call never entered the merged message, and claiming otherwise would hand a
+ * recovery reader a batch it cannot assemble.
+ */
+function isBatchSettled(opts: {
+  readonly results: ReadonlyArray<ToolExecutionResult>;
+  readonly callCount: number;
+  readonly timedOut: boolean;
+  readonly cancelled: boolean;
+}): boolean {
+  return (
+    opts.results.length === opts.callCount &&
+    !opts.timedOut &&
+    !opts.cancelled &&
+    opts.results.every(isSettledToolResult)
+  );
+}
+
+/**
+ * Append the durable fact for one settled result of a wave.
+ *
+ * WHY a separate seam, at settlement instead of in the prefix flush: the fact
+ * carries `batchPosition`, so reconstruction restores protocol order without
+ * waiting for the commit prefix — that is what makes a result durable while an
+ * earlier call of the same wave is still blocked. A still-running operation has
+ * no settled outcome and gets no fact. A rejected write rejects the settling
+ * call itself and leaves the prefix counters untouched, so no half-drained
+ * prefix is left behind.
+ *
+ * Position and size are the BATCH's, never the wave's: the wave is one
+ * concurrency split of the batch, so a wave-local index would give every wave a
+ * second call at position 0 and a reader would have no order to restore.
+ */
+async function appendSettledResultFactOrThrow(
+  // WHY the name: the argument is the wave's execution context, not the wave
+  // itself — `ctx.batchOffset` / `ctx.batchSize` are where this wave's calls sit
+  // inside the whole batch. Naming it `wave` made `wave.wave` read like a typo
+  // at every use site.
+  ctx: {
+    readonly deps: LoopEngineDeps;
+    readonly turnId: string;
+    /** Calls of this batch that precede the wave. */
+    readonly batchOffset: number;
+    /** Calls in the whole batch, not in this wave. */
+    readonly batchSize: number;
+  },
+  result: ToolExecutionResult,
+  indexInWave: number
+): Promise<void> {
+  if (!isSettledToolResult(result)) return;
+  await appendOperationFactOrThrow(ctx.deps, {
+    kind: "tool_result",
+    toolUseId: result.toolUseId,
+    turnId: ctx.turnId,
+    batchPosition: ctx.batchOffset + indexInWave,
+    batchSize: ctx.batchSize,
+    resultMessage: {
+      role: "user",
+      content: ctx.deps.adapter.encodeToolResults([result]),
+    },
+  });
+}
+
+/**
+ * Publish the accepted input, at most once per run (the latch box is the
+ * caller's run-scoped mutable state, so the loop body keeps no second copy).
+ * turnId is honestly null: the id is minted at dispatch, and this boundary
+ * sits before the first dispatch. The box is also what seeds the run's frozen
+ * prefix — no request has been sent yet, so the seam is the only honest source
+ * for the prefix this boundary is about to be followed by.
+ *
+ * WHY the "did this run append user text" rule lives here: a run that appended
+ * none (a silent host wake) has no accepted input to publish, and the latch must
+ * not be consumed by a boundary that never had one. Keeping the rule with the
+ * publisher means the loop body carries no branch that has to stay in step with
+ * the latch.
+ */
+async function publishAcceptedInputOnceOrThrow(
+  deps: LoopEngineDeps,
+  latch: { published: boolean },
+  frozen: FrozenSystemPrefix,
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  acceptedUserText: boolean
+): Promise<void> {
+  if (!acceptedUserText) return;
+  if (latch.published) return;
+  await publishSavedStateOrThrow(deps, frozen, {
+    boundary: "accepted_input",
+    turnId: null,
+    messages,
+  });
+  latch.published = true;
 }
 
 /**
@@ -1946,6 +2173,31 @@ export interface RaceModelOpts {
    * `resolveModelClocks` at stepWithTrace; this layer only takes a number.
    */
   readonly idleTimeoutMs?: number;
+  /** Sink for the final-request evidence of every attempt of
+   *  this call. Absent (no trace host) → no `onDispatch` is passed at all, so
+   *  the adapter's absent-means-unchanged rule still holds. */
+  readonly dispatchEvidence?: SdkDispatchEvidence[];
+}
+
+/**
+ * One evidence sink per model step, allocated only when a trace host will
+ * record it: a trace-less host passes no observer at all, so the adapter's
+ * absent-means-unchanged rule (and the pre-evidence request bytes) hold.
+ */
+function newDispatchEvidenceSink(
+  trace: LoopEngineDeps["trace"]
+): SdkDispatchEvidence[] | undefined {
+  return trace ? [] : undefined;
+}
+
+/** Postel: omitted when nothing was observed, so a reader cannot read "no
+ *  governed invocation" as "evidence lost". */
+function dispatchEvidenceField(sink: SdkDispatchEvidence[] | undefined): {
+  dispatchEvidence?: SdkDispatchEvidence[];
+} {
+  return sink !== undefined && sink.length > 0
+    ? { dispatchEvidence: sink }
+    : {};
 }
 
 /**
@@ -2033,6 +2285,16 @@ function createRaceOutcome(opts: {
             ? { system: opts.raceOpts.systemText }
             : {}),
           onStream,
+          // Evidence only, and only when a trace host exists. Faults are
+          // swallowed once, at the adapter's single observer boundary
+          // (ADR-0136 D9), so a trace failure can never re-dispatch.
+          ...(opts.raceOpts.dispatchEvidence !== undefined
+            ? {
+                onDispatch: (evidence: SdkDispatchEvidence): void => {
+                  opts.raceOpts.dispatchEvidence!.push(evidence);
+                },
+              }
+            : {}),
         },
         opts.compositeSignal
       )
@@ -2189,6 +2451,7 @@ async function runModelAttempt(opts: {
   readonly modelIdleTimeoutMs: number | undefined;
   readonly onStream?: (event: HarnessStreamEvent) => void;
   readonly systemText: string | undefined;
+  readonly dispatchEvidence?: SdkDispatchEvidence[];
 }): Promise<ModelAttemptConclusion> {
   const handle = raceModel({
     adapter: opts.deps.adapter,
@@ -2201,6 +2464,7 @@ async function runModelAttempt(opts: {
       : {}),
     onStream: opts.onStream,
     systemText: opts.systemText,
+    dispatchEvidence: opts.dispatchEvidence,
   });
   const outcome = await handle.outcome;
   const stopAt = (
@@ -2448,6 +2712,12 @@ async function runModelPhase(opts: {
   /** ADR-0013: run-scoped reactive-compact attempted flag;
    *  true = already compacted and retried once this run, no second time. */
   readonly reactiveAttemptedRef: { attempted: boolean };
+  /** Run-scoped frozen prompt prefix; the resolved `system` lands in it here. */
+  readonly frozenSystemPrefix: FrozenSystemPrefix;
+  /** Per-model-step evidence sink, shared by the transport
+   *  retries inside this phase and by the reactive-compact retry round, so the
+   *  row's entries stay in invocation order. */
+  readonly dispatchEvidence?: SdkDispatchEvidence[];
 }): Promise<
   | { kind: "ok"; result: AssistantTurnResult }
   | {
@@ -2463,6 +2733,11 @@ async function runModelPhase(opts: {
     // adapter's conditional spread sends no system field → byte-zero change
     // to the KV cache prefix. Usage-bar pre_call uses this same string.
     const systemText = await opts.deps.system?.();
+    // The request is the authority on the prefix this turn used: hand those
+    // exact bytes to the run-scoped box, so every later publication reports
+    // what the model was actually sent rather than a re-derivation.
+    opts.frozenSystemPrefix.prefix = systemText;
+    opts.frozenSystemPrefix.resolved = true;
     await emitPreCallContextUsage({
       state: opts.state,
       deps: opts.deps,
@@ -2488,6 +2763,7 @@ async function runModelPhase(opts: {
         modelIdleTimeoutMs: opts.modelIdleTimeoutMs,
         onStream: opts.onStream,
         systemText,
+        dispatchEvidence: opts.dispatchEvidence,
       });
       if (attempt.kind === "ok") return attempt;
       const verdict = attemptVerdict(
@@ -2681,6 +2957,10 @@ type ToolCallView = { id: string; name: string; input: unknown };
  */
 async function executeWaveAndCommit(opts: {
   readonly wave: ReadonlyArray<ToolCallView>;
+  /** Calls of this batch that precede the wave (batch-level fact position). */
+  readonly batchOffset: number;
+  /** Calls in the whole batch (batch-level fact size). */
+  readonly batchSize: number;
   readonly deps: LoopEngineDeps;
   readonly signal: AbortSignal | undefined;
   readonly toolTimeout: number;
@@ -2739,6 +3019,7 @@ async function executeWaveAndCommit(opts: {
     opts.deps.conversationId,
     async (result, index) => {
       slots[index] = result;
+      await appendSettledResultFactOrThrow(opts, result, index);
       await flushPrefix();
     },
     opts.turnId,
@@ -2765,6 +3046,8 @@ async function runToolPhase(opts: {
   /** Injected messages flush in the batch of the first tool_result commit. */
   readonly pendingInjected: PendingInjected;
   readonly onStream?: (event: HarnessStreamEvent) => void;
+  /** Run-scoped frozen prompt prefix; see FrozenSystemPrefix. */
+  readonly frozenSystemPrefix: FrozenSystemPrefix;
 }): Promise<{
   transition: Transition;
   turn: TurnTrace;
@@ -2791,9 +3074,17 @@ async function runToolPhase(opts: {
   // afterAssistantState.messages (includes this wave's assistant tool_use
   // message, excludes its tool_results — those append only after the whole
   // wave completes).
+  // WHY the running offset: a wave is a concurrency split INSIDE the batch, so
+  // a fact's position has to be its call's index in the whole batch and its size
+  // the whole batch's call count. `partitionConcurrencyWaves` keeps the waves in
+  // original order and covers every call exactly once, so the offset is just the
+  // length of the waves already run.
+  let batchOffset = 0;
   for (const wave of waves) {
     await executeWaveAndCommit({
       wave,
+      batchOffset,
+      batchSize: toolCallViews.length,
       deps: opts.deps,
       signal: opts.signal,
       toolTimeout,
@@ -2804,6 +3095,7 @@ async function runToolPhase(opts: {
       onStream: opts.onStream,
       messages: opts.afterAssistantState.messages,
     });
+    batchOffset += wave.length;
   }
   const toolResultMsg: AnthropicNativeMessage = {
     role: "user",
@@ -2820,6 +3112,26 @@ async function runToolPhase(opts: {
     results,
     signal: opts.signal,
   });
+  // Full saved state for the batch: published only now, once every returned
+  // call is inside `finalState.messages` (error results included), so the
+  // boundary never claims a batch the context does not carry. A batch holding
+  // an outstanding operation has no settled end at all — the post-assembly
+  // branch returns a stop and skips this write, leaving its settled members
+  // visible through the per-result facts alone.
+  if (
+    isBatchSettled({
+      results,
+      callCount: toolCallViews.length,
+      timedOut,
+      cancelled,
+    })
+  ) {
+    await publishSavedStateOrThrow(opts.deps, opts.frozenSystemPrefix, {
+      boundary: "tool_batch_settled",
+      turnId: opts.turnId,
+      messages: finalState.messages,
+    });
+  }
   const turn = mkTurn({
     turnIndex: opts.entryTurnCount,
     supplierStop: opts.turnResult.supplierStop,
@@ -3143,6 +3455,12 @@ async function stepWithTrace(opts: {
    * (single step has no closeout).
    */
   readonly modelStreamRef?: ModelStreamWindow;
+  /**
+   * Run-scoped frozen prompt prefix (see FrozenSystemPrefix). run() shares one
+   * box across steps so every boundary of the run reports the same frozen
+   * assembly; public step() creates a fresh one (single-step semantics).
+   */
+  readonly frozenSystemPrefix: FrozenSystemPrefix;
 }): Promise<StepResult> {
   // ADR-0011 + ADR-0012: maxTurns overflow → throw.
   // undefined = unlimited, never triggers (long exploration is not killed by turn counting).
@@ -3247,6 +3565,10 @@ async function stepWithTrace(opts: {
   // never written twice.
   const modelStreamRef = opts.modelStreamRef;
   const modelOnStream = openModelInFlightWindow(modelStreamRef, opts.onStream);
+  // One evidence sink per model step, shared by the transport
+  // retries and the reactive-compact retry round so entries stay in invocation
+  // order (see newDispatchEvidenceSink).
+  const dispatchEvidence = newDispatchEvidenceSink(opts.deps.trace);
   const firstPhase = await runModelPhase({
     state: deltaState,
     deps: opts.deps,
@@ -3257,6 +3579,8 @@ async function stepWithTrace(opts: {
     hostStreamPresent: opts.hostStreamPresent,
     onStream: modelOnStream,
     reactiveAttemptedRef: opts.reactiveAttemptedRef,
+    frozenSystemPrefix: opts.frozenSystemPrefix,
+    dispatchEvidence,
   });
   // Non-reactive path: the last message the model saw is deltaState (with the injected delta).
   let effectiveState: LoopState = deltaState;
@@ -3308,6 +3632,14 @@ async function stepWithTrace(opts: {
             opts.pendingInjected
           );
           effectiveState = compactedWithDelta;
+          // The retry below is the request that reads this array, so it is the
+          // exact post-compaction context to publish — no re-compaction, and no
+          // reset of the progress already folded into the product.
+          await publishSavedStateOrThrow(opts.deps, opts.frozenSystemPrefix, {
+            boundary: "compacted",
+            turnId,
+            messages: compactedWithDelta.messages,
+          });
           // ADR-0108: the reactive retry is a brand-new model generation —
           // reopen the observation window (reset the buffer); the half-finished
           // output before the earlier PromptTooLongError is not part of the
@@ -3331,6 +3663,8 @@ async function stepWithTrace(opts: {
             hostStreamPresent: opts.hostStreamPresent,
             onStream: retryOnStream,
             reactiveAttemptedRef: opts.reactiveAttemptedRef,
+            frozenSystemPrefix: opts.frozenSystemPrefix,
+            dispatchEvidence,
           });
           if (compressedAttempt.kind === "reactive_compact_pending") {
             // Invariant violated — reactive_compact is disabled or already
@@ -3362,6 +3696,7 @@ async function stepWithTrace(opts: {
   // comment); both recordLlmCall sites (ok / error) share this single truth
   // value, read once before instrumentation.
   const streamMode = opts.deps.adapter.streamMode === true;
+  const evidenceField = dispatchEvidenceField(dispatchEvidence);
   let llmCallId: string | undefined;
   if (opts.deps.trace) {
     if (modelPhase.kind === "stop") {
@@ -3384,6 +3719,7 @@ async function stepWithTrace(opts: {
           // same shape as ADR-0008) — the adapter never exposes a model, so
           // there is nothing to fill on success or failure alike.
           status: "error",
+          ...evidenceField,
           error: { type: toTraceErrorType(reason), message: reason },
         })
       );
@@ -3417,6 +3753,7 @@ async function stepWithTrace(opts: {
           // coordinator-section proactive keywords).
           messages: effectiveState.messages,
           status: "ok",
+          ...evidenceField,
           ...(usage !== undefined ? usage : {}),
         })
       );
@@ -3574,6 +3911,7 @@ async function stepWithTrace(opts: {
     turnId,
     pendingInjected: opts.pendingInjected,
     onStream: opts.onStream,
+    frozenSystemPrefix: opts.frozenSystemPrefix,
   });
 
   // ADR-0028: last_tool = the last successful tool name in the batch (kind === "ok").
@@ -3728,6 +4066,7 @@ export async function step(
     reconcileRef: { stamped: undefined },
     toolLoopRef: { events: [], nextPhase: 0 },
     pendingInjected: createPendingInjected(),
+    frozenSystemPrefix: createFrozenSystemPrefix(),
   });
   return transition;
 }
@@ -3771,8 +4110,13 @@ export async function run(
   // no encodeUserText and no recognize(userText).
   const hostStreamPresent =
     opts?.hostStreamPresent ?? opts?.onStream !== undefined;
+  // Whether this run accepted new user input at all. The accepted-input
+  // boundary exists for that acceptance only: a continuation run with
+  // appendUserText:false appended nothing, so it has no input state to
+  // publish and must not borrow one.
+  const acceptedUserText = opts?.appendUserText !== false;
   let state: LoopState;
-  if (opts?.appendUserText !== false) {
+  if (acceptedUserText) {
     let effectiveUserText = userText;
     if (deps.secretsMode !== "block" && deps.secretRegistry !== undefined) {
       const { replaced } = recognize(userText, deps.secretRegistry);
@@ -3818,6 +4162,12 @@ export async function run(
   let lastCompactTurn: number = -1;
   // ADR-0013: reactive-compact attempted flag (at most once per run, closure variable).
   const reactiveAttemptedRef = { attempted: false };
+  // accepted_input latch (at most once per run, closure variable): the loop
+  // body repeats per step but the accepted input is a single event.
+  const acceptedInputLatch = { published: false };
+  // Frozen prompt prefix shared by every publication of this run (see
+  // FrozenSystemPrefix). Discarded at run end; a resumed run re-seeds it.
+  const frozenSystemPrefix = createFrozenSystemPrefix();
   // ADR-0028: status-bar last_tool run-scoped state — one run = one user
   // turn; initial idle (no tools run yet this turn), updated after each tool
   // batch to the last successful tool name; shared across steps, discarded at run end.
@@ -3902,9 +4252,31 @@ export async function run(
           // point at message positions that no longer exist — drop the buffer
           // so post-compaction injections flush with the new commit.
           pendingInjected.take();
+          // The step about to run reads exactly this array, so publishing it
+          // here is what lets a restart resume the compacted context instead
+          // of re-deriving it. turnId is honestly null: a step boundary has no
+          // dispatch in flight, and the engine mints the id at dispatch.
+          await publishSavedStateOrThrow(deps, frozenSystemPrefix, {
+            boundary: "compacted",
+            turnId: null,
+            messages: compactedState.messages,
+          });
         }
       }
     }
+    // WHY here and once: the accepted-input write must carry the context the
+    // first request actually sees, so it lands after this iteration's
+    // proactive compaction gate — and the loop body is re-entered per step,
+    // while an accepted input is a once-per-run event. The publisher owns the
+    // "only a run that appended user text" rule, so this call site has no
+    // branch of its own to keep in step with the latch.
+    await publishAcceptedInputOnceOrThrow(
+      deps,
+      acceptedInputLatch,
+      frozenSystemPrefix,
+      state.messages,
+      acceptedUserText
+    );
     let stepResult: StepResult;
     try {
       stepResult = await stepWithTrace({
@@ -3919,6 +4291,7 @@ export async function run(
         toolLoopRef,
         pendingInjected,
         modelStreamRef,
+        frozenSystemPrefix,
       });
     } catch (err) {
       if (err instanceof MaxTurnsExceeded) {
@@ -3976,6 +4349,24 @@ export async function run(
         },
         apiError
       );
+      // Terminal record for the settled turn: the final context plus the
+      // observed stop reason, never a completeness verdict (ADR-0126 leaves
+      // "was this turn known to be finished" to the host, which owns the
+      // turn-outcome record; an absent record simply stays unknown). WHY here:
+      // the messages are settled by closeout above, and maxTurns leaves through
+      // the throw path, so no unsettled turn can reach this site. Whether an
+      // operation is still outstanding after an interrupted stop is not
+      // observable from the kernel — the detached-handler case surfaces in the
+      // fact stream, and the reason travels as observed.
+      await publishSavedStateOrThrow(deps, frozenSystemPrefix, {
+        boundary: "terminal_turn",
+        turnId: null,
+        messages: finalMessages,
+        terminal: {
+          stopReason: reason,
+          ...supplierDetailField(supplierDetail),
+        },
+      });
       // ADR-0011: after an exceptional stop run one best-effort epilogue
       // summary. It counts toward neither maxTurns nor the tool budget; on
       // failure just skip, never block the original stop cause.

@@ -63,16 +63,19 @@ describe("TraceMessageDereferenceOptions (T3 SC7)", () => {
     // injected, dirname(traceFilePath)/blobs derivation is skipped and the
     // injection is the only read path.
     let deriveAttempted = false;
-    const deref = await projectToolResultsFromTrace([{ sha: "x", bytes: 1 }], {
-      traceFilePath: "/definitely/not/a/real/dir/trace.jsonl",
-      readBlob: (sha) => {
-        // If the impl still derived via dirname, readFileSync on the fake
-        // path would fail first; this flag is meaningful only once the
-        // injected readBlob takes over.
-        deriveAttempted = true;
-        return `blob-${sha}`;
-      },
-    });
+    const deref = await projectToolResultsFromTrace(
+      [{ sha: "a".repeat(64), bytes: 1 }],
+      {
+        traceFilePath: "/definitely/not/a/real/dir/trace.jsonl",
+        readBlob: (sha) => {
+          // If the impl still derived via dirname, readFileSync on the fake
+          // path would fail first; this flag is meaningful only once the
+          // injected readBlob takes over.
+          deriveAttempted = true;
+          return `blob-${sha}`;
+        },
+      }
+    );
     assert.ok(
       deriveAttempted,
       "injected readBlob must be the read path when provided"

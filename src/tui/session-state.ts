@@ -29,6 +29,12 @@ import {
 import { isSkillIndexDeltaText } from "../harness/skill/index-delta.js";
 import { jsonDeepEqual } from "../session-api/store/index.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
+import type { SessionOpenRecovery } from "../session-api/recovery-host.js";
+import { formatRecoveredOperations } from "../session-api/recovery-host.js";
+import type {
+  RecoveryBlockedReason,
+  RecoveryHandlingItem,
+} from "../session-api/store/recovery-status.js";
 import type { TurnOutcomeView } from "../session-api/contract.js";
 import { projectOutputLimitNotice } from "../session-api/contract.js";
 
@@ -83,7 +89,26 @@ export interface TuiSessionState {
    * unknown outcome, which is never labelled either way.
    */
   readonly outputLimitNotice?: string;
+  /**
+   * ADR-0136 §4: what session-ENTRY recovery restored, or `undefined` when the
+   * path that produced this state never RAN recovery. That absence is the point:
+   * a non-entry read must not be readable as "recovered".
+   *
+   * `messages` above stays the transcript projection (display). `recovery.messages`
+   * is the SAVED native context read out of the published body — the authoritative
+   * restored state, and deliberately a different array: post-anchor log growth
+   * never leaks into it.
+   */
+  readonly recovery?: TuiSessionRecovery;
 }
+
+/** What the TUI keeps of one session-ENTRY recovery (ADR-0136 §4).
+ *
+ *  DERIVED from the shared host contract's return type, never re-listed by
+ *  hand: a report field added later reaches this shape instead of being
+ *  silently dropped by the TUI alone. Operator-facing only (SC26) — it never
+ *  reaches a model prompt, a tool description, or a system instruction. */
+export type TuiSessionRecovery = SessionOpenRecovery;
 
 /** Session file as the bridge hands it back, plus the terminal outcome of its
  *  last settled turn (ADR-0126: read from the transcript's outcome records,
@@ -110,8 +135,13 @@ export function createDraftSession(): TuiSessionState {
   });
 }
 
-/** Restore from a persisted session file (`iknow tui <session-id>` / Enter from the list view). */
-export function attachSession(file: TuiLoadedSessionFile): TuiSessionState {
+/** Restore from a persisted session file (`iknow tui <session-id>` / Enter from the list view).
+ *  `recovery` is passed only by the two session-ENTRY surfaces that actually ran
+ *  recovery; omitting it leaves the state with no recovery field. */
+export function attachSession(
+  file: TuiLoadedSessionFile,
+  recovery?: TuiSessionRecovery
+): TuiSessionState {
   // The last settled turn's outcome comes with the loaded file (ADR-0126):
   // reopens used to drop it, so an abnormal stop read as a fresh idle session.
   // `unknown` (legacy transcript, crash before the terminal record) keeps both
@@ -140,8 +170,111 @@ export function attachSession(file: TuiLoadedSessionFile): TuiSessionState {
     // read it from here (replacing the deleted in-memory thinking-seconds side channel).
     thinkingMs: file.thinkingMs,
     ...(outputLimitNotice !== undefined ? { outputLimitNotice } : {}),
+    ...(recovery !== undefined ? { recovery } : {}),
   });
 }
+
+/** `1 item` / `2 items` — recovery copy names counts, never bare numerals. */
+const plural = (count: number, noun: string): string =>
+  `${count} ${noun}${count === 1 ? "" : "s"}`;
+
+/**
+ * ADR-0136 §4: operator copy for one recovery status, for the existing sticky
+ * notice lane (no new UI system). Every branch names what the operator can act
+ * on, and none of it claims progress the recovery did not make:
+ *  - `needs handling` names each affected path and reason;
+ *  - `blocked` states that nothing was restored and nothing was reverted;
+ *  - `unsupported_format` points at the existing /new path instead of
+ *    offering a rewrite of the untouched old bytes;
+ *  - `no_published_state` is a non-error, not a failure.
+ * The in-flight `RECOVERY_IN_PROGRESS_LABEL` is deliberately NOT a branch
+ * here — a host renders it while the entry promise is pending.
+ */
+export function recoveryNoticeLines(
+  session: Pick<TuiSessionState, "messages" | "recovery"> | undefined
+): ReadonlyArray<string> {
+  const recovery = session?.recovery;
+  if (session === undefined || recovery === undefined) return [];
+  const status = recovery.status;
+  switch (status.status) {
+    case "recovered":
+      return recoveredLines(recovery, session.messages.length);
+    case "needs handling":
+      return needsHandlingLines(status.handling);
+    case "blocked":
+      return blockedLines(status.reason, status.detail);
+    case "unsupported_format":
+      return [
+        "⚠ This session predates recoverable checkpoints — its stored bytes are unchanged.",
+        "  Use /new to start a recoverable session.",
+      ];
+    case "no_published_state":
+      return [
+        "ℹ Recovery: no saved checkpoint yet for this session (nothing to reconcile).",
+      ];
+  }
+}
+
+/** `recovered` also names what recovery did NOT restore, and the per-file
+ *  verdicts behind the verdict (SC11): a completed classification whose
+ *  operations were not all verified must not read as "everything is fine". */
+function recoveredLines(
+  recovery: TuiSessionRecovery,
+  messageCount: number
+): ReadonlyArray<string> {
+  // The published state replaces the context only when the tail after its
+  // anchor was never settled (see `restoredContextOf`). A settled tail is the
+  // turn's own completed protocol and IS kept, so claiming a restore there
+  // would be false; `outcome.state` is the same discriminator the restore gate
+  // uses, so the copy cannot drift from the behavior.
+  if (recovery.restoredContext === null) {
+    return [
+      `✔ Recovery complete — last turn settled; kept the full ${plural(
+        messageCount,
+        "message"
+      )} of history (the published state at ${plural(
+        recovery.savedMessageCount,
+        "saved message"
+      )} predates that reply).`,
+    ];
+  }
+  // Naming the gap is what keeps a projection from reading as restored
+  // progress: the transcript keeps showing post-anchor messages that recovery
+  // did NOT restore.
+  const unsaved = messageCount - recovery.savedMessageCount;
+  return [
+    `✔ Recovery complete — restored ${plural(recovery.savedMessageCount, "saved message")}.`,
+    ...(unsaved > 0
+      ? [
+          `  ${plural(unsaved, "unsaved message")} after the last checkpoint ${
+            unsaved === 1 ? "is" : "are"
+          } not restored.`,
+        ]
+      : []),
+    ...(recovery.operations.length === 0
+      ? []
+      : [
+          `  ${plural(recovery.operations.length, "file operation")}: ${formatRecoveredOperations(recovery.operations)}`,
+        ]),
+  ];
+}
+
+const needsHandlingLines = (
+  items: ReadonlyArray<RecoveryHandlingItem>
+): ReadonlyArray<string> => [
+  `⚠ Recovery needs ${plural(items.length, "item")} — no file was changed:`,
+  ...items.map((item) => `  ${item.relPath} (${item.reason})`),
+  "  Review it, then continue the session or start a new one.",
+];
+
+const blockedLines = (
+  reason: RecoveryBlockedReason,
+  detail: string
+): ReadonlyArray<string> => [
+  `⛔ Recovery blocked (${reason}) — nothing was restored.`,
+  `  ${detail}`,
+  "  Nothing was reverted; the saved checkpoint is still on disk.",
+];
 
 /** Turn start: only idle can start (a double start is a caller bug — keep the state unchanged, never throw). */
 export function turnStarted(session: TuiSessionState): TuiSessionState {

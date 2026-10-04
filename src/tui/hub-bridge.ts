@@ -22,6 +22,12 @@ import { SessionStore } from "../session-api/store/session-store.js";
 import { SessionHub } from "../session-api/hub.js";
 import { liteTitleGeneratorOptions } from "../session-api/title-generation.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
+import { mainCheckoutOf } from "../harness/isolation/worktree-gate.js";
+// The shared host-side session-open contract (ADR-0136 §4).
+import {
+  openSessionWithRecovery,
+  resolveLiveRoot,
+} from "../session-api/recovery-host.js";
 import type { EngineBundle } from "../harness/build-engine.js";
 import type {
   PostMessageResponse,
@@ -31,7 +37,10 @@ import type {
 import { knownTurnOutcome } from "../session-api/contract.js";
 import type { SessionFileV1 } from "../session-api/store/schema.js";
 import type { LedgerRewindTarget } from "../session-api/store/index.js";
-import type { TuiLoadedSessionFile } from "./session-state.js";
+import type {
+  TuiLoadedSessionFile,
+  TuiSessionRecovery,
+} from "./session-state.js";
 import type { LoopEngineDeps } from "../harness/index.js";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import type {
@@ -53,7 +62,10 @@ import type { VerifyConfig } from "../harness/verify/index.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { FsModeContext } from "../harness/sandbox/fs-mode.js";
 import type { YoloContext } from "../harness/sandbox/yolo.js";
-import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
+import {
+  seedRestoredGraphNodes,
+  type LiveGraphLedgerHost,
+} from "../harness/graph/ledger.js";
 import type { VerifyAnswerView } from "../session-api/contract.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
 import type { IknowEnv, LlmEnv } from "../config/env.js";
@@ -180,6 +192,27 @@ export interface TuiBridge {
   readonly loadSessionFile: (
     conversationId: string
   ) => Promise<TuiLoadedSessionFile>;
+  /**
+   * The complete session-ENTRY open (ADR-0136 §4): the one projection read plus
+   * session-entry recovery. Both entry surfaces — the startup resume and the
+   * in-app picker selection — go through here, so a session can never be
+   * opened on the TUI without recovery having run.
+   *
+   * The TUI reads the store directly rather than going through the hub's
+   * `getSession`, so it runs its own `recoverSession`. Recovery is a read: it
+   * dispatches no model request, no tool, and no file mutation.
+   *
+   * Non-entry reloads (a turn-end refresh, a rewind or compaction re-read) must
+   * keep calling `loadSessionFile` alone — recovery is a session-open concern,
+   * not a per-read one.
+   */
+  readonly openSession: (conversationId: string) => Promise<{
+    /** The loaded session, or null when its log is unreadable — the
+     *  classification then stands alone and no transcript is reconstructed
+     *  (spec §2.1). */
+    readonly file: TuiLoadedSessionFile | null;
+    readonly recovery: TuiSessionRecovery;
+  }>;
   /** Manual compaction (/compact). Returns `{ compacted, cancelled? }`:
    *  `compacted` true = trimming actually happened; false = nothing
    *  compactable (empty session is idempotent) or full failure — the auto
@@ -389,6 +422,14 @@ async function lastTurnOutcome(
   }
 }
 
+/**
+ * A session whose log is a legacy `.json` with no `.jsonl` is reachable from the
+ * picker, and the published-state read reports `not_found` for it because there
+ * is no log to read a checkpoint out of. The shared host contract maps that one
+ * case to the classification that already covers "predates recoverable
+ * checkpoints" (the old bytes stay untouched); it decides it from the session
+ * file it read itself, so no host has to keep a private `not_found` catch.
+ */
 export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
   // Store namespace keys by projectIdentityRoot, not cwd — mirrors build-engine.
   const projectIdentityRoot = deriveProjectIdentityRoot({
@@ -548,6 +589,66 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
       return outcome === undefined
         ? file
         : { ...file, lastTurnOutcome: outcome };
+    },
+    openSession: async (conversationId) => {
+      const recovery = await openSessionWithRecovery({
+        store,
+        conversationId,
+        // The shared live write root decision. The bridge has no public read of
+        // the hub's dirty-worktree record, so `dirtyRoot` stays absent: a
+        // post-rebind intent may then be measured against the pre-rebind root,
+        // which reconcile reports as `needs handling` /
+        // `root_identity_mismatch` — fail toward visible, never a mutation.
+        roots: {
+          resolve: (file) =>
+            resolveLiveRoot({
+              ...(file?.workspaceRoot !== undefined
+                ? { recordedRoot: file.workspaceRoot }
+                : {}),
+              ...(opts.workspaceRoot !== undefined
+                ? { boundRoot: opts.workspaceRoot }
+                : {}),
+              cwd: file?.cwd ?? process.cwd(),
+            }),
+          // Must equal the identity the write tools stamped on their intents
+          // (`projectIdentityRoot ?? sandboxRoot` at the registry), so the same
+          // derivation the store namespace already uses is the one compared.
+          identityOf: () => mainCheckoutOf(projectIdentityRoot),
+        },
+        // ADR-0136 §4: this host sweeps the workers the session it is opening
+        // owns, before the report — the same session-scoped sweep the hub runs
+        // on its own entry read, resolved from the same helper at spawn
+        // (`<projectDir>/<conversationId>/subagents`) and filtered by the same
+        // session id. Without it a TUI reopen had no stop evidence at all, so
+        // no unprovable stop was ever reported.
+        sweepOwnedWorkers: (id) => hub.sweepOwnedWorkersForSession(id),
+      });
+      // Same reason the hub and the chat host do it: durable graph facts are
+      // the only record that survives the process that wrote them, so the
+      // restored per-node view is folded into the live ledger here — in memory
+      // only, once per open, and never on `blocked`.
+      if (recovery.status.status !== "blocked") {
+        seedRestoredGraphNodes(
+          opts.liveGraphLedger?.ledgerFor(conversationId),
+          recovery.operationFacts?.graphNodes ?? []
+        );
+      }
+      // The turn this host dispatches next must start from the published state,
+      // so the restore is handed to the hub rather than kept in the view.
+      hub.adoptEntryRecovery(recovery);
+      if (recovery.file === null) {
+        // A damaged log: there is no transcript to render and none to
+        // reconstruct, so the caller renders the classification alone.
+        return { file: null, recovery };
+      }
+      const outcome = await lastTurnOutcome(store, conversationId);
+      // Outcome absent = nothing to annotate: the plain file keeps its shape
+      // for every reader that only knows SessionFileV1.
+      const file =
+        outcome === undefined
+          ? recovery.file
+          : { ...recovery.file, lastTurnOutcome: outcome };
+      return { file, recovery };
     },
     compactSession: async (conversationId, compactOpts) => {
       const res = await hub.compactSession(

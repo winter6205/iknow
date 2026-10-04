@@ -15,6 +15,7 @@ export {
   ToolExecutionError,
   McpLifecycleError,
   MessageCommitError,
+  RuntimeStatePersistenceError,
 } from "./errors.js";
 export type { McpLifecycleErrorKind } from "./errors.js";
 

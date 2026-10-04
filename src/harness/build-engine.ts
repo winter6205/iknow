@@ -104,6 +104,7 @@ import {
   type SecretRegistry,
 } from "./secret-roundtrip/index.js";
 import { ValidationError } from "../shared/errors.js";
+import type { RuntimePersistenceBinder } from "../shared/runtime-persistence.js";
 import {
   createIknowSystemResolver,
   initIknowWorkspaceSafe,
@@ -212,6 +213,18 @@ export type BuildEngineOpts = {
    * an absent graphMode).
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
+  /**
+   * Session-checkpoint plan B: runtime persistence seam. The host constructs
+   * the binder (session-api owns bodies, selection, and the single-writer
+   * queue) and injects it here, so no harness file imports session-api
+   * (Gate B). The engine is assembled without session identity, so this is a
+   * binder rather than a sink; per-run callers take the session-bound sink
+   * from their own deps overlay instead.
+   *
+   * Absent → no persistence requests anywhere in the harness, behavior
+   * byte-identical. A rejected write blocks the execution that depends on it.
+   */
+  readonly runtimePersistence?: RuntimePersistenceBinder<AnthropicNativeMessage>;
   /**
    * Optional seam for the last-read ledger host (`conversationId → canonical
    *
@@ -735,18 +748,14 @@ const SECURITY_REVIEW_HINT_DETAIL_CAP = 300;
  * typed. Approvals are one-call (requestId-bound by the executor), never
  * persisted; the ordinary askUser semantics of the entry are unchanged.
  */
-export function securityReviewRouteFromAsk(
-  ask: AskUser
-): SecurityReviewRoute {
+export function securityReviewRouteFromAsk(ask: AskUser): SecurityReviewRoute {
   return {
     interactive: true,
     request: (req: SecurityReviewRequest) => {
       const detail =
         req.requirement.detail.length > SECURITY_REVIEW_HINT_DETAIL_CAP
-          ? req.requirement.detail.slice(
-              0,
-              SECURITY_REVIEW_HINT_DETAIL_CAP
-            ) + "…"
+          ? req.requirement.detail.slice(0, SECURITY_REVIEW_HINT_DETAIL_CAP) +
+            "…"
           : req.requirement.detail;
       return ask({
         tool: req.tool,
@@ -1209,6 +1218,7 @@ export async function buildHarnessEngine(
           // (undefined passes as absent) → legacy stdin-end shape, workers
           // deny reviews structurally.
           securityReview: opts.securityReview,
+          runtimePersistence: opts.runtimePersistence,
         }))
       : undefined;
   // bash background-task manager — conditional assembly (surface !== "ask"):
@@ -1483,6 +1493,9 @@ export async function buildHarnessEngine(
       ...(opts.liveGraphLedger
         ? { liveGraphLedger: opts.liveGraphLedger }
         : {}),
+      // Runtime persistence binder pass-through — the run_graph handler resolves
+      // its sink by ctx.conversationId. Absent → zero tool behavior change.
+      runtimePersistence: opts.runtimePersistence,
       // Last-read ledger shared across rebind-rebuilt registries (read memory
       // (ADR-0084)
       // survives root switches); unwired hosts (ask / direct tests) → the
@@ -1651,6 +1664,9 @@ export async function buildHarnessEngine(
       ...(opts.liveGraphLedger
         ? { liveGraphLedger: opts.liveGraphLedger }
         : {}),
+      // Runtime persistence binder pass-through — the run_graph handler resolves
+      // its sink by ctx.conversationId. Absent → zero tool behavior change.
+      runtimePersistence: opts.runtimePersistence,
       // Same as the first construction — shared last-read ledger (the ask
       // (ADR-0084)
       // path has no conversationId, so the gate degrades to "deny every

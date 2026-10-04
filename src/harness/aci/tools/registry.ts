@@ -44,6 +44,8 @@ import { createSubAgentStopTool } from "../../subagent/subagent-stop-tool.js";
 import { createSubAgentContinueTool } from "../../subagent/subagent-continue-tool.js";
 import { createRunGraphTool } from "../../graph/run-graph-tool.js";
 import type { LiveGraphLedgerHost } from "../../graph/ledger.js";
+import type { RuntimePersistenceBinder } from "../../../shared/runtime-persistence.js";
+import type { AnthropicNativeMessage } from "../../model-adapter/types.js";
 import {
   createLastReadLedgerHost,
   type LastReadLedgerHost,
@@ -413,6 +415,12 @@ export interface CreateDefaultAciRegistryOptions {
    */
   readonly liveGraphLedger?: LiveGraphLedgerHost;
   /**
+   * Session-checkpoint plan B: runtime persistence seam, resolved per session
+   * id at call time. Absent → the `run_graph` handler records nothing
+   * (zero behavior change, same shape as an absent graphMode).
+   */
+  readonly runtimePersistence?: RuntimePersistenceBinder<AnthropicNativeMessage>;
+  /**
    * ADR-0084: optional seam for the last-read ledger host
    * (`conversationId → set of canonical paths`). If not passed, the
    * registry builds its own (default wiring: the write gate is live).
@@ -712,6 +720,7 @@ export function createDefaultAciRegistry(
   const backgroundManager = opts.backgroundManager;
   const graphAssembly = opts.graphAssembly;
   const liveGraphLedger = opts.liveGraphLedger;
+  const runtimePersistence = opts.runtimePersistence;
   // ADR-0084: last-read ledger. Injection absent → the registry builds its
   // own (default wiring: write_file's gate is live for every registry
   // assembly entry). Carrying old reads across registries (rebind rebuilds /
@@ -1088,6 +1097,7 @@ export function createDefaultAciRegistry(
                 ? () => graphAssembly.enabled()
                 : undefined,
               ...(liveGraphLedger ? { ledger: liveGraphLedger } : {}),
+              ...(runtimePersistence ? { runtimePersistence } : {}),
             }),
         }
       : {}),

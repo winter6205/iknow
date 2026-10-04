@@ -32,6 +32,9 @@ export const MAIN_SESSION_FENCE_TMP_DIR_NAME = "fence-tmp";
 /** `<sessionFolder>/code-snapshots/` — content-addressed preimage blobs a successful workspace write captured (ADR-0036 / ADR-0071). Sibling of `subagents/` and `fence-tmp/`. */
 export const CODE_SNAPSHOTS_DIR_NAME = "code-snapshots";
 
+/** `<sessionFolder>/blobs/` — the session-local immutable body pool for masked trace bodies and native recovery state; trace readers follow only trace-authorized references. */
+export const BLOBS_DIR_NAME = "blobs";
+
 /** `<projectDir>/tasks/` — background task registry root (ADR-0088). Sibling of the session folder leaves. */
 export const TASKS_DIR_NAME = "tasks";
 

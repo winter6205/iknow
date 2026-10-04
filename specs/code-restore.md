@@ -3,6 +3,8 @@
 **Status:** ACR all-yes (see `plans/code-restore.md`)  
 **Surface:** session transcript projection + session-folder blobs + harness write-tool port + TUI confirm + rewind HTTP
 
+**Related accepted contract:** [Native session checkpoint architecture](session-checkpoint-architecture.md) and [ADR-0136](../docs/adr/0136-native-session-checkpoint-architecture.md) extend captured file evidence with durable pre-write operation associations for restart reconciliation. This document continues to define explicit manual rewind; its opt-out, root/drift checks, and missing-preimage preflight remain in force. The new automatic recovery protocol is not implemented and does not turn session entry into code rewind.
+
 ## Objective
 
 When the operator rewinds a session to an earlier user-message anchor, they can also put workspace files back to the bytes those files had before the abandoned head-chain segment. The user is the person at the TUI rewind picker (and any HTTP client that sends the same flag). Success means transcript rewind and workspace restore are separately choosable, and the transcript stays the only history authority.

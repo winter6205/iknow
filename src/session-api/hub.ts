@@ -9,6 +9,7 @@
  * (serve.ts) supply the SPA-channel implementation or a v0 stub.
  */
 import { randomUUID } from "node:crypto";
+import { AsyncLocalStorage } from "node:async_hooks";
 import {
   run,
   createJsonlTraceService,
@@ -96,7 +97,10 @@ import type {
   FsModeContext,
 } from "../harness/sandbox/fs-mode.js";
 import type { YoloContext } from "../harness/sandbox/yolo.js";
-import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
+import {
+  seedRestoredGraphNodes,
+  type LiveGraphLedgerHost,
+} from "../harness/graph/ledger.js";
 import {
   listSubagentRecordPaths,
   resolveSessionFenceTmp,
@@ -136,6 +140,7 @@ import {
   MaxTurnsExceeded,
   McpLifecycleError,
   errorMessage,
+  unwrapRuntimeStateCause,
   withApiError,
 } from "../harness/errors.js";
 import { basename, join } from "node:path";
@@ -169,13 +174,37 @@ import {
   CURRENT_SCHEMA_VERSION,
   decideCheckpointPersist,
   extractTitle,
+  isNewFormatSession,
+  NATIVE_STATE_FORMAT_VERSION,
   pinGoal,
   shouldPersistCheckpoint,
   toInterruptReason,
   validateGoalText,
+  type RecoveryInProgressLabel,
 } from "./store/index.js";
+// The host-side session-open contract (ADR-0136 §4): one live-root decision and
+// one classification for every host, and the published state the next turn
+// starts from.
+import {
+  openSessionWithRecovery,
+  resolveLiveRoot,
+  type SessionOpenRecovery,
+} from "./recovery-host.js";
 // Deep import: internal persist-rule helper, deliberately not on the store barrel.
 import { persistedLastUsage } from "./store/schema.js";
+import { createNativeStatePort } from "./store/native-state-port-host.js";
+import { createRuntimePersistenceBinder } from "./store/runtime-persistence-host.js";
+import type {
+  NativeStateMessage,
+  NativeStatePort,
+} from "../shared/native-state-port.js";
+import { isNativeStatePortError } from "../shared/native-state-port.js";
+import type {
+  RuntimePersistenceBinder,
+  RuntimePersistenceSink,
+} from "../shared/runtime-persistence.js";
+import { sweepOwnedWorkers } from "../harness/subagent/worker-identity-stop.js";
+import type { OwnedWorkerSweepResult } from "../harness/subagent/worker-identity-stop.js";
 import {
   createPreimageLedger,
   drainPreimageRefs,
@@ -224,6 +253,7 @@ import type {
   ResetSessionResponse,
   RewindSessionResponse,
   RewindTargetsResponse,
+  SessionRecoveryView,
   SessionSummary,
   SkillSummaryDto,
   TurnAnswerDto,
@@ -689,6 +719,22 @@ function builtBackgroundManagerOption(
   return { backgroundManager: manager };
 }
 
+/**
+ * ADR-0136 §3: the per-turn persistence sink for one conversation. An
+ * unbindable session (blank id) omits the key, which the engine reads as "no
+ * persistence" — the same no-op path a host that wired none takes.
+ */
+function persistenceSinkOption(
+  binder: RuntimePersistenceBinder<NativeStateMessage>,
+  conversationId: string
+): {
+  readonly runtimePersistence?: RuntimePersistenceSink<NativeStateMessage>;
+} {
+  const sink = binder.bind(conversationId);
+  if (sink === undefined) return {};
+  return { runtimePersistence: sink };
+}
+
 function projectInterruptionItem(
   item: unknown
 ): ReadonlyArray<SecurityInterruptionItem> {
@@ -696,7 +742,9 @@ function projectInterruptionItem(
   if (base === null) return [];
   const evidence = base.item["cleanup"];
   if (evidence === null || typeof evidence !== "object") return [];
-  const cleanup = projectInterruptionCleanup(evidence as Record<string, unknown>);
+  const cleanup = projectInterruptionCleanup(
+    evidence as Record<string, unknown>
+  );
   if (cleanup === null) return [];
   return [{ ...base.header, cleanup }];
 }
@@ -707,7 +755,9 @@ type InterruptionItemHeader = {
   readonly header: Omit<SecurityInterruptionItem, "cleanup">;
 };
 
-function readInterruptionItemHeader(item: unknown): InterruptionItemHeader | null {
+function readInterruptionItemHeader(
+  item: unknown
+): InterruptionItemHeader | null {
   const it = item as Record<string, unknown> | null;
   if (
     it === null ||
@@ -720,7 +770,8 @@ function readInterruptionItemHeader(item: unknown): InterruptionItemHeader | nul
   ) {
     return null;
   }
-  const reason = typeof it["reason"] === "string" ? { reason: it["reason"] } : {};
+  const reason =
+    typeof it["reason"] === "string" ? { reason: it["reason"] } : {};
   return {
     item: it,
     header: {
@@ -998,6 +1049,13 @@ export type SessionHubOptions = {
    */
   sandboxRoot?: string;
   /**
+   * ADR-0136 §4: host seam for the session-entry recovery transient. Called
+   * with `RECOVERY_IN_PROGRESS_LABEL` immediately before the recovery promise
+   * starts and never with an outcome, so a host cannot render a progress
+   * display as a result. Absent → no transient, no behavior change.
+   */
+  readonly onRecoveryProgress?: (label: RecoveryInProgressLabel) => void;
+  /**
    * Entry surface — decides whether BOOTSTRAP is active. The serve path
    * always passes "serve" (skipping BOOTSTRAP); tests may omit → default "chat".
    */
@@ -1271,12 +1329,42 @@ function skillFaceOf(built: {
   };
 }
 
+/**
+ * Ownership marker for one `serialize` slot, carried by the async context that
+ * entered it. `held` is the liveness half: it is cleared when the queued work
+ * settles, so a callback created inside the slot but fired afterwards queues
+ * behind the chain instead of writing while the queue is free.
+ */
+interface WriterSlot {
+  readonly conversationId: string;
+  held: boolean;
+}
+
+/**
+ * ADR-0136 §3: one error dialect leaves this host. A boundary publication the
+ * engine rejected arrives wrapped in the harness's own type; the store's typed
+ * error underneath is the one the CLI / TUI / serve surfaces already classify,
+ * so it is what leaves the hub. A non-port cause keeps the harness type rather
+ * than being re-labelled as a persistence failure it is not.
+ */
+function hostTurnError(err: unknown): unknown {
+  const cause = unwrapRuntimeStateCause(err);
+  if (cause === err) return err;
+  return isNativeStatePortError(cause) ? cause : err;
+}
+
 export class SessionHub {
   private readonly store: SessionStore;
   /** ADR-0037: task-worktree build + this-session-only root rebind host seam. */
   private readonly worktreeProvisioner: TaskWorktreeProvisioner;
   /** Roots returned by provision but not yet persisted with the turn. */
   private readonly dirtyWorktreeRoots = new Map<string, string>();
+  /** ADR-0136 §4: the published state a session-ENTRY recovery restored, one
+   * shot per conversation: the next turn's model context (spec §2.1). */
+  private readonly restoredContexts = new Map<
+    string,
+    ReadonlyArray<AnthropicNativeMessage>
+  >();
   private cachedDeps: LoopEngineDeps | undefined;
   private readonly defaults: {
     jsonMode: boolean;
@@ -1432,6 +1520,32 @@ export class SessionHub {
    * never rebind are unchanged).
    */
   private readonly startupSettings: IknowSettings | undefined;
+  /** ADR-0136: the neutral persistence seam over THIS hub's store. Every call
+   * the hub makes through it runs inside a `serialize` slot (the engine's turn
+   * and the preimage capture both are), so the port adds no locking, no second
+   * journal, and no independent state pointer. */
+  private readonly nativeStatePort: NativeStatePort;
+  /** ADR-0136 §3: the harness-facing persistence binder over THIS hub's store,
+   *  built once per hub and handed to every engine this hub builds plus every
+   *  per-turn deps overlay. One object for the hub's life is what makes an
+   *  engine that was already cached reachable: the per-turn sink is bound from
+   *  this binder, not captured at build time. */
+  private readonly runtimePersistence: RuntimePersistenceBinder<NativeStateMessage>;
+  /** The publication gate (SC23): sessions this process found in the new
+   *  format, as of the last load. Recorded at the load the turn already
+   *  performs, so `shouldPublish` is a map read and never a store load per
+   *  publication. Absent → not this host's session to write, which fails
+   *  toward leaving a legacy session's bytes untouched. */
+  private readonly newFormatSessions = new Map<string, boolean>();
+  /** Aborted when the host is going down, so a publication issued after
+   *  shutdown fails fast instead of queueing behind work that will never
+   *  finish writing. */
+  private readonly shutdownSignal = new AbortController();
+  /** ADR-0136 §4: in-flight recovery notification seam. A host that can show a
+   * transient renders the one shared label; absent → recovery runs silently and
+   * the result still arrives on the session view. */
+  private readonly onRecoveryProgress:
+    ((label: RecoveryInProgressLabel) => void) | undefined;
   /** serve-workspace test seam; production omits → buildHarnessEngine.
    * The returned bundle shape is locked by the `EngineBundle` SSOT,
    * extended with `mcpRoots?` / `mcpManager?` / `catalog?` (hub per-root
@@ -1500,6 +1614,16 @@ export class SessionHub {
   private readonly engineByRoot = new Map<string, HubEngineEntry>();
   /** Per-conversation serialization. */
   private readonly inflight = new Map<string, Promise<void>>();
+  /**
+   * Which writer slot the CALLING async context already holds. The hub runs an
+   * entire turn inside one `serialize` slot, so a publication the engine or a
+   * worker issues from inside that turn arrives while the slot is held; a
+   * queue that is not re-entrant deadlocks there. The context is the ownership
+   * proof (not a hub-wide flag, which a concurrent unrelated caller would read
+   * as permission to write while the turn runs), and `held` is cleared when
+   * the work returns so a callback that outlives its slot queues normally.
+   */
+  private readonly writerSlot = new AsyncLocalStorage<WriterSlot>();
   /** Actual active work count; `inflight` retains resolved chain sentinels. */
   private readonly activeTurnCounts = new Map<string, number>();
   /**
@@ -1533,6 +1657,21 @@ export class SessionHub {
     this.cachedDeps = opts.deps;
     this.injectedEngineRoot = opts.injectedEngineRoot;
     this.startupSettings = opts.settings;
+    this.nativeStatePort = createNativeStatePort({ store: opts.store });
+    // ADR-0136 §3: this hub IS the host for ADR-0136 runtime persistence, so
+    // the binder is built here rather than per turn. Its three host inputs are
+    // the hub's own: this store, the hub's own writer queue (re-entrant, so a
+    // publication issued from inside a turn lands in the slot that turn already
+    // holds instead of deadlocking behind it), and the shutdown signal.
+    this.runtimePersistence = createRuntimePersistenceBinder({
+      store: opts.store,
+      serialize: (conversationId, work) =>
+        this.serialize({ conversationId, work }),
+      shouldPublish: (conversationId) =>
+        this.newFormatSessions.get(conversationId) === true,
+      signal: this.shutdownSignal.signal,
+    });
+    this.onRecoveryProgress = opts.onRecoveryProgress;
     this.buildEngine = opts.buildEngine;
     this.traceOut = opts.traceOut;
     this.askUser = opts.askUser;
@@ -1843,6 +1982,11 @@ export class SessionHub {
    */
   async shutdown(): Promise<void> {
     this.subagentWake?.dispose();
+    // ADR-0136 §3: abort first. A publication issued from here on fails fast
+    // instead of queueing behind a turn that will never finish writing, so a
+    // going-down host reports the loss instead of reporting a success it
+    // cannot back on disk.
+    this.shutdownSignal.abort();
     // Session end (hub release) destroys all live-graph ledgers so none
     // leak into later sessions.
     this.liveGraphLedger?.destroyAll();
@@ -2063,6 +2207,12 @@ export class SessionHub {
       sanitized_at: now,
       checkpoints: [],
       workspaceRoot: root,
+      // ADR-0136: the new-format marker is stamped HERE and nowhere else.
+      // `save` never stamps it, so this is the only place an old-format
+      // session could be relabelled — and a session file only reaches here by
+      // being genuinely new. That is what makes `unsupported_format` honest
+      // for every session this host never created (SC23).
+      nativeStateFormat: NATIVE_STATE_FORMAT_VERSION,
     };
     await this.store.save({ id, file });
     return {
@@ -2072,13 +2222,33 @@ export class SessionHub {
   }
 
   async getSession(conversationId: string): Promise<GetSessionResponse> {
-    const file = await this.store.load(conversationId);
+    // ADR-0136 §4: this is a session-ENTRY surface (the HTTP/serve read entry),
+    // so recovery runs here — not on `store.load`, which is also called by the
+    // goal auto-loop, title generation, and the checkpoint write-back.
+    const opened = await this.openSessionWithRecovery(conversationId);
+    this.adoptEntryRecovery(opened);
+    const recovery = this.recoveryView(opened);
+    if (opened.file === null) {
+      // A damaged log: the classification is what the operator needs, and the
+      // transcript is NOT reconstructed from the log or from an older state.
+      return {
+        session: {
+          conversation_id: conversationId,
+          json_mode: false,
+          turn_count: 0,
+          prior_count: 0,
+          recovery,
+        },
+        turns: [],
+      };
+    }
+    const file = opened.file;
     // ADR-0126: reopened history is projected against the ACTIVE head chain's
     // persisted outcomes, so a rewind/reopen can never surface an abandoned
     // branch's terminal state.
     const evidence = await this.store.projectTurnOutcomes(conversationId);
     return {
-      session: this.summarize({ file }),
+      session: this.summarize({ file, recovery }),
       // D2 (tui-display-consistency): pass file.thinkingMs parallel array so
       // projectMessagesToTurns can sum per-turn assistant thinkingMs.
       // #1079: pass file.lastUsage so the replay's last turn carries the
@@ -2139,7 +2309,7 @@ export class SessionHub {
     const operation = this.serialize<PostMessageResponse>({
       conversationId,
       work: async () => {
-        let session = await this.store.load(conversationId);
+        let session = await this.loadSessionForTurn(conversationId);
         // EXIT: reject-execute-before-engine — legacy/unbound sessions are
         // inspectable but must never reach trace, postMessage, or the engine.
         const boundRoot = requireBoundRoot(session.workspaceRoot);
@@ -2229,6 +2399,28 @@ export class SessionHub {
           }
           return deps.adapter.encodeUserText(effective);
         };
+        // ADR-0136 §3: the accepted input is committed here — after the prefix
+        // is known and BEFORE the engine can issue its first model request, so
+        // the engine's own input-boundary publication anchors at the input's own
+        // event. Consuming the same latch the commit hook uses is what makes
+        // this one-shot per postMessage and what stops the engine's first commit
+        // from re-adding the query.
+        //
+        // A round that accepted no user text (a silent host wake) is NOT an
+        // input boundary: its digest-only prefix keeps riding the engine's
+        // first commit exactly as before, so a wake that never reaches the
+        // model still leaves the session empty.
+        const acceptInput = async (opts: {
+          readonly acceptedInput: ReadonlyArray<AnthropicNativeMessage>;
+        }): Promise<void> => {
+          if (!queryCommitPending) return;
+          queryCommitPending = false;
+          await this.commitAcceptedInput({
+            conversationId,
+            session,
+            acceptedInput: opts.acceptedInput,
+          });
+        };
         // T6: wrap the executor with the violation kill-session hook. Serve/TUI
         // is long-running, so on kill we write the violation event to the JSONL
         // trace and do NOT touch process.exitCode. hard_wall already failed the
@@ -2317,6 +2509,14 @@ export class SessionHub {
             });
           },
           ...(trace !== undefined ? { trace } : {}),
+          // ADR-0136 §3: the sink the engine publishes its four boundaries
+          // through. Bound per turn from the hub's one binder, so an engine
+          // cached before this hub had a persistence binder still reaches it —
+          // the deps overlay, not the build, is where session identity exists.
+          // Queue discipline matches commitMessages: the engine publishes from
+          // inside this turn's serialize slot, and the binder's queue is
+          // re-entrant, so the publication lands in the slot already held.
+          ...persistenceSinkOption(this.runtimePersistence, conversationId),
           // Compact-boundary rendering seam: inject a boundaryAttachment
           // closure that renders the session's most recent qualifying user
           // task quotes verbatim (a pure function over session.messages,
@@ -2430,15 +2630,18 @@ export class SessionHub {
                   ? await runVerifyLoop({
                       runFn: (text, o) =>
                         attachPrefetch(text).then((effective) => {
-                          queryCommitPrefix = [
+                          const acceptedInput = [
                             ...(drained ? [drainedMsg] : []),
                             buildUserCommit(effective),
                           ];
-                          return run(effective, runDeps, o?.signal, {
-                            priorMessages: o?.priorMessages ?? priorMessages,
-                            onStream: o?.onStream ?? wrappedOnStream,
-                            hostStreamPresent: opts.onStream !== undefined,
-                          });
+                          queryCommitPrefix = acceptedInput;
+                          return acceptInput({ acceptedInput }).then(() =>
+                            run(effective, runDeps, o?.signal, {
+                              priorMessages: o?.priorMessages ?? priorMessages,
+                              onStream: o?.onStream ?? wrappedOnStream,
+                              hostStreamPresent: opts.onStream !== undefined,
+                            })
+                          );
                         }),
                       // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
                       // goal → auto (userText = goal.text); else HITL (userText =
@@ -2554,12 +2757,21 @@ export class SessionHub {
                       const effective = silent
                         ? ""
                         : await attachPrefetch(query);
-                      queryCommitPrefix = [
+                      const acceptedInput = [
                         ...(drained ? [drainedMsg] : []),
                         ...(effective.length > 0
                           ? [buildUserCommit(effective)]
                           : []),
                       ];
+                      queryCommitPrefix = acceptedInput;
+                      // ADR-0136 §3: nothing is issued to the model
+                      // until the accepted input is committed — the engine's
+                      // own input-boundary publication then anchors at it, and
+                      // a failed commit or publication rejects the run before
+                      // the request is made.
+                      if (effective.length > 0) {
+                        await acceptInput({ acceptedInput });
+                      }
                       // ADR-0135: the turn's escalation abort rides the run
                       // signal, so the turn stops at the next decision point —
                       // a pending model request is abandoned, not awaited and
@@ -2570,10 +2782,11 @@ export class SessionHub {
                         runDeps,
                         mergeSignals(opts.signal, turnScope.interrupt.signal),
                         {
-                        priorMessages,
-                        onStream: wrappedOnStream,
-                        hostStreamPresent: opts.onStream !== undefined,
-                      });
+                          priorMessages,
+                          onStream: wrappedOnStream,
+                          hostStreamPresent: opts.onStream !== undefined,
+                        }
+                      );
                     })();
               const result = runOutcome.result;
               // #408 T5: capture the terminal outcome for post-run write-back.
@@ -2773,7 +2986,7 @@ export class SessionHub {
               },
             };
           }
-          throw err;
+          throw hostTurnError(err);
         }
       },
     });
@@ -2893,6 +3106,9 @@ export class SessionHub {
     return this.serialize({
       conversationId,
       work: async () => {
+        // A compaction rewrites the context the next turn would start from, so a
+        // restored state adopted before it is no longer that context.
+        this.restoredContexts.delete(conversationId);
         const session = await this.store.load(conversationId);
         const before = session.messages;
         // ADR-0126: compaction re-projects the history it did not change, so it
@@ -3236,6 +3452,9 @@ export class SessionHub {
     return this.serialize({
       conversationId,
       work: async () => {
+        // A rewind moves the chain the published state was anchored on, so a
+        // restored state adopted before it no longer describes this session.
+        this.restoredContexts.delete(conversationId);
         const codeRestore = restoreCode
           ? await this.restoreAbandonedCode(conversationId, head)
           : undefined;
@@ -3844,14 +4063,26 @@ export class SessionHub {
   /**
    * Serialize operations on the same conversation_id (spec A15).
    * Different ids run in parallel; same id chains sequentially.
+   *
+   * RE-ENTRANT (ADR-0136 §3): a caller that already holds this conversation's
+   * slot runs its work inline. The hub drives a whole turn inside one slot, and
+   * the engine's boundary publications and the worker facts land from inside
+   * it — chaining them would queue behind a slot that only advances when the
+   * turn returns, which is the deadlock this branch exists to prevent. ADR-0110
+   * still holds: one writer, one journal, one queue; the inline work joins the
+   * slot the caller already owns instead of taking a second lock.
    */
   private serialize<T>(opts: {
     readonly conversationId: string;
     readonly work: () => Promise<T>;
   }): Promise<T> {
     const { conversationId, work } = opts;
+    const slot = this.writerSlot.getStore();
+    if (slot?.conversationId === conversationId && slot.held) {
+      return work();
+    }
     const prev = this.inflight.get(conversationId) ?? Promise.resolve();
-    const next = prev.then(() => work());
+    const next = prev.then(() => this.inWriterSlot(conversationId, work));
     // Swallow rejection in the chain sentinel so subsequent ops still run.
     this.inflight.set(
       conversationId,
@@ -3861,6 +4092,22 @@ export class SessionHub {
       )
     );
     return next;
+  }
+
+  /** Run queued work as the holder of this conversation's writer slot, so work
+   *  it starts recognizes the slot as its own. */
+  private inWriterSlot<T>(
+    conversationId: string,
+    work: () => Promise<T>
+  ): Promise<T> {
+    const slot: WriterSlot = { conversationId, held: true };
+    return this.writerSlot.run(slot, async () => {
+      try {
+        return await work();
+      } finally {
+        slot.held = false;
+      }
+    });
   }
 
   /**
@@ -3923,7 +4170,198 @@ export class SessionHub {
       getProjectDir: () => this.store.getProjectDir(),
       ledger: this.preimageLedger,
       isEnabled: () => this.startupSettings?.codeRestore?.enabled !== false,
+      // ADR-0136 §3: the durable per-file intent for this session. The
+      // capture runs inside the engine, which the hub drives from inside the
+      // per-session writer queue, so the append needs no second lock.
+      intentRecorder: this.nativeStatePort,
     });
+  }
+
+  /** ADR-0136 §3: commit the accepted input to the session transcript, before
+   *  the caller may issue its model request.
+   *
+   * The input is committed FIRST (through the same append path the engine's
+   * commit hook uses) so the engine's own input-boundary publication — the sole
+   * producer of that boundary — anchors at the accepted input's own event id: a
+   * real event on the head chain, which is the only authority checkpoint
+   * selection consults. The engine's first commit therefore no longer carries
+   * the query prefix: the chain ends up with the same events under the same
+   * ids, written in two appends instead of one.
+   *
+   * WHY the hub no longer publishes this boundary: the engine publishes
+   * accepted_input itself, from inside the loop, carrying the post-compaction
+   * full context the dependent request will actually use. A host-side
+   * publication duplicated that record with a context the engine never sent,
+   * so one accepted message produced two `input` records and the selected one
+   * could be the pre-compaction copy.
+   *
+   * A store failure propagates to the caller, so the dependent model request is
+   * never issued. It is not caught, retried, or degraded into an unpersisted
+   * turn.
+   *
+   * One-shot per postMessage: the caller holds the latch this consumes, so an
+   * auto-continue round cannot re-commit this turn's input.
+   */
+  private async commitAcceptedInput(opts: {
+    readonly conversationId: string;
+    readonly session: SessionFileV1;
+    /** The exact native messages entering the engine this round (drained
+     *  subagent digest + the accepted user input). */
+    readonly acceptedInput: ReadonlyArray<AnthropicNativeMessage>;
+  }): Promise<void> {
+    if (opts.acceptedInput.length === 0) return;
+    await this.appendSessionEvents({
+      conversationId: opts.conversationId,
+      session: opts.session,
+      events: opts.acceptedInput,
+    });
+  }
+
+  /**
+   * ADR-0136 §4 / SC16-SC17: reconcile and stop the workers THIS session owns,
+   * as a fresh process does when the operator reopens it. The sweep is the
+   * module-level entry point over durable identity records; this wrapper only
+   * supplies the two session-scoped inputs it cannot know:
+   *
+   *   - the subagents root, resolved through the same helper the subagent
+   *     manager uses at spawn (`<projectDir>/<conversationId>/subagents`), so
+   *     the sweep reads the records the spawn actually wrote;
+   *   - the `sessionId` filter, so a record belonging to another session — or to
+   *     none this process can attribute — is reported as excluded instead of
+   *     signalled. A pid is signalled only after the record's own
+   *     process-identity check proves the process is still the owned worker.
+   *
+   * Never called with a session id the caller did not resolve from its own
+   * open path: an unverifiable record is left for `needs handling` rather than
+   * stopped on a guess.
+   */
+  async sweepOwnedWorkersForSession(
+    conversationId: string
+  ): Promise<OwnedWorkerSweepResult> {
+    return sweepOwnedWorkers(
+      resolveSubagentTraceDir({
+        projectDir: this.store.getProjectDir(),
+        conversationId,
+      }),
+      { sessionId: conversationId }
+    );
+  }
+
+  /** ADR-0136 §3: this hub's ONE persistence binder, for the assembly-time
+   * consumers of a host that builds its own engine outside the hub (the TUI
+   * assembles its subagent manager in buildTuiDeps, which runs before this hub
+   * exists). Exposing the hub's own object is what keeps a single writer
+   * authority: a host forwards to it instead of building a second binder over
+   * the same store. */
+  runtimePersistenceBinder(): RuntimePersistenceBinder<NativeStateMessage> {
+    return this.runtimePersistence;
+  }
+
+  /** ADR-0136 §4: open the session through the shared host contract, so the
+   * hub classifies exactly what the CLI and the TUI classify. Read-only by
+   * construction — it selects and validates the published state on the
+   * session's own chain and reconciles recorded operations; it issues no
+   * model/tool call, moves no head, and restores no file. */
+  private async openSessionWithRecovery(
+    conversationId: string
+  ): Promise<SessionOpenRecovery> {
+    const recovery = await openSessionWithRecovery({
+      store: this.store,
+      conversationId,
+      // The dirty record while present, else the session's recorded root, else
+      // the host's bound root, else the recorded cwd: the same live value
+      // `restoreAbandonedCode` uses, so a verdict compares against the root the
+      // engine writes to. An unreadable log has no recorded root to read, and
+      // the process cwd is the only honest last resort.
+      roots: {
+        resolve: (file) =>
+          resolveLiveRoot({
+            ...(this.dirtyWorktreeRoots.get(conversationId) !== undefined
+              ? { dirtyRoot: this.dirtyWorktreeRoots.get(conversationId) }
+              : {}),
+            ...(file?.workspaceRoot !== undefined
+              ? { recordedRoot: file.workspaceRoot }
+              : {}),
+            ...(this.boundRoot !== undefined
+              ? { boundRoot: this.boundRoot }
+              : {}),
+            cwd: file?.cwd ?? process.cwd(),
+          }),
+        identityOf: (liveRoot) => this.rootIdentityFor(liveRoot),
+      },
+      ...(this.onRecoveryProgress !== undefined
+        ? { onProgress: this.onRecoveryProgress }
+        : {}),
+      // ADR-0136 §4: this host runs the owned-worker sweep for the session it
+      // is opening, so the report describes the world AFTER the sweep rather
+      // than the one the dead host left behind.
+      sweepOwnedWorkers: (id) => this.sweepOwnedWorkersForSession(id),
+    });
+    // Durable graph facts are the only record that survives the process that
+    // wrote them, so the restored per-node view is folded into the live ledger
+    // here — in memory only, once per open, and never on `blocked` (that
+    // session is not opening). The ledger outlives a rebind, so the verdict
+    // survives the engine rebuild a rebind performs.
+    if (recovery.status.status !== "blocked") {
+      seedRestoredGraphNodes(
+        this.liveGraphLedger?.ledgerFor(conversationId),
+        recovery.operationFacts?.graphNodes ?? []
+      );
+    }
+    return recovery;
+  }
+  /** ADR-0136 §4: adopt one session-ENTRY recovery so the next turn's model
+   * context is the published state rather than a transcript projection
+   * (spec §2.1: "Do not rebuild from the transcript"). One-shot — the turn that
+   * consumes it writes a new chain, and a rewind or a compaction moves the
+   * ground under it, so both drop it.
+   *
+   * Exposed because the TUI opens a session through its own bridge (it reads
+   * the store directly rather than calling `getSession`) while its turns still
+   * land here. */
+  adoptEntryRecovery(recovery: SessionOpenRecovery): void {
+    if (recovery.restoredContext === null) {
+      this.restoredContexts.delete(recovery.conversationId);
+      return;
+    }
+    this.restoredContexts.set(
+      recovery.conversationId,
+      recovery.restoredContext
+    );
+  }
+
+  /** The published state this session's next turn must start from, if any. */
+  private takeRestoredContext(
+    conversationId: string
+  ): ReadonlyArray<AnthropicNativeMessage> | undefined {
+    const restored = this.restoredContexts.get(conversationId);
+    this.restoredContexts.delete(conversationId);
+    return restored;
+  }
+
+  /** The session a turn starts from. ADR-0136 §4: a session opened since an
+   *  abnormal exit starts from the PUBLISHED state, not from this transcript
+   *  projection — the projection still carries the dead turn's unacknowledged
+   *  events and the synthesized closeout result for its orphaned tool_use.
+   *  The restored context is one-shot: it is consumed here or not at all. */
+  private async loadSessionForTurn(
+    conversationId: string
+  ): Promise<SessionFileV1> {
+    const session = await this.store.load(conversationId);
+    // The publication gate (SC23) is decided here, at the load the turn
+    // already performs, so a publication never pays a second store read to
+    // learn whether this session is one it may write into.
+    this.newFormatSessions.set(conversationId, isNewFormatSession(session));
+    const restored = this.takeRestoredContext(conversationId);
+    return restored === undefined
+      ? session
+      : { ...session, messages: restored };
+  }
+
+  /** The wire view of one entry recovery: the status plus the reconciled
+   * operations behind it (SC11). The restored context stays in-process. */
+  private recoveryView(recovery: SessionOpenRecovery): SessionRecoveryView {
+    return { ...recovery.status, operations: recovery.operations };
   }
 
   /** Save condition based on stopReason and progress delta.
@@ -4318,9 +4756,7 @@ export class SessionHub {
    * fabricated stop, produced from a missing manager instead of a missing
    * process group.
    */
-  private cancelBackgroundTaskOption(
-    conversationId: string
-  ): {
+  private cancelBackgroundTaskOption(conversationId: string): {
     readonly cancelBackgroundTask?: (
       taskId: string
     ) => Promise<CleanupEvidence>;
@@ -4478,6 +4914,10 @@ export class SessionHub {
       // build-engine threads it to the manager as an opaque seam — the harness
       // never imports the store.
       subagentActivityReader: readWorkerInFlightToolName,
+      // ADR-0136 §3: the one binder this hub built, handed to the subagent
+      // manager (worker facts) and the graph tool (node facts) so a worker's
+      // progress reaches the same store as the loop's boundaries.
+      runtimePersistence: this.runtimePersistence,
       // Live-graph ledger host pass-through — resolve the per-session ledger
       // by ctx.conversationId; destroyed on resetSession / shutdown.
       ...(this.liveGraphLedger
@@ -4654,6 +5094,8 @@ export class SessionHub {
       // Same as the per-root path above: the activity projection reader is
       // injected from the layer that owns the worker-ledger codec.
       subagentActivityReader: readWorkerInFlightToolName,
+      // ADR-0136 §3: same one binder as the per-root path above.
+      runtimePersistence: this.runtimePersistence,
       ...(this.traceOut !== undefined
         ? { subagentDiagnosticsDir: this.traceOut }
         : {}),
@@ -4782,13 +5224,18 @@ export class SessionHub {
     });
   }
 
-  private summarize(opts: { readonly file: SessionFileV1 }): SessionSummary {
+  private summarize(opts: {
+    readonly file: SessionFileV1;
+    /** ADR-0136: present only where entry recovery actually ran. */
+    readonly recovery?: SessionRecoveryView;
+  }): SessionSummary {
     const { file } = opts;
     return {
       conversation_id: file.conversation_id,
       json_mode: file.jsonMode,
       turn_count: file.turnCount,
       prior_count: 0,
+      ...(opts.recovery !== undefined ? { recovery: opts.recovery } : {}),
     };
   }
 

@@ -10,9 +10,19 @@
  * - ToolInputValidationError: handler input-shape rejection (validation_failed)
  * - SubAgentSandboxRootError: sandboxRoot narrowed outside the parent root
  * - SkipAppend*Error: skip-append guards (`skip_append_with_text` / `skip_append_empty_prior`)
- *
- // (ADR-0011)
+ * - RuntimeStatePersistenceError / unwrapRuntimeStateCause: the runtime-state
+ *   persistence seam's one error dialect
+ * (ADR-0011)
  */
+
+// Type-only, and one-directional: the neutral persistence contract declares no
+// imports of its own (a locked guard in
+// tests/harness/permission/saved-state-excludes-grants.test.ts enforces that),
+// so this points at it and never the reverse.
+import type {
+  RuntimeOperationFact,
+  RuntimeSavedStateBoundary,
+} from "../shared/runtime-persistence.js";
 
 export class RegistryConstructionError extends Error {
   override readonly name = "RegistryConstructionError";
@@ -237,6 +247,50 @@ export class MessageCommitError extends Error {
     super(`MessageCommitError: commit hook failed: ${errorMessage(cause)}`);
     this.cause = cause;
   }
+}
+
+/**
+ * Which persistence write lost. Two independent seams publish through the same
+ * wrapper, so the field is the union of both vocabularies rather than `string`:
+ * a reader that cannot tell a saved-state boundary from a fact kind has to guess
+ * which chain broke, and a bare `string` would let any typo type-check.
+ */
+export type RuntimePersistenceWriteKind =
+  RuntimeSavedStateBoundary | RuntimeOperationFact<unknown>["kind"];
+
+/**
+ * A runtime-state persistence write failed (session saved-state plan B). The
+ * runtime-state port is the seam that makes a boundary durable, so a rejected
+ * write is treated exactly like a failed commit hook: wrapped, rethrown, never
+ * retried, and the dependent execution does not start. `boundary` names which
+ * write lost (a saved-state boundary or an operation-fact kind) because the
+ * commit chain and the runtime-state chain are independent seams and a host
+ * diagnosing a failed turn needs to know which one broke.
+ */
+export class RuntimeStatePersistenceError extends Error {
+  override readonly name = "RuntimeStatePersistenceError";
+  readonly boundary: RuntimePersistenceWriteKind;
+  readonly cause: unknown;
+  constructor(boundary: RuntimePersistenceWriteKind, cause: unknown) {
+    super(
+      `RuntimeStatePersistenceError: ${boundary} write failed: ${errorMessage(cause)}`
+    );
+    this.boundary = boundary;
+    this.cause = cause;
+  }
+}
+
+/**
+ * The port error underneath a persistence failure, or the error unchanged.
+ *
+ * WHY one function: the hub and the chat host both surface this failure, and
+ * they must surface the SAME one. Two copies is how one of them ends up
+ * recognising the wrapper by its `name` string while the other uses
+ * `instanceof` — which then disagrees the moment a bundler minifies or a
+ * duplicate copy of the module is loaded.
+ */
+export function unwrapRuntimeStateCause(err: unknown): unknown {
+  return err instanceof RuntimeStatePersistenceError ? err.cause : err;
 }
 
 /** Skip-append guard: `appendUserText: false` forbids new task user text (EXIT `skip_append_with_text`). */

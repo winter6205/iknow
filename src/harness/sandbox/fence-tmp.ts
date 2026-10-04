@@ -1,4 +1,10 @@
-import { existsSync, mkdirSync, readdirSync, realpathSync, type Dirent } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  readdirSync,
+  realpathSync,
+  type Dirent,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { sanitizeConversationSegment } from "../session-roots.js";
 import { MAIN_SESSION_FENCE_TMP_DIR_NAME } from "../../shared/session-tree-names.js";
@@ -121,6 +127,24 @@ export function workerRecordPath(subagentsDir: string, taskId: string): string {
 
 export function workerMetaPath(subagentsDir: string, taskId: string): string {
   return join(workerTaskDir(subagentsDir, taskId), `agent-${taskId}.meta.json`);
+}
+
+/**
+ * Worker OS-identity record — the durable `(pid, starttime)` of the task's
+ * CURRENT spawn, plus its wait/background ownership and transcript reference.
+ *
+ * Its own file, not a field of `.meta.json`: meta is create-once spawn
+ * provenance read by the hub's spawn-tool-use join, while this record is
+ * rewritten on every spawn and read by whoever has to prove a former worker
+ * process is gone. The `process-` prefix (not `agent-`) keeps it clear of the
+ * `agent-*.jsonl` trace glob and of the `agent-<taskId>.jsonl` / `.meta.json`
+ * lookups, so no existing reader can mistake it for either.
+ */
+export function workerProcessRecordPath(
+  subagentsDir: string,
+  taskId: string
+): string {
+  return join(workerTaskDir(subagentsDir, taskId), `process-${taskId}.json`);
 }
 
 export function workerFenceTmpPath(

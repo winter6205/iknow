@@ -48,6 +48,36 @@ import { createOutputMask, currentSecretValues } from "../sandbox/index.js";
 import { writeSituation } from "../isolation/write-situation.js";
 import { sanitizeConversationSegment } from "../session-roots.js";
 import { SUBAGENT_TRACE_DIR_NAME } from "../../shared/session-tree-names.js";
+import type {
+  RuntimePersistenceBinder,
+  RuntimeWorkerFact,
+} from "../../shared/runtime-persistence.js";
+import type { AnthropicNativeMessage } from "../model-adapter/types.js";
+import {
+  readWorkerIdentityRecord,
+  readWorkerIdentityRecordState,
+  WorkerIdentityWriteError,
+  writeWorkerIdentityRecord,
+  type WorkerIdentityEntry,
+  type WorkerOwnership,
+} from "./worker-identity-record.js";
+import {
+  captureWorkerIdentity,
+  describeOwnedProcessProbe,
+  identityOf,
+  probeOwnedProcess,
+  probeProvesProcessGone,
+  sweepOwnedWorkers,
+  terminateOwnedWorkerNow,
+  type OwnedWorkerIdentity,
+  type OwnedWorkerStopResult,
+  type OwnedWorkerSweepResult,
+} from "./worker-identity-stop.js";
+import {
+  rehydrateWorkerTask,
+  rehydratedResumeFields,
+  type RehydratedWorkerTask,
+} from "./worker-fact-rehydration.js";
 import {
   ensureWorkerSessionLayout,
   workerFenceTmpPath,
@@ -234,6 +264,35 @@ export interface SubAgentManager {
     def: SubAgentDefinition
   ) => { readonly taskId: string };
   /**
+   * Stop every session-owned worker this host still owns, by durable
+   * identity, and report what was proven per worker.
+   *
+   * The sweep reads the per-task identity records under the assembly
+   * `subagentsDir`, so it works in a process that never held the children
+   * (after an abnormal host exit) exactly as well as in the owning one. A
+   * worker is signalled only while its `/proc` start time still matches the
+   * record; a recycled pid is reported `not_ours` and left alone, and a stop
+   * that cannot be confirmed is reported `needs_handling` — never as a stop.
+   * A second call is a no-op for already-proven workers.
+   *
+   * `input.subagentsDir` overrides the assembly root: the per-conversation
+   * layout derives its root from the reopened session rather than from
+   * assembly options, and that root is what the host resolved. No root at all
+   * (nothing was ever recorded) → an empty result.
+   *
+   * Optional on the interface so poll-only fakes stay structural.
+   */
+  readonly stopOwnedWorkers?: (input?: {
+    readonly subagentsDir?: string;
+    /**
+     * Session the reopened host is reconciling. When passed, only records whose
+     * own `session_id` matches are swept; records of another session, or of no
+     * attributable session, are reported in `excluded` and never signalled.
+     * Omit it only when the assembly root is already this session's own.
+     */
+    readonly sessionId?: string;
+  }) => Promise<OwnedWorkerSweepResult>;
+  /**
    * Read-only full enumeration (starting/running/completed/failed together) —
    * consumed by Session API GET /sessions/:id/subagents. Data source =
    * in-memory map + terminal envelopes (the same truth as
@@ -310,12 +369,28 @@ export class SubAgentWaitTimeoutError extends Error {
  */
 export class SubAgentResumeError extends Error {
   override readonly name = "SubAgentResumeError";
-  readonly kind: "not_found" | "running" | "no_transcript" | "missing_task";
+  readonly kind:
+    | "not_found"
+    | "running"
+    | "no_transcript"
+    | "missing_task"
+    | "prior_process_unconfirmed";
   readonly taskId: string;
-  constructor(taskId: string, kind: SubAgentResumeError["kind"]) {
+  /**
+   * Which of the two "not proven stopped" situations this is (the former
+   * process is still running, or its identity cannot be matched / confirmed).
+   * Postel: absent on the historical kinds.
+   */
+  readonly detail?: string;
+  constructor(
+    taskId: string,
+    kind: SubAgentResumeError["kind"],
+    detail?: string
+  ) {
     super(`subagent resume refused: ${kind} (task ${taskId})`);
     this.taskId = taskId;
     this.kind = kind;
+    if (detail !== undefined) this.detail = detail;
   }
 }
 
@@ -589,6 +664,13 @@ interface Task {
   /** Host path of this worker's fence `/tmp` pad when session layout exists. */
   padRoot?: string;
   /**
+   * OS identity of the CURRENT spawn, captured right after the child exists.
+   * Absent when no identity was recorded (no runtime persistence wired, or a
+   * spawn factory that reported no pid): there is then nothing to verify, and
+   * the pre-existing in-memory gates stand unchanged.
+   */
+  identity?: OwnedWorkerIdentity;
+  /**
    * SettleReject references for this task's pending waitFor.
    * `abortTask` (operator force-kill) uses them to reject the task's waiters
    * **synchronously** — killing only the worker child is not enough: the
@@ -861,6 +943,33 @@ function resumeDefinition(
   };
 }
 
+/**
+ * Everything a sweep decided that the operator has not been told yet. Split
+ * out of `stopOwnedWorkers` so the sweep's own control flow stays a straight
+ * line: the decision path and the reporting path are different jobs.
+ */
+function reportSweepAnomalies(swept: OwnedWorkerSweepResult): void {
+  for (const bad of swept.unreadable) {
+    console.warn(
+      `[subagent] identity record unreadable, worker unaccounted for: ${bad.path} (${bad.reason})`
+    );
+  }
+  for (const missed of swept.unrecorded) {
+    console.warn(
+      `[subagent] stop verdict for ${missed.taskId} did not reach its identity record (${missed.reason}); the next pass re-attempts it`
+    );
+  }
+  for (const skip of swept.excluded) {
+    const owner =
+      skip.sessionId === undefined
+        ? ""
+        : ` (belongs to session ${skip.sessionId})`;
+    console.warn(
+      `[subagent] identity record for ${skip.taskId} was not swept: ${skip.reason}${owner}`
+    );
+  }
+}
+
 function readIsolationOn(
   value: boolean | (() => boolean) | undefined
 ): boolean {
@@ -895,6 +1004,14 @@ function blockedSpawnDefinition(
 
 export function createSubAgentManager(opts: {
   readonly spawn: SubAgentSpawn;
+  /**
+   * Session-checkpoint plan B: runtime persistence seam, resolved per session
+   * id. The manager records worker identity and liveness through it so a
+   * restarted process can tell an owned worker that stopped from one whose
+   * process identity can no longer be confirmed. Absent → nothing recorded,
+   * worker behavior unchanged.
+   */
+  readonly runtimePersistence?: RuntimePersistenceBinder<AnthropicNativeMessage>;
   /**
    * Parent sandboxRoot — the parent agent's "work domain". `buildWorkerPayload`
    * validates in one place that `def.sandboxRoot` must be prefix-of-parent
@@ -1347,6 +1464,311 @@ export function createSubAgentManager(opts: {
       console.warn(`[subagent] meta write skipped for ${taskId}: ${detail}`);
     }
   }
+
+  // ── owned-worker identity (runtime persistence seam) ──────────────────────
+  //
+  // One rule decides whether any of this runs: an identity is recorded only
+  // when a runtime-persistence sink binds for the worker's session. With no
+  // binder wired there is no parent runtime state that could read the record
+  // back, so the manager adds no file, no fact and no gate — worker behavior
+  // stays byte-identical to before.
+
+  /**
+   * wait/background ownership, read from the same `excludeFromHostDrain` bit
+   * the host-drain gate uses: set means the spawning call waits for this
+   * worker's envelope (foreground), absent means the call returned a handle
+   * and completion arrives later (background).
+   */
+  function workerOwnershipOf(def: SubAgentDefinition): WorkerOwnership {
+    return def.excludeFromHostDrain === true ? "foreground" : "background";
+  }
+
+  /** Current identity fields; the pid pair is required, so callers check first. */
+  function identityEntry(
+    task: Task,
+    subagentsDir: string,
+    identity: OwnedWorkerIdentity
+  ): WorkerIdentityEntry {
+    return {
+      task_id: task.id,
+      ownership: workerOwnershipOf(task.def),
+      worker_state: task.state,
+      pid: identity.pid,
+      starttime: identity.startTime,
+      transcript_path: workerTranscriptPath(subagentsDir, task.id),
+      ...(presentString(task.def.conversationId)
+        ? { session_id: task.def.conversationId }
+        : {}),
+      ...(presentString(task.def.toolUseId)
+        ? { tool_use_id: task.def.toolUseId }
+        : {}),
+    };
+  }
+
+  /**
+   * Persist the task's current identity.
+   *
+   * Throws `WorkerIdentityWriteError` on failure rather than swallowing it into
+   * a quiet "no record": an identity missing from disk is exactly what would
+   * leave a worker unreconcilable after the host dies. The in-memory
+   * `task.identity` still gates continuation in this process either way.
+   *
+   * Callers decide the route, because the two callers need opposite behavior:
+   * a lifecycle transition reports (it must not fail the transition, and
+   * `emitStateChange` is documented never to throw), while the dispatch path
+   * fails the spawn closed.
+   */
+  function writeIdentityRecord(task: Task, subagentsDir: string): void {
+    const identity = task.identity;
+    if (identity === undefined) return;
+    writeWorkerIdentityRecord(
+      subagentsDir,
+      identityEntry(task, subagentsDir, identity)
+    );
+  }
+
+  /** The transition-side route: report the failed record write, keep going. */
+  function reportIdentityRecordFailure(task: Task, err: unknown): void {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.warn(
+      `[subagent] identity record write failed for ${task.id}: ${detail}`
+    );
+  }
+
+  /**
+   * Append one worker fact to the session's runtime state.
+   *
+   * Not awaited: `spawn` is synchronous by contract, so this append is an
+   * account of progress whose rejection cannot gate dependent execution at
+   * this layer (the recovery-critical artifact is the synchronous record
+   * write above). It is never swallowed silently — a rejected append is
+   * reported with its cause.
+   */
+  function appendWorkerFact(
+    task: Task,
+    subagentsDir: string | undefined,
+    state: RuntimeWorkerFact["state"]
+  ): void {
+    const sink = opts.runtimePersistence?.bind(task.def.conversationId);
+    if (sink === undefined) return;
+    const identity = task.identity;
+    const fact: RuntimeWorkerFact = {
+      kind: "worker_progress",
+      taskId: task.id,
+      ownership: workerOwnershipOf(task.def),
+      state,
+      ...(identity !== undefined
+        ? { process: { pid: identity.pid, startTime: identity.startTime } }
+        : {}),
+      ...(subagentsDir !== undefined
+        ? { transcriptPath: workerTranscriptPath(subagentsDir, task.id) }
+        : {}),
+      ...(presentString(task.def.toolUseId)
+        ? { toolUseId: task.def.toolUseId }
+        : {}),
+    };
+    void sink.appendOperationFact(fact).catch((err: unknown) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[subagent] worker fact append failed for ${task.id} (${state}): ${detail}`
+      );
+    });
+  }
+
+  /**
+   * One lifecycle state, published to the record and the fact stream together.
+   *
+   * The record's own field is read from `task.state` rather than from the
+   * `state` argument, and the two always agree: `emitStateChange` assigns
+   * `task.state` before publishing, and the dispatch path is called while the
+   * task is still `starting`. `task.state` is the single value both surfaces
+   * are derived from, and both are handed the ONE already-resolved
+   * `subagentsDir` rather than each resolving it again, so they cannot drift.
+   */
+  function noteWorkerState(
+    task: Task,
+    subagentsDir: string | undefined,
+    state: RuntimeWorkerFact["state"]
+  ): void {
+    if (opts.runtimePersistence === undefined) return;
+    if (subagentsDir !== undefined) {
+      try {
+        writeIdentityRecord(task, subagentsDir);
+      } catch (err) {
+        // The transition is not what failed, and `emitStateChange` must never
+        // throw; the missing record is reported so the operator learns that
+        // this worker's identity is no longer trustworthy on disk.
+        reportIdentityRecordFailure(task, err);
+      }
+    }
+    appendWorkerFact(task, subagentsDir, state);
+  }
+
+  /**
+   * Dispatch bookkeeping, fail-closed: capture the child's OS identity, publish
+   * the `starting` state, and — if the durable record cannot be written —
+   * terminate the process just started and throw.
+   *
+   * Runs before the starting→running transition, so a host that dies in between
+   * still leaves a record naming the process it started. That is exactly the
+   * guarantee a failed write withdraws, so the worker must not keep running: an
+   * unrecorded worker is invisible to every later process, which is the orphan
+   * the sweep can never reach. The throw is what withholds the handle.
+   */
+  function noteWorkerDispatched(task: Task): void {
+    if (opts.runtimePersistence === undefined) return;
+    task.identity = captureWorkerIdentity(task.child?.pid);
+    const dir = resolveSubagentsDirForDef(task.def);
+    if (dir === undefined) return;
+    // Deliberately not `noteWorkerState`: the transition route reports a failed
+    // record write, and here the failed write is the failure being handled.
+    try {
+      writeIdentityRecord(task, dir);
+    } catch (err) {
+      failClosedOnIdentityWrite(task, err);
+    }
+    appendWorkerFact(task, dir, "starting");
+  }
+
+  /**
+   * Terminate the unrecordable child, unbook the task, and rethrow as a typed
+   * spawn failure. Never returns.
+   *
+   * The unbooking is deliberate: the task has no durable identity, so a
+   * `listSubagents` entry claiming it is live would be the one claim this whole
+   * path exists to prevent. The typed error carries the record-write cause, so
+   * the caller reports the real reason rather than a generic spawn error.
+   */
+  function failClosedOnIdentityWrite(task: Task, cause: unknown): never {
+    const identity = task.identity;
+    const teardown =
+      identity === undefined
+        ? {
+            state: "refused" as const,
+            signalled: false,
+            detail: "no child identity was captured",
+          }
+        : terminateOwnedWorkerNow(identity);
+    tasks.delete(task.id);
+    if (teardown.state === "refused") {
+      console.warn(
+        `[subagent] identity record for ${task.id} could not be written and its worker was not provably terminated: ${teardown.detail}`
+      );
+    }
+    throw new WorkerIdentityWriteError(task.id, cause);
+  }
+
+  /**
+   * Pre-continuation death proof: resolve the identity a recovery process
+   * would verify — the durable record when one exists, else this process's own
+   * capture — and report whether the owned process is provably not running. A
+   * recycled pid counts as provably gone (the owned worker is dead; the current
+   * occupant is none of its business); a still-live one and an unmatchable
+   * identity do not.
+   */
+  function verifyPriorWorkerStopped(task: Task): {
+    readonly provable: boolean;
+    readonly detail: string;
+  } {
+    const dir = resolveSubagentsDirForDef(task.def);
+    const record =
+      dir === undefined
+        ? undefined
+        : readWorkerIdentityRecordState(dir, task.id);
+    if (record !== undefined && record.kind === "untrusted") {
+      // A record file that exists but cannot be parsed is an identity that
+      // cannot be confirmed — not an absent one. Allowing continuation here
+      // would be reading "cannot confirm" as "nothing to check", which is how a
+      // second live process ends up behind one task id.
+      return {
+        provable: false,
+        detail: `identity record untrusted (${record.reason})`,
+      };
+    }
+    const identity: OwnedWorkerIdentity | undefined =
+      record?.kind === "record" ? identityOf(record.value) : task.identity;
+    if (identity === undefined) {
+      return {
+        provable: true,
+        detail: "no worker identity was recorded for this task",
+      };
+    }
+    const probe = probeOwnedProcess(identity);
+    return {
+      provable: probeProvesProcessGone(probe),
+      detail: describeOwnedProcessProbe(probe, identity),
+    };
+  }
+
+  /**
+   * A verification pass's contribution to the runtime state: a proven stop
+   * publishes `stopped`; an unconfirmed one publishes the worker's last known
+   * state instead, because "could not confirm the stop" must never be reported
+   * as a stop — and an unsettled worker must never be reported as done.
+   */
+  function publishStopFact(
+    subagentsDir: string,
+    worker: OwnedWorkerStopResult
+  ): void {
+    const record = readWorkerIdentityRecord(subagentsDir, worker.taskId);
+    if (record === undefined) return;
+    // The record carries the owning session, so a process that never held this
+    // worker still routes the verdict to the right runtime state.
+    const sink = opts.runtimePersistence?.bind(record.session_id);
+    if (sink === undefined) return;
+    const fact: RuntimeWorkerFact = {
+      kind: "worker_progress",
+      taskId: worker.taskId,
+      ownership: worker.ownership,
+      state:
+        worker.state === "needs_handling" ? record.worker_state : "stopped",
+      process: { pid: record.pid, startTime: record.starttime },
+      transcriptPath: record.transcript_path,
+      ...(presentString(record.tool_use_id)
+        ? { toolUseId: record.tool_use_id }
+        : {}),
+    };
+    void sink.appendOperationFact(fact).catch((err: unknown) => {
+      const detail = err instanceof Error ? err.message : String(err);
+      console.warn(
+        `[subagent] worker stop fact append failed for ${worker.taskId}: ${detail}`
+      );
+    });
+  }
+
+  /**
+   * Stop every session-owned worker recorded under the assembly
+   * `subagentsDir`, by identity, and publish each verdict.
+   *
+   * Sweeping the durable records (not the in-memory task map) is what makes
+   * this usable from a process that never held the children — the
+   * abnormal-exit case — while behaving identically in the owning process.
+   * Nothing here writes a terminal worker state: a stop pass can confirm death
+   * or report needs handling, never completion.
+   *
+   * A verdict that did not reach its record is reported: the process fact is
+   * published, but the record no longer carries the verdict, so the next pass
+   * re-attempts that worker and the operator is told the record is behind.
+   */
+  async function stopOwnedWorkers(input?: {
+    readonly subagentsDir?: string;
+    readonly sessionId?: string;
+  }): Promise<OwnedWorkerSweepResult> {
+    const dir = input?.subagentsDir ?? opts.subagentsDir;
+    if (dir === undefined) {
+      return { workers: [], unreadable: [], unrecorded: [], excluded: [] };
+    }
+    // The session filter is what makes the call safe from a NEW process on
+    // session open: a sweep that cannot attribute a record to this session must
+    // not signal it, however dead it looks.
+    const swept = await sweepOwnedWorkers(dir, {
+      ...(input?.sessionId !== undefined ? { sessionId: input.sessionId } : {}),
+    });
+    for (const worker of swept.workers) publishStopFact(dir, worker);
+    reportSweepAnomalies(swept);
+    return swept;
+  }
+
   /**
    * Compatibility with the existing `opts.trace` injection (test seam): if a
    * manager-direct scenario passes trace but no subagentsDir, the previous
@@ -1406,6 +1828,10 @@ export function createSubAgentManager(opts: {
     // the prev === toState check).
     if (fromState === toState) return;
     task.state = toState;
+    // The owned-worker record and the runtime-state fact stream move with the
+    // task state — one call site, so a persisted lifecycle state can never
+    // disagree with the fact the session state received.
+    noteWorkerState(task, resolveSubagentsDirForDef(task.def), toState);
     const taskTrace = resolvePerAgentTrace(task.id, task.def);
     if (!taskTrace) return;
     void safeTrace(() =>
@@ -1861,6 +2287,10 @@ export function createSubAgentManager(opts: {
       return { taskId: id };
     }
     task.child = child;
+    // Identity capture lands here, before the starting→running transition and
+    // before the spawn trace record: the earliest point at which the child
+    // exists, and the last point at which this process can still name it.
+    noteWorkerDispatched(task);
     task.abortCtrl = new AbortController();
     let stderrBuf = "";
     let stderrCapture = Buffer.alloc(0);
@@ -2475,12 +2905,88 @@ export function createSubAgentManager(opts: {
   }
 
   /**
+   * Resume gate for a task this process does not hold in its map — the
+   * after-restart case, where the durable record and the worker's own
+   * transcript outlived the manager.
+   *
+   * Gate order differs from the in-memory arm on purpose. The in-memory task
+   * has a live `state` to consult, so it can ask "is it terminal?" first. A
+   * reconstructed entry has no such thing: its recorded state is the last
+   * transition the DEAD process published, and the process that was running
+   * when the host died is exactly the `wait:false` orphan this exists for. So
+   * the death proof comes first and is the only gate that can refuse it —
+   * before transcript, before the cap — because a second live process behind
+   * one task id is unrecoverable, while a missing transcript or a full quota
+   * is a retryable inconvenience.
+   *
+   * `not_found` survives here for exactly one case: there is no record on disk
+   * at all. A record that exists and cannot be parsed is a refusal, never a
+   * claim that the task never existed.
+   */
+  function resumeRehydratedTask(
+    taskId: string,
+    def: SubAgentDefinition
+  ): { readonly taskId: string } {
+    const dir = resolveSubagentsDirForDef();
+    if (dir === undefined) {
+      throw new SubAgentResumeError(taskId, "not_found");
+    }
+    const rehydrated = rehydrateWorkerTask(dir, taskId);
+    if (rehydrated.kind === "absent") {
+      throw new SubAgentResumeError(taskId, "not_found");
+    }
+    if (rehydrated.kind === "untrusted") {
+      throw new SubAgentResumeError(
+        taskId,
+        "prior_process_unconfirmed",
+        `identity record untrusted (${rehydrated.reason})`
+      );
+    }
+    const task = rehydrated.task;
+    const priorStop = verifyRehydratedStopped(task);
+    if (!priorStop.provable) {
+      throw new SubAgentResumeError(
+        taskId,
+        "prior_process_unconfirmed",
+        priorStop.detail
+      );
+    }
+    if (!existsSync(task.transcript_path)) {
+      throw new SubAgentResumeError(taskId, "no_transcript");
+    }
+    const cap = currentCapacity();
+    if (cap !== "unlimited") {
+      assertCapacityAvailable(cap, tasks);
+    }
+    // A reconstructed Task is a carrier for the resume def and the death
+    // probe; it holds no child, so the launch path books the real one.
+    return launchWorker(
+      resumeDefinition(rehydratedResumeFields(task), def, taskId),
+      taskId
+    );
+  }
+
+  /** The death proof for a reconstructed entry; the record is its only identity. */
+  function verifyRehydratedStopped(task: RehydratedWorkerTask): {
+    readonly provable: boolean;
+    readonly detail: string;
+  } {
+    const identity = identityOf(task.record);
+    const probe = probeOwnedProcess(identity);
+    return {
+      provable: probeProvesProcessGone(probe),
+      detail: describeOwnedProcessProbe(probe, identity),
+    };
+  }
+
+  /**
    * Resume gate (process already dead + the worker transcript written since
    *
-   // (ADR-0102)
+   * // (ADR-0102)
    * this slice onward). `completed` / `failed` / `aborted` are treated alike
    * (one mechanical path); gate order: existence → lifetime → transcript →
-   * concurrency cap; an unsatisfied earlier gate typed-rejects and occupies
+   * prior-process death → concurrency cap; an unsatisfied earlier gate
+   * typed-rejects and occupies
    * no quota. Success = `launchWorker(merged, same taskId)` — new process,
    * same external handle; the old Task record is wholesale replaced by the new
    * one (the terminal envelope / endedAt were the previous round's truth and
@@ -2493,7 +2999,9 @@ export function createSubAgentManager(opts: {
   ): { readonly taskId: string } {
     const old = tasks.get(taskId);
     if (old === undefined) {
-      throw new SubAgentResumeError(taskId, "not_found");
+      // The map is the fast path, not the authority: a task whose record and
+      // transcript survived the host is still continuable.
+      return resumeRehydratedTask(taskId, def);
     }
     if (old.state === "starting" || old.state === "running") {
       throw new SubAgentResumeError(taskId, "running");
@@ -2506,6 +3014,19 @@ export function createSubAgentManager(opts: {
     // pre-slice worker — never fabricate a ledger backfilled from the trace.
     if (transcriptPath === undefined || !existsSync(transcriptPath)) {
       throw new SubAgentResumeError(taskId, "no_transcript");
+    }
+    // The former worker process must be proven stopped before a new process is
+    // allowed to take over the same external handle. A terminal task state is
+    // not that proof: the worker reported a result (or a crash was recorded)
+    // while its process can still be alive, and nothing may signal a pid whose
+    // identity no longer matches the recorded worker.
+    const priorStop = verifyPriorWorkerStopped(old);
+    if (!priorStop.provable) {
+      throw new SubAgentResumeError(
+        taskId,
+        "prior_process_unconfirmed",
+        priorStop.detail
+      );
     }
     // The resume occupies the same subagent concurrency cap (over the limit → SubAgentCapacityError).
     const cap = currentCapacity();
@@ -2846,6 +3367,9 @@ export function createSubAgentManager(opts: {
     // (ADR-0102)
     // subagent_continue only maps them).
     resumeTask,
+    // Abnormal-exit reconciliation: stop every recorded owned worker by
+    // identity and report what was proven per worker.
+    stopOwnedWorkers,
     listSubagents,
     subscribe,
     // Read-only getter for the concurrency cap — description and

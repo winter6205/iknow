@@ -41,9 +41,14 @@ export type {
   SettleStatus,
   LiveGraphLedger,
   LiveGraphLedgerHost,
+  RestoredGraphNodeView,
 } from "./ledger.js";
 export { resolveResidualSubgraph } from "./residual.js";
-export { createLiveGraphLedger, createLiveGraphLedgerHost } from "./ledger.js";
+export {
+  createLiveGraphLedger,
+  createLiveGraphLedgerHost,
+  seedRestoredGraphNodes,
+} from "./ledger.js";
 
 export type { OnFailureNode } from "./on-failure.js";
 export { validateOnFailureEdges } from "./on-failure.js";
