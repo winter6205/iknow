@@ -174,6 +174,36 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Added
 
+- **Verify reads only the current turn, and its evidence checker reads what it claims
+  to read (spec `verify-trust-boundary-and-goal-decoupling`, ADR-0137, 2026-10-05)**:
+  the verify gate and the evidence checker are both scoped to the current turn, so a
+  cross-turn conversation can no longer produce a verify record out of evidence that
+  belongs to an earlier turn.
+  - A green summary has to be its own line. Each framework's `green` rule tolerates
+    the decorator bytes runners actually emit (` ✓ Tests  3 passed (3)`,
+    `Tests:       14 passed, 14 total`) but rejects a summary phrase echoed or
+    printed into someone else's line, so `npx vitest run; echo "Tests  42 passed"`
+    no longer reads as passing evidence while `npx vitest run && echo done` still
+    does — the check keys on the emitted text, never on the keyword, and reuses the
+    per-framework rules as the one definition of "summary-shaped".
+  - Staleness is judged per `tool_use` block rather than per message, so an edit that
+    is a sibling of the green run inside the same assistant message — or a block
+    inside the claim message itself — is now visible, and that is exactly the code
+    the green run could not have described. Ordering uses the session's own block
+    order, never mtime, diff, or git.
+  - The rerun probe reader reads the production `path` key, so a transcript that
+    wrote a project flag file can actually derive a rerun command instead of
+    silently probing nothing.
+  - Verify envelopes name the actor that really produced the record: a contradiction
+    names the checker that found it while a genuine judge failure still names the
+    judge, and the not-verified envelope reports the verdict its own record carries
+    rather than asserting a completion claim that nothing in the loop tests.
+  - Goal activation is decided by one predicate in the goal layer instead of four
+    call-site copies, with `/continue`'s `isPinnedUserGoal` left as the narrower
+    user-pinned question layered on that predicate. The two mode axes are now named
+    apart, so the TUI's `[auto] ` marker states a permission fact and nothing on the
+    goal axis feeds it.
+
 - **Native session checkpoints: a published native-context snapshot survives an abnormal
   exit, and file writes are durable before they mutate (spec `session-checkpoint-architecture`,
   ADR-0136, plan A 2026-10-03)**:

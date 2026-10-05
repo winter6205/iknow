@@ -63,6 +63,19 @@ describe("弱绿四形态 → 非 SUFFICIENT (A6)", () => {
     expect(report.runs[0].weakGreen).toBe(true);
     expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
   });
+
+  // `::` is a selector only when glued to an argument token (the pytest
+  // `file.py::Class::test` shape); a spaced `::` sits in prose / a trailing
+  // comment and selects nothing, so it must not read as a narrow run.
+  it("注释里空格包围的 :: 不在参数位 → 不算窄跑 → SUFFICIENT", () => {
+    const msgs = greenTranscript(
+      "npx vitest run --silent  # full suite, see docs :: all",
+      VITEST_GREEN
+    );
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].weakGreen).toBe(false);
+    expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
+  });
 });
 
 describe("吞失败四 pattern → 证据作废 → INSUFFICIENT (A7 硬信号)", () => {
@@ -172,6 +185,157 @@ describe("时效 (A6) — 绿后代码编辑 → stale → INSUFFICIENT; doc-onl
       message("assistant", write),
     ]);
     const report = checkEvidence({ messages: msgs, claimIndex: 3 });
+    expect(report.stale).toBe(false);
+    expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
+  });
+
+  it("遗留键 {filePath} 仍被读取: 代码编辑 绿后 → stale; doc-only → 豁免", () => {
+    const legacyCodeEdit = {
+      type: "tool_use",
+      id: "e14",
+      name: "edit_file",
+      input: { filePath: "src/legacy.ts" },
+    } as AnthropicContentBlock;
+    const codeReport = checkEvidence({
+      messages: greenTranscript("npx vitest run", VITEST_GREEN, [
+        message("assistant", legacyCodeEdit),
+      ]),
+      claimIndex: 3,
+    });
+    expect(codeReport.stale).toBe(true);
+    expect(codeReport.verdict).toBe("EVIDENCE_INSUFFICIENT");
+
+    const legacyDocEdit = {
+      type: "tool_use",
+      id: "w12",
+      name: "write_file",
+      input: { filePath: "docs/legacy.md", content: "text" },
+    } as AnthropicContentBlock;
+    const docReport = checkEvidence({
+      messages: greenTranscript("npx vitest run", VITEST_GREEN, [
+        message("assistant", legacyDocEdit),
+      ]),
+      claimIndex: 3,
+    });
+    expect(docReport.stale).toBe(false);
+    expect(docReport.verdict).toBe("EVIDENCE_SUFFICIENT");
+  });
+});
+
+/**
+ * Staleness is ordered by (message, content-block) pairs — the session's own
+ * tool-call order — because a single assistant message can carry the green
+ * bash and the edit as siblings, or a claim text block and an edit together.
+ * Message-granular edges made both invisible.
+ */
+describe("时效按 tool_use BLOCK 粒度 (兄弟块 / claim 消息内编辑)", () => {
+  /** Green bash pair + sibling edit_file in ONE assistant message. */
+  function greenWithSiblingEdit(
+    edit: AnthropicContentBlock
+  ): AnthropicNativeMessage[] {
+    const id = "b01";
+    return [
+      message("user", textBlock("task")),
+      message(
+        "assistant",
+        toolUse(id, "npx vitest run"),
+        toolResult(
+          id,
+          JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+        ),
+        edit
+      ),
+      message("user", textBlock("done")),
+    ];
+  }
+
+  it("绿 bash 的同消息兄弟 edit_file (代码) → stale → INSUFFICIENT", () => {
+    const msgs = greenWithSiblingEdit(editFile("e20", "src/foo.ts"));
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].greenSummary).toBe(true);
+    expect(report.runs[0].contentBlockIndex).toBe(0);
+    expect(report.stale).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it("绿 bash 的同消息兄弟 write_file (代码) → stale → INSUFFICIENT", () => {
+    const msgs = greenWithSiblingEdit(writeFile("w20", "src/bar.ts", "code"));
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.stale).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it("绿 bash 的同消息兄弟 .md 编辑 → doc 豁免仍成立 → SUFFICIENT", () => {
+    const msgs = greenWithSiblingEdit(editFile("e21", "docs/readme.md"));
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.stale).toBe(false);
+    expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
+  });
+
+  it("claim 消息内、claim 文本块之后的 edit_file → stale → INSUFFICIENT", () => {
+    const id = "b02";
+    const msgs: AnthropicNativeMessage[] = [
+      message("user", textBlock("task")),
+      message(
+        "assistant",
+        toolUse(id, "npx vitest run"),
+        toolResult(
+          id,
+          JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+        )
+      ),
+      message(
+        "assistant",
+        textBlock("全部测试通过"),
+        editFile("e22", "src/foo.ts")
+      ),
+    ];
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].greenSummary).toBe(true);
+    expect(report.stale).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it("claim 消息内、claim 文本块之前的 edit_file → 同样作废 → stale → INSUFFICIENT", () => {
+    const id = "b03";
+    const msgs: AnthropicNativeMessage[] = [
+      message("user", textBlock("task")),
+      message(
+        "assistant",
+        toolUse(id, "npx vitest run"),
+        toolResult(
+          id,
+          JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+        )
+      ),
+      message(
+        "assistant",
+        editFile("e23", "src/foo.ts"),
+        textBlock("全部测试通过")
+      ),
+    ];
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.stale).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it("绿 bash 之前的同消息 edit_file (块序在前) → 不是绿后编辑 → SUFFICIENT", () => {
+    const id = "b04";
+    const msgs: AnthropicNativeMessage[] = [
+      message("user", textBlock("task")),
+      message(
+        "assistant",
+        editFile("e24", "src/foo.ts"),
+        toolUse(id, "npx vitest run"),
+        toolResult(
+          id,
+          JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+        )
+      ),
+      message("user", textBlock("done")),
+    ];
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].contentBlockIndex).toBe(1);
     expect(report.stale).toBe(false);
     expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
   });

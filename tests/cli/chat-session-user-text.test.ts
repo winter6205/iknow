@@ -200,7 +200,7 @@ function capturedCompletionMode(): unknown {
   return opts.completionMode;
 }
 
-describe("chat-session verify-loop seam: HITL vs auto dispatch (plan T1)", () => {
+describe("chat-session verify-loop seam: HITL vs goal dispatch (plan T1)", () => {
   it("session without goal/taskFocus → userText === query and HITL skip judge", async () => {
     const id = "chat-no-goal-baseline";
     // Not seeded —— store.load throws not_found inside resolveVerifyUserText.
@@ -283,7 +283,7 @@ describe("chat-session verify-loop seam: HITL vs auto dispatch (plan T1)", () =>
     assert.equal(r.ranQuery, true);
     expect(runVerifyLoopMock).toHaveBeenCalledTimes(1);
     assert.equal(capturedUserText(), "G dominates chat");
-    assert.equal(capturedCompletionMode(), "auto");
+    assert.equal(capturedCompletionMode(), "goal");
   });
 
   it("taskFocus.text === '' → userText === query (空 taskFocus 按缺席算)", async () => {

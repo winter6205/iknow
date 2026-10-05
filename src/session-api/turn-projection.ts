@@ -15,10 +15,7 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
 } from "../harness/index.js";
-import { isAgentStatusText } from "../harness/agent-status.js";
-import { isGraphModeText } from "../harness/graph/notification.js";
-import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
-import { isSkillIndexDeltaText } from "../harness/skill/index-delta.js";
+import { isTurnQuery, messageText } from "../harness/turn-boundary.js";
 import type { ActivityItem, ThinkingView, ToolCallView } from "./contract.js";
 
 /**
@@ -66,50 +63,14 @@ export function sumAssistantThinkingMsInRange(opts: {
 }
 
 /**
- * Joined text of a message's text blocks (" "-separated; "" when none).
- * Single shared implementation — previously duplicated verbatim as hub.ts
- * `textOf` and store/checkpoint.ts `joinedText`; keep every consumer on this
- * one helper (fixes here apply to both sides; do not copy again).
+ * Turn-boundary rule surface. `messageText` + `isTurnQuery` are defined once in
+ * `src/harness/turn-boundary.ts`; re-exported here because harness-side
+ * consumers (verify gate / checker) must reach the rule without importing
+ * session-api, while hub.ts, store/checkpoint.ts, store/rewind-targets.ts,
+ * title-generation.ts and cli/chat-session.ts keep importing from this module.
+ * Import the rule from the harness in new code; re-export nothing else.
  */
-export function messageText(msg: AnthropicNativeMessage): string {
-  return msg.content
-    .filter(
-      (b): b is Extract<AnthropicContentBlock, { type: "text" }> =>
-        b.type === "text"
-    )
-    .map((b) => b.text)
-    .join(" ");
-}
-
-/**
- * Turn-boundary rule SSOT (shared by hub.ts projectMessagesToTurns and
- * store/checkpoint.ts splitTurns; the former hub `isQueryMessage` /
- * checkpoint `isQuery` conditions converge here): a turn starts at a user
- * message that carries NO tool_result block and is NOT a subagent drain
- * summary, an agent_status bar injection, a graph_mode notification (ON/OFF
- * toggle + ADR-0081 one short presence note per run()), nor a skill-index
- * delta listing (ADR-0098 `<available_skills>` increment); user messages
- * with only tool_result blocks are continuation, not queries. Drain /
- * agent_status / graph_mode / skill-index-delta messages are host-injected —
- * they neither surface as a turn nor bound the preceding turn's slice.
- *
- * The five injected-envelope kinds share one list with TUI
- * `isTuiHiddenUserMessage` (the "hidden injection" consumers must not drift
- * apart); predicates always come from each producer's own module
- * (`isSubagentDrainText` / `isAgentStatusText` / `isGraphModeText` /
- * `isSkillIndexDeltaText`).
- */
-export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
-  const text = messageText(msg);
-  return (
-    msg.role === "user" &&
-    !msg.content.some((b) => b.type === "tool_result") &&
-    !isSubagentDrainText(text) &&
-    !isAgentStatusText(text) &&
-    !isGraphModeText(text) &&
-    !isSkillIndexDeltaText(text)
-  );
-}
+export { isTurnQuery, messageText } from "../harness/turn-boundary.js";
 
 /**
  * External signal (ADR-0024): greetings never become a compact-boundary

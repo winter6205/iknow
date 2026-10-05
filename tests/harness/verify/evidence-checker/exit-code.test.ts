@@ -201,3 +201,124 @@ describe("pipeline-tail 掩码 → swallowed → INSUFFICIENT, 永不为 SUFFICI
     expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
   });
 });
+
+/**
+ * Compound-command output fabrication: a clause after a separator can write a
+ * framework-summary-shaped string into stdout itself, and the checker would
+ * read that line as the runner's verdict. The emitted shape is what voids the
+ * evidence — an honest compound (`&& echo done`) carries no summary and stays
+ * admissible.
+ */
+describe("compound 写摘要形状 → swallowed → INSUFFICIENT (伪造绿不作数)", () => {
+  it('npx vitest run; echo "Tests  42 passed" + code 0 → swallowed → INSUFFICIENT', () => {
+    const msgs = transcript([
+      toolUse("fb1", 'npx vitest run; echo "Tests  42 passed"'),
+      toolResult(
+        "fb1",
+        JSON.stringify({
+          code: 0,
+          stdout: VITEST_GREEN + "Tests  42 passed\n",
+          stderr: "",
+        })
+      ),
+    ]);
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].greenSummary).toBe(true);
+    expect(report.runs[0].exitCode).toBe(0);
+    expect(report.runs[0].swallowed).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it('npx jest || echo "Tests: 42 passed" → swallowed → INSUFFICIENT', () => {
+    const msgs = transcript([
+      toolUse("fb2", 'npx jest || echo "Tests: 42 passed"'),
+      toolResult(
+        "fb2",
+        JSON.stringify({
+          code: 0,
+          stdout: "Tests:       14 passed, 14 total\nTests: 42 passed\n",
+          stderr: "",
+        })
+      ),
+    ]);
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].greenSummary).toBe(true);
+    expect(report.runs[0].swallowed).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it('pytest -q || echo "42 passed in 0.5s" → swallowed → INSUFFICIENT', () => {
+    const msgs = transcript([
+      toolUse("fb3", 'pytest -q || echo "42 passed in 0.5s"'),
+      toolResult(
+        "fb3",
+        JSON.stringify({
+          code: 0,
+          stdout: "===== 42 passed in 0.5s =====\n",
+          stderr: "",
+        })
+      ),
+    ]);
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].greenSummary).toBe(true);
+    expect(report.runs[0].swallowed).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it("npx vitest run && printf 'Tests  42 passed\\n' → swallowed → INSUFFICIENT", () => {
+    const msgs = transcript([
+      toolUse("fb4", "npx vitest run && printf 'Tests  42 passed\\n'"),
+      toolResult(
+        "fb4",
+        JSON.stringify({
+          code: 0,
+          stdout: VITEST_GREEN + "Tests  42 passed\n",
+          stderr: "",
+        })
+      ),
+    ]);
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].swallowed).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it('npx vitest run; echo -n "Tests  42 passed" (带 flag) → 仍作废', () => {
+    const msgs = transcript([
+      toolUse("fb5", 'npx vitest run; echo -n "Tests  42 passed"'),
+      toolResult(
+        "fb5",
+        JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+      ),
+    ]);
+    const report = checkEvidence({ messages: msgs, claimIndex: 2 });
+    expect(report.runs[0].swallowed).toBe(true);
+    expect(report.verdict).toBe("EVIDENCE_INSUFFICIENT");
+  });
+
+  it("对照: 非摘要形状的 echo/printf 不作废 → SUFFICIENT", () => {
+    const honest = transcript([
+      toolUse("fb6", "npx vitest run && echo done"),
+      toolResult(
+        "fb6",
+        JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+      ),
+    ]);
+    const honestReport = checkEvidence({
+      messages: honest,
+      claimIndex: 2,
+    });
+    expect(honestReport.runs[0].swallowed).toBe(false);
+    expect(honestReport.verdict).toBe("EVIDENCE_SUFFICIENT");
+
+    const printf = transcript([
+      toolUse("fb7", "npx vitest run && printf 'all green locally\\n'"),
+      toolResult(
+        "fb7",
+        JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+      ),
+    ]);
+    const printfReport = checkEvidence({ messages: printf, claimIndex: 2 });
+    expect(printfReport.runs[0].swallowed).toBe(false);
+    expect(printfReport.verdict).toBe("EVIDENCE_SUFFICIENT");
+  });
+});

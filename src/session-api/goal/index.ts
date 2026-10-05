@@ -4,15 +4,20 @@
  * Design principles:
  * - Pure functions, no IO leakage (hub is the only writer; this module
  *   builds values, persistence is hub calling store.save)
- * - Everything Result-typed, fail-closed explicit
+ * - Everything the mutation path returns is Result-typed, fail-closed
+ *   explicit
  * - Never infer from messages (avoids injection pollution)
  * - Do not extend the GoalStatus union (no schema v5→v6 bump)
  *
- * Two core functions:
+ * Two core transition functions:
  * - assertValidTransition: transition legality assertion (valid edges
  *   like active→achieved; achieved→active / self-transitions rejected)
  * - applyTransition: sets goal.status to a value already validated by
  *   assertValidTransition. Pure, no IO; updatedAt passed by caller.
+ *
+ * Activation (goalActivation / sessionGoalActivation, re-exported from
+ * ./activation.js) is read-only and lives here because every consumer of
+ * "is the goal feature running" must read one rule, not restate it.
  *
  * No model-propose / confirm channel: goal is a pure user-pinned
  * anchor, so hub never uses a two-phase propose/confirm path.
@@ -25,6 +30,8 @@ export { err, goalError, ok };
 export type { GoalError, Result };
 export type { TransitionInput } from "./types.js";
 export { VALID_GOAL_TRANSITIONS };
+export { goalActivation, sessionGoalActivation } from "./activation.js";
+export type { GoalActivation } from "./activation.js";
 
 /**
  * Status transition legality assertion.

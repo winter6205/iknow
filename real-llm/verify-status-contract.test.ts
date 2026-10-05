@@ -251,7 +251,7 @@ const CASES = [
                   `${c.id}: passed may only ride real SUFFICIENT evidence`
                 ).toBe("EVIDENCE_SUFFICIENT");
               }
-              const lines = projectVerifyBanner(slot, "hitl", 160);
+              const lines = projectVerifyBanner(slot, "interactive", 160);
               expect(lines.length).toBe(1);
               if (view.outcome === "not_run") {
                 const [insufficient, contradicted] = [
@@ -334,7 +334,11 @@ const CASES = [
                 notRunReason: "insufficient",
               });
               expect(
-                projectVerifyBanner(verifyFromWire(view), "hitl", 160)[0]!.text
+                projectVerifyBanner(
+                  verifyFromWire(view),
+                  "interactive",
+                  160
+                )[0]!.text
               ).toBe(
                 expectedBannerText(
                   NOT_RUN_INSUFFICIENT_PRESENTATION,
@@ -367,7 +371,8 @@ const CASES = [
             expect(view).toEqual({ outcome: "passed", rounds: out.rounds });
             expect("notRunReason" in (view ?? {})).toBe(false);
             expect(
-              projectVerifyBanner(verifyFromWire(view), "hitl", 160)[0]!.text
+              projectVerifyBanner(verifyFromWire(view), "interactive", 160)[0]!
+                .text
             ).toBe(expectedBannerText(PASSED_PRESENTATION, out.rounds));
           } finally {
             await built.shutdown?.();

@@ -8,13 +8,19 @@
  *
  * Frozen contract (ADR-0003/0006): no imports from loop-engine / session-api /
  * subagent / fs; consumes only stdout already truncated upstream by
- * sandbox/executor (truncation authority stays upstream). The only
- * cross-context import is AnthropicNativeMessage (same as verify-loop.ts).
+ * sandbox/executor (truncation authority stays upstream). The cross-context
+ * imports are AnthropicNativeMessage and the shared claim scan
+ * (`../last-nonempty-assistant.js`, the same one verify-loop.ts takes
+ * claimIndex from — one backward scan, one definition of "the claim").
  */
 import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
 } from "../model-adapter/types.js";
+import {
+  lastNonEmptyTextBlockIndex,
+  type ContentBlockPosition,
+} from "../last-nonempty-assistant.js";
 import type {
   EvidenceReport,
   EvidenceVerdict,
@@ -95,6 +101,15 @@ function extractCommand(input: unknown): string {
 }
 
 /**
+ * Line-bounded prefix for the green summary rules: line start plus a run of
+ * non-word characters. Runners decorate their summary line (`=====`, the `✓`
+ * glyph) but a summary phrase with word characters before it on the same line
+ * is quoted or echoed text inside someone else's line, not the runner's
+ * summary. `\r\n` stay excluded so the run cannot spill across a line break.
+ */
+const GREEN_LINE = "^[^\\w\\r\\n]*";
+
+/**
  * Five-framework runner recognition + green-summary-line conjunction
  * (whitelist). Runner is anchored on the command side (env-prefix / quote
  * stripping); green reads numbers only from framework summary lines, never
@@ -112,17 +127,17 @@ const FRAMEWORK_RULES: ReadonlyArray<{
     framework: "pytest",
     runner: /\bpytest\b/,
     // count+duration summary clause ("N passed in X.XXs"; decorators may appear anywhere).
-    green: /\d+\s+passed\s+in\s+[\d.]+\s*s/,
+    green: new RegExp(GREEN_LINE + "\\d+\\s+passed\\s+in\\s+[\\d.]+\\s*s", "m"),
   },
   {
     framework: "jest",
     runner: /\bjest\b/,
-    green: /Tests:\s+\d+\s+passed/,
+    green: new RegExp(GREEN_LINE + "Tests:\\s+\\d+\\s+passed", "m"),
   },
   {
     framework: "vitest",
     runner: /\bvitest\b/,
-    green: /Tests\s+\d+\s+passed/,
+    green: new RegExp(GREEN_LINE + "Tests\\s+\\d+\\s+passed", "m"),
   },
   {
     framework: "go",
@@ -132,7 +147,7 @@ const FRAMEWORK_RULES: ReadonlyArray<{
   {
     framework: "cargo",
     runner: /\bcargo\s+test\b/,
-    green: /test result:\s*ok/,
+    green: new RegExp(GREEN_LINE + "test result:\\s*ok", "m"),
   },
 ];
 
@@ -157,9 +172,69 @@ const SWALLOWED_PATTERNS: ReadonlyArray<RegExp> = [
   /\|\s*head\b/,
 ];
 
-/** Command-side narrow selection (-k / -t / :: exact path) → weak green. */
+/**
+ * Compound clause that writes into stdout (`;` / `&&` / `||` / `&` then
+ * echo/printf); the captured group is everything the clause prints. Only the
+ * emitted TEXT decides the void — a clause whose payload is not
+ * framework-summary-shaped (`&& echo done`) is an honest status line, so the
+ * keyword alone is never the trigger.
+ */
+const SUMMARY_WRITER_CLAUSE =
+  /(?:;|&&|\|\||&)\s*\b(?:echo|printf)\b([^\r\n]*)/g;
+
+/**
+ * Texts an echo/printf clause emits: its quoted payloads (a leading `-n` /
+ * `-e` flag stays outside them), else the bare remainder when unquoted.
+ */
+function emittedTexts(clauseTail: string): string[] {
+  const quoted: string[] = [];
+  for (const m of clauseTail.matchAll(/"([^"]*)"|'([^']*)'|`([^`]*)`/g)) {
+    const text = m[1] ?? m[2] ?? m[3];
+    if (text !== undefined && text.length > 0) quoted.push(text);
+  }
+  return quoted.length > 0 ? quoted : [clauseTail];
+}
+
+/**
+ * Fabricated green: the command itself writes a framework-summary-shaped line
+ * into the stdout the checker reads, so that line is not the runner's verdict.
+ * Reuses the per-framework `green` shapes (line-anchored) as the authority on
+ * what "summary-shaped" means — one definition, never a second looser one.
+ */
+function fabricatesSummary(command: string): boolean {
+  for (const clause of command.matchAll(SUMMARY_WRITER_CLAUSE)) {
+    if (
+      emittedTexts(clause[1]).some((text) =>
+        FRAMEWORK_RULES.some(({ green }) => green.test(text))
+      )
+    ) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/**
+ * Command-side void (evidence condition 4): failure swallowed by one of the
+ * six patterns, or the green line fabricated by the command itself. Both void
+ * through the same flag because the observable effect is identical — the
+ * reported exit code and the summary line no longer come from one execution.
+ */
+function isSwallowed(command: string): boolean {
+  return (
+    SWALLOWED_PATTERNS.some((p) => p.test(command)) ||
+    fabricatesSummary(command)
+  );
+}
+
+/**
+ * Command-side narrow selection (-k / -t filters, or a `::` selector glued to
+ * an argument token, pytest `f.py::Class::test` shape). A `::` that is not
+ * glued on both sides sits in prose or a comment, not in an argument position,
+ * so it selects nothing and must not read as a narrow run.
+ */
 function hasNarrowSelection(command: string): boolean {
-  return /(^|\s)-[kt]\b/.test(command) || command.includes("::");
+  return /(^|\s)-[kt]\b/.test(command) || /\S::\S/.test(command);
 }
 
 /** Five-framework marker check; no match → null (fail-closed, never guess a framework). */
@@ -177,11 +252,6 @@ function detectFramework(
 function isWeakGreen(command: string, stdout: string): boolean {
   if (WEAK_GREEN_PATTERNS.some((p) => p.test(stdout))) return true;
   return hasNarrowSelection(command);
-}
-
-/** Failure swallowed: any of the six patterns in the command text → evidence voided. */
-function isSwallowed(command: string): boolean {
-  return SWALLOWED_PATTERNS.some((p) => p.test(command));
 }
 
 /**
@@ -206,7 +276,7 @@ function isDocOnlyPath(filePath: unknown): boolean {
  * `filePath` is accepted only for legacy test fixtures. Non-string / absent on
  * both keys returns undefined — the callers keep their fail-closed handling.
  */
-function editBlockPath(input: unknown): string | undefined {
+export function editBlockPath(input: unknown): string | undefined {
   if (!input || typeof input !== "object") return undefined;
   const { path, filePath } = input as { path?: unknown; filePath?: unknown };
   if (typeof path === "string") return path;
@@ -228,45 +298,70 @@ function isRecord(value: unknown): value is object {
  * Every tool_use scanner goes through it — malformed shapes fail closed by
  * being skipped, never by throwing: a non-object message, a non-array
  * content, a non-object block, a non-tool_use block all contribute no
- * signal. The handler receives the narrowed block plus its message index (for
- * windowed scans); returning true short-circuits the walk. Returns whether
- * any handler call short-circuited.
+ * signal. The handler receives the narrowed block plus its (message,
+ * content-block) coordinates — the message index alone cannot order two
+ * blocks of one assistant message — so windowed scans compare pairs;
+ * returning true short-circuits the walk. Returns whether any handler call
+ * short-circuited.
  */
 function forEachToolUseBlock(
   messages: ReadonlyArray<AnthropicNativeMessage>,
-  handler: (block: ToolUseBlock, messageIndex: number) => boolean | void
+  handler: (
+    block: ToolUseBlock,
+    messageIndex: number,
+    contentBlockIndex: number
+  ) => boolean | void
 ): boolean {
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i];
     if (!isRecord(message)) continue;
     const content = message.content;
     if (!Array.isArray(content)) continue;
-    for (const block of content) {
+    for (let j = 0; j < content.length; j++) {
+      const block = content[j];
       if (!isRecord(block)) continue;
       const b = block as AnthropicContentBlock;
       if (b.type !== "tool_use") continue;
-      if (handler(b, i)) return true;
+      if (handler(b, i, j)) return true;
     }
   }
   return false;
 }
 
 /**
- * Staleness check: an edit_file / write_file after the green test turn and
- * before claimIndex, targeting a non-doc-only path → stale. Ordering uses the
- * messages index (never mtime/diff/git). In-bash file mutation (sed -i /
- * echo >) is not tracked in v1 (known limitation).
+ * Staleness check at block granularity: an edit_file / write_file after the
+ * green test tool_use block and up to the claim, targeting a non-doc-only
+ * path → stale. The claim message is no longer skipped wholesale — its
+ * sibling edit is exactly the code the green run cannot describe (before the
+ * claim text it is a post-green edit, after it the code moved past the claim),
+ * and the claim's own text block is not a tool_use so it never lands here.
+ * Ordering uses the session's own block order (never mtime/diff/git).
+ * In-bash file mutation (sed -i / echo >) is not tracked in v1 (known
+ * limitation).
  */
 function hasStaleEdit(
   messages: ReadonlyArray<AnthropicNativeMessage>,
-  greenIndex: number,
-  claimIndex: number
+  green: ContentBlockPosition,
+  claim: ContentBlockPosition
 ): boolean {
-  return forEachToolUseBlock(messages, (b, i) => {
-    // Staleness window (greenIndex, claimIndex): the walk visits the whole
-    // array; blocks outside the window are not edits-after-green.
-    if (i <= greenIndex || i >= claimIndex) return;
+  return forEachToolUseBlock(messages, (b, messageIndex, contentBlockIndex) => {
     if (b.name !== "edit_file" && b.name !== "write_file") return;
+    // The walk visits the whole array; the window edges are block pairs and
+    // everything past the claim message belongs to no window of this turn.
+    if (messageIndex > claim.messageIndex) return;
+    if (
+      messageIndex === claim.messageIndex &&
+      contentBlockIndex === claim.contentBlockIndex
+    ) {
+      return;
+    }
+    if (
+      messageIndex < green.messageIndex ||
+      (messageIndex === green.messageIndex &&
+        contentBlockIndex <= green.contentBlockIndex)
+    ) {
+      return;
+    }
     return !isDocOnlyPath(editBlockPath(b.input));
   });
 }
@@ -300,7 +395,7 @@ function extractTestRuns(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): TestRunEvidence[] {
   const runs: TestRunEvidence[] = [];
-  forEachToolUseBlock(messages, (b, i) => {
+  forEachToolUseBlock(messages, (b, i, j) => {
     if (b.name !== "bash") return;
     const command = extractCommand(b.input);
     if (!isTestCommand(command)) return; // test executions only
@@ -317,6 +412,7 @@ function extractTestRuns(
     const framework = detectFramework(command, stdout);
     runs.push({
       messageIndex: i,
+      contentBlockIndex: j,
       command,
       exitCode: parseExitCode(text, isError),
       framework,
@@ -570,10 +666,18 @@ export function checkEvidence(args: {
 
   const verdict = computeVerdict(runs);
   if (verdict === "EVIDENCE_SUFFICIENT") {
-    // Staleness: code edited after the green test turn but before claimIndex → stale → not SUFFICIENT.
-    const stale = runs.some((r) =>
-      hasStaleEdit(messages, r.messageIndex, claimIndex)
-    );
+    // Staleness: code edited after the green test block but not past the claim
+    // → stale → not SUFFICIENT.
+    const claim: ContentBlockPosition = {
+      messageIndex: claimIndex,
+      // The claim message's own text block, when it has one: the right edge is
+      // a block, not a message. Absent (claimIndex pointing at a tool-result
+      // turn, or malformed content) fails closed to -1, which no block equals.
+      contentBlockIndex: lastNonEmptyTextBlockIndex(
+        messages[claimIndex]?.content
+      ),
+    };
+    const stale = runs.some((r) => hasStaleEdit(messages, r, claim));
     if (stale) {
       return insufficient(
         ["code edited after green test run (stale evidence)"],

@@ -4,12 +4,14 @@ import { describe, it } from "vitest";
 import {
   buildClassifierEnvelope,
   buildEvidenceRerunEnvelope,
+  buildNotRunEnvelope,
   buildValidationEnvelope,
   isVerifyInjectedText,
   truncateExcerpt,
 } from "../../../src/harness/verify/inject.ts";
 import type { EvidenceContext } from "../../../src/harness/verify/types.ts";
 import { truncateByCodePoint } from "../../../src/harness/aci/tools/helpers.ts";
+import { FORBIDDEN_CLAIM_ASSERTIONS } from "./verify-status-contract.fixtures.ts";
 
 const FIXED_INSTRUCTION =
   "Fix the failures above. Do not claim completion until validation passes.";
@@ -262,6 +264,7 @@ describe("buildClassifierEnvelope", () => {
     const envelope = buildClassifierEnvelope({
       round: 2,
       maxRounds: 12,
+      source: "classifier",
       task: "为 SessionGoal 增加 status 字段并落盘",
       missing: ["部署到 staging", "迁移脚本"],
       reason: "goal 已写入 session store,但 staging 部署步骤未执行",
@@ -311,6 +314,7 @@ describe("buildClassifierEnvelope", () => {
     const envelope = buildClassifierEnvelope({
       round: 1,
       maxRounds: 12,
+      source: "classifier",
       task: "ensure code review report merges cleanly",
       missing: [],
       reason: "single judge line",
@@ -327,6 +331,7 @@ describe("buildClassifierEnvelope", () => {
     const envelope = buildClassifierEnvelope({
       round: 3,
       maxRounds: 12,
+      source: "classifier",
       task: "task text",
       missing: [
         "deploy to staging",
@@ -357,6 +362,7 @@ describe("buildClassifierEnvelope", () => {
     const envelope = buildClassifierEnvelope({
       round: 1,
       maxRounds: 12,
+      source: "classifier",
       task: "line one\nline two\r\nline three line four line five",
       missing: ["item"],
       reason: "judge reason",
@@ -382,6 +388,7 @@ describe("buildClassifierEnvelope", () => {
     const envelope = buildClassifierEnvelope({
       round: 1,
       maxRounds: 12,
+      source: "classifier",
       task: "task",
       missing: ["x"],
       reason: longReason,
@@ -405,6 +412,7 @@ describe("buildClassifierEnvelope", () => {
     const envelope = buildClassifierEnvelope({
       round: 1,
       maxRounds: 12,
+      source: "classifier",
       task: "task",
       missing: ["x"],
       reason: "concise judge one-liner",
@@ -428,6 +436,7 @@ describe("buildClassifierEnvelope", () => {
     const envelope = buildClassifierEnvelope({
       round: 5,
       maxRounds: 12,
+      source: "classifier",
       task: "any",
       missing: ["a"],
       reason: "b",
@@ -444,6 +453,7 @@ describe("buildClassifierEnvelope", () => {
     const envelope = buildClassifierEnvelope({
       round: 2,
       maxRounds: 12,
+      source: "classifier",
       task: "task",
       missing: ["a", "b"],
       reason: "judge",
@@ -454,6 +464,230 @@ describe("buildClassifierEnvelope", () => {
     assert.equal(envelope.includes("exit_code:"), false);
     assert.equal(envelope.includes("failed_count:"), false);
     assert.equal(envelope.includes("signature:"), false);
+  });
+});
+
+/**
+ * Envelope fidelity: an envelope names the actor that actually produced the
+ * verdict, states the configuration fact the record actually holds, and asserts
+ * nothing the system never checked (there is no completion-claim test anywhere,
+ * so no envelope may claim the model made one).
+ */
+describe("buildClassifierEnvelope source attribution", () => {
+  it("checker-authored contradiction renders source=checker, never source=classifier", () => {
+    const envelope = buildClassifierEnvelope({
+      round: 1,
+      maxRounds: 12,
+      source: "checker",
+      task: "make the suite green",
+      missing: [],
+      reason: "test files cleared or removed (binary contradiction)",
+    });
+
+    assert.ok(
+      envelope.startsWith(
+        "[VALIDATION FAILED] attempt=1/12 verdict=true-failure source=checker\n"
+      ),
+      `source must name the actor that ran\n---\n${envelope}`
+    );
+    assert.equal(
+      envelope.includes("source=classifier"),
+      false,
+      "a checker veto must not attribute itself to the judge"
+    );
+    assert.ok(
+      envelope.includes(
+        "reason: test files cleared or removed (binary contradiction)"
+      ),
+      `the checker's own reason must reach the reason field\n---\n${envelope}`
+    );
+    assert.equal(
+      envelope.includes("classifier reported failure"),
+      false,
+      "no invented judge reason"
+    );
+  });
+
+  it("judge-reported failure still renders source=classifier with the judge line", () => {
+    const envelope = buildClassifierEnvelope({
+      round: 2,
+      maxRounds: 12,
+      source: "classifier",
+      task: "ship the migration",
+      missing: ["migration script"],
+      reason: "migration was never written",
+    });
+
+    assert.ok(
+      envelope.startsWith(
+        "[VALIDATION FAILED] attempt=2/12 verdict=true-failure source=classifier\n"
+      ),
+      `a genuine judge failure keeps source=classifier\n---\n${envelope}`
+    );
+    assert.ok(envelope.includes("reason: migration was never written"));
+  });
+});
+
+describe("buildNotRunEnvelope reports the record's actual fact", () => {
+  const PREFIX_RE = /^\[VERIFY: not verified\] attempt=\d+\/\d+\n/;
+
+  it("EVIDENCE_CONTRADICTED: names the conflict the record states, not a missing command", () => {
+    const envelope = buildNotRunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      evidenceVerdict: "EVIDENCE_CONTRADICTED",
+      reasons: ["test files cleared or removed (binary contradiction)"],
+    });
+
+    assert.equal(
+      envelope.includes("No verify command is configured"),
+      false,
+      `a contradicted record must not be told the project has no command\n---\n${envelope}`
+    );
+    assert.ok(
+      envelope.includes("test files cleared or removed (binary contradiction)"),
+      `the checker's contradiction reason must appear\n---\n${envelope}`
+    );
+    // Locked by the inherited spec: prefix and the not-passed-not-failed core.
+    assert.match(envelope, PREFIX_RE);
+    assert.ok(
+      envelope.includes(
+        "test evidence, so the result is not verified — not passed and not failed."
+      ),
+      `core sentence must stay byte-stable\n---\n${envelope}`
+    );
+  });
+
+  it("EVIDENCE_INSUFFICIENT with a configured command: names that command verbatim", () => {
+    const envelope = buildNotRunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      command: "npm test",
+      evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+      reasons: ["no bash test execution before claim found"],
+    });
+
+    assert.ok(
+      envelope.includes("\n  npm test\n"),
+      `the configured command must be named\n---\n${envelope}`
+    );
+    assert.equal(envelope.includes("No verify command is configured"), false);
+  });
+
+  it("no command + EVIDENCE_INSUFFICIENT: keeps the honest no-command branch", () => {
+    const envelope = buildNotRunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+      reasons: ["no bash test execution before claim found"],
+    });
+
+    assert.ok(
+      envelope.includes("No verify command is configured for this project"),
+      `an insufficient record with no command says so\n---\n${envelope}`
+    );
+    assert.equal(/\n {2}\S/.test(envelope), false, "no invented command line");
+  });
+
+  it("verdict absent keeps today's rendering (prefix + core + obligation)", () => {
+    const envelope = buildNotRunEnvelope({ round: 3, maxRounds: 12 });
+
+    assert.match(envelope, PREFIX_RE);
+    assert.ok(
+      envelope.includes(
+        "test evidence, so the result is not verified — not passed and not failed."
+      )
+    );
+    assert.match(envelope, /run the project's tests/i);
+  });
+});
+
+/**
+ * Envelope copy asserts only what the system checked. `lastNonEmptyAssistant`
+ * is the only claim predicate in the tree — "the last assistant message with
+ * non-blank text" — which is not a completion claim, so no envelope may assert
+ * that one was made.
+ */
+describe("envelope copy asserts no completion claim", () => {
+  const rerunVariants = (): ReadonlyArray<string> => [
+    buildEvidenceRerunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      reasons: ["no bash test execution before claim found"],
+      command: "npm test",
+    }),
+    buildEvidenceRerunEnvelope({
+      round: 2,
+      maxRounds: 4,
+      reasons: [],
+      command: "pytest -q",
+    }),
+  ];
+
+  const notRunVariants = (): ReadonlyArray<string> => [
+    buildNotRunEnvelope({ round: 1, maxRounds: 12 }),
+    buildNotRunEnvelope({ round: 1, maxRounds: 12, command: "npm test" }),
+    buildNotRunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      evidenceVerdict: "EVIDENCE_INSUFFICIENT",
+      reasons: ["no bash test execution before claim found"],
+    }),
+    buildNotRunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      evidenceVerdict: "EVIDENCE_CONTRADICTED",
+      reasons: ["test files cleared or removed (binary contradiction)"],
+    }),
+    buildNotRunEnvelope({
+      round: 1,
+      maxRounds: 12,
+      command: "npm test",
+      evidenceVerdict: "EVIDENCE_CONTRADICTED",
+      reasons: ["test files cleared or removed (binary contradiction)"],
+    }),
+  ];
+
+  it("no rerun-envelope output asserts a completion claim, obligations intact", () => {
+    for (const envelope of rerunVariants()) {
+      for (const claim of FORBIDDEN_CLAIM_ASSERTIONS) {
+        assert.equal(
+          envelope.includes(claim),
+          false,
+          `rerun envelope must not assert ${JSON.stringify(claim)}\n---\n${envelope}`
+        );
+      }
+      assert.match(envelope, /^\[VERIFY: rerun needed\] attempt=\d+\/\d+\n/);
+      assert.match(
+        envelope,
+        /Run the command and show the test framework's green-summary line/
+      );
+      assert.match(
+        envelope,
+        /Run this command and include the test framework's green-summary line/
+      );
+    }
+  });
+
+  it("no not-verified envelope asserts a completion claim, obligations intact", () => {
+    for (const envelope of notRunVariants()) {
+      for (const claim of FORBIDDEN_CLAIM_ASSERTIONS) {
+        assert.equal(
+          envelope.includes(claim),
+          false,
+          `not-verified envelope must not assert ${JSON.stringify(
+            claim
+          )}\n---\n${envelope}`
+        );
+      }
+      assert.match(envelope, /^\[VERIFY: not verified\] attempt=\d+\/\d+\n/);
+      assert.match(envelope, /run the project's tests/i);
+      assert.match(
+        envelope,
+        /show the test framework's green-summary line/,
+        "the green-summary obligation must survive the rewrite"
+      );
+    }
   });
 });
 
@@ -479,11 +713,13 @@ describe("buildEvidenceRerunEnvelope", () => {
       command: "npm test",
     });
 
-    // Final agreed copy, verbatim.
+    // Final agreed copy, verbatim. The heading states the CHECKER's finding
+    // only: no envelope may assert a completion claim, because the loop has no
+    // such predicate (the claim window is lastNonEmptyAssistant).
     assert.deepEqual(envelope.split("\n"), [
       "[VERIFY: rerun needed] attempt=1/12",
-      "You claimed completion, but the automated evidence check did not find",
-      "real test execution in the transcript.",
+      "The automated evidence check did not find real test execution in this",
+      "turn's transcript.",
       "Missing:",
       "- no bash test execution before claim found",
       "- no run satisfies exit-0 + green-summary evidence threshold",
@@ -664,6 +900,7 @@ describe("buildClassifierEnvelope with evidenceContext (#449b B6)", () => {
     const envelope = buildClassifierEnvelope({
       round: 2,
       maxRounds: 12,
+      source: "classifier",
       task: "goal text",
       missing: ["m1"],
       reason: "judge one-liner",
@@ -722,6 +959,7 @@ describe("buildClassifierEnvelope with evidenceContext (#449b B6)", () => {
     const envelope = buildClassifierEnvelope({
       round: 1,
       maxRounds: 12,
+      source: "classifier",
       task: "t",
       missing: [],
       reason: "r",
@@ -757,6 +995,7 @@ describe("buildClassifierEnvelope with evidenceContext (#449b B6)", () => {
     const baseArgs = {
       round: 2,
       maxRounds: 12,
+      source: "classifier" as const,
       task: "为 SessionGoal 增加 status 字段并落盘",
       missing: ["部署到 staging"],
       reason: "goal 已写入 session store,但 staging 部署步骤未执行",
@@ -782,6 +1021,7 @@ describe("buildClassifierEnvelope with evidenceContext (#449b B6)", () => {
     const envelope = buildClassifierEnvelope({
       round: 1,
       maxRounds: 12,
+      source: "classifier",
       task: "t",
       missing: ["a"],
       reason: "b",

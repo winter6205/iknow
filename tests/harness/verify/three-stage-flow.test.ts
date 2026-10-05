@@ -16,7 +16,7 @@
  *
  * messages fixture: claimIndex is the messages index of the last assistant
  * with non-empty text (same backward scan as deriveFinalText), not verify
- * round. GREEN_FIRST keeps bash at index 0 and the claim at index 1 so the
+ * round. GREEN_FIRST keeps bash at index 1 and the claim at index 2 so the
  * window still includes that run. Fixtures that pin "evidence must live in
  * messages[0]" as evidence-first semantics belong in claim-window.test.ts.
  */
@@ -95,8 +95,9 @@ function bashFailBlocks(toolUseId: string): AnthropicContentBlock[] {
   ];
 }
 
-/** Green bash (index 0) + assistant claim (index 1) → SUFFICIENT. */
+/** Green bash (index 1) + assistant claim (index 2) → SUFFICIENT. */
 const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
+  makeNative({ role: "user", text: "implement goal" }),
   {
     role: "assistant",
     content: bashGreenBlocks("g01"),
@@ -109,6 +110,7 @@ const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
  *  probe hit → rerun envelope triggered. pyproject.toml is not a test file →
  *  no CONTRADICTED, no gamingSignals. */
 const PROBE_OK_MESSAGES: AnthropicNativeMessage[] = [
+  makeNative({ role: "user", text: "implement goal" }),
   {
     role: "assistant",
     content: [
@@ -124,10 +126,11 @@ const PROBE_OK_MESSAGES: AnthropicNativeMessage[] = [
 ];
 
 /** INSUFFICIENT + a run (exit≠0) + soft signal: bash fail + git commit --no-verify.
- *  The failed bash sits at messageIndex 0 (claim assistant later → counted in runs);
+ *  The failed bash sits at messageIndex 1 (claim assistant later → counted in runs);
  *  hasContradiction=false (no rm/write_file clearing test files); computeVerdict
  *  lands INSUFFICIENT on exit 1; gamingSignals pass through via collectGamingSignals. */
 const INSUFFICIENT_WITH_SIGNAL_MESSAGES: AnthropicNativeMessage[] = [
+  makeNative({ role: "user", text: "implement goal" }),
   {
     role: "assistant",
     content: bashFailBlocks("s01"),
@@ -146,12 +149,13 @@ const INSUFFICIENT_WITH_SIGNAL_MESSAGES: AnthropicNativeMessage[] = [
   { role: "assistant", content: [textBlock("implemented")] },
 ];
 
-/** CONTRADICTED: green bash (index 0) + write_file clearing a test file (any
+/** CONTRADICTED: green bash (index 1) + write_file clearing a test file (any
  *  position) → hasContradiction binary hard veto. The checker reasons normalized
  *  signature buildFailureSignature({ exitCode: 1, outputText: "test files
  *  cleared or removed (binary contradiction)", countRegex: undefined }) → no
  *  FAIL lines → signature = "exit=1". */
 const CONTRADICTED_MESSAGES: AnthropicNativeMessage[] = [
+  makeNative({ role: "user", text: "implement goal" }),
   {
     role: "assistant",
     content: bashGreenBlocks("g02"),
@@ -722,6 +726,7 @@ describe("evidence-first rerun (B5)", () => {
     // hits 0 marker files → probeVerifyCommand returns null → no command →
     // skip the rerun and defer straight to the judge.
     const PROBE_FAIL_MESSAGES: AnthropicNativeMessage[] = [
+      makeNative({ role: "user", text: "implement goal" }),
       {
         role: "assistant",
         content: [

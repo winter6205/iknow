@@ -200,7 +200,7 @@ describe("verify-loop seam: userText = goal.text ?? query (#408 T4 / #458 T8)", 
       "Type-system-validate-LSP",
       "session goal must bind to verify-loop userText"
     );
-    assert.equal(capturedCompletionMode(), "auto");
+    assert.equal(capturedCompletionMode(), "goal");
   });
 
   it("session without goal → userText === query (byte-identical to pre-#408)", async () => {

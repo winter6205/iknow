@@ -12,6 +12,7 @@ import {
   SkipAppendWithTextError,
 } from "../harness/errors.js";
 import { ValidationError } from "../shared/errors.js";
+import { goalActivation } from "./goal/index.js";
 import type { GoalState } from "./store/schema.js";
 
 /** Trailing interrupt system text; same literal as loop-engine SYSTEM_INTERRUPT_TEXT. */
@@ -93,10 +94,15 @@ export function evaluateContinuePending(opts: {
   );
 }
 
+/**
+ * Activation (the shared non-empty-text rule, read from the goal layer) plus
+ * this question's own width: `/continue` rejects a continuation only for a
+ * user-pinned mission, so a legacy `user_initial` goal — which still activates
+ * the verify dispatch — must not trip `goal_active` here.
+ */
 function isPinnedUserGoal(goal: GoalState | undefined): boolean {
-  return (
-    goal !== undefined && goal.source === "user_pin" && goal.text.length > 0
-  );
+  const activation = goalActivation(goal);
+  return activation.active && activation.goal.source === "user_pin";
 }
 
 /**

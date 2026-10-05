@@ -252,7 +252,7 @@ describe("offline half: verifyFromWire malformed-wire table", () => {
 /* ------------------------ 4: presentation seams ------------------------ */
 
 function bannerLine(slot: VerifySlot): string {
-  const lines = projectVerifyBanner(slot, "hitl", 120);
+  const lines = projectVerifyBanner(slot, "interactive", 120);
   expect(lines.length).toBe(1);
   return lines[0]!.text;
 }
@@ -272,12 +272,14 @@ describe("offline half: TUI banner renders the locked copy", () => {
     it(`${key} → 「${p.bannerLabel}」 one amber/green/red-correct line`, () => {
       const slot = verifyFromWire(wireOf(p, 3));
       expect(slot.kind).toBe("ok");
-      const lines = projectVerifyBanner(slot, "hitl", 120);
+      const lines = projectVerifyBanner(slot, "interactive", 120);
       expect(lines.length).toBe(1);
       expect(lines[0]!.text).toBe(expectedBannerText(p, 3));
       // Auto mode carries the same terminal line with the [auto] prefix.
       expect(
-        projectVerifyBanner(slot, "auto", 120)[0]!.text.startsWith("[auto] ")
+        projectVerifyBanner(slot, "full_auto", 120)[0]!.text.startsWith(
+          "[auto] "
+        )
       ).toBe(true);
     });
   }
@@ -308,7 +310,7 @@ describe("offline half: TUI banner renders the locked copy", () => {
       rounds: 1,
       notRunReason: "insufficient",
     });
-    const fg = projectVerifyBanner(slot, "hitl", 120)[0]!.fg;
+    const fg = projectVerifyBanner(slot, "interactive", 120)[0]!.fg;
     expect(fg).toBe(tuiPalette.running);
     expect(fg).not.toBe(tuiPalette.add);
     expect(fg).not.toBe(tuiPalette.error);
@@ -316,14 +318,14 @@ describe("offline half: TUI banner renders the locked copy", () => {
     expect(
       projectVerifyBanner(
         verifyFromWire({ outcome: "passed", rounds: 1 }),
-        "hitl",
+        "interactive",
         120
       )[0]!.fg
     ).toBe(tuiPalette.add);
     expect(
       projectVerifyBanner(
         verifyFromWire({ outcome: "failed", rounds: 1 }),
-        "hitl",
+        "interactive",
         120
       )[0]!.fg
     ).toBe(tuiPalette.error);

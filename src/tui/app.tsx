@@ -4702,11 +4702,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       : 0;
   // Location row recomputes with the snapshot (first frame fills the branch).
   void envSnapshot;
-  // Verify banner row budget: active session's slot + mode (hitl/auto);
-  // projectVerifyBanner (pure fn) yields 0/1 rows. Chat view only — no
-  // render for switched-away sessions (ownership check like crunchedOf).
-  const verifyMode: "hitl" | "auto" =
-    permMode === "full_auto" ? "auto" : "hitl";
+  // Verify banner row budget: active session's slot + permission mode
+  // (interactive/full_auto); the marker derives from permMode alone, never
+  // from goal presence. projectVerifyBanner (pure fn) yields 0/1 rows. Chat
+  // view only — no render for switched-away sessions (ownership check like
+  // crunchedOf).
+  const verifyMode: "interactive" | "full_auto" =
+    permMode === "full_auto" ? "full_auto" : "interactive";
   const verifySlot: VerifySlot | null =
     view === "chat" && active.conversationId !== undefined
       ? (verifySlots[active.conversationId] ?? { kind: "none" })

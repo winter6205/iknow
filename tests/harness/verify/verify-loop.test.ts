@@ -41,12 +41,14 @@ import {
 } from "../../../src/harness/verify/types.ts";
 import { projectVerifyHumanView } from "../../../src/session-api/verify-human-view.ts";
 import {
+  EVIDENCE_RERUN_PREFIX,
   isVerifyInjectedText,
   NOT_RUN_PREFIX,
 } from "../../../src/harness/verify/inject.ts";
 import { isHostInjectedUserText } from "../../../src/harness/agent-status-instruction.ts";
 import { isTuiHiddenUserMessage } from "../../../src/tui/session-state.ts";
 import type {
+  AnthropicContentBlock,
   AnthropicNativeMessage,
   RunResult,
 } from "../../../src/harness/model-adapter/types.ts";
@@ -58,6 +60,13 @@ import type { SandboxRunResult } from "../../../src/harness/sandbox/index.ts";
 import type { LoopEngineDeps } from "../../../src/harness/loop-engine.ts";
 import { run } from "../../../src/harness/loop-engine.ts";
 import { assistantResult, makeDeps, makeNative } from "../../cli/_fixtures.ts";
+import {
+  message,
+  toolResult,
+  toolUse,
+  VITEST_GREEN,
+  writeFile,
+} from "./evidence-checker/_fixtures.ts";
 
 /* ------------------------------ test doubles ------------------------------ */
 
@@ -1277,6 +1286,159 @@ describe("内容门: 无可用内容信号的 turn 不进入 verify 子系统", 
   });
 });
 
+/* ------------------------------ turn-scoped gate + checker ------------------------------ */
+
+// The loop seeds result.messages from priorMessages, so a previous turn's green
+// run sits in the array before the current turn's query. The content gate and
+// the evidence checker must judge ONLY the current turn — a prior turn's green
+// test cannot open this turn's gate or supply this turn's evidence.
+describe("verify 门与 checker 只读当前 turn (跨 turn 绿测不越权开门)", () => {
+  const greenAssistant = (id: string): AnthropicNativeMessage =>
+    message(
+      "assistant",
+      toolUse(id, "npx vitest run"),
+      toolResult(
+        id,
+        JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+      )
+    );
+
+  // A bash run split across the assistant tool_use and the paired user
+  // tool_result, matching production message order: the tool_result-carrying
+  // user message reads as a continuation, never as a new turn query.
+  const bashRound = (
+    id: string,
+    code: number,
+    stdout: string
+  ): AnthropicNativeMessage[] => [
+    message("assistant", toolUse(id, "npx vitest run")),
+    message(
+      "user",
+      toolResult(id, JSON.stringify({ code, stdout, stderr: "" }))
+    ),
+  ];
+
+  const outcome = (
+    messages: AnthropicNativeMessage[],
+    finalText: string
+  ): RunOutcome => ({
+    result: {
+      finalText,
+      messages,
+      turnCount: 1,
+      stopReason: "completed",
+      lastUsage: null,
+    },
+    trace: EMPTY_TRACE,
+  });
+
+  it("上一轮的绿测不为本轮纯文本解释开门: 门关 → disabled, 与未配置逐字节一致", async () => {
+    const messages: AnthropicNativeMessage[] = [
+      makeNative({ role: "user", text: "跑一下测试" }),
+      greenAssistant("prev-green"),
+      makeNative({ role: "assistant", text: "上一轮全绿" }),
+      makeNative({ role: "user", text: "那给我讲讲原理" }),
+      makeNative({ role: "assistant", text: "原理是这样……" }),
+    ];
+    let verifyCalled = 0;
+    const gated = await runVerifyLoop(
+      defaultOptions({
+        runFn: async () => outcome(messages, "原理是这样……"),
+        runVerify: async () => {
+          verifyCalled += 1;
+          return { exitCode: 0, stdout: VITEST_GREEN, stderr: "" };
+        },
+      })
+    );
+    assert.equal(verifyCalled, 0, "本轮无信号 → 门关, 不得执行 verify 阶梯");
+    assert.equal(gated.enabled, false);
+    assert.equal(gated.outcome, "disabled");
+    assert.equal(gated.rounds, 0);
+    assert.equal(gated.records.length, 0);
+    assert.equal(
+      projectVerifyHumanView({
+        outcome: gated.outcome,
+        rounds: gated.rounds,
+        records: gated.records,
+      }),
+      undefined,
+      "门关 turn 无 wire verify 字段"
+    );
+    const bare = await runVerifyLoop(
+      defaultOptions({
+        runFn: async () => outcome(messages, "原理是这样……"),
+        config: { command: "" },
+      })
+    );
+    assert.deepEqual(gated, bare, "门关结果与未配置裸 run 逐字节一致");
+  });
+
+  it("绿测落在本轮: 门开且判 EVIDENCE_SUFFICIENT (防过度切片丢本轮证据)", async () => {
+    const messages: AnthropicNativeMessage[] = [
+      makeNative({ role: "user", text: "先闲聊一句" }),
+      makeNative({ role: "assistant", text: "嗯嗯" }),
+      makeNative({ role: "user", text: "帮我跑测试" }),
+      greenAssistant("cur-green"),
+      makeNative({ role: "assistant", text: "本轮全绿了" }),
+    ];
+    let verifyCalled = 0;
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn: async () => outcome(messages, "本轮全绿了"),
+        runVerify: async () => {
+          verifyCalled += 1;
+          return { exitCode: 0, stdout: VITEST_GREEN, stderr: "" };
+        },
+      })
+    );
+    assert.equal(out.enabled, true, "本轮绿测必须开门");
+    assert.equal(out.outcome, "passed", "本轮绿测短路判 pass");
+    assert.equal(
+      verifyCalled,
+      0,
+      "checkEvidence SUFFICIENT 短路, 不进沙箱阶梯"
+    );
+    assert.equal(out.rounds, 1);
+  });
+
+  it("复验轮 tool_result 续写不移动边界: 本轮先编辑不足 → 第 2 轮增长切片判绿", async () => {
+    const currentTurnStart: AnthropicNativeMessage[] = [
+      makeNative({ role: "user", text: "给登录加个测试" }),
+    ];
+    const round1: AnthropicNativeMessage[] = [
+      makeNative({ role: "user", text: "先看看别的项目" }),
+      greenAssistant("prior-leak-green"),
+      makeNative({ role: "assistant", text: "那边全绿" }),
+      ...currentTurnStart,
+      ...bashRound("r1", 1, "Tests 1 failed (1)"),
+      makeNative({ role: "assistant", text: "先看到失败" }),
+    ];
+    const round2: AnthropicNativeMessage[] = [
+      ...round1,
+      ...bashRound("r2", 0, VITEST_GREEN),
+      makeNative({ role: "assistant", text: "这轮把测试也跑绿了" }),
+    ];
+    let call = 0;
+    const runFn: VerifyLoopOptions["runFn"] = async () => {
+      call += 1;
+      return call === 1
+        ? outcome(round1, "先看到失败")
+        : outcome(round2, "这轮把测试也跑绿了");
+    };
+    const verify = makeScriptedVerify(
+      expandRounds([{ exitCode: 1, stdout: FAIL_OUTPUT, stderr: "" }])
+    );
+    const out = await runVerifyLoop(
+      defaultOptions({ runFn, runVerify: verify.runVerify })
+    );
+    assert.equal(call, 2, "上一轮绿测不得短路本轮, 必须真正进入第 2 轮");
+    assert.equal(out.enabled, true, "增长轮仍透明运行, 切片不得塌成空数组");
+    assert.equal(out.outcome, "passed", "第 2 轮在本轮增长切片上判 SUFFICIENT");
+    assert.equal(out.rounds, 2);
+    assert.equal(out.records[0]?.evidenceVerdict, "EVIDENCE_INSUFFICIENT");
+  });
+});
+
 /* ------------------------------ not_run 注入 (spec: 未验证诚实回传) ------------------------------ */
 
 describe("not_run 注入: 未验证终态如实回传模型, 成功路径零注入", () => {
@@ -1546,5 +1708,400 @@ describe("not_run 注入: 未验证终态如实回传模型, 成功路径零注�
     // Zero verify envelopes of ANY kind — the gate case is transparent, and
     // strictly distinct from not_run (which means the turn DID enter verify).
     assert.deepEqual(injectedTexts(gated.result.messages), []);
+  });
+});
+
+/* ------------------------------ CONTRADICTED 信封点名实际作者 ------------------------------ */
+
+// The goal-feature CONTRADICTED veto is produced by the checker, before and
+// without the completion-facing judge. The correction-round envelope it injects
+// must therefore name the checker and carry the checker's own reasons; naming
+// the classifier there tells the model a judge read its work when none ran.
+describe("goal-mode CONTRADICTED: 修正轮信封点名 checker, 判官零调用", () => {
+  /** Green vitest run, then the test file emptied through the production
+   *  `path` key — the binary-contradiction shape. */
+  function contradictedMessages(
+    greenId: string,
+    writeId: string
+  ): AnthropicNativeMessage[] {
+    return [
+      makeNative({ role: "user", text: "make the suite green" }),
+      message(
+        "assistant",
+        toolUse(greenId, "npx vitest run"),
+        toolResult(
+          greenId,
+          JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+        )
+      ),
+      message("assistant", {
+        type: "tool_use",
+        id: writeId,
+        name: "write_file",
+        input: { path: "src/foo.test.ts", content: "" },
+      }),
+      makeNative({ role: "assistant", text: "全部测试通过了" }),
+    ];
+  }
+
+  /** Injected verify envelopes carried by a result's message list. */
+  function injectedEnvelopeTexts(
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): ReadonlyArray<string> {
+    return messages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => m.content.map((b) => (b.type === "text" ? b.text : "")))
+      .filter((t) => isVerifyInjectedText(t));
+  }
+
+  it("信封 source=checker + checker 原因; classifier 一次都没跑", async () => {
+    const priors: Array<ReadonlyArray<AnthropicNativeMessage>> = [];
+    const runFn: VerifyLoopOptions["runFn"] = async (_userText, runOpts) => {
+      priors.push(runOpts?.priorMessages ?? []);
+      const call = priors.length - 1;
+      const stopReason: RunResult["stopReason"] =
+        call === 0 ? "completed" : "maxTurns";
+      return {
+        result: {
+          finalText: stopReason === "completed" ? "全部测试通过了" : null,
+          messages: contradictedMessages("c-green", "c-clear"),
+          turnCount: 1,
+          stopReason,
+          lastUsage: null,
+        },
+        trace: EMPTY_TRACE,
+      };
+    };
+    const judge = { calls: 0 };
+    const runClassifier: RunClassifierFn = async () => {
+      judge.calls += 1;
+      throw new Error("CONTRADICTED 否决必须在判官之前短路");
+    };
+
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier,
+        config: { command: "" },
+        completionMode: "goal",
+      })
+    );
+
+    assert.equal(
+      judge.calls,
+      0,
+      "checker 否决的修正轮绝不启动完成判官 (本轮的全部要点)"
+    );
+    assert.equal(out.outcome, "failed", "第 2 轮 maxTurns 原样透传");
+    assert.equal(out.rounds, 1, "CONTRADICTED 短路一轮");
+    assert.equal(out.records[0]?.verdict, "true-failure");
+
+    const injected = priors[1] ?? [];
+    const lastUser = [...injected].reverse().find((m) => m.role === "user");
+    const envelope = lastUser
+      ? lastUser.content.map((b) => (b.type === "text" ? b.text : "")).join("")
+      : "";
+    assert.ok(
+      envelope.includes("[VALIDATION FAILED]"),
+      `修正轮必须带失败信封, 实际: ${JSON.stringify(envelope)}`
+    );
+    assert.ok(
+      envelope.includes("source=checker"),
+      `信封必须点名 checker, 实际: ${envelope}`
+    );
+    assert.equal(
+      envelope.includes("source=classifier"),
+      false,
+      "判官没跑, 信封不得宣称 source=classifier"
+    );
+    assert.ok(
+      envelope.includes(
+        "reason: test files cleared or removed (binary contradiction)"
+      ),
+      `信封必须携带 checker 自己的原因, 实际: ${envelope}`
+    );
+    assert.equal(
+      envelope.includes("classifier reported failure"),
+      false,
+      "不得编造判官原因"
+    );
+  });
+
+  it("HITL CONTRADICTED 终态: 未验证信封报告记录里的冲突, 不再宣称缺配置", async () => {
+    // The same contradicted transcript under HITL ends at the not_run terminal
+    // (ADR-0073 rule 3). The record's own evidenceVerdict is the conflict, so
+    // the envelope must report it — the no-command sentence is a claim about
+    // configuration this record never made.
+    const runFn: VerifyLoopOptions["runFn"] = async () => ({
+      result: {
+        finalText: "全部测试通过了",
+        messages: contradictedMessages("h-green", "h-clear"),
+        turnCount: 1,
+        stopReason: "completed",
+        lastUsage: null,
+      },
+      trace: EMPTY_TRACE,
+    });
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        config: { command: "" },
+        completionMode: "hitl",
+        runClassifier: async () => {
+          throw new Error("HITL 不得生成判官");
+        },
+      })
+    );
+
+    assert.equal(out.outcome, "not_run");
+    assert.equal(
+      out.records[0]?.evidenceVerdict,
+      "EVIDENCE_CONTRADICTED",
+      "记录本身必须带着冲突判定 (信封叙述的权威来源)"
+    );
+    const text = injectedEnvelopeTexts(out.result.messages)[0]!;
+    assert.ok(
+      text.startsWith(NOT_RUN_PREFIX),
+      `前缀不变, 实际: ${text.slice(0, 40)}`
+    );
+    assert.equal(
+      text.includes("No verify command is configured"),
+      false,
+      `冲突记录不得被回一个配置缺失的说法\n---\n${text}`
+    );
+    assert.ok(
+      text.includes("test files cleared or removed (binary contradiction)"),
+      `信封必须带上 checker 报出的冲突原因\n---\n${text}`
+    );
+    assert.match(text, /not passed and not failed/i);
+  });
+});
+
+/* ------------------------------ 自动探测取路径: 生产键端到端 ------------------------------ */
+
+describe("自动探测取路径: 标志文件经 loop 派生复验命令并注入复验信封", () => {
+  /** Loop 注入的 verify 信封文本 (user 角色消息)。 */
+  function injectedUserTexts(
+    messages: ReadonlyArray<AnthropicNativeMessage>
+  ): ReadonlyArray<string> {
+    return messages
+      .filter((m) => m.role === "user")
+      .flatMap((m) => m.content.map((b) => (b.type === "text" ? b.text : "")))
+      .filter((t) => isVerifyInjectedText(t));
+  }
+
+  /**
+   * Round 1 = only `blocks` (the probe turn, no test execution), round 2
+   * answers whatever the loop injected with the green run of `green`. The
+   * priorMessages of every call are recorded so a case can read what the loop
+   * actually injected into the model's next turn.
+   */
+  function probeThenGreen(opts: {
+    readonly blocks: ReadonlyArray<AnthropicContentBlock>;
+    readonly green: { readonly command: string; readonly stdout: string };
+  }): {
+    readonly runFn: VerifyLoopOptions["runFn"];
+    readonly priors: Array<ReadonlyArray<AnthropicNativeMessage>>;
+  } {
+    const priors: Array<ReadonlyArray<AnthropicNativeMessage>> = [];
+    const runFn: VerifyLoopOptions["runFn"] = async (_userText, runOpts) => {
+      const prior = runOpts?.priorMessages ?? [];
+      priors.push(prior);
+      const id = `green-${priors.length}`;
+      const messages: AnthropicNativeMessage[] =
+        priors.length === 1
+          ? [
+              makeNative({ role: "user", text: "把这个项目跑起来" }),
+              message("assistant", ...opts.blocks),
+              makeNative({ role: "assistant", text: "改完了" }),
+            ]
+          : [
+              ...prior,
+              message(
+                "assistant",
+                toolUse(id, opts.green.command),
+                toolResult(
+                  id,
+                  JSON.stringify({
+                    code: 0,
+                    stdout: opts.green.stdout,
+                    stderr: "",
+                  })
+                )
+              ),
+              makeNative({ role: "assistant", text: "测试跑完了" }),
+            ];
+      return {
+        result: {
+          finalText: "改完了",
+          messages,
+          turnCount: 1,
+          stopReason: "completed",
+          lastUsage: null,
+        },
+        trace: EMPTY_TRACE,
+      };
+    };
+    return { runFn, priors };
+  }
+
+  /** 判官计数桩: 复验信封短路时它一次都不该被唤起。 */
+  function countingJudge(calls: { n: number }): RunClassifierFn {
+    return async () => {
+      calls.n += 1;
+      return {
+        status: "ok",
+        result: JSON.stringify({
+          kind: "pass",
+          reason: "判官不该被唤起",
+          evidence: [],
+        }),
+        summary: "no",
+      };
+    };
+  }
+
+  it("生产键 {input:{path}} 写 package.json(vitest): 经 loop 派生复验命令并注入复验信封", async () => {
+    const content = JSON.stringify({
+      name: "x",
+      devDependencies: { vitest: "^1.0.0" },
+    });
+    const write = writeFile("p1", "package.json", content);
+    // fixture 必须真的发生产键, 否则本例悄悄退化成 legacy 路径的复测。
+    const input = (write as { input: Record<string, unknown> }).input;
+    assert.equal(input.path, "package.json", "fixture 发出的必须是生产键 path");
+    assert.equal(input.filePath, undefined, "生产形态不发 legacy 键");
+
+    const { runFn, priors } = probeThenGreen({
+      blocks: [write],
+      green: { command: "npx vitest run", stdout: VITEST_GREEN },
+    });
+    const judge = { n: 0 };
+
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier: countingJudge(judge),
+        config: { command: "" },
+      })
+    );
+
+    assert.equal(priors.length, 2, "派生出复验命令 → 恰好一次复验续跑");
+    const envelope = injectedUserTexts(priors[1] ?? [])[0] ?? "";
+    assert.ok(
+      envelope.startsWith(EVIDENCE_RERUN_PREFIX),
+      `复验轮必须收到复验信封, 实际: ${JSON.stringify(envelope.slice(0, 40))}`
+    );
+    assert.ok(
+      envelope.includes("\n  npx vitest run\n"),
+      `信封必须点名派生的复验命令, 实际: ${envelope}`
+    );
+    assert.equal(judge.n, 0, "复验信封短路本轮, 判官零调用");
+    assert.equal(out.outcome, "passed", "复验轮补上绿灯 → 直接通过");
+    assert.deepEqual(
+      injectedUserTexts(out.result.messages),
+      [envelope],
+      "复验信封留在 loop 的注入输出里"
+    );
+  });
+
+  it("legacy {input:{filePath}} 写 pyproject.toml: 仍派生 pytest 复验命令并注入复验信封", async () => {
+    // 内联构造: fixture builder 现在发生产键, 走它就测不到 legacy 分支。
+    const { runFn, priors } = probeThenGreen({
+      blocks: [
+        {
+          type: "tool_use",
+          id: "l1",
+          name: "write_file",
+          input: {
+            filePath: "pyproject.toml",
+            content: "[tool.pytest.ini_options]",
+          },
+        },
+      ],
+      green: { command: "pytest", stdout: "3 passed in 0.20s\n" },
+    });
+    const judge = { n: 0 };
+
+    const out = await runVerifyLoop(
+      defaultOptions({
+        runFn,
+        runClassifier: countingJudge(judge),
+        config: { command: "" },
+      })
+    );
+
+    assert.equal(
+      priors.length,
+      2,
+      "legacy 键同样派生出复验命令 → 一次复验续跑"
+    );
+    const envelope = injectedUserTexts(priors[1] ?? [])[0] ?? "";
+    assert.ok(
+      envelope.startsWith(EVIDENCE_RERUN_PREFIX),
+      `复验轮必须收到复验信封, 实际: ${JSON.stringify(envelope.slice(0, 40))}`
+    );
+    assert.ok(
+      envelope.includes("\n  pytest\n"),
+      `信封必须点名派生的 pytest 复验命令, 实际: ${envelope}`
+    );
+    assert.equal(judge.n, 0, "复验信封短路本轮, 判官零调用");
+    assert.equal(out.outcome, "passed", "复验轮补上绿灯 → 直接通过");
+  });
+
+  it("普通源文件路径不贡献探测候选: 不派生复验命令, 本轮直接落完成判官", async () => {
+    let runCalls = 0;
+    const runFn: VerifyLoopOptions["runFn"] = async () => {
+      runCalls += 1;
+      return {
+        result: {
+          finalText: "改完了",
+          messages: [
+            makeNative({ role: "user", text: "改一下 src/foo.ts" }),
+            message("assistant", {
+              type: "tool_use",
+              id: "n1",
+              name: "edit_file",
+              input: { path: "src/foo.ts", old_str: "a", new_str: "b" },
+            }),
+            makeNative({ role: "assistant", text: "改完了" }),
+          ],
+          turnCount: 1,
+          stopReason: "completed",
+          lastUsage: null,
+        },
+        trace: EMPTY_TRACE,
+      };
+    };
+    let judgeCalls = 0;
+    const runClassifier: RunClassifierFn = async () => {
+      judgeCalls += 1;
+      return {
+        status: "ok",
+        result: JSON.stringify({
+          kind: "unverified",
+          reason: "证据不足, 不猜",
+        }),
+        summary: "no",
+      };
+    };
+
+    const out = await runVerifyLoop(
+      defaultOptions({ runFn, runClassifier, config: { command: "" } })
+    );
+
+    assert.equal(runCalls, 1, "无探测候选 → 没有复验续跑, runFn 只跑一次");
+    assert.equal(judgeCalls, 1, "派生出 null → 本轮直接落完成判官");
+    assert.equal(out.outcome, "unstable", "判官拒判 → unstable 停机");
+    assert.equal(
+      out.records[0]?.evidenceVerdict,
+      "EVIDENCE_INSUFFICIENT",
+      "本轮证据判定原样落记录"
+    );
+    assert.deepEqual(
+      injectedUserTexts(out.result.messages),
+      [],
+      "零注入信封 (既不复验也不训斥)"
+    );
   });
 });

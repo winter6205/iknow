@@ -226,7 +226,11 @@ import {
 } from "./store/index.js";
 import { recognize } from "../harness/secret-roundtrip/index.js";
 import type { GoalStatus } from "./store/index.js";
-import { applyTransition, assertValidTransition } from "./goal/index.js";
+import {
+  applyTransition,
+  assertValidTransition,
+  sessionGoalActivation,
+} from "./goal/index.js";
 import {
   applyGoalAutoContinue,
   applyGoalAutoError,
@@ -2533,7 +2537,7 @@ export class SessionHub {
           //   - renderRecentUserTasksBoundary is a private hub closure —
           //     harness-domain independence: harness never imports
           //     session-api, zero reverse dependency.
-          ...(!(session.goal !== undefined && session.goal.text.length > 0)
+          ...(!sessionGoalActivation(session).active
             ? {
                 boundaryAttachment: () =>
                   this.renderRecentUserTasksBoundary(session.messages),
@@ -2625,6 +2629,10 @@ export class SessionHub {
               // already handled). Note: runVerifyLoop's first-round runFn
               // omits priorMessages / onStream, so the closure must fall back
               // to hub-side priorMessages and wrappedOnStream.
+              // One activation read feeds both fields below: completionMode
+              // picks the judge module and userText is that module's task, so
+              // they must come from the same read of the same rule.
+              const activation = sessionGoalActivation(session);
               const runOutcome =
                 !silent && this.verifyConfig
                   ? await runVerifyLoop({
@@ -2644,19 +2652,13 @@ export class SessionHub {
                           );
                         }),
                       // ADR-0024: two modules, not `goal.text ?? query`. Non-empty
-                      // goal → auto (userText = goal.text); else HITL (userText =
+                      // goal → goal (userText = goal.text); else HITL (userText =
                       // query). taskFocus never entered verify input (#473) and
                       // is gone with #605 T2's retirement.
-                      completionMode:
-                        session.goal !== undefined &&
-                        session.goal.text.length > 0
-                          ? "auto"
-                          : "hitl",
-                      userText:
-                        session.goal !== undefined &&
-                        session.goal.text.length > 0
-                          ? session.goal.text
-                          : query,
+                      completionMode: activation.active ? "goal" : "hitl",
+                      userText: activation.active
+                        ? activation.goal.text
+                        : query,
                       config: this.verifyConfig,
                       sessionId: conversationId,
                       signal: opts.signal,

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { probeVerifyCommand } from "../../../src/harness/verify/command-probe.js";
+import { editBlockPath } from "../../../src/harness/verify/evidence-checker.js";
 
 /**
  * Auto-probe matrix:
@@ -147,5 +148,29 @@ describe("D2 自动探测 - 契约形状", () => {
     expect(typeof hit).toBe("string");
     const miss = probeVerifyCommand([]);
     expect(miss).toBeNull();
+  });
+});
+
+/**
+ * The shared edit-block path accessor in both spellings: a write_file /
+ * edit_file tool_use input carries the production `path` key, legacy fixtures
+ * spell it `filePath`. Either one must reach the probe reader as the file's
+ * path; neither key present (or a non-string value) is fail-closed undefined.
+ */
+describe("D2 自动探测 - 编辑块取路径 (editBlockPath)", () => {
+  it("生产 schema 键 path → 原样返回", () => {
+    expect(editBlockPath({ path: "pyproject.toml" })).toBe("pyproject.toml");
+    expect(editBlockPath({ path: "package.json", content: "{}" })).toBe(
+      "package.json"
+    );
+  });
+
+  it("legacy schema 键 filePath → 原样返回", () => {
+    expect(editBlockPath({ filePath: "pyproject.toml" })).toBe(
+      "pyproject.toml"
+    );
+    expect(editBlockPath({ filePath: "package.json", content: "{}" })).toBe(
+      "package.json"
+    );
   });
 });

@@ -12,7 +12,15 @@
  * messages in between included).
  */
 import type { AnthropicNativeMessage } from "../harness/model-adapter/types.js";
-import { isTurnQuery } from "../session-api/turn-projection.js";
+import { isTurnQuery } from "../harness/turn-boundary.js";
+
+/**
+ * The turn-boundary rule and its last-query scan are defined once in
+ * `src/harness/turn-boundary.ts`; the TUI depends only on the harness layer.
+ * Re-exported here because every existing call site (and
+ * tests/tui/turn-activity.test.ts) imports the scan through this module.
+ */
+export { lastTurnQueryIndex, sliceTurnFrom } from "../harness/turn-boundary.js";
 
 export interface ToolUseCount {
   readonly name: string;
@@ -152,27 +160,6 @@ export function orderedTurnActivitySegments(
     // EXIT: Malformed messages have no derivable stable order; render no fold, safely.
     return [];
   }
-}
-
-/** Index of the last turn query; no query → -1. */
-export function lastTurnQueryIndex(
-  messages: ReadonlyArray<AnthropicNativeMessage>
-): number {
-  let idx = -1;
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i];
-    if (message !== undefined && isTurnQuery(message)) idx = i;
-  }
-  return idx;
-}
-
-/** Slice from `start` (inclusive) to the end; start < 0 or out of range → empty array (a missing query must not mean the whole history). */
-export function sliceTurnFrom(
-  messages: ReadonlyArray<AnthropicNativeMessage>,
-  start: number
-): ReadonlyArray<AnthropicNativeMessage> {
-  if (start < 0 || start >= messages.length) return [];
-  return messages.slice(start);
 }
 
 /**

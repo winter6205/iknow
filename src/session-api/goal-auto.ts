@@ -7,6 +7,7 @@
  */
 import type { AnthropicNativeMessage, RunResult } from "../harness/index.js";
 import { errorMessage } from "../harness/errors.js";
+import { sessionGoalActivation } from "./goal/index.js";
 import type { GoalState, SessionFileV1 } from "./store/schema.js";
 import { CURRENT_SCHEMA_VERSION } from "./store/schema.js";
 import type { VerifyLoopOutcome } from "../harness/verify/index.js";
@@ -300,10 +301,15 @@ export async function persistGoalDecision(
   });
 }
 
+/**
+ * The auto loop keys on activation alone (non-empty text), not on
+ * `goal.source` — a goal loaded from a legacy `user_initial` file keeps
+ * looping here, the same way it activates the verify dispatch. Returns the
+ * goal so the loop can read its counters without a second session read.
+ */
 function activePinnedGoal(session: SessionFileV1): GoalState | undefined {
-  const goal = session.goal;
-  if (goal === undefined || goal.text.length === 0) return undefined;
-  return goal;
+  const activation = sessionGoalActivation(session);
+  return activation.active ? activation.goal : undefined;
 }
 
 async function loadSessionForAutoLoop(

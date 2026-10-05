@@ -20,20 +20,20 @@ export function toolResult(
   return { type: "tool_result", tool_use_id: id, content, is_error };
 }
 
-export function editFile(id: string, filePath: string): AnthropicContentBlock {
-  return { type: "tool_use", id, name: "edit_file", input: { filePath } };
+export function editFile(id: string, path: string): AnthropicContentBlock {
+  return { type: "tool_use", id, name: "edit_file", input: { path } };
 }
 
 export function writeFile(
   id: string,
-  filePath: string,
+  path: string,
   content: unknown
 ): AnthropicContentBlock {
   return {
     type: "tool_use",
     id,
     name: "write_file",
-    input: { filePath, content },
+    input: { path, content },
   };
 }
 

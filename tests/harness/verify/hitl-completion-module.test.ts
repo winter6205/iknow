@@ -55,16 +55,22 @@ function bashGreenBlocks(toolUseId: string): AnthropicContentBlock[] {
   ];
 }
 
+// Each fixture is a whole turn as loop-engine seeds it — user query first, then
+// the assistant turn — because the gate judges only the slice from that query
+// and fails closed to `disabled` when there is no query to slice from.
 const GREETING_MESSAGES: AnthropicNativeMessage[] = [
+  { role: "user", content: [textBlock("你好")] },
   { role: "assistant", content: [textBlock("你好")] },
 ];
 
 const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
+  { role: "user", content: [textBlock("make the suite green")] },
   { role: "assistant", content: bashGreenBlocks("g01") },
   { role: "assistant", content: [textBlock("implemented")] },
 ];
 
 const CONTRADICTED_EMPTY_WRITE_MESSAGES: AnthropicNativeMessage[] = [
+  { role: "user", content: [textBlock("add a test for foo")] },
   { role: "assistant", content: bashGreenBlocks("g02") },
   {
     role: "assistant",
@@ -74,6 +80,7 @@ const CONTRADICTED_EMPTY_WRITE_MESSAGES: AnthropicNativeMessage[] = [
 ];
 
 const CONTRADICTED_RM_MESSAGES: AnthropicNativeMessage[] = [
+  { role: "user", content: [textBlock("add a test for foo")] },
   { role: "assistant", content: bashGreenBlocks("g03") },
   {
     role: "assistant",
@@ -173,7 +180,7 @@ function hitlOptions(over: {
   };
 }
 
-/** The `/goal` feature uses completionMode: "auto" — not the PermissionMode `自动模式` ("auto mode"). */
+/** The `/goal` feature uses completionMode: "goal" — not the PermissionMode `自动模式` ("auto mode"). */
 function autoOptions(over: {
   readonly runFn: VerifyLoopOptions["runFn"];
   readonly runClassifier: RunClassifierFn;
@@ -181,7 +188,7 @@ function autoOptions(over: {
   return {
     ...hitlOptions(over),
     sessionId: "goal",
-    completionMode: "auto",
+    completionMode: "goal",
     userText: "/goal ship it",
   };
 }

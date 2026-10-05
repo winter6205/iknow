@@ -1095,8 +1095,7 @@ describe("buildHarnessEngine — #126 T5 secrets guard 装配", () => {
           id: "t5-transparent",
           name: "bash",
           input: {
-            command:
-              "curl https://x --header Authorization: sk-abcd1234567890abcdefg1234",
+            command: "echo Authorization: sk-abcd1234567890abcdefg1234",
           },
         },
       ]);

@@ -1,6 +1,7 @@
 /**
- * Plan T2: auto-mode judge envelope — task is goal.text only; SUFFICIENT still
- * spawns; CONTRADICTED still does not; omitted completionMode keeps SUFFICIENT skip.
+ * Plan T2: goal-feature judge envelope — task is goal.text only; SUFFICIENT
+ * still spawns; CONTRADICTED still does not; omitted completionMode keeps
+ * SUFFICIENT skip.
  */
 import { describe, it } from "vitest";
 import assert from "node:assert/strict";
@@ -55,7 +56,13 @@ function bashGreenBlocks(toolUseId: string): AnthropicContentBlock[] {
   ];
 }
 
+/**
+ * Each fixture is a whole turn as loop-engine seeds it — the turn's user query
+ * first — because `runVerifyLoop` judges only the slice from that query and
+ * fails closed to `disabled` when there is no query to slice from.
+ */
 const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
+  { role: "user", content: [textBlock(GOAL_TEXT)] },
   { role: "assistant", content: bashGreenBlocks("g01") },
   { role: "assistant", content: [textBlock("implemented")] },
 ];
@@ -66,6 +73,7 @@ const GREEN_FIRST_MESSAGES: AnthropicNativeMessage[] = [
  * execution before claim found").
  */
 const TEXT_ONLY_MESSAGES: AnthropicNativeMessage[] = [
+  { role: "user", content: [textBlock(GOAL_TEXT)] },
   {
     role: "assistant",
     content: [writeFile("w01", "src/app.ts", "code")],
@@ -74,6 +82,7 @@ const TEXT_ONLY_MESSAGES: AnthropicNativeMessage[] = [
 ];
 
 const CONTRADICTED_MESSAGES: AnthropicNativeMessage[] = [
+  { role: "user", content: [textBlock(GOAL_TEXT)] },
   { role: "assistant", content: bashGreenBlocks("g02") },
   {
     role: "assistant",
@@ -184,22 +193,22 @@ function autoOptions(over: {
     config: { command: "" },
     sessionId: "auto",
     runClassifier: over.runClassifier,
-    completionMode: "auto",
+    completionMode: "goal",
     cwd: process.cwd(),
   };
 }
 
-describe("auto completion module judge envelope (plan T2)", () => {
-  it("auto + completed + SUFFICIENT: spawn >= 1", async () => {
+describe("goal completion module judge envelope (plan T2)", () => {
+  it("goal + completed + SUFFICIENT: spawn >= 1", async () => {
     const runFn = makeEvidenceRunFn(GREEN_FIRST_MESSAGES);
     const { runClassifier, calls } = makeClassifierSpy([passEnvelope()]);
     const out = await runVerifyLoop(autoOptions({ runFn, runClassifier }));
-    assert.ok(calls().length >= 1, "auto SUFFICIENT must still spawn judge");
+    assert.ok(calls().length >= 1, "goal SUFFICIENT must still spawn judge");
     assert.equal(out.outcome, "passed");
     assert.equal(out.result.stopReason, "completed");
   });
 
-  it("auto + CONTRADICTED: spawn = 0 (hard fail inherits T1)", async () => {
+  it("goal + CONTRADICTED: spawn = 0 (hard fail inherits T1)", async () => {
     const runFn = makeEvidenceRunFn(CONTRADICTED_MESSAGES, {
       stopReasonFor: (call) => (call === 0 ? "completed" : "maxTurns"),
     });
@@ -228,7 +237,7 @@ describe("auto completion module judge envelope (plan T2)", () => {
     assert.equal(out.outcome, "passed");
   });
 
-  it("auto: task === goal.text, no evidence JSON, finalText stays independent", async () => {
+  it("goal: task === goal.text, no evidence JSON, finalText stays independent", async () => {
     const runFn = makeEvidenceRunFn(TEXT_ONLY_MESSAGES);
     const { runClassifier, calls } = makeClassifierSpy([passEnvelope()]);
     await runVerifyLoop(autoOptions({ runFn, runClassifier }));

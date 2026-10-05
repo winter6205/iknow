@@ -3,8 +3,8 @@
  *
  * TUI verify final-state human-readable banner:
  *
- *  - both HITL and auto modes show the passed / failed / unstable / escalated
- *    final states;
+ *  - both permission modes (interactive / full_auto) show the passed / failed /
+ *    unstable / escalated final states;
  *  - verify missing → silent (0 lines, component renders null, no fake hint);
  *  - illegal wire shape (runtime boundary) → degraded `验证结果不可用`
  *    ("verification result unavailable") + typed-error detail rendering
@@ -54,13 +54,13 @@ function hasBwrap(): boolean {
 }
 
 // =============================================================================
-// Projection matrix: HITL × 4 final states
+// Projection matrix: interactive permission mode × 4 final states
 // =============================================================================
-describe("projectVerifyBanner — HITL 模式 × 4 终态文案 + glyph + 颜色", () => {
+describe("projectVerifyBanner — interactive 模式 × 4 终态文案 + glyph + 颜色", () => {
   test("passed → 「✓ 验证通过（N 轮）」fg=palette.add", () => {
     const lines = projectVerifyBanner(
       { kind: "ok", verify: { outcome: "passed", rounds: 2 } },
-      "hitl",
+      "interactive",
       80
     );
     expect(lines).toHaveLength(1);
@@ -71,7 +71,7 @@ describe("projectVerifyBanner — HITL 模式 × 4 终态文案 + glyph + 颜色
   test("failed → 「✗ 验证未通过（N 轮）」fg=palette.error", () => {
     const lines = projectVerifyBanner(
       { kind: "ok", verify: { outcome: "failed", rounds: 3 } },
-      "hitl",
+      "interactive",
       80
     );
     expect(lines).toHaveLength(1);
@@ -82,7 +82,7 @@ describe("projectVerifyBanner — HITL 模式 × 4 终态文案 + glyph + 颜色
   test("unstable → 含 ⚠ / 验证不稳定 / N 轮,fg=palette.running", () => {
     const lines = projectVerifyBanner(
       { kind: "ok", verify: { outcome: "unstable", rounds: 4 } },
-      "hitl",
+      "interactive",
       80
     );
     expect(lines).toHaveLength(1);
@@ -95,7 +95,7 @@ describe("projectVerifyBanner — HITL 模式 × 4 终态文案 + glyph + 颜色
   test("escalated → 含 ⤴ / 验证耗尽 / N 轮,fg=palette.error", () => {
     const lines = projectVerifyBanner(
       { kind: "ok", verify: { outcome: "escalated", rounds: 5 } },
-      "hitl",
+      "interactive",
       80
     );
     expect(lines).toHaveLength(1);
@@ -116,7 +116,7 @@ describe("projectVerifyBanner — HITL 模式 × 4 终态文案 + glyph + 颜色
       expect(
         projectVerifyBanner(
           { kind: "ok", verify: { outcome: o, rounds: 1 } },
-          "hitl",
+          "interactive",
           80
         ).length
       ).toBe(1);
@@ -125,46 +125,75 @@ describe("projectVerifyBanner — HITL 模式 × 4 终态文案 + glyph + 颜色
 });
 
 // =============================================================================
-// Projection: auto mode visual marker ("[auto] " prefix, wording unchanged)
+// Projection: the full_auto permission marker ("[auto] " prefix, wording
+// unchanged — the rendered bytes are the contract, the mode value is the axis)
 // =============================================================================
-describe("projectVerifyBanner — auto 模式视觉标记", () => {
-  test("passed + auto → 「[auto] 」前缀 + 验证通过", () => {
+describe("projectVerifyBanner — full_auto 权限标记", () => {
+  test("passed + full_auto → 「[auto] 」前缀 + 验证通过", () => {
     const lines = projectVerifyBanner(
       { kind: "ok", verify: { outcome: "passed", rounds: 1 } },
-      "auto",
+      "full_auto",
       80
     );
     expect(lines[0]!.text).toBe("[auto] ✓ 验证通过（1 轮）");
   });
 
-  test("failed + auto → 「[auto] 」前缀 + 验证未通过", () => {
+  test("failed + full_auto → 「[auto] 」前缀 + 验证未通过", () => {
     const lines = projectVerifyBanner(
       { kind: "ok", verify: { outcome: "failed", rounds: 1 } },
-      "auto",
+      "full_auto",
       80
     );
     expect(lines[0]!.text).toBe("[auto] ✗ 验证未通过（1 轮）");
   });
 
-  test("degraded + auto 同样加 [auto] 前缀(标记与 hitl/auto 无差)", () => {
+  test("degraded + full_auto 同样加 [auto] 前缀(标记与 interactive/full_auto 无差)", () => {
     const lines = projectVerifyBanner(
       {
         kind: "unavailable",
         reason: { kind: "malformed_view" },
       },
-      "auto",
+      "full_auto",
       80
     );
     expect(lines[0]!.text).toBe("[auto] ⚠ 验证结果不可用（malformed_view）");
   });
 
-  test("HITL 不含 [auto] 前缀", () => {
+  test("interactive 不含 [auto] 前缀", () => {
     const lines = projectVerifyBanner(
       { kind: "ok", verify: { outcome: "passed", rounds: 1 } },
-      "hitl",
+      "interactive",
       80
     );
     expect(lines[0]!.text).not.toMatch(/^\[auto\]/);
+  });
+
+  test("full_auto 会话且无 goal → 前缀只来自 permMode(与 goal 在场无关)", () => {
+    // Real seam chain, no goal-axis input anywhere: a session whose verify
+    // records carry no completion-judge signal still renders the marker, so a
+    // human reading `[auto] ` is reading a permission fact and nothing else.
+    const view = projectVerifyHumanView({
+      outcome: "passed",
+      rounds: 1,
+      records: [{}],
+    });
+    expect(view).toEqual({ outcome: "passed", rounds: 1 });
+    const slot = verifyFromWire(view);
+    // The slot is the whole projection input besides the mode: it holds no goal
+    // field that could have fed the marker.
+    expect(slot).toEqual({
+      kind: "ok",
+      verify: { outcome: "passed", rounds: 1 },
+    });
+    const fullAuto = projectVerifyBanner(slot, "full_auto", 80);
+    expect(fullAuto).toHaveLength(1);
+    expect(fullAuto[0]!.text).toBe("[auto] ✓ 验证通过（1 轮）");
+    expect(fullAuto[0]!.fg).toBe(tuiPalette.add);
+    // Same goal-free slot, interactive: the marker disappears and nothing else
+    // on the line moves.
+    const interactive = projectVerifyBanner(slot, "interactive", 80);
+    expect(interactive).toHaveLength(1);
+    expect(interactive[0]!.text).toBe("✓ 验证通过（1 轮）");
   });
 });
 
@@ -174,8 +203,8 @@ describe("projectVerifyBanner — auto 模式视觉标记", () => {
 describe("projectVerifyBanner — 缺 verify 静默合法态", () => {
   test('slot.kind === "none" → 0 行', () => {
     const slot: VerifySlot = { kind: "none" };
-    expect(projectVerifyBanner(slot, "hitl", 80)).toEqual([]);
-    expect(projectVerifyBanner(slot, "auto", 80)).toEqual([]);
+    expect(projectVerifyBanner(slot, "interactive", 80)).toEqual([]);
+    expect(projectVerifyBanner(slot, "full_auto", 80)).toEqual([]);
   });
 });
 
@@ -189,7 +218,7 @@ describe("projectVerifyBanner — 投影失败 degraded (typed-error 契约)", (
         kind: "unavailable",
         reason: { kind: "malformed_view", conversation_id: "abc-123" },
       },
-      "hitl",
+      "interactive",
       80
     );
     expect(lines).toHaveLength(1);
@@ -200,7 +229,7 @@ describe("projectVerifyBanner — 投影失败 degraded (typed-error 契约)", (
   test("仅有 kind,缺 conversation_id → 不伪造 conv_id", () => {
     const lines = projectVerifyBanner(
       { kind: "unavailable", reason: { kind: "session_not_found" } },
-      "hitl",
+      "interactive",
       80
     );
     expect(lines[0]!.text).toBe("⚠ 验证结果不可用（session_not_found）");
@@ -214,7 +243,7 @@ describe("projectVerifyBanner — 视觉宽度截断", () => {
   test("cols=10 极窄 → 文本宽度 ≤ cols(CJK-safe)", () => {
     const lines = projectVerifyBanner(
       { kind: "ok", verify: { outcome: "failed", rounds: 99 } },
-      "hitl",
+      "interactive",
       10
     );
     expect(lines).toHaveLength(1);
@@ -224,7 +253,7 @@ describe("projectVerifyBanner — 视觉宽度截断", () => {
   test("cols=3 → 仍 1 行(截断到列宽),不抛", () => {
     const lines = projectVerifyBanner(
       { kind: "ok", verify: { outcome: "passed", rounds: 1 } },
-      "hitl",
+      "interactive",
       3
     );
     expect(lines).toHaveLength(1);
@@ -570,7 +599,7 @@ describe("projectVerifyHumanView + banner — HITL skip 投影 not_run (SC1-SC3)
     });
     const slot = verifyFromWire(view);
     expect(slot.kind).toBe("ok");
-    const lines = projectVerifyBanner(slot, "hitl", 80);
+    const lines = projectVerifyBanner(slot, "interactive", 80);
     expect(lines).toHaveLength(1);
     expect(lines[0]!.text).toBe("⚠ 未验证（证据不足）（1 轮）");
     expect(lines[0]!.fg).toBe(tuiPalette.running);
@@ -595,7 +624,7 @@ describe("projectVerifyHumanView + banner — HITL skip 投影 not_run (SC1-SC3)
     });
     const slot = verifyFromWire(view);
     expect(slot.kind).toBe("ok");
-    const lines = projectVerifyBanner(slot, "hitl", 80);
+    const lines = projectVerifyBanner(slot, "interactive", 80);
     expect(lines).toHaveLength(1);
     expect(lines[0]!.text).toBe("⚠ 未验证（证据冲突）（1 轮）");
     expect(lines[0]!.fg).toBe(tuiPalette.running);
@@ -608,7 +637,7 @@ describe("projectVerifyHumanView + banner — HITL skip 投影 not_run (SC1-SC3)
         kind: "ok",
         verify: { outcome: "not_run", rounds: 1, notRunReason: "insufficient" },
       },
-      "hitl",
+      "interactive",
       80
     );
     const contradicted = projectVerifyBanner(
@@ -616,7 +645,7 @@ describe("projectVerifyHumanView + banner — HITL skip 投影 not_run (SC1-SC3)
         kind: "ok",
         verify: { outcome: "not_run", rounds: 1, notRunReason: "contradicted" },
       },
-      "hitl",
+      "interactive",
       80
     );
     expect(insufficient).toHaveLength(1);
@@ -650,7 +679,7 @@ describe("projectVerifyHumanView + banner — HITL skip 投影 not_run (SC1-SC3)
       records: [{}],
     });
     const slot = verifyFromWire(view);
-    const lines = projectVerifyBanner(slot, "hitl", 80);
+    const lines = projectVerifyBanner(slot, "interactive", 80);
     expect(lines).toHaveLength(1);
     expect(lines[0]!.text).toBe("✓ 验证通过（2 轮）");
   });

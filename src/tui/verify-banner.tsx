@@ -3,7 +3,7 @@
  * src/tui/verify-banner.tsx
  *
  * Human-readable end-state banner for the TUI verify loop:
- *   - shown in both HITL and auto modes for the terminal states
+ *   - shown in both permission modes for the terminal states
  *     passed / failed / unstable / escalated / not_run;
  *   - missing verify → silent (0 rows, the render shell returns null, no
  *     fake hint);
@@ -16,8 +16,10 @@
  *     directly, without OpenTUI / React rendering.
  *
  * Glyph discipline: passed ✓ / failed ✗ (established ✓ ✗ ▤ convention from
- * subagent-panel); unstable ⚠ / escalated ⤴ / not_run ⚠. HITL shows the label directly;
- * auto prefixes `[auto] ` as a visual marker.
+ * subagent-panel); unstable ⚠ / escalated ⤴ / not_run ⚠. The interactive mode
+ * shows the label directly; full_auto prefixes `[auto] ` as a visual marker.
+ * The marker states a permission fact: `[auto] ` is PermissionMode's `full_auto`
+ * (docs/CONTEXT.md), and nothing on the goal axis feeds it.
  *
  * Single data source: no second ledger. Banner state lives in app.tsx keyed
  * by conversation (`verifySlots`), fed by the `verify` DTO returned from
@@ -31,10 +33,12 @@ import type { VerifyAnswerView } from "../session-api/contract.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
-/** Verify mode from the TUI perspective: hitl = the default interactive flow;
- *  auto = full_auto mode (the banner adds the `[auto] ` visual marker; see the
- *  src/tui/run.tsx --auto-mode flag). */
-export type VerifyBannerMode = "hitl" | "auto";
+/** Which permission mode the banner reports: interactive = the default human-in
+ *  the-loop flow; full_auto = PermissionMode's own value (the banner adds the
+ *  `[auto] ` visual marker; see the src/tui/run.tsx --auto-mode flag). The
+ *  values carry PermissionMode's vocabulary because permMode is the only axis
+ *  that feeds them. */
+export type VerifyBannerMode = "interactive" | "full_auto";
 
 /** Projection failure reason (code-quality.md typed-error rendering contract):
  *  lifts `kind` out of the discriminated union as the primary key; no
@@ -207,11 +211,11 @@ export function describeVerifyErrorDetail(err: unknown): string | null {
   return typeof convId === "string" ? `${obj.kind}: ${convId}` : obj.kind;
 }
 
-/** Render projection: slot + mode → display-line array. none → []; ok → 1 line
- *  (terminal-state text); unavailable → 1 line (degraded). auto mode prefixes
- *  `[auto] ` uniformly (terminal states and the degraded line alike, so the
- *  marker is recognizable at a glance). cols truncation goes through
- *  clipOneLineVisual (CJK counts 2 columns; same as agent-status-line /
+/** Render projection: slot + permission mode → display-line array. none → [];
+ *  ok → 1 line (terminal-state text); unavailable → 1 line (degraded).
+ *  full_auto prefixes `[auto] ` uniformly (terminal states and the degraded
+ *  line alike, so the marker is recognizable at a glance). cols truncation goes
+ *  through clipOneLineVisual (CJK counts 2 columns; same as agent-status-line /
  *  subagent-panel). */
 export function projectVerifyBanner(
   slot: VerifySlot,
@@ -219,21 +223,21 @@ export function projectVerifyBanner(
   cols: number
 ): ReadonlyArray<VerifyBannerLine> {
   if (slot.kind === "none") return [];
-  const autoPrefix = mode === "auto" ? "[auto] " : "";
+  const permissionPrefix = mode === "full_auto" ? "[auto] " : "";
   if (slot.kind === "ok") {
     const view = slot.verify;
     const pres = VERIFY_OUTCOME_PRESENTATION[verifyPresentationKey(view)];
-    const text = `${autoPrefix}${pres.glyph} ${pres.label}（${view.rounds} 轮）`;
+    const text = `${permissionPrefix}${pres.glyph} ${pres.label}（${view.rounds} 轮）`;
     return [{ fg: pres.fg, text: clipOneLineVisual(text, cols) }];
   }
-  // unavailable — auto mode gets the same [auto] prefix (marker consistent with the terminal states).
+  // unavailable — full_auto gets the same [auto] prefix (marker consistent with the terminal states).
   const detail = describeVerifyErrorDetail(slot.reason);
   const suffix = detail === null ? "" : `（${detail}）`;
   const base = "⚠ 验证结果不可用";
   return [
     {
       fg: tuiPalette.error,
-      text: clipOneLineVisual(`${autoPrefix}${base}${suffix}`, cols),
+      text: clipOneLineVisual(`${permissionPrefix}${base}${suffix}`, cols),
     },
   ];
 }

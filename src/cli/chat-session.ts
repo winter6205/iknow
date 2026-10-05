@@ -143,6 +143,7 @@ import { isNativeStatePortError } from "../shared/native-state-port.js";
 // as loop-engine's own use) — this seam must substitute secrets exactly as the
 // engine will, or the committed query would not match what the model receives.
 import { recognize } from "../harness/secret-roundtrip/index.js";
+import { sessionGoalActivation } from "../session-api/goal/index.js";
 import { isTurnQuery } from "../session-api/turn-projection.js";
 import { projectVerifyHumanView } from "../session-api/verify-human-view.js";
 import { resolveServeDataDir } from "../session-api/serve.js";
@@ -892,7 +893,7 @@ export interface ProcessChatLineOpts {
  * Failure semantics (named EXIT paths):
  * - store absent / conversationId === null → HITL; userText = query.
  *   Never treat the query as the judge's task for a completion.
- * - store.load succeeds with non-empty goal.text → auto; userText =
+ * - store.load succeeds with non-empty goal.text → goal; userText =
  *   goal.text.
  * - store.load succeeds with missing / empty goal.text → HITL;
  *   userText = query.
@@ -905,15 +906,16 @@ async function resolveVerifyDispatch(
   query: string
 ): Promise<{
   readonly userText: string;
-  readonly completionMode: "hitl" | "auto";
+  readonly completionMode: "hitl" | "goal";
 }> {
   if (store === undefined || conversationId === null) {
     return { userText: query, completionMode: "hitl" };
   }
   try {
     const session = await store.load(conversationId);
-    if (session.goal !== undefined && session.goal.text.length > 0) {
-      return { userText: session.goal.text, completionMode: "auto" };
+    const activation = sessionGoalActivation(session);
+    if (activation.active) {
+      return { userText: activation.goal.text, completionMode: "goal" };
     }
     return { userText: query, completionMode: "hitl" };
   } catch (err) {

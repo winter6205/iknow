@@ -163,22 +163,21 @@ function textBlock(text: string): AnthropicContentBlock {
 
 /**
  * write_file tool_use block. The target-path key is parameterized: the
- * production ACI schema key is `path` (write-file.ts ALLOWED_KEYS), `filePath`
- * is the legacy fixture spelling. Default keeps the legacy key so existing
- * cases stay byte-identical; the {path} variant certifies the real tool-call
- * form.
+ * production ACI schema key is `path` (write-file.ts ALLOWED_KEYS) and is the
+ * default, so every case speaks the key a real transcript carries; the
+ * `"filePath"` variant spells the legacy fixture key.
  */
 function writeBlock(
   id: string,
-  filePath: string,
+  path: string,
   content: unknown,
-  pathKey: "path" | "filePath" = "filePath"
+  pathKey: "path" | "filePath" = "path"
 ): AnthropicContentBlock {
   return {
     type: "tool_use",
     id,
     name: "write_file",
-    input: { [pathKey]: filePath, content },
+    input: { [pathKey]: path, content },
   };
 }
 
@@ -525,10 +524,23 @@ export function expectedCliLine(p: LockedPresentation, rounds: number): string {
  */
 export const NOT_RUN_ENVELOPE_PREFIX = "[VERIFY: not verified]";
 
-/** The honest meaning the envelope must state: not verified, not a pass, not a failure. */
+/**
+ * The honest meaning the envelope must state: not verified, not a pass, not a
+ * failure. Line 1 asserts only the turn's own evidence state — there is no
+ * completion-claim predicate anywhere in the loop, so the witness forbids the
+ * older copy that asserted one (`envelope copy asserts no completion claim`, and
+ * the copy-lock case below). Line 2 is the sentence locked by
+ * `specs/verify-status-contract.md` and is byte-stable across this change.
+ */
 export const NOT_RUN_ENVELOPE_MEANING = [
-  "You reported the task as complete, but this turn produced no verifiable",
+  "This turn produced no verifiable",
   "test evidence, so the result is not verified — not passed and not failed.",
+] as const;
+
+/** Sentences no injected envelope may assert (nothing in the loop tests them). */
+export const FORBIDDEN_CLAIM_ASSERTIONS = [
+  "You claimed completion",
+  "You reported the task as complete",
 ] as const;
 
 /** The obligation: produce test evidence before claiming completion again. */
@@ -537,6 +549,15 @@ export const NOT_RUN_ENVELOPE_OBLIGATION = "run the project's tests"; // case-in
 /** Copy for the no-command shape (classifier branch): says so, invents nothing. */
 export const NOT_RUN_ENVELOPE_NO_COMMAND =
   "No verify command is configured for this project";
+
+/**
+ * Copy for the CONTRADICTED shape: the record's own conflict headline. A
+ * contradicted record is not a record with a missing command, so the envelope
+ * that states one while holding the other is the configuration lie this row
+ * locks out.
+ */
+export const NOT_RUN_ENVELOPE_CONTRADICTION =
+  "The automated evidence check contradicted this turn's test evidence";
 
 /** Copy for the configured-command shape: names the command verbatim. */
 export function expectedNotRunEnvelope(opts: {

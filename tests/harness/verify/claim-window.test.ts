@@ -13,7 +13,11 @@ import {
   type VerifyLoopOptions,
 } from "../../../src/harness/verify/verify-loop.ts";
 import { checkEvidence } from "../../../src/harness/verify/evidence-checker.ts";
-import { deriveClaimIndex } from "../../../src/harness/last-nonempty-assistant.ts";
+import {
+  deriveClaimIndex,
+  lastNonEmptyAssistant,
+  lastNonEmptyTextBlockIndex,
+} from "../../../src/harness/last-nonempty-assistant.ts";
 import type { VerifyConfig } from "../../../src/harness/verify/types.ts";
 import type {
   AnthropicContentBlock,
@@ -63,8 +67,12 @@ const GREEN_AT_INDEX_2: AnthropicNativeMessage[] = [
   { role: "assistant", content: [textBlock("implemented")] },
 ];
 
-/** Green bash at [0] but no assistant with non-empty text (claim point missing). */
+/**
+ * Turn seeded as loop-engine does (user query first, then the assistant turn):
+ * green bash at [1] but no assistant with non-empty text (claim point missing).
+ */
 const NO_NONEMPTY_ASSISTANT: AnthropicNativeMessage[] = [
+  { role: "user", content: [textBlock("fix the failing test")] },
   { role: "assistant", content: bashGreenBlocks("g-sc5") },
   { role: "assistant", content: [textBlock("   ")] },
 ];
@@ -200,5 +208,41 @@ describe("claim window coordinates (SC1 / SC5)", () => {
       1,
       "INSUFFICIENT uses command observation"
     );
+  });
+});
+
+/**
+ * The claim's second coordinate: lastNonEmptyAssistant joins the non-blank
+ * texts, so the block index has to come from the original content positions —
+ * a claim message whose first text block is blank resolves to the LATER block,
+ * which is what the staleness window's right edge needs.
+ */
+describe("claim 块坐标 (SC13f)", () => {
+  it("首个文本块空白 + 末个非空 → 块坐标落在最后一个非空文本块", () => {
+    const msgs: AnthropicNativeMessage[] = [
+      { role: "user", content: [textBlock("task")] },
+      {
+        role: "assistant",
+        content: [
+          textBlock("   "),
+          ...bashGreenBlocks("c1"),
+          textBlock("implemented"),
+        ],
+      },
+    ];
+    const last = lastNonEmptyAssistant(msgs);
+    assert.ok(last !== null);
+    assert.equal(last.index, 1);
+    assert.equal(last.text, "implemented");
+    assert.equal(last.contentBlockIndex, 3);
+    // deriveClaimIndex keeps its scalar contract for the existing consumers.
+    assert.equal(deriveClaimIndex(msgs), 1);
+  });
+
+  it("无文本块 / 畸形 content → 块坐标 -1 (staleness 右边界 fail-closed)", () => {
+    assert.equal(lastNonEmptyTextBlockIndex([toolUse("c2", "ls")]), -1);
+    assert.equal(lastNonEmptyTextBlockIndex([]), -1);
+    assert.equal(lastNonEmptyTextBlockIndex(undefined), -1);
+    assert.equal(lastNonEmptyAssistant(NO_NONEMPTY_ASSISTANT), null);
   });
 });

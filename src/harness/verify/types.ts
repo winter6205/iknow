@@ -154,12 +154,16 @@ export type EvidenceVerdict =
 
 /**
  * Extracted evidence for one bash test execution.
- * messageIndex = index into messages, the ordering anchor for staleness
- * (trust only the session's own tool-call order — no mtime/diff/git).
+ * (messageIndex, contentBlockIndex) is the ordering anchor for staleness:
+ * blocks are ordered by the session's own tool-call order, and one assistant
+ * message can hold both the green bash and an edit, so the message index alone
+ * cannot place them relative to each other (never mtime/diff/git).
  */
 export interface TestRunEvidence {
   /** Index into the messages array (ordering anchor). */
   readonly messageIndex: number;
+  /** Index of the bash tool_use block within that message's content array. */
+  readonly contentBlockIndex: number;
   /** bash tool_use input.command. */
   readonly command: string;
   /** Structured JSON {code} from tool_result; null on is_error or missing code. */
@@ -170,7 +174,11 @@ export interface TestRunEvidence {
   readonly greenSummary: boolean;
   /** Weak green: 0 tests / collected 0 / no tests found / narrow run. */
   readonly weakGreen: boolean;
-  /** Failure swallowed: || true / || exit 0 / ; exit 0 / --passWithNoTests. */
+  /**
+   * Evidence voided by the command itself: || true / || exit 0 / ; exit 0 /
+   * --passWithNoTests / a masked pipeline tail, or a compound clause that
+   * writes a framework-summary-shaped line into stdout (fabricated green).
+   */
   readonly swallowed: boolean;
 }
 

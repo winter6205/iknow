@@ -40,6 +40,7 @@ One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 sta
 - `transport-continue-persist.md` — transport retry / continue / failure persist
 - `interrupt-frozen-prefix-keep.md` — interrupting a model in flight keeps the frozen prefix (ADR-0108)
 - `verify-status-contract.md` — three honest verify outcomes (`passed` / `not_run` + `notRunReason` / failed family) replacing the `passed`+hide hack, upstream content gate that overrides `verify.command` presence, pipeline-tail (`| tail`/`| head`) evidence voided, trajectory golden set (ADR-0073; hsr-3/hsr-6-stopgap)
+- `verify-trust-boundary-and-goal-decoupling.md` — declared = implemented for the verify subsystem: turn-scoped gate, line-anchored green summaries + output-fabrication void, block-ordinal staleness, envelopes naming the real actor and fact, goal activation collapsed to one predicate (ADR-0137; issue #1195)
 
 ### TUI
 

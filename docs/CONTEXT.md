@@ -825,6 +825,18 @@ _Avoid_: channel（该词已命名信任轴，ADR-0009）；chat REPL；进程�
 **平台事实页（platform facts page）**: `docs/platforms/<平台>-facts.md`，只登记已核实的平台约束和带测法的未证实项，不做设计决策。换一个桥接目标就新增一页，平台数值不跨目标混用。ADR-0120。
 _Avoid_: 把平台数值写进桥核；把事实页当 spec
 
+**goal 功能激活谓词**: goal 层导出的唯一谓词，读已加载会话判定 **goal 功能** 是否在跑（非空且 user-pinned 的 `goal.text`）；verify 只读它，不自写第二份。与 **自动模式** 的 `full_auto` 和 verify 循环的 `completionMode` 各属不同的轴。ADR-0137。
+_Avoid_: 把 opt-in 功能的激活态当完成判官开关；把「功能没开」当证据事实（那是 HITL 路径，不是证据不足）；在调用点内联 goal 条件
+
+**输出伪造证据（output-fabricated evidence）**: 测试命令在 runner 之后把框架摘要形状的串写进 stdout（`; echo "Tests 42 passed"` / `|| echo …` / `printf`），于是退出码与绿行都属于伪造步；判为 swallowed（fail-closed → INSUFFICIENT）。形状约束是承重的：`&& echo done` 不是摘要形状，必须仍判绿，所以判据看写出文本的形状而非 `echo` / `printf` 关键词。`SWALLOWED_PATTERNS` 的对应条目是 SSOT。
+_Avoid_: 用裸 `\b(echo|printf)\b` 判伪造（会误杀 `&& echo done`）；与 **pipeline-masked evidence** 混同（那个丢退出码）；与 **弱绿** 混同（那个真跑了窄跑）
+
+**tool_use 块序位（block ordinal）**: 一条 assistant 消息内 `tool_use` 块的位置，与消息下标组成二元坐标决定证据与 staleness 的先后；顺序只按会话自身的块序比较，从不用 mtime / diff / git。
+_Avoid_: 拿消息下标当唯一顺序坐标（同一消息内的兄弟 edit 因此不可见）；按文件时间判断证据新鲜度
+
+**信封忠实性（envelope fidelity）**: 面向模型的 verify 信封只陈述系统真正观察到的、以及真正产出该记录的那个 actor——CONTRADICTED 点名 checker 而非从未跑过的判官，not verified 报记录自己的配置事实，不复述系统没测过的完成声明。
+_Avoid_: 给从未跑过的判官署名；报记录里没有的配置事实；断言系统没测过的完成声明
+
 ## Relationships
 
 - **代码前像 vs 内容寻址正文池**: Raw per-write file payloads stay in `code-snapshots/`; `blobs/` can hold native recovery and trace-permitted represented bodies under ADR-0136. Required recovery/file-evidence writes block dependent execution on failure, while trace remains best-effort; shared bytes do not merge those contracts (ADR-0121 / ADR-0071 / ADR-0136).

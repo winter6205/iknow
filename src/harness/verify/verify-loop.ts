@@ -40,8 +40,13 @@ import type { SubagentFailureReason } from "../subagent/envelope.js";
 import type { LoopTrace } from "../loop-trace.js";
 import type { TraceService } from "../trace/index.js";
 import { stampHostInjected } from "../model-adapter/outbound-projection.js";
+import { lastTurnQueryIndex, sliceTurnFrom } from "../turn-boundary.js";
 import { deriveClaimIndex } from "../last-nonempty-assistant.js";
-import { checkEvidence, shouldTriggerVerify } from "./evidence-checker.js";
+import {
+  checkEvidence,
+  editBlockPath,
+  shouldTriggerVerify,
+} from "./evidence-checker.js";
 import { probeVerifyCommand } from "./command-probe.js";
 import {
   buildClassifierEnvelope,
@@ -181,12 +186,14 @@ export interface VerifyLoopOptions {
    *
    // (ADR-0024)
    * `hitl` = skip LLM judge (named EXIT).
-   * `auto` = the `/goal` feature's judge module: spawn judge on completed unless hard-fail,
+   * `goal` = the `/goal` feature's judge module: spawn judge on completed unless hard-fail,
    * including checker SUFFICIENT.
    * Omitted keeps the legacy evidence-first short-circuit (SUFFICIENT skips
    * the judge) so existing classifier unit tests stay on the old path.
+   * Values name the goal axis, not PermissionMode: only the goal feature feeds
+   * this field, so the word must not read as a permission statement.
    */
-  readonly completionMode?: "hitl" | "auto";
+  readonly completionMode?: "hitl" | "goal";
   readonly cwd: string;
   /**
    * ADR-0092: fs isolation tier + home ro-bind source for the verify-command
@@ -293,6 +300,15 @@ interface RoundObservation {
    *  (SUFFICIENT / CONTRADICTED carry nothing). */
   readonly evidenceVerdict?: EvidenceVerdict;
   readonly gamingSignals?: ReadonlyArray<string>;
+  /**
+   * Evidence-first pre-stage: present only when the CHECKER wrote this round's
+   * verdict itself — the goal-mode EVIDENCE_CONTRADICTED veto, raised before and
+   * without the completion-facing judge. Carries the reasons the veto was built
+   * from, so the correction envelope can name its real author and narrate that
+   * author's own reasons. Deliberately not persisted: the record's Postel shape
+   * stays as it is; only the envelope reads who authored it.
+   */
+  readonly checkerVeto?: { readonly reasons: ReadonlyArray<string> };
 }
 
 /** Terminal state of one verification round; aborted = user interrupt during execution. */
@@ -605,16 +621,31 @@ function buildNextPriorMessages(
 function appendNotRunInjection(
   current: RunOutcome,
   outcome: VerifyLoopOutcome,
-  round: number,
-  maxRounds: number,
-  configCommand: string | undefined
+  facts: {
+    readonly round: number;
+    readonly maxRounds: number;
+    readonly configCommand: string | undefined;
+    /**
+     * What this terminal's record says about the evidence. The envelope
+     * narrates it, so a CONTRADICTED turn is told about its conflict rather
+     * than about a configuration it never lacked.
+     */
+    readonly evidenceVerdict: EvidenceVerdict | undefined;
+    readonly reasons: ReadonlyArray<string>;
+  }
 ): RunOutcome {
   if (outcome !== "not_run") return current;
   const injected = userTextMessage(
     buildNotRunEnvelope({
-      round,
-      maxRounds,
-      ...(configCommand !== undefined ? { command: configCommand } : {}),
+      round: facts.round,
+      maxRounds: facts.maxRounds,
+      ...(facts.configCommand !== undefined
+        ? { command: facts.configCommand }
+        : {}),
+      ...(facts.evidenceVerdict !== undefined
+        ? { evidenceVerdict: facts.evidenceVerdict }
+        : {}),
+      reasons: facts.reasons,
     })
   );
   const filtered = current.result.messages.filter(
@@ -717,8 +748,8 @@ function collectProbeFiles(
       const b = block as AnthropicContentBlock;
       if (b.type !== "tool_use") continue;
       if (b.name !== "write_file" && b.name !== "edit_file") continue;
-      const input = b.input as { filePath?: unknown; content?: unknown };
-      const filePath = typeof input.filePath === "string" ? input.filePath : "";
+      const input = b.input as { content?: unknown };
+      const filePath = editBlockPath(b.input) ?? "";
       if (filePath.length === 0) continue;
       if (PROBE_FLAG_FILES.has(filePath)) {
         files.push(filePath);
@@ -943,6 +974,7 @@ async function runClassifierOnce(opts: {
  */
 function preRoundExit(opts: {
   readonly current: RunOutcome;
+  readonly turnMessages: ReadonlyArray<AnthropicNativeMessage>;
   readonly records: ReadonlyArray<VerificationRecord>;
   readonly round: number;
   readonly signal: AbortSignal | undefined;
@@ -968,14 +1000,14 @@ function preRoundExit(opts: {
       outcome,
     });
   }
-  // Upstream content gate (pre-stage, re-evaluated every round on the
-  // post-run messages of the current round — a round-2 edit is seen): a
-  // turn without a usable content signal never enters the verify
+  // Upstream content gate (pre-stage, re-evaluated every round on the current
+  // round's turn slice — a round-2 edit is seen): a turn without a usable
+  // content signal never enters the verify
   // subsystem, even when verify.command is configured. The no-op result is
   // the disabled path's exact shape, byte-identical to an unconfigured
   // bare run; round 1's runFn already ran, so result is the model's real
   // output.
-  if (!shouldTriggerVerify({ messages: opts.current.result.messages })) {
+  if (!shouldTriggerVerify({ messages: opts.turnMessages })) {
     return buildResult({
       current: opts.current,
       records: [],
@@ -1002,7 +1034,8 @@ async function runVerifyLoopBody(opts: {
   readonly sessionId: string;
   readonly produceObservation: (
     round: number,
-    current: RunOutcome
+    current: RunOutcome,
+    turnMessages: ReadonlyArray<AnthropicNativeMessage>
   ) => Promise<RoundResult>;
   readonly buildFailureEnvelope: (
     round: number,
@@ -1019,11 +1052,27 @@ async function runVerifyLoopBody(opts: {
   let current = await options.runFn(options.userText, {
     signal: options.signal,
   });
+  // The judged turn's boundary, read once here: `result.messages` is seeded
+  // from `priorMessages`, so an earlier turn's green run sits before this index
+  // and must neither open this turn's gate nor stand as this turn's evidence.
+  // Not re-read per round: each continuation appends the loop's own envelope and
+  // run()'s re-appended task text, both of which read as queries, so a re-scan
+  // would walk the boundary forward mid-loop and cut this turn's earlier
+  // evidence (and its gate signal) off. Rounds only grow the tail, so
+  // re-slicing from this index is the same turn seen later. A negative index is
+  // kept: with no query there is no turn to judge, and sliceTurnFrom collapses
+  // that to the empty array (fail-closed) rather than scanning all history.
+  const turnStart = lastTurnQueryIndex(current.result.messages);
   let round = 0;
 
   while (true) {
+    // The one array this observation judges: the gate and both checker sites get
+    // this same slice, so claimIndex and the evidence window share its
+    // coordinates (claimIndex is slice-relative, not history-relative).
+    const turnMessages = sliceTurnFrom(current.result.messages, turnStart);
     const exit = preRoundExit({
       current,
+      turnMessages,
       records,
       round,
       signal: options.signal,
@@ -1032,14 +1081,14 @@ async function runVerifyLoopBody(opts: {
 
     round += 1;
     // Evidence-first pre-stage: before each round's produceObservation run
-    // checkEvidence; three-state mapping:
+    // checkEvidence on the same turn slice the gate judged; three-state mapping:
     //   EVIDENCE_SUFFICIENT → PASS short-circuit (zero judge, zero rerun, even
     //     when a command is configured);
-    //     exception: completionMode === "auto" and command empty → still spawn
+    //     exception: completionMode === "goal" and command empty → still spawn
     // (ADR-0024)
     //     the completion-facing judge (judged even on success; the command
     //     sandbox loop stays out of this);
-    //   EVIDENCE_CONTRADICTED → goal feature (completionMode auto) / omitted:
+    //   EVIDENCE_CONTRADICTED → goal feature (completionMode goal) / omitted:
     //     true-failure (enters correction round);
     // (ADR-0073)
     //     HITL: same EXIT as INSUFFICIENT (skip the completion-facing judge,
@@ -1050,8 +1099,8 @@ async function runVerifyLoopBody(opts: {
     //     this round's observation (Postel persistence via buildRecord).
     //     SUFFICIENT and goal-mode CONTRADICTED do not persist evidenceVerdict.
     const evidenceReport = checkEvidence({
-      messages: current.result.messages,
-      claimIndex: deriveClaimIndex(current.result.messages),
+      messages: turnMessages,
+      claimIndex: deriveClaimIndex(turnMessages),
     });
     let pendingEvidence:
       | {
@@ -1060,14 +1109,14 @@ async function runVerifyLoopBody(opts: {
         }
       | undefined;
     let observation: RoundResult;
-    const autoJudgeOnSufficient =
-      options.completionMode === "auto" &&
+    const goalJudgeOnSufficient =
+      options.completionMode === "goal" &&
       (options.config.command ?? "").trim() === "";
     if (
       evidenceReport.verdict === "EVIDENCE_SUFFICIENT" &&
-      autoJudgeOnSufficient
+      goalJudgeOnSufficient
     ) {
-      observation = await opts.produceObservation(round, current);
+      observation = await opts.produceObservation(round, current, turnMessages);
     } else if (evidenceReport.verdict === "EVIDENCE_SUFFICIENT") {
       observation = {
         verdict: "pass",
@@ -1081,7 +1130,11 @@ async function runVerifyLoopBody(opts: {
         // Persist evidenceVerdict so human projection can hide the
         // "verification passed" banner (Postel still omits the verdict on
         // goal-mode true-failure / SUFFICIENT).
-        observation = await opts.produceObservation(round, current);
+        observation = await opts.produceObservation(
+          round,
+          current,
+          turnMessages
+        );
         pendingEvidence = {
           evidenceVerdict: "EVIDENCE_CONTRADICTED",
           gamingSignals: evidenceReport.gamingSignals,
@@ -1096,6 +1149,11 @@ async function runVerifyLoopBody(opts: {
             countRegex: undefined,
           }),
           outputText: "",
+          // The checker raised this veto; the completion-facing judge never ran.
+          // Authorship travels with the verdict so the correction envelope names
+          // the checker and quotes these reasons instead of inventing a judge
+          // line for a judge that was never asked.
+          checkerVeto: { reasons: evidenceReport.reasons },
         };
       }
     } else {
@@ -1132,7 +1190,7 @@ async function runVerifyLoopBody(opts: {
           continue;
         }
       }
-      observation = await opts.produceObservation(round, current);
+      observation = await opts.produceObservation(round, current, turnMessages);
       pendingEvidence = {
         evidenceVerdict: "EVIDENCE_INSUFFICIENT",
         gamingSignals: evidenceReport.gamingSignals,
@@ -1198,13 +1256,16 @@ async function runVerifyLoopBody(opts: {
         observation
       );
       return buildResult({
-        current: appendNotRunInjection(
-          current,
-          terminalOutcome,
+        current: appendNotRunInjection(current, terminalOutcome, {
           round,
-          opts.maxRounds,
-          options.config.command
-        ),
+          maxRounds: opts.maxRounds,
+          configCommand: options.config.command,
+          // The record's own evidence fact and the reasons behind it, both in
+          // scope at this terminal: `observation` carries the verdict the
+          // pre-stage merged in, `evidenceReport` the checker's reasons.
+          evidenceVerdict: observation.evidenceVerdict,
+          reasons: evidenceReport.reasons,
+        }),
         records,
         rounds: round,
         enabled: true,
@@ -1319,7 +1380,7 @@ function runClassifierLoop(
     options,
     maxRounds,
     sessionId,
-    produceObservation: (_round, current) => {
+    produceObservation: (_round, current, turnMessages) => {
       if (options.completionMode === "hitl") {
         // EXIT: HITL skips completion-facing LLM; checker already ran.
         return Promise.resolve({
@@ -1331,11 +1392,12 @@ function runClassifierLoop(
       }
       const summary = current.result.finalText ?? "";
       // Reuse the evidence-first pre-stage's report (checkEvidence is pure and
-      // idempotent; the second call is independent and side-effect-free;
-      // claimIndex aligns with the pre-stage).
+      // idempotent; the second call is independent and side-effect-free; it
+      // receives the pre-stage's own turn slice, so its claimIndex is the same
+      // coordinate).
       const report = checkEvidence({
-        messages: current.result.messages,
-        claimIndex: deriveClaimIndex(current.result.messages),
+        messages: turnMessages,
+        claimIndex: deriveClaimIndex(turnMessages),
       });
       lastEvidenceContext = buildEvidenceContext(
         report,
@@ -1351,19 +1413,33 @@ function runClassifierLoop(
         evidenceContext: lastEvidenceContext,
       });
     },
-    buildFailureEnvelope: (round, maxRounds, observation) =>
-      buildClassifierEnvelope({
+    buildFailureEnvelope: (round, maxRounds, observation) => {
+      // Authorship is a fact about this round's observation, never a default:
+      // the checker veto names the checker and quotes its own reasons; anything
+      // else reaching this builder came from the completion-facing judge (the
+      // command path renders buildValidationEnvelope, not this one).
+      const veto = observation.checkerVeto;
+      return buildClassifierEnvelope({
         round,
         maxRounds,
+        source: veto !== undefined ? "checker" : "classifier",
         task: options.userText,
-        reason: observation.reason ?? "classifier reported failure",
+        reason:
+          veto !== undefined
+            ? veto.reasons.join("; ")
+            : (observation.reason ?? "classifier reported failure"),
         missing: observation.missing ?? [],
         // Failure-correction envelope carries the evidence_context section
-        // (Postel: undefined → envelope bytes unchanged, section omitted).
-        ...(lastEvidenceContext !== undefined
+        // (Postel: undefined → envelope bytes unchanged, section omitted). On a
+        // checker veto the judge never ran this round, so the shared context is
+        // either absent or the PREVIOUS round's report — quoting a stale
+        // checker_verdict under a checker-authored headline would be a new
+        // inaccuracy, and the veto's own reasons already ride `reason:` above.
+        ...(veto === undefined && lastEvidenceContext !== undefined
           ? { evidenceContext: lastEvidenceContext }
           : {}),
-      }),
+      });
+    },
   });
 }
 
