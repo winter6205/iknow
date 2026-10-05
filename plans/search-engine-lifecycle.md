@@ -34,7 +34,7 @@ minimal-change-verifier:  yes — T2's file list below is the full enumeration i
    - **Acceptance:** `npx tsx scripts/ci-check-test-excludes.ts` exits 0. In this sandbox the `npx tsx` route fails on an IPC pipe (`listen EINVAL` on the fence tmp path) and `bun run scripts/ci-check-test-excludes.ts` is the working equivalent — the implementer must report the exit code of the run it actually used, not the pipe's. The reverse check (no dead entries) and the `tests/tui` ban must also pass, since they run in the same process. Each of the 12 entries carries a class + reason comment; `grep.test.ts:74` — which today has **no reason of its own**, the ADR-0117 comment above it belongs to the entry above — is not in scope for this bullet, it is handled by T2.
    - The 12 files, as the guard actually reports them:
      `tests/harness/aci/bash-background-deadline.test.ts`, `bash-cleanup-roots.test.ts`, `bash-foreground-deadline.test.ts`, `bash-protected-erofs-feedback.test.ts`, `bash-protected-targets-wiring.test.ts`, `tests/harness/aci/tools/bash-substitution-description.test.ts`, `tests/harness/cleanup-roots-production-wiring.test.ts`, `tests/harness/permission/root-find-readonly-allowance.test.ts`, `tests/harness/permission/sensitive-path-evidence.test.ts`, `tests/harness/route-budget-wire.test.ts`, `tests/harness/sandbox/cleanup-evidence.test.ts`, `tests/harness/subagent-thinking-propagation.test.ts`.
-   - Status: [ ] pending
+   - Status: [x] done — all 12 files registered; `npx tsx scripts/ci-check-test-excludes.ts` exits 0.
 
 2. **Provision the search engine from the lockfile** — tag: `[implementation]`
    - **Inherits:** the operator's decision #1, "Take ripgrep from npm, not from a GitHub download — adopt `@vscode/ripgrep`" (sel-2), and its rejected alternative: **no `postinstall` hook** (sel-2 — the package abandoned it after GitHub rate-limit, 403, proxy and yarn incidents; npm RFC-0054 is moving install scripts to opt-in).
@@ -51,6 +51,7 @@ minimal-change-verifier:  yes — T2's file list below is the full enumeration i
      - **Consequence:** the pinned version constant and the model-visible `GREP_DESCRIPTION` become 15.0.0, and the type table loses `ssa`. That is the table catching up to the engine, which is what its own header requires.
    - Full file list (blocker 3 correction): `package.json` + lockfile, `src/harness/aci/search/engine-manifest.ts`, `src/harness/aci/search/type-table.ts`, `src/harness/aci/tools/grep.ts` (call site + version in `GREP_DESCRIPTION`), `src/harness/aci/tools/glob.ts` (call site), `scripts/install-search-engine.ts` (deleted), `vitest.ci-excludes.ts`, `README.md:53-61`, and the test call sites in `tests/harness/aci/tools/grep.test.ts`, `glob.test.ts`, `glob-engine-binding.test.ts`, `host-read-policy.test.ts`.
    - **Dependency justification (minimal-change gate):** adds one runtime dependency; deletes 162 lines of installer plus ~60 of manifest; retires a manual provisioning step that nothing in CI or `npm ci` performs.
+   - Status: [x] done — all four criteria met. `scripts/install-search-engine.ts` and the npm script are gone; `engine-absent.test.ts` pins the throwing-import path; the type table tracks the shipped 15.0.0 (217 keys, set-equal to its `--type-list`); `grep.test.ts` left the exclude set and runs green in `test-fast`.
    - [blocks: T3]
 
 3. **Disclose the Node fallback in the grep output** — tag: `[implementation]`
@@ -58,6 +59,7 @@ minimal-change-verifier:  yes — T2's file list below is the full enumeration i
    - **Surface:** the grep tool and the search pipeline.
    - **Acceptance:** when the handler takes the Node fallback, the returned `output` ends with one English line naming the fallback; when the engine is present, `output` is byte-identical to today. The `{kind:"unavailable"}` tag is **recorded and carried to the render step, not passed into the pipeline** — `pipeline.ts:56` throws on it by design and `dropUnrepresentable:105` handles it; neither may be weakened. The three output modes stay exact-matchable after the notice is accounted for; the mode contract is not weakened to accommodate it. The in-tree precedent for a bare in-band string is `EMPTY_RESULT` (`glob.ts:49`) and `NO_ENTRIES_AT_OFFSET` (`paginate.ts:18`).
    - **Model-visible change:** this appends to what the model reads, so the golden-set rule in `docs/guides/prompt-development.md` applies. State in the commit which registry the change was checked against, or that no registry entry covers it.
+   - Status: [x] done — notice landed and is asserted; the registry answer is **"none covers it"**: the roster has no tool-result-body row. Per the operator's decision, that class is declared permanently out of scope, traced on the grep roster row at `docs/guides/prompt-development.md:46`. The required commit-body line accompanies the commit that adds it.
    - [blocks: —]
 
 ## 待写入 (persist)
