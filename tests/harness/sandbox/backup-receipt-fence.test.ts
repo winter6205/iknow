@@ -29,15 +29,20 @@ import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createProtectedTargetInventory } from "../../../src/harness/sandbox/protected-targets.js";
 
-function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
-}
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.js";
 
 function hasPython3(): boolean {
   return spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
 }
 
-const SKIP = !hasBwrap();
+/**
+ * Capability gate, not a `bwrap --version` existence check: `runFence` below
+ * really spawns the assembled fence argv (constant `--unshare-net`), so the
+ * question is whether a fence can start HERE. The existence check passes on a
+ * GHA runner that installed bwrap but has no user-namespace, and the refusal
+ * (RTM_NEWADDR) then surfaces as a red instead of a skip.
+ */
+const SKIP = !canRunBwrapFence();
 
 const scratch: string[] = [];
 function scratchDir(prefix: string): string {
@@ -94,16 +99,13 @@ function runFence(script: string): { status: number; stderr: string } {
 }
 
 describe("T7 real-bwrap: a protected target refuses every unlink spelling", () => {
-  it.skipIf(SKIP)(
-    "rm -f refused (EROFS) at the protected target",
-    () => {
-      const backup = agentBackup("protected-rm");
-      const r = runFence(`rm -f '${backup}'`);
-      assert.notEqual(r.status, 0, "rm at a protected target must fail");
-      assert.match(r.stderr.toLowerCase(), /read-only file system|erofs/);
-      assert.ok(existsSync(backup), "the file survives the refused attempt");
-    }
-  );
+  it.skipIf(SKIP)("rm -f refused (EROFS) at the protected target", () => {
+    const backup = agentBackup("protected-rm");
+    const r = runFence(`rm -f '${backup}'`);
+    assert.notEqual(r.status, 0, "rm at a protected target must fail");
+    assert.match(r.stderr.toLowerCase(), /read-only file system|erofs/);
+    assert.ok(existsSync(backup), "the file survives the refused attempt");
+  });
 
   it.skipIf(SKIP || !hasPython3())(
     "python3 os.remove refused (EROFS) at the same protected target",

@@ -34,6 +34,8 @@ import { afterAll, beforeAll, describe, it } from "vitest";
 
 import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts";
 
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.js";
+
 /**
  * Binary-resolution pin — a test-environment fix, not a product change.
  *
@@ -64,23 +66,21 @@ import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts
 const SYSTEM_PATH = "/usr/bin:/bin";
 
 /**
- * Skip decision taken under the SAME PATH the run uses: `bwrap` is probed with
+ * Skip decision taken under the SAME PATH the run uses: the probe runs with
  * `PATH: SYSTEM_PATH` in an explicit env instead of the inherited one, because
  * everything this file executes after the beforeAll pin resolves under that
  * PATH — the production probe (requireBwrap, src/harness/sandbox/runner.ts)
  * and the `ssh-keygen` fixture alike. Deciding on the host PATH at module load
  * would skip a host whose `bwrap` sits outside SYSTEM_PATH, then fail the
  * fixture setup anyway.
+ *
+ * It is a physical capability probe, not a `bwrap --version` existence check:
+ * every case below really spawns the wired fence (constant `--unshare-net`),
+ * so the gate must answer "can a fence start here", not "is the binary
+ * present". The existence check admits a GHA runner (bwrap installed, no
+ * user-namespace) and turns the skip into a red.
  */
-function hasBwrap(): boolean {
-  const probe = spawnSync("bwrap", ["--version"], {
-    stdio: "ignore",
-    env: { ...process.env, PATH: SYSTEM_PATH },
-  });
-  return probe.status === 0;
-}
-
-const SKIP = !hasBwrap();
+const SKIP = !canRunBwrapFence({ path: SYSTEM_PATH });
 /** Host PATH as of this module's load — the value to put back on teardown. */
 const SAVED_PATH = process.env.PATH;
 

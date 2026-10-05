@@ -50,11 +50,16 @@ import { createProtectedTargetInventory } from "../../../src/harness/sandbox/pro
 import { protectedTargetFenceGuidance } from "../../../src/harness/sandbox/protected-target-feedback.js";
 import { VIOLATION_PREFIXES } from "../../../src/harness/permission/prefixes.js";
 
-function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
-}
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.js";
 
-const SKIP = !hasBwrap();
+/**
+ * Capability gate, not a `bwrap --version` existence check: every gated case
+ * really spawns the assembled combo fence (constant `--unshare-net`), so the
+ * question is whether a fence can start HERE. The existence check passes on a
+ * GHA runner that installed bwrap but has no user-namespace, and the refusal
+ * (RTM_NEWADDR) then surfaces as a red instead of a skip.
+ */
+const SKIP = !canRunBwrapFence();
 
 const scratch: string[] = [];
 function scratchDir(prefix: string): string {
@@ -94,9 +99,11 @@ function comboOptions(): Parameters<typeof createBwrapFence>[0] {
   };
 }
 
-function runCombo(
-  script: string
-): { status: number; stdout: string; stderr: string } {
+function runCombo(script: string): {
+  status: number;
+  stdout: string;
+  stderr: string;
+} {
   const opts = comboOptions();
   const argv = createBwrapFence({
     ...opts,
@@ -181,9 +188,9 @@ describe("HIGH-1 production combo — one coordinated mount plan (real bwrap)", 
       const guidance = protectedTargetFenceGuidance(
         r.stderr,
         createProtectedTargetInventory({
-      home: HOME,
-      scanRoot: HOME,
-    })
+          home: HOME,
+          scanRoot: HOME,
+        })
       );
       assert.ok(
         guidance !== undefined,

@@ -16,7 +16,7 @@
  * are what prove the deadline actually kills a live process group.
  */
 import assert from "node:assert/strict";
-import { spawnSync, type ChildProcess } from "node:child_process";
+import type { ChildProcess } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
@@ -32,9 +32,17 @@ import type { BackgroundTaskManager } from "../../../src/harness/background/mana
 import { resolveTasksDir } from "../../../src/harness/background/paths.js";
 import type { BackgroundTaskRecord } from "../../../src/harness/background/registry.js";
 
-function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
-}
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.js";
+
+/**
+ * Real-process arms below run `defaultBackgroundSpawn`, which assembles a real
+ * bwrap fence (createBwrapFence, constant `--unshare-net`) — so they need a
+ * host that can really start one, not a host that merely has the binary.
+ * A capability probe, not a `bwrap --version` existence check: the latter
+ * admits a GHA runner (bwrap installed, no user-namespace), where the fenced
+ * `sleep`/kill-tree spawn fails instead of skipping.
+ */
+const CAN_RUN_FENCE = canRunBwrapFence();
 
 /** fake ChildProcess: same shape as manager.test.ts, a kill spy that never exits on its own. */
 interface FakeChild {
@@ -72,7 +80,10 @@ async function makeFakeManager(): Promise<{
 }> {
   const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-deadline-"));
   tempRoots.push(root);
-  const tasksDir = resolveTasksDir({ dataDir: root, projectIdentityRoot: root });
+  const tasksDir = resolveTasksDir({
+    dataDir: root,
+    projectIdentityRoot: root,
+  });
   const children: FakeChild[] = [];
   const manager = createBackgroundTaskManager({
     tasksDir,
@@ -86,9 +97,11 @@ async function makeFakeManager(): Promise<{
 }
 
 /** Narrow a spawn result to the ok arm so `log_path` is reachable. */
-function okResult(
-  res: Awaited<ReturnType<BackgroundTaskManager["spawn"]>>
-): { status: "ok"; task_id: string; log_path: string } {
+function okResult(res: Awaited<ReturnType<BackgroundTaskManager["spawn"]>>): {
+  status: "ok";
+  task_id: string;
+  log_path: string;
+} {
   assert.equal(res.status, "ok");
   if (res.status !== "ok") throw new Error("unreachable");
   return res;
@@ -104,7 +117,9 @@ async function readRecord(logPath: string): Promise<BackgroundTaskRecord> {
   let lastError: unknown;
   for (let i = 0; i < 50; i += 1) {
     try {
-      return JSON.parse(await fs.readFile(path, "utf8")) as BackgroundTaskRecord;
+      return JSON.parse(
+        await fs.readFile(path, "utf8")
+      ) as BackgroundTaskRecord;
     } catch (err) {
       lastError = err;
       await new Promise((r) => setTimeout(r, 20));
@@ -135,9 +150,7 @@ async function waitFor<T>(
 describe("background 有限 deadline：启动时一次建立", () => {
   it("省略 timeout_ms → 持久服务形态：落盘无 deadline 字段，status 报 null", async () => {
     const { manager } = await makeFakeManager();
-    const res = okResult(
-      await manager.spawn({ command: "serve", cwd: "." })
-    );
+    const res = okResult(await manager.spawn({ command: "serve", cwd: "." }));
     const rec = await readRecord(res.log_path);
     assert.equal(rec.timeout_ms, undefined);
     assert.equal(rec.deadline_at, undefined);
@@ -148,11 +161,13 @@ describe("background 有限 deadline：启动时一次建立", () => {
 
   it("提供 timeout_ms → 落盘 timeout_ms + deadline_at，deadline_at ≈ created_at + timeout_ms", async () => {
     const { manager } = await makeFakeManager();
-    const res = okResult(await manager.spawn({
-      command: "build",
-      cwd: ".",
-      timeoutMs: 60_000,
-    }));
+    const res = okResult(
+      await manager.spawn({
+        command: "build",
+        cwd: ".",
+        timeoutMs: 60_000,
+      })
+    );
     const rec = await readRecord(res.log_path);
     assert.equal(rec.timeout_ms, 60_000);
     assert.ok(rec.deadline_at, "deadline_at must be persisted");
@@ -170,11 +185,13 @@ describe("background 有限 deadline：启动时一次建立", () => {
 
   it("反复 poll（status / output）不重置时钟：deadline_at 逐次字节相同", async () => {
     const { manager, children } = await makeFakeManager();
-    const res = okResult(await manager.spawn({
-      command: "build",
-      cwd: ".",
-      timeoutMs: 120,
-    }));
+    const res = okResult(
+      await manager.spawn({
+        command: "build",
+        cwd: ".",
+        timeoutMs: 120,
+      })
+    );
     const first = (await readRecord(res.log_path)).deadline_at;
     // Poll well past the deadline's arming window; a resetting implementation
     // would move deadline_at on each read.
@@ -194,11 +211,13 @@ describe("background 有限 deadline：启动时一次建立", () => {
 describe("background 有限 deadline：到期终止", () => {
   it("到期 → 进程组收到 SIGTERM，cause=deadline_expired，终态只迁移一次", async () => {
     const { manager, children } = await makeFakeManager();
-    const res = okResult(await manager.spawn({
-      command: "build",
-      cwd: ".",
-      timeoutMs: 60,
-    }));
+    const res = okResult(
+      await manager.spawn({
+        command: "build",
+        cwd: ".",
+        timeoutMs: 60,
+      })
+    );
     await waitFor(async () =>
       children[0]!.kill.mock.calls.some((c) => c[0] === "SIGTERM")
         ? true
@@ -219,7 +238,7 @@ describe("background 有限 deadline：到期终止", () => {
     assert.equal(rec.termination_cause, "deadline_expired");
   });
 
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!CAN_RUN_FENCE)(
     "真实进程组：有限 deadline 到期后进程组确实消失（不是只改了状态字段）",
     async () => {
       const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-deadline-real-"));
@@ -271,7 +290,7 @@ describe("background 有限 deadline：到期终止", () => {
 // ── omission preserves the persistent-service lifecycle ──────────────────────
 
 describe("background 省略 timeout_ms：持久服务不被前台 10s 默认杀掉", () => {
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!CAN_RUN_FENCE)(
     "无 timeout_ms 的长驻进程存活过 10 秒前台默认（且从未建立 deadline）",
     async () => {
       const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-service-"));
@@ -318,7 +337,7 @@ describe("background 省略 timeout_ms：持久服务不被前台 10s 默认杀�
 // ── concurrency: independent deadlines ────────────────────────────────────────
 
 describe("background 并发任务：各自独立 deadline", () => {
-  it.skipIf(!hasBwrap())(
+  it.skipIf(!CAN_RUN_FENCE)(
     "短 deadline 的任务被杀，长 deadline 的任务仍在运行",
     async () => {
       const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-conc-deadline-"));
@@ -354,11 +373,13 @@ describe("background 并发任务：各自独立 deadline", () => {
 describe("background stop / timeout / exit 竞态：只结算一次", () => {
   it("自然 exit 先到 → cause=exit，deadline 定时器不得事后改写终态", async () => {
     const { manager, children } = await makeFakeManager();
-    const res = okResult(await manager.spawn({
-      command: "quick",
-      cwd: ".",
-      timeoutMs: 80,
-    }));
+    const res = okResult(
+      await manager.spawn({
+        command: "quick",
+        cwd: ".",
+        timeoutMs: 80,
+      })
+    );
     children[0]!.emit("exit", 0, null);
     const settled = await waitFor(async () => {
       const s = await manager.status(res.task_id);
@@ -383,11 +404,13 @@ describe("background stop / timeout / exit 竞态：只结算一次", () => {
 
   it("stop 与 deadline 同时竞争 → 只有一个终态，cause 稳定不变", async () => {
     const { manager, children } = await makeFakeManager();
-    const res = okResult(await manager.spawn({
-      command: "build",
-      cwd: ".",
-      timeoutMs: 60,
-    }));
+    const res = okResult(
+      await manager.spawn({
+        command: "build",
+        cwd: ".",
+        timeoutMs: 60,
+      })
+    );
     await manager.stop(res.task_id);
     await waitFor(async () =>
       children[0]!.kill.mock.calls.some((c) => c[0] === "SIGTERM")
@@ -421,11 +444,13 @@ describe("background stop / timeout / exit 竞态：只结算一次", () => {
 
   it("并发重复 stop 在有 deadline 时仍幂等（SIGTERM 轮次有界）", async () => {
     const { manager, children } = await makeFakeManager();
-    const res = okResult(await manager.spawn({
-      command: "build",
-      cwd: ".",
-      timeoutMs: 5_000,
-    }));
+    const res = okResult(
+      await manager.spawn({
+        command: "build",
+        cwd: ".",
+        timeoutMs: 5_000,
+      })
+    );
     await Promise.allSettled([
       manager.stop(res.task_id),
       manager.stop(res.task_id),
@@ -464,7 +489,10 @@ describe("background 非法 timeout_ms：前置失败不留痕", () => {
         assert.equal(res.error.kind, "spawn_validation_failed");
       }
       assert.equal(children.length, 0, "spawn factory must not be called");
-      assert.deepEqual(await fs.readdir(tasksDir).catch(() => [] as string[]), []);
+      assert.deepEqual(
+        await fs.readdir(tasksDir).catch(() => [] as string[]),
+        []
+      );
     });
   }
 });

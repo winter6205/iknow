@@ -47,6 +47,8 @@ import {
   protectedTargetBindPaths,
 } from "../../../src/harness/sandbox/protected-targets.js";
 
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.js";
+
 const scratch: string[] = [];
 function scratchDir(prefix: string): string {
   const d = mkdtempSync(join(tmpdir(), prefix));
@@ -70,7 +72,10 @@ function workspaceWithMatches(prefix: string): string {
   mkdirSync(join(ws, "build"), { recursive: true });
   writeFileSync(join(ws, ".gitignore"), "build/\n*.local\n");
   writeFileSync(join(ws, "certs", "server.pem"), "fixture\n");
-  writeFileSync(join(ws, "node_modules", "server-pkg", "server.pem"), "fixture\n");
+  writeFileSync(
+    join(ws, "node_modules", "server-pkg", "server.pem"),
+    "fixture\n"
+  );
   writeFileSync(join(ws, ".hidden.pem"), "fixture\n");
   writeFileSync(join(ws, ".env"), "fixture\n");
   writeFileSync(join(ws, ".env.production"), "fixture\n");
@@ -247,7 +252,10 @@ describe("scan scope — the workspace directory, one root for both fs modes", (
 });
 
 describe("mode proof — both fs modes scan the same root and order binds last", () => {
-  function assemble(mode: "global" | "workspace", scanRoot: string): {
+  function assemble(
+    mode: "global" | "workspace",
+    scanRoot: string
+  ): {
     readonly argv: readonly string[];
   } {
     const ws = workspaceWithMatches("t2-mode-");
@@ -303,8 +311,14 @@ describe("mode proof — both fs modes scan the same root and order binds last",
     const matchAt = argv.indexOf(match);
     const cwdBindAt = argv.indexOf("--bind");
     const procAt = argv.indexOf("--proc");
-    assert.ok(matchAt > cwdBindAt, "the protected bind lands after the writable binds");
-    assert.ok(matchAt < procAt, "and before --proc, where the boundary block sits");
+    assert.ok(
+      matchAt > cwdBindAt,
+      "the protected bind lands after the writable binds"
+    );
+    assert.ok(
+      matchAt < procAt,
+      "and before --proc, where the boundary block sits"
+    );
   });
 });
 
@@ -342,15 +356,21 @@ describe("W4 — a match that vanished before the bind takes the typed warn dire
     );
     // The surviving siblings really are in argv, not merely counted.
     assert.ok(argv.includes(join(ws, "certs", "server.pem")));
-    assert.ok(argv.includes(join(ws, "node_modules", "server-pkg", "server.pem")));
+    assert.ok(
+      argv.includes(join(ws, "node_modules", "server-pkg", "server.pem"))
+    );
   });
 });
 
 describe("W3 — a match behind a filesystem-arm ancestor is still masked on read", () => {
-  function hasBwrap(): boolean {
-    return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
-  }
-  const SKIP = !hasBwrap();
+  /**
+   * Capability gate, not a `bwrap --version` existence check: both cases below
+   * really spawn the assembled fence argv (constant `--unshare-net`), so the
+   * question is whether a fence can start HERE. The existence check passes on a
+   * GHA runner that installed bwrap but has no user-namespace, and the refusal
+   * (RTM_NEWADDR) then surfaces as a red instead of a skip.
+   */
+  const SKIP = !canRunBwrapFence();
 
   it.skipIf(SKIP)(
     "cat on a credential match whose only covering ancestor is a filesystem-arm entry is DENIED",

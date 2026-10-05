@@ -27,8 +27,9 @@
  *     file budget (argv protection; presence hidden, deletion truthful for
  *     everything the fallback does not hide).
  *
- * Argv pins run everywhere; the effect matrix runs only on a host with bwrap
- * (`hasBwrap()` guard). Fixture HOME lives in mkdtemp scratch roots with
+ * Argv pins run everywhere; the effect matrix runs only on a host that can
+ * really start a fence (`canRunBwrapFence()` capability guard). Fixture HOME
+ * lives in mkdtemp scratch roots with
  * ssh-keygen-generated keys; the operator's real `~/.ssh` and real credential
  * files are never read or written (discipline of ssh-key-fs-modes.test.ts).
  * Sentinel strings are random per run and asserted ABSENT from every output.
@@ -59,11 +60,17 @@ import {
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createProtectedTargetInventory } from "../../../src/harness/sandbox/protected-targets.js";
 
-function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
-}
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.js";
 
-const SKIP = !hasBwrap();
+/**
+ * Capability gate, not a `bwrap --version` existence check: every gated case
+ * below really spawns the assembled fence argv (constant `--unshare-net`), so
+ * the question is whether a fence can start HERE. The existence check passes on
+ * a GHA runner that installed bwrap but has no user-namespace, and the refusal
+ * (RTM_NEWADDR) then surfaces as a red instead of a skip. The argv pins above
+ * stay ungated: they are pure construction and run everywhere.
+ */
+const SKIP = !canRunBwrapFence();
 
 const scratch: string[] = [];
 function scratchDir(prefix: string): string {

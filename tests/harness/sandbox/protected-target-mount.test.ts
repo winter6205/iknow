@@ -44,13 +44,20 @@ import {
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createProtectedTargetInventory } from "../../../src/harness/sandbox/protected-targets.js";
 
-function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
-}
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.js";
 
 function hasPython3(): boolean {
   return spawnSync("python3", ["--version"], { stdio: "ignore" }).status === 0;
 }
+
+/**
+ * Capability gate, not a `bwrap --version` existence check: every gated case
+ * below really spawns the assembled fence argv (constant `--unshare-net`), so
+ * the question is whether a fence can start HERE. The existence check passes on
+ * a GHA runner that installed bwrap but has no user-namespace, and the refusal
+ * (RTM_NEWADDR) then surfaces as a red instead of a skip.
+ */
+const SKIP = !canRunBwrapFence();
 
 const scratch: string[] = [];
 function scratchDir(prefix: string): string {
@@ -58,8 +65,6 @@ function scratchDir(prefix: string): string {
   scratch.push(d);
   return d;
 }
-
-const SKIP = !hasBwrap();
 
 const FAKE_HOME = scratchDir("iknow-t7-fence-home-");
 const TASK = scratchDir("iknow-t7-fence-task-");
@@ -249,7 +254,10 @@ describe("SC3(a) real-bwrap: an ordinary backup is removable by both spellings",
     const out: string[] = [];
     for (const entry of readdirSync(root, { withFileTypes: true })) {
       const full = join(root, entry.name);
-      out.push(join(prefix.slice(root.length), entry.name) + (entry.isDirectory() ? "/" : ""));
+      out.push(
+        join(prefix.slice(root.length), entry.name) +
+          (entry.isDirectory() ? "/" : "")
+      );
       if (entry.isDirectory()) out.push(...snapshotTree(full, prefix));
     }
     return out.sort();
@@ -282,7 +290,11 @@ describe("SC3(a) real-bwrap: an ordinary backup is removable by both spellings",
 
       writeFileSync(BACKUP, BACKUP_BYTES, { mode: 0o600 });
       const viaRm = runBackupFence(`rm -f '${BACKUP}'`);
-      assert.equal(viaRm.status, 0, `rm -f on an ordinary backup: ${viaRm.stderr}`);
+      assert.equal(
+        viaRm.status,
+        0,
+        `rm -f on an ordinary backup: ${viaRm.stderr}`
+      );
       assert.equal(
         existsSync(BACKUP),
         false,
@@ -329,7 +341,17 @@ describe("SC3(a) real-bwrap: an ordinary backup is removable by both spellings",
       mkdirSync(join(BK_HOME, ".ssh"), { recursive: true, mode: 0o700 });
       const key = spawnSync(
         "ssh-keygen",
-        ["-t", "ed25519", "-N", "", "-C", "iknow-t7-sc3", "-f", protectedPath, "-q"],
+        [
+          "-t",
+          "ed25519",
+          "-N",
+          "",
+          "-C",
+          "iknow-t7-sc3",
+          "-f",
+          protectedPath,
+          "-q",
+        ],
         { stdio: "ignore" }
       );
       assert.equal(key.status, 0, "fixture key generation must succeed");
@@ -442,7 +464,11 @@ describe("T2 real-bwrap: a workspace-scoped name-pattern match with no ancestor 
     "python3 os.remove on the materialized match is refused and host bytes are unchanged",
     () => {
       const r = runMatFence(`python3 -c "import os; os.remove('${PEM}')"`);
-      assert.notEqual(r.status, 0, "os.remove on a materialized match must fail");
+      assert.notEqual(
+        r.status,
+        0,
+        "os.remove on a materialized match must fail"
+      );
       assert.match(
         r.stderr,
         /Read-only file system|errno 30|errno 16/i,

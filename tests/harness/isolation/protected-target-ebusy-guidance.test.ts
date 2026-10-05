@@ -53,6 +53,8 @@ import {
 } from "../../../src/harness/sandbox/protected-target-feedback.js";
 import { VIOLATION_PREFIXES } from "../../../src/harness/permission/prefixes.js";
 
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.js";
+
 const HOME = "/home/u";
 /**
  * The name-pattern scan scope must be a REAL directory — the inventory refuses
@@ -79,15 +81,15 @@ const UNRELATED_BUSY =
 
 describe("protectedTargetEbusyFenceGuidance — correlation against emitted masks", () => {
   it("an EBUSY naming an emitted exact-file mask → class + boundary attribution, no route advertised", () => {
-    const guidance = protectedTargetEbusyFenceGuidance(
-      NETRC_RM,
-      INVENTORY,
-      [NETRC]
-    )!;
+    const guidance = protectedTargetEbusyFenceGuidance(NETRC_RM, INVENTORY, [
+      NETRC,
+    ])!;
     expect(guidance).toBeDefined();
     expect(guidance.startsWith(`${VIOLATION_PREFIXES.fsDenied} `)).toBe(true);
     // target CLASS named from the inventory, never a bare path
-    expect(guidance).toContain(describeProtectedTargetClass("netrc_credential"));
+    expect(guidance).toContain(
+      describeProtectedTargetClass("netrc_credential")
+    );
     // boundary attribution, distinct from the EROFS physics
     expect(guidance).toContain("kernel (EBUSY)");
     expect(guidance).toContain("not a command-syntax judgment");
@@ -137,19 +139,21 @@ describe("protectedTargetEbusyFenceGuidance — correlation against emitted mask
   it("a subtree-seeded mask resolves its class too (not only `exact` rules)", () => {
     // The fence masks individual regular files INSIDE credential subtrees —
     // a list built from `exact` rules only would miss the majority.
-    const guidance = protectedTargetEbusyFenceGuidance(
-      SSH_RM,
-      INVENTORY,
-      [SSH_KEY]
-    )!;
-    expect(guidance).toContain(describeProtectedTargetClass("ssh_key_material"));
+    const guidance = protectedTargetEbusyFenceGuidance(SSH_RM, INVENTORY, [
+      SSH_KEY,
+    ])!;
+    expect(guidance).toContain(
+      describeProtectedTargetClass("ssh_key_material")
+    );
   });
 
   it("an unrelated EBUSY (no parseable path) → undefined", () => {
     expect(
       protectedTargetEbusyFenceGuidance(UNRELATED_BUSY, INVENTORY, [NETRC])
     ).toBeUndefined();
-    expect(protectedTargetEbusyFenceGuidance("", INVENTORY, [NETRC])).toBeUndefined();
+    expect(
+      protectedTargetEbusyFenceGuidance("", INVENTORY, [NETRC])
+    ).toBeUndefined();
   });
 
   it("python OSError shape (quoted path AFTER the marker) correlates too", () => {
@@ -158,7 +162,9 @@ describe("protectedTargetEbusyFenceGuidance — correlation against emitted mask
       INVENTORY,
       [NETRC]
     )!;
-    expect(guidance).toContain(describeProtectedTargetClass("netrc_credential"));
+    expect(guidance).toContain(
+      describeProtectedTargetClass("netrc_credential")
+    );
   });
 
   it("unquoted absolute path shape correlates too", () => {
@@ -167,7 +173,9 @@ describe("protectedTargetEbusyFenceGuidance — correlation against emitted mask
       INVENTORY,
       [NETRC]
     )!;
-    expect(guidance).toContain(describeProtectedTargetClass("netrc_credential"));
+    expect(guidance).toContain(
+      describeProtectedTargetClass("netrc_credential")
+    );
   });
 
   it("two masked classes in one stderr → one [fs_denied] message per class", () => {
@@ -181,24 +189,39 @@ describe("protectedTargetEbusyFenceGuidance — correlation against emitted mask
     for (const m of messages) {
       expect(m.startsWith(`${VIOLATION_PREFIXES.fsDenied} `)).toBe(true);
     }
-    expect(guidance).toContain(describeProtectedTargetClass("netrc_credential"));
-    expect(guidance).toContain(describeProtectedTargetClass("ssh_key_material"));
+    expect(guidance).toContain(
+      describeProtectedTargetClass("netrc_credential")
+    );
+    expect(guidance).toContain(
+      describeProtectedTargetClass("ssh_key_material")
+    );
   });
 
   it("cap-and-count: first 5 EBUSY lines, then (+N more EBUSY lines)", () => {
     const lines = Array.from(
       { length: 7 },
-      (_, i) => `rm: cannot remove '${HOME}/.ssh/k${i}': Device or resource busy`
+      (_, i) =>
+        `rm: cannot remove '${HOME}/.ssh/k${i}': Device or resource busy`
     );
-    const guidance = protectedTargetEbusyGuidance(lines.join("\n"), "ssh_key_material")!;
+    const guidance = protectedTargetEbusyGuidance(
+      lines.join("\n"),
+      "ssh_key_material"
+    )!;
     expect(guidance).toContain("k4");
     expect(guidance).not.toContain("k5");
     expect(guidance).toContain("(+2 more EBUSY lines)");
   });
 
   it("a stderr with no EBUSY line yields undefined (existing no-EROFS contract stays green)", () => {
-    expect(protectedTargetEbusyGuidance(NETRC_RM.replace(/Device or resource busy/, "Read-only file system"), "netrc_credential")).toBeUndefined();
-    expect(protectedTargetEbusyGuidance("", "netrc_credential")).toBeUndefined();
+    expect(
+      protectedTargetEbusyGuidance(
+        NETRC_RM.replace(/Device or resource busy/, "Read-only file system"),
+        "netrc_credential"
+      )
+    ).toBeUndefined();
+    expect(
+      protectedTargetEbusyGuidance("", "netrc_credential")
+    ).toBeUndefined();
   });
 });
 
@@ -269,10 +292,14 @@ describe("EBUSY wording is DISTINCT from EROFS wording (both directions)", () =>
  * being correlated, which is the whole point of the seam.
  * ------------------------------------------------------------------ */
 
-function hasBwrap(): boolean {
-  return spawnSync("bwrap", ["--version"], { stdio: "ignore" }).status === 0;
-}
-const SKIP = !hasBwrap();
+/**
+ * Capability gate, not a `bwrap --version` existence check: `runFence` below
+ * really spawns the production fence argv (constant `--unshare-net`), so the
+ * question is whether a fence can start HERE. The existence check passes on a
+ * GHA runner that installed bwrap but has no user-namespace, and the refusal
+ * (RTM_NEWADDR) then surfaces as a red instead of a skip.
+ */
+const SKIP = !canRunBwrapFence();
 
 const scratch: string[] = [];
 function scratchDir(prefix: string): string {
@@ -288,16 +315,20 @@ const R_NETRC = join(R_HOME, ".netrc");
 const R_SENTINEL = "netrc-SECRET-fixture-value";
 
 /** Assemble the real production fence combo and run a script inside it. */
-function runFence(
-  script: string
-): { r: { status: number | null; stdout: string; stderr: string }; fence: ReturnType<typeof createBwrapFence> } {
+function runFence(script: string): {
+  r: { status: number | null; stdout: string; stderr: string };
+  fence: ReturnType<typeof createBwrapFence>;
+} {
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", script],
     fsPolicy: createFsPolicy({ tmpDir: R_TMP, mode: "global" }),
     env: { HOME: R_HOME, PATH: "/usr/bin:/bin" },
     cwd: R_TASK,
-    protectedTargets: createProtectedTargetInventory({ home: R_HOME, scanRoot: R_HOME }),
+    protectedTargets: createProtectedTargetInventory({
+      home: R_HOME,
+      scanRoot: R_HOME,
+    }),
     protectCredentialReads: true,
     onProtectedTargetSkipped: () => {},
   });
@@ -357,7 +388,9 @@ describe("real bwrap — the exact-file /dev/null mask refusal (EBUSY)", () => {
         fence.exactFileMaskPaths
       );
       expect(guidance).toBeDefined();
-      expect(guidance!.startsWith(`${VIOLATION_PREFIXES.fsDenied} `)).toBe(true);
+      expect(guidance!.startsWith(`${VIOLATION_PREFIXES.fsDenied} `)).toBe(
+        true
+      );
       expect(guidance).toContain(
         describeProtectedTargetClass("netrc_credential")
       );
