@@ -72,10 +72,40 @@ step nothing in CI performed, and a vendored binary tree.
   Nothing produces it any more.
 - `grep.test.ts` leaves the CI exclude set: `npm ci` now provisions the engine.
 
-## Open follow-up
+## Comment sweep — done, and its premise did not survive measurement
 
-~32 comments across `src/harness/aci/search/` and
-`src/harness/aci/tools/bash-read-extract.ts` record rg behaviour as "verified
-against 15.1.0". They were not re-verified against 15.0.0, and at least one cited
-pin no longer reproduces (`glob-match.ts:63` claims `rc=1`; the shipped binary
-returns `rc=2` for `rg --glob '!'`). Sweeping them is a separate ticket.
+The follow-up named when this ADR was drafted is complete (`2b6441118`). Its
+two load-bearing claims were both wrong, so the correction is recorded here
+rather than left to be re-derived:
+
+- **The count was wrong.** "~32 comments" was exact for `src/`, but the test
+  suite carried 23 more comment lines plus one test title — 55 comment sites
+  and 1 title in total, 56 places.
+- **The named example was wrong.** `glob-match.ts:63` claims `rc=1`, and
+  `rc=1` is what actually happens: `rg --glob '!' hello .` returns 1 on both
+  15.0.0 and 15.1.0. `rc=2` appears only when the path argument is omitted
+  entirely, which is not the invocation the comment cites. There is no known-
+  wrong `rc` claim in the swept set.
+
+An A/B against the residual 15.1.0 binary (still on disk) found **no
+downgrade-induced drift**: every mechanically checkable cited `rc`, flag and
+verbatim output form is identical on both versions. The sweep was therefore a
+re-attribution, not a re-litigation — historical numbers keep the binary they
+were taken on, and "vendored rg" became "bundled rg" because
+`vendor/ripgrep/` is no longer produced.
+
+Three claims were not mechanically checkable and were re-measured; two were
+wrong:
+
+- `rg-output.ts` said rg "doesn't slice at all when the cut would land
+  mid-character". It snaps the cut forward to a whole code point, so the body
+  can exceed the byte budget — 7,999 ASCII + 300 CJK under an 8,000 budget
+  yields 8,002 bytes. Also recorded: under `--max-columns-preview` the marker
+  is emitted before the `\r`.
+- `scope-guard.ts` quoted `--max-filesize=1MiB`, an rc=2 parse error on both
+  binaries that exits in ~8ms without scanning anything, and derived its
+  headroom from a 17.8s figure that does not reproduce. The number is kept
+  only as a record of what was believed; nothing derives the limit from it.
+- `bash-read-extract.ts` non-read flags re-confirmed. **`bat` is still not
+  installed on the measuring host, so its row remains unverified** — the one
+  item from this ADR still outstanding.
