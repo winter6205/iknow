@@ -641,11 +641,25 @@ export function checkEvidence(args: {
     );
   }
 
+  // The claim's right edge is a content BLOCK, not a message: one assistant
+  // message can carry the claim text and the tool_use alike. Absent (claimIndex
+  // pointing at a tool-result turn, or malformed content) fails closed to -1,
+  // which no block precedes — so a claimless message contributes no runs.
+  const claim: ContentBlockPosition = {
+    messageIndex: claimIndex,
+    contentBlockIndex: lastNonEmptyTextBlockIndex(
+      messages[claimIndex]?.content
+    ),
+  };
+
   // claimIndex windowing: runs produced after the claim are not evidence
-  // (right edge of the ordering window = claimIndex; conservative — even a
+  // (right edge of the ordering window = the claim block; conservative — even a
   // green post-claim run never yields SUFFICIENT).
   const runs = extractTestRuns(messages).filter(
-    (r) => r.messageIndex < claimIndex
+    (r) =>
+      r.messageIndex < claim.messageIndex ||
+      (r.messageIndex === claim.messageIndex &&
+        r.contentBlockIndex < claim.contentBlockIndex)
   );
   if (runs.length === 0) {
     return insufficient(["no bash test execution before claim found"], []);
@@ -668,15 +682,6 @@ export function checkEvidence(args: {
   if (verdict === "EVIDENCE_SUFFICIENT") {
     // Staleness: code edited after the green test block but not past the claim
     // → stale → not SUFFICIENT.
-    const claim: ContentBlockPosition = {
-      messageIndex: claimIndex,
-      // The claim message's own text block, when it has one: the right edge is
-      // a block, not a message. Absent (claimIndex pointing at a tool-result
-      // turn, or malformed content) fails closed to -1, which no block equals.
-      contentBlockIndex: lastNonEmptyTextBlockIndex(
-        messages[claimIndex]?.content
-      ),
-    };
     const stale = runs.some((r) => hasStaleEdit(messages, r, claim));
     if (stale) {
       return insufficient(

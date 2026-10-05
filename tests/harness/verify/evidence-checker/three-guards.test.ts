@@ -339,6 +339,26 @@ describe("时效按 tool_use BLOCK 粒度 (兄弟块 / claim 消息内编辑)", 
     expect(report.stale).toBe(false);
     expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
   });
+
+  it("绿 bash 与 claim 文本同处一条消息 (bash 块在 claim 块之前) → 计入证据 → SUFFICIENT", () => {
+    const id = "b05";
+    const msgs: AnthropicNativeMessage[] = [
+      message("user", textBlock("task")),
+      message(
+        "assistant",
+        toolUse(id, "npx vitest run"),
+        textBlock("全部测试通过"),
+        toolResult(
+          id,
+          JSON.stringify({ code: 0, stdout: VITEST_GREEN, stderr: "" })
+        )
+      ),
+    ];
+    const report = checkEvidence({ messages: msgs, claimIndex: 1 });
+    expect(report.runs.length).toBe(1);
+    expect(report.stale).toBe(false);
+    expect(report.verdict).toBe("EVIDENCE_SUFFICIENT");
+  });
 });
 
 describe("gate 内容信号: 测试命令 / 代码编辑开门; doc-only 三件套 = 闲聊 (SC10)", () => {
