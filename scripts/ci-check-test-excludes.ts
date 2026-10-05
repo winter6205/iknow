@@ -32,9 +32,9 @@
  * Background: GitHub Actions runners lack user-namespace → bwrap cannot
  * execute physically; but requireBwrap() throws already during assembly in
  * createBashTool / createDefaultAciRegistry / createWorkerDeps /
- * runInSandbox, so CI fails loudly at assembly time — including the past
- * regression where a bwrap-dependent test leaked into the exclude set and
- * reddened test-fast. This script makes CI alert immediately when such a
+ * runInSandbox / buildTuiDeps, so CI fails loudly at assembly time — including
+ * the past regression where a bwrap-dependent test leaked into the exclude set
+ * and reddened test-fast. This script makes CI alert immediately when such a
  * test is merged next (naming the missing file) instead of silently breaking
  * the PR flow.
  *
@@ -45,6 +45,7 @@
  *   - createDefaultAciRegistry(...): ACI assembly → createBashTool
  *   - createWorkerDeps(...): subagent worker assembly → createBashTool
  *   - buildHarnessEngine(...): buildEngine → createDefaultAciRegistry
+ *   - buildTuiDeps(...): TUI dependency assembly → buildHarnessEngine
  *
  * Only call shapes match (`\bidentifier\s*\(`) to avoid false positives from
  * type-only imports or vi.mock paths — the real dependency is an assembly-time
@@ -74,6 +75,25 @@ const BWRAP_PATTERNS: ReadonlyArray<RegExp> = [
   // createBashTool → requireBwrap. CI-verified: build-engine hook/trace tests
   // assemble through this path and fail loudly when bwrap is missing.
   /\bbuildHarnessEngine\s*\(/,
+  // Transitive chain: buildTuiDeps (src/tui/deps.ts) → buildHarnessEngine →
+  // createDefaultAciRegistry → createBashTool → requireBwrap. The TUI seam is
+  // the CLI's real production dependency assembly, so a test reaching bwrap
+  // through it is as unrunnable on the runner as one calling buildHarnessEngine
+  // directly.
+  //
+  // Deliberately NOT an anchor: `new SessionHub(`. 50 collectible test files
+  // call it; 8 are registered and 42 are not, but 40 of the unregistered ones
+  // inject a stub `deps` and never build a production engine — the anchor
+  // would flag them all and turn the guard into noise. The two that really
+  // reach getOrBuildEngine → buildProductionEngine are hand-registered in
+  // vitest.ci-excludes.ts instead.
+  //
+  // The other no-`deps` caller, `tests/session-api/hub-trace-assembly.test.ts`,
+  // is safe only because it `vi.mock`s src/harness/build-engine.ts:12-24 and
+  // replaces `buildHarnessEngine` outright — it *does* reach `ensureDeps` via
+  // postMessage (hub.ts:2361). Removing that mock would make it an
+  // unregistered bwrap dependency, so the exemption is the mock, not the shape.
+  /\bbuildTuiDeps\s*\(/,
 ];
 
 /**

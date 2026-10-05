@@ -154,6 +154,15 @@ export const CI_EXCLUDES: readonly string[] = [
   // handler and the admitted-arm test asserts six commands pass the gate, so
   // those `rm -f` calls do run under the fence.
   "tests/harness/aci/bash-cleanup-roots.test.ts",
+  // Scratch cleanup host wiring: assembles through buildTuiDeps →
+  // buildHarnessEngine → createDefaultAciRegistry → createBashTool →
+  // requireBwrap (fail-loud at assembly), and the cases are physical too —
+  // `host.run("rm -f $TMPDIR/a.cjs")` then asserts `existsSync(target) ===
+  // false`, so the deletion really happens under the fence. A third case
+  // spawns a real `src/cli.ts chat` child process. Registered after the
+  // buildTuiDeps anchor landed in the guard: it was in no exclude set at all
+  // and reddened test-fast (CI 37347211644).
+  "tests/harness/scratch-cleanup-host-wiring.test.ts",
 
   // ---- bwrap assembly-dependency class (requireBwrap fail-loud, throws at assembly time) ----
   // ACI registry assembly → createBashTool → requireBwrap
@@ -209,6 +218,15 @@ export const CI_EXCLUDES: readonly string[] = [
   // ADR-0098 SC8: root-bound hub goes buildProductionEngine → buildHarnessEngine
   // → requireBwrap (transitive chain; the test file itself does not hit the guard pattern).
   "tests/session-api/skills-hot.test.ts",
+  // Same shape as skills-hot above, same reason it is hand-registered: these two
+  // construct `new SessionHub({...})` with no injected `deps`, then call the
+  // private `ensureDeps(hub, root)` → `getOrBuildEngine` → `buildProductionEngine`
+  // → `buildHarnessEngine → requireBwrap`, so assembly throws on the runner.
+  // `new SessionHub(` is deliberately NOT a guard anchor (43 of its 50 callers
+  // inject a stub `deps` and never build a production engine), so the guard
+  // cannot surface these — the dependency is verified by hand here instead.
+  "tests/session-api/hub-file-intent.test.ts",
+  "tests/session-api/store/capture-disabled-needs-handling.test.ts",
   // ADR-0037 / #814 evidenced: hub executor really mutates → runInSandbox → requireBwrap
   "tests/session-api/hub-worktree-isolation.test.ts",
   // Subagent worker assembly → createWorkerDeps → createBashTool → requireBwrap
