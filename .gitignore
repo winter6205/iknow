@@ -155,13 +155,12 @@ docs/kb-assistant-guide
 docs/harness-report
 
 .reference/
+# .iknow/ is personal tooling (skills, MCP wiring, local settings);
+# same convention as .claude/ — only the generic settings file is tracked.
 .iknow/
 !.iknow/
 .iknow/*
-!.iknow/mcp.json
 !.iknow/settings.json
-!.iknow/skills/
-!.iknow/skills/**
 .qoder/
 AGENTS.md
 .mcp.json
