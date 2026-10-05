@@ -177,7 +177,7 @@ const RG_ARG_FLAGS: ReadonlySet<string> = Object.freeze(
     "-M",
     "-r",
     // `-d` / `-E` are value-swallowing short flags the earlier table
-    // missed (verified on vendored rg 15.1.0: `rg -d 1 a.txt` treats a.txt
+    // missed (verified on bundled rg 15.0.0: `rg -d 1 a.txt` treats a.txt
     // as the pattern, not the file). Without swallowing the value, the
     // extractor would record the pattern-position token as "read".
     "-d",
@@ -205,8 +205,8 @@ const RG_ARG_FLAGS: ReadonlySet<string> = Object.freeze(
     "--color",
     "--replace",
     "--pre",
-    // `--pre-glob <GLOB>` swallows a value (verified on vendored rg
-    // 15.1.0). Missing it from this table drops the value token into
+    // `--pre-glob <GLOB>` swallows a value (verified on bundled rg
+    // 15.0.0). Missing it from this table drops the value token into
     // operands → count skew → the whole command rejected (a miss-direction
     // false negative). Semantically it only filters which files pass
     // through `--pre`'s COMMAND, producing no fabricated view itself — so
@@ -285,7 +285,7 @@ const CONTENT_SUPPRESSING_FLAGS: Readonly<Record<string, ReadonlySet<string>>> =
         "--count-matches",
         "--files",
         // `-r` / `--replace` prints **post-substitution lines**, not the
-        // disk original (verified on vendored rg 15.1.0: a file containing
+        // disk original (verified on bundled rg 15.0.0: a file containing
         // `ZZMARK_ONLY_HERE` yields `INVENTED_ONLY_HERE` with `rg -r
         // INVENTED ZZMARK z.txt`) — the model sees a fabricated view,
         // worse than seeing nothing. Same class as `-o` (fragments only)
@@ -296,7 +296,7 @@ const CONTENT_SUPPRESSING_FLAGS: Readonly<Record<string, ReadonlySet<string>>> =
         "-r",
         "--replace",
         // `--pre COMMAND` makes rg search **COMMAND's output**, not the
-        // file original (verified on vendored rg 15.1.0: `rg --pre rev PAT
+        // file original (verified on bundled rg 15.0.0: `rg --pre rev PAT
         // a.txt` matches the reversed content; `=` form is identical).
         // `cat` as preprocessor happens to equal the original, but any
         // other command (rev / sed / script) yields a fabricated view —
@@ -335,8 +335,11 @@ const CONTENT_SUPPRESSING_FLAGS: Readonly<Record<string, ReadonlySet<string>>> =
  * one of them.
  *
  * Entries were verified on real machines where installed (uutils coreutils
- * 0.8.0 for cat / nl / head / tail, GNU grep 3.12, GNU sed 4.9, vendored
- * ripgrep 15.1.0); bat is not installed locally, so its entry is unverified
+ * 0.8.0 for cat / nl / head / tail, GNU grep 3.12, GNU sed 4.9 — the exact
+ * versions still on this host — and the ripgrep that ships in the lockfile,
+ * `@vscode/ripgrep` 15.0.0, re-measured flag by flag after the engine moved
+ * off the `vendor/ripgrep/` install tree); bat is not installed locally, so
+ * its entry is still unverified
  * and listed from the CLI contract — fail-closed direction: a wrong call is
  * only a missed record, never letting an unread file pass the overwrite
  * gate.
@@ -397,8 +400,11 @@ const NON_READ_FLAGS: Readonly<Record<string, ReadonlySet<string>>> =
     // usage). `-h` / `-V` excluded: real `sed -h` / `sed -V` exit 1 (the
     // exit gate already rejects them upstream).
     sed: Object.freeze(new Set(["--help", "--version"])),
-    // Verified vendored ripgrep 15.1.0: `--help` / `-h` / `--version` /
-    // `-V` / `--type-list` / `--generate` exit 0 with no file content.
+    // Verified bundled ripgrep 15.0.0: `--help` / `-h` / `--version` /
+    // `-V` / `--type-list` exit 0 with no file content. `--generate` is
+    // listed because it reads no file either, but it **takes a value**
+    // (`--generate=KIND`, per `rg --help`): the bare form is a usage error
+    // and exits 2, not 0. The entry is about "reads no file", not "exits 0".
     // **`-v` excluded**: rg's `-v` is `--invert-match`, verified to still
     // print lines.
     rg: Object.freeze(
@@ -598,7 +604,7 @@ function isDeniedLongPrefix(base: string, deny: ReadonlySet<string>): boolean {
  *
  * Two forms:
  *   1. ripgrep (clap) **single-letter double-dash aliases**: `--c` is `-c`,
- *      `--g` is `-g`, `--q` is `-q`. Verified on vendored rg 15.1.0: `rg --c`
+ *      `--g` is `-g`, `--q` is `-q`. Verified on bundled rg 15.0.0: `rg --c`
  *      prints only counts, `--l` only filenames, `--q` empty stdout (all
  *      exit 0); for X ∈ {g,t,m,j,M,r,f,e,A,B,C,d,E,T}, `rg --X VALUE PAT f`
  *      and `rg -X VALUE PAT f` output byte-identically.
@@ -1040,8 +1046,8 @@ function selectSedFile(walk: OperandWalk): string | undefined {
  * `--file`) → the first positional operand is no longer the pattern but a
  * path.
  *
- * `-f` / `--file` (pattern from file) must be included: verified on vendored
- * rg 15.1.0, `rg -f pats.txt PAT a.txt` exits 2 with
+ * `-f` / `--file` (pattern from file) must be included: verified on bundled
+ * rg 15.0.0, `rg -f pats.txt PAT a.txt` exits 2 with
  * `rg: PAT: No such file or directory` — after `-f`, positional arguments
  * are parsed **entirely** as paths; `rg -f pats.txt a.txt` exits 0 printing
  * a.txt (single-file read). The old implementation recognized only `-e`, so

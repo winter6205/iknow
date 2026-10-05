@@ -12,6 +12,12 @@
  *
  // (ADR-0004)
  * surrogate pair).
+ *
+ * Provenance of the "verified / measured / verbatim" notes in this file: they
+ * were taken on rg 15.1.0 and each cited rc / flag / verbatim form was re-run
+ * against the shipped `@vscode/ripgrep` binary (rg 15.0.0) with identical
+ * results, so the stamps below read 15.0.0 — the engine this tool actually
+ * execs (`engine-manifest.RIPGREP_VERSION`).
  */
 
 import { truncateByCodePoint } from "../../sandbox/runner.js";
@@ -21,7 +27,7 @@ export const MAX_MATCH_LINE_COLUMNS = 2_000;
 export const RG_TRUNCATION_MARKER = "...[truncated]";
 
 /**
- * The elision marker rg `--max-columns-preview` appends (verbatim rg 15.1.0).
+ * The elision marker rg `--max-columns-preview` appends (verbatim rg 15.0.0).
  *
  * It is **not** this tool's elision marker: when this string appears in the
  * body, the model is seeing rg's transport-layer truncation, not the display
@@ -36,7 +42,7 @@ export const RG_PREVIEW_MARKER = " [... omitted end of long line]";
  * most 4 bytes.
  *
  * `--max-columns` **triggers** on bytes but **slices** on code points
- * (verified 15.1.0), whereas `truncateMatchContent` only understands code
+ * (measured rg 15.0.0), whereas `truncateMatchContent` only understands code
  * points — different units. A 4x budget ensures "rg appended a marker" does
  * not imply "content was cut":
  *   - An over-long line (> 2000 cp) is necessarily >= 2001 bytes ⟹ always
@@ -44,9 +50,11 @@ export const RG_PREVIEW_MARKER = " [... omitted end of long line]";
  *     authoritative cap, so after stripping the marker the code-point gate
  *     finalizes the same shape.
  *   - A non-over-long line is at most 2000 cp ⟹ at most 8000 bytes; a line at
- *     the trigger rg slices to at most 8000 cp (and doesn't slice at all when
- *     the cut would land mid-character, verified 15.1.0), so no character is
- *     lost. With a budget below 4x, lines of 1000 three-byte CJK chars
+ *     the trigger rg slices to at most 8000 cp and always snaps that cut
+ *     **forward** to a whole code point (measured rg 15.0.0: 7999 ASCII chars
+ *     + 300 CJK chars — 8899 bytes / 8299 cp — comes back as 8000 cp /
+ *     8002 bytes: over the byte budget, never mid-character), so no character
+ *     is lost. With a budget below 4x, lines of 1000 three-byte CJK chars
  *     (3003 bytes / 1003 cp) would actually lose a tail, while the Node side
  *     keeps them intact as under-column — same line, different bytes / body /
  *     copyable content.
@@ -66,15 +74,17 @@ export function rgTransportBudgetBytes(maxColumns: number): number {
  * Strip rg's transport-layer elision marker (only when it is **certain rg
  * added it**).
  *
- * Verified rg 15.1.0 semantics (the two units differ, see
+ * Measured rg 15.0.0 semantics (the two units differ, see
  * `MAX_COLUMN_BYTES_PER_CODE_POINT`):
  *   - **Trigger**: append the marker when line bytes >= budget;
  *   - **Slice**: cut the body to the first `budget` **code points**, or keep
  *     it verbatim if shorter.
- * So a marker does not prove the body was cut (no cut when the line is
- * exactly the budget, or when the cut would land mid-character, verified
- * 15.1.0), and "bytes after removing the marker >= budget" is equivalent to
- * "rg appended the marker":
+ * So a marker does not prove the body was cut (measured rg 15.0.0: a line of
+ * exactly `budget` ASCII bytes gets the marker and keeps its whole 8000-cp
+ * body; and there is no "cut would land mid-character" case at all — the cut
+ * is snapped forward to a whole code point, which may push the body past
+ * `budget` bytes), and "bytes after removing the marker >= budget" is
+ * equivalent to "rg appended the marker":
  *   - a cut line loses a prefix of exactly `budget` code points, i.e. at
  *     least `budget` bytes;
  *   - an uncut whole line already had >= budget bytes.
@@ -85,7 +95,8 @@ export function rgTransportBudgetBytes(maxColumns: number): number {
  * `strippedTailBytes` = bytes the caller removed from the **raw record tail**
  * (the trailing `\r` rg echoes under `--crlf`, i.e. 1): it counts toward rg's
  * trigger base, and without it a 7999-byte CRLF line would escape stripping
- * (verified 15.1.0: 7999 + `\r` lands exactly on the line). Callers must pass
+ * (measured 15.0.0: 7999 + `\r` lands exactly on the line; and rg emits the
+ * marker *before* that `\r`, so the tail is `\r` then `\n`). Callers must pass
  * "verbatim record length - content length passed in", not pre-deduct and
  * guess.
  */
@@ -135,23 +146,27 @@ export function parseRgNullLines(stdout: string): LineHit[] {
 /**
  * rg's binary notice records (**not hit lines**).
  *
- * Two verbatim forms verified in 15.1.0 (under `--null -H` the path segment
+ * Two verbatim forms verified in 15.0.0 (under `--null -H` the path segment
  * ends with NUL, so the notice body follows the NUL):
  *   - `path\0 binary file matches (found "\0" byte around offset 8)`
  *   - `path\0 WARNING: stopped searching binary file after match (found "\0" byte around offset 70008)`
  *   - `path: binary file matches (...)` — under `--null`, rg only NUL-delimits
  *     **real content records**; the notice line uses the NUL-free `path: `
- *     form (verified 15.1.0).
+ *     form (verified 15.0.0).
  *
  * They look like records (path, colon); unrecognized, parsers like
  * `parseRgNullLines` would treat them as hits or drop them wholesale. Under
  * `-l` / `--count` rg does not even **emit** these notices, so the same
  * NUL-containing file is listed by `-l` but reported as a notice by
- * `content` (verified 15.1.0: a file with a far NUL gives `-l` rc=0 with the
- * path, `--count` rc=0 without, `content` a WARNING). This is a side effect
- * of rg's own detection window (64 KiB) and not a replicable rule, so both
- * engines uniformly treat binary files as unsearchable; this code only
- * recognizes the notice.
+ * `content` (verified 15.0.0: a file with a far NUL gives `-l` rc=0 with the
+ * path, `--count` rc=0 without, `content` a WARNING). Which of the two notice
+ * bodies appears is itself not a rule — it depends on the search shape (an
+ * explicitly named file prints `binary file matches`, a directory walk prints
+ * the `WARNING:` form), and under the default parallel walk the notice can be
+ * dropped entirely for a tree holding several NUL files (`-j1` restores it).
+ * All of it is a side effect of rg's own detection window (64 KiB) and not a
+ * replicable rule, so both engines uniformly treat binary files as
+ * unsearchable; this code only recognizes the notice.
  *
  * The test must be **anchored at the record position**: a hit line's body can
  * contain the very same text (e.g. querying `binary file matches` as a
@@ -184,7 +199,7 @@ export function isRgBinaryNotice(record: string): boolean {
  *
  * `argv.ts` passes `--crlf`: rg decides line boundaries by CRLF (so `foo$`
  * hits a CRLF line), but **the echoed line content still carries `\r`**
- * (verified 15.1.0, same with or without `--null`). The Node side already
+ * (verified 15.0.0, same with or without `--null`). The Node side already
  * strips `\r` after splitting on `\n` (see `file-lines.splitLines`); not
  * stripping here means the same query differs by one invisible char between
  * engines — invisible to the model, but byte comparisons and a later

@@ -164,7 +164,7 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
   });
 
   it("rg --co 不是单字母别名（clap 报 unrecognized flag）→ 不据此拒", () => {
-    // Measured vendored rg 15.1.0: `rg --co` reports `unrecognized flag
+    // Measured bundled rg 15.0.0: `rg --co` reports `unrecognized flag
     // --co`, exit 2 — clap's short alias accepts exactly **one** letter. The
     // extractor does not model this syntax (it should not gate on it
     // anyway); the bash exit != 0 gate is what rejects it. This pins the
@@ -288,7 +288,7 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
     assert.equal(extractSingleReadPath("grep -L SECRET cfg.ts"), undefined);
     assert.equal(extractSingleReadPath("rg -L needle a.ts"), "a.ts");
     // The double-dash form does not change the semantic fork: rg's `--L` is
-    // still --follow (measured vendored 15.1.0 prints matching lines) →
+    // still --follow (measured bundled 15.0.0 prints matching lines) →
     // ledgered.
     assert.equal(extractSingleReadPath("rg --L needle a.ts"), "a.ts");
     // grep's `--L` is not alias syntax (measured GNU: unrecognized, exit 2),
@@ -300,7 +300,7 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
   });
 
   it("别名不误伤正向读形态：rg --n（= -n，行号照常打印）仍入账", () => {
-    // Measured vendored rg 15.1.0: `rg --n` = `-n` = --line-number, matching
+    // Measured bundled rg 15.0.0: `rg --n` = `-n` = --line-number, matching
     // lines printed as usual. The alias rule only canonicalizes the token to
     // a short flag and consults the blacklist; flags off the blacklist pass —
     // a per-semantics fork, not "reject any --x".
@@ -320,7 +320,7 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
   });
 
   it("ripgrep 的单字母双横线别名 = 短旗标（--c / --l / --q 抑制内容 → 不入账）", () => {
-    // Measured vendored rg 15.1.0: `rg --c` prints only the count (`2`),
+    // Measured bundled rg 15.0.0: `rg --c` prints only the count (`2`),
     // `--l` only file names, `--q` empty stdout — all exit 0. This clap alias
     // syntax is not GNU getopt's unambiguous-prefix rule (`--co` is
     // unrecognized in rg, exit 2), so modeling prefix expansion alone would
@@ -343,7 +343,7 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
   });
 
   it("rg --pre COMMAND：跑 `COMMAND <a.txt`、搜其输出而非文件原文 → 不入账", () => {
-    // Measured vendored rg 15.1.0, on-disk a.txt = `PRECIOUS_DISK_CONTENT`:
+    // Measured bundled rg 15.0.0, on-disk a.txt = `PRECIOUS_DISK_CONTENT`:
     //   `rg --pre rev TNETNOC_KSID_SUOICERP a.txt`   rc=0 stdout=`TNETNOC_KSID_SUOICERP`
     //   `rg --pre=rev TNETNOC_KSID_SUOICERP a.txt`   rc=0 same (the `=` spelling is equivalent)
     //   `rg --pre cat PRECIOUS_DISK_CONTENT a.txt`   rc=0 stdout=`PRECIOUS_DISK_CONTENT`
@@ -367,7 +367,7 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
   });
 
   it("rg --pre-glob 单独出现不构成伪造：没有 --pre 时它只是过滤器 → 照常入账", () => {
-    // Measured vendored rg 15.1.0: `rg --pre-glob '*.txt'
+    // Measured bundled rg 15.0.0: `rg --pre-glob '*.txt'
     // PRECIOUS_DISK_CONTENT a.txt` exits 0 printing `PRECIOUS_DISK_CONTENT`
     // (the disk text) — `--pre-glob` only selects which files pass through
     // `--pre`'s COMMAND, and with no `--pre` no preprocessing happens.
@@ -384,7 +384,7 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
   });
 
   it("rg --pr 不是 --pre 的合法前缀（clap 报 unrecognized flag，exit 2）→ 不据此拒", () => {
-    // Measured vendored rg 15.1.0: `rg --pr rev PAT a.txt` reports
+    // Measured bundled rg 15.0.0: `rg --pr rev PAT a.txt` reports
     // `rg: unrecognized flag --pr`, exit 2 — the bash exit gate stops it, not
     // this extractor. Pins that the prefix criterion is not
     // over-generalized onto rg's clap syntax (GNU's unambiguous-prefix rule
@@ -392,7 +392,7 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
     assert.equal(extractSingleReadPath("rg --pr rev PAT a.txt"), undefined);
   });
 
-  it("rg --crlf 是 boolean（vendored rg 15.1.0 实测：值不被吞，按 pattern 解析）", () => {
+  it("rg --crlf 是 boolean（bundled rg 15.0.0 实测：值不被吞，按 pattern 解析）", () => {
     // Real machine `rg --crlf X PAT f.txt`: rc=2, stderr
     // `rg: PAT: No such file or directory` — X is not swallowed; it parses
     // as the pattern, PAT as a file path, which does not exist (per
@@ -414,7 +414,7 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
   });
 
   it("rg --o = -o = --only-matching：实测只打印匹配片段，不是整行 → 不入账", () => {
-    // Measured vendored rg 15.1.0 (inputs `xxSECRETyy` / `zzSECRETww`):
+    // Measured bundled rg 15.0.0 (inputs `xxSECRETyy` / `zzSECRETww`):
     // `rg -o` / `rg --o` / `rg --only-matching` produce byte-identical
     // output — only `SECRET`, no full lines. A single-letter alias does not
     // change flag semantics, so `--o` follows the existing
@@ -497,8 +497,8 @@ describe("extractSingleReadPath — 不入账形态（fail-closed）", () => {
  *   - uutils `cat/head/tail -h` = `--help` (rejected, implementation-dependent).
  *
  * All rc / stdout notes below are measured on this machine: uutils coreutils
- * 0.8.0 (cat / nl / head / tail), GNU grep 3.12, GNU sed 4.9, vendored
- * ripgrep 15.1.0 (linux-x64).
+ * 0.8.0 (cat / nl / head / tail), GNU grep 3.12, GNU sed 4.9, and the rg that
+ * ships in the lockfile — `@vscode/ripgrep` 15.0.0 (linux-x64).
  */
 describe("extractSingleReadPath — 簇 A：非读短路旗标", () => {
   const NON_READ_CASES: ReadonlyArray<string> = [
@@ -595,7 +595,7 @@ describe("extractSingleReadPath — 簇 A：非读短路旗标", () => {
  * table, so their value tokens counted as operands, and the miscount could
  * land on exactly "one" → wrong record.
  *
- * Measured (vendored rg 15.1.0): `rg --X VALUE PAT a.txt` and
+ * Measured (bundled rg 15.0.0): `rg --X VALUE PAT a.txt` and
  * `rg -X VALUE PAT a.txt` are **byte-identical** for
  * X ∈ {g,t,m,j,M,r,f,e,A,B,C,d,E,T} — same semantics for both spellings, so
  * the verdict must match. That is this group's criterion: parity, not
@@ -671,7 +671,7 @@ describe("extractSingleReadPath — 簇 B：ripgrep 单字母双横线别名归�
   });
 
   it("rg -f / --f / --file 是 pattern 来源：其后的首个位置参数是路径，不是 pattern", () => {
-    // Measured vendored rg 15.1.0: `rg -f pats.txt PAT a.txt` is rc=2 with
+    // Measured bundled rg 15.0.0: `rg -f pats.txt PAT a.txt` is rc=2 with
     // `rg: PAT: No such file or directory` — every positional after `-f`
     // resolves as a path (two paths → not "one file read");
     // `rg -f pats.txt a.txt` is rc=0 printing a.txt (single-file read). The
@@ -737,7 +737,7 @@ describe("extractSingleReadPath — 正向对照（拒集不得误伤真读形�
     // Measured GNU sed 4.9: both script sources print the first two lines.
     ["sed -n '1,2p' a.txt", "a.txt"],
     ["sed -n -e '1,2p' a.txt", "a.txt"],
-    // Measured vendored rg 15.1.0: --no-heading / --hidden / -v print content as usual.
+    // Measured bundled rg 15.0.0: --no-heading / --hidden / -v print content as usual.
     ["rg --no-heading PAT a.txt", "a.txt"],
     ["rg --hidden PAT a.txt", "a.txt"],
     ["rg -v PAT a.txt", "a.txt"],
@@ -758,7 +758,7 @@ describe("extractSingleReadPath — 正向对照（拒集不得误伤真读形�
     ["rg --f pats.txt a.txt", "a.txt"],
     ["rg --file pats.txt a.txt", "a.txt"],
     ["grep -f pats.txt a.txt", "a.txt"],
-    // Measured vendored rg 15.1.0: `rg --pre-glob '*.txt' PRECIOUS a.txt` is
+    // Measured bundled rg 15.0.0: `rg --pre-glob '*.txt' PRECIOUS a.txt` is
     // a single-file read (`--debug` log: `number of paths given to search: 1`),
     // pattern `PRECIOUS`, file `a.txt`. `--pre-glob` takes a value; if it is
     // not in the value-swallowing table the value token falls into operands,

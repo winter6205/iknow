@@ -1600,7 +1600,7 @@ describe("grep — Node 降级披露 (sel-4 / ADR-0005 notice-over-failure)", ()
 describe("grep — 含换行的路径（行协议不可表示）", () => {
   /**
    * All three output faces are line protocols (one record per line), so a `\n`
-   * in a path splits one record into two. Measured on rg 15.1.0: it breaks
+   * in a path splits one record into two. Measured on rg 15.0.0: it breaks
    * differently from Node but equally badly — rg's first half renders as a
    * **fake hit** (`name.txt:1:<text>` for a file that does not exist on disk),
    * Node emits the newline-carrying path verbatim. The stance: both engines
@@ -1674,7 +1674,7 @@ describe("grep — 含换行的路径（行协议不可表示）", () => {
 
   it("显式点名含换行的文件 / 目录 → 空结果（不是假命中）", async () => {
     // rg's `--glob` exclusions do **not** apply to explicitly named path
-    // arguments (measured on 15.1.0), so this relies on the representability
+    // arguments (measured on 15.0.0), so this relies on the representability
     // short-circuit in `rg-engine` before exec — without it, naming
     // `nl\nname.txt` would emit the fake hit `name.txt:1:needle here`.
     await bothEngines(async (makeTool) => {

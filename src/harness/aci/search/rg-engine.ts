@@ -78,7 +78,7 @@ export async function runRgEngine(input: RgEngineInput): Promise<EngineResult> {
   // When the search target itself contains `\n` / `\0`, return an empty
   // result directly and do **not** exec rg: rg's `--glob` exclusion only
   // applies during traversal, while an explicitly named file / dir is still
-  // searched (verified 15.1.0), and its records end with `\n` — a path with
+  // searched (verified 15.0.0), and its records end with `\n` — a path with
   // `\n` splits one record into two, and the second half looks like a **fake
   // hit** (`nl\nname.txt` → `name.txt:1:<body>`), and that fake path, if it
   // really exists, could pass text admission and reach the model. When the
@@ -100,7 +100,7 @@ export async function runRgEngine(input: RgEngineInput): Promise<EngineResult> {
  *
  * Why re-check paths rg already reported: rg's own binary detection uses a
  * 64 KiB window and **reaches different conclusions for the same file
- * depending on output mode** (verified 15.1.0: a file with NUL at 70 KB is
+ * depending on output mode** (verified 15.0.0: a file with NUL at 70 KB is
  * listed by `-l`, skipped by `--count`, WARNING for `content`). That behavior
  * has no replicable consistent meaning, so this tool's rule is "binary
  *

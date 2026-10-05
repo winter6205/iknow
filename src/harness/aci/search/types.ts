@@ -68,12 +68,14 @@ export interface ContextEntry {
 /**
  * The group separator line (the single authority for rendering and parsing).
  *
- * Under `--null -C N`, rg prints the separator as **two spaces plus `--`**
- * (`\0--\0\n`, verified on 15.1.0; different from the bare `--` it prints
- * without `--null`). A parser that only accepts bare `--` would drop the
- * separator as a corrupt record, merging adjacent groups — the group count
- * behind `head_limit` and the landing point of `offset` would both shift —
- * while the Node engine builds its own groups and would not be affected: the
- * same `-C N` query would paginate differently across the two engines.
+ * Under `--null -C N`, rg prints the separator as a **bare `--` line**
+ * (`--\n`, verified on 15.0.0, and unchanged on 15.1.0). The NULs in that
+ * mode are the path field delimiter, not part of the separator: a two-file
+ * run emits `sub/c.ts\0needle\n--\nplain.ts\0plain\n…`. A parser that expects
+ * any other shape would drop the separator as a corrupt record, merging
+ * adjacent groups — the group count behind `head_limit` and the landing point
+ * of `offset` would both shift — while the Node engine builds its own groups
+ * and would not be affected: the same `-C N` query would paginate differently
+ * across the two engines.
  */
 export const CONTEXT_GROUP_SEPARATOR = "--";

@@ -56,7 +56,7 @@ export const MAX_EXPLICIT_FILE_BYTES = MAX_TEXT_FILE_BYTES * 16;
  * `allowOversize` is used only on the path where "the search root is an
  * **explicitly named single file**": rg's `--max-filesize` applies only during
  * **recursive traversal**; an explicitly fed file is searched even above the
- * limit (verified rg 15.1.0). If Node refused by size unconditionally, the
+ * limit (verified rg 15.0.0). If Node refused by size unconditionally, the
  * same `path: "big.ts"` would get different answers from the two engines; and
  * with no bound at all, an oversize file becomes an unbounded read. Hence the
  * shared cap `MAX_EXPLICIT_FILE_BYTES`.
@@ -67,7 +67,7 @@ export const MAX_EXPLICIT_FILE_BYTES = MAX_TEXT_FILE_BYTES * 16;
  // (ADR-0004)
  * own binary detection cannot be the authority: it judges within a 64 KiB
  * window and **reaches different conclusions per output mode** — a file with a
- * far-away NUL is listed by `-l` but skipped by `--count` (verified 15.1.0:
+ * far-away NUL is listed by `-l` but skipped by `--count` (verified 15.0.0:
  * `-l` returns on first hit while `--count` reads to EOF). That has no
  * replicable consistent meaning, so both engines uniformly use this function's
  * whole-file verdict, and rg's built-in detection is only an I/O-saving

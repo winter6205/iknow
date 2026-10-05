@@ -4,19 +4,27 @@
  * the tier clock burns out, instead of spinning to the 30s default-tier
  * timeout.
  *
- * Why the gate counts **files**, not wall clock: measured (rg 15.1.0), the
- * same 54,318-file tree takes `rg -l --max-filesize=1MiB` 17.8s (60% of the
- * default tier), while 1,200 files take 0.021s; wall-clock thresholds
- * misjudge on both fast and slow hosts (17.8s is already close to 30s — a
- * slightly slower machine crosses the tier). File count is approximately
- * linear in matching cost at this tool's scale (~0.33ms/file), so the gate
- * uses file count: deterministic, testable, decoupled from host speed; the
- * tier clock remains the backstop.
+ * Why the gate counts **files**, not wall clock: measured on the engine that
+ * actually ships (rg 15.0.0, best of 3 on this host), 1,200 / 5,400 / 10,000 /
+ * 20,000 / 40,000 files take 0.012 / 0.030 / 0.050 / 0.093 / 0.168s — about
+ * 0.004ms/file, linear in file count. Wall-clock thresholds misjudge on both
+ * fast and slow hosts, so the gate uses file count: deterministic, testable,
+ * decoupled from host speed; the tier clock remains the backstop.
  *
- * `GREP_SCOPE_FILE_LIMIT` = 10,000: extrapolating from the measurement above,
- * `17.8s × 10,000 / 54,318 ≈ 3.3s`, about 11% of the default tier, leaving
- * ~9x headroom for host speed; counting itself early-stops at cap+1, and the
- * Node walk of 10,000 files measured < 1s.
+ * An earlier note here attributed 17.8s to a 54,318-file tree on rg 15.1.0.
+ * **That figure does not reproduce** — the same shape extrapolates to well
+ * under a second here, and the command it quoted (`--max-filesize=1MiB`) is
+ * an rc=2 parse error on both binaries that exits in ~8ms without scanning
+ * anything, so it cannot have produced that number either. It is kept above
+ * only as a record of what was believed; **nothing derives the limit from it.**
+ * (The tool's real spelling is a raw byte count — `argv.ts` pushes
+ * `--max-filesize=${MAX_TEXT_FILE_BYTES}`, i.e. `1048576` — not a `1M` suffix.)
+ *
+ * `GREP_SCOPE_FILE_LIMIT` = 10,000: at the measured ~0.004ms/file that is
+ * ~50ms of scanning, far under the 30s default tier, so host-speed variance
+ * does not threaten it — which is the whole reason the gate counts files
+ * rather than seconds. Counting itself early-stops at cap+1, and the Node walk
+ * of 10,000 files measured < 1s.
  *
  * Exempt / not exempt (both engines share this module — the same `path` must
  * get the same verdict):

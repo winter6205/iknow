@@ -26,7 +26,7 @@ import { ToolExecutionError } from "../../errors.js";
  * engine is running — error with the shipped engine, silently empty when it
  * cannot start.
  *
- * Rules verified against rg 15.1.0: `[` must close; and the `]` immediately
+ * Rules verified against rg 15.0.0: `[` must close; and the `]` immediately
  * after `[` (or `[!` / `[^`) **is a literal member**, not the closing
  * bracket — hence `[]]` is legal while `[]` and `[!]` report `unclosed
  * character class`.
@@ -45,7 +45,7 @@ export function assertValidGlob(glob: string): void {
  * Decide whether a relative path is accepted by a glob set.
  *
  * A bare `!` (nothing left after stripping the negation marker) **selects no
- * files**, it does not mean "accept everything": verified against rg 15.1.0,
+ * files**, it does not mean "accept everything": verified against rg 15.0.0,
  * a lone `--glob '!'` gives rc=1, same as `--glob '!*'` (negate all). An
  * empty pattern can only match an empty path, and candidate paths are never
  * empty — so as a negation it removes nothing and as a positive it selects
@@ -60,7 +60,7 @@ export function matchesGlobSet(
   globs: ReadonlyArray<string>
 ): boolean {
   // A bare `!` makes the whole set accept nothing: it is an **empty pattern**,
-  // verified against rg 15.1.0 where a lone `--glob '!'` gives rc=1 (same as
+  // verified against rg 15.0.0 where a lone `--glob '!'` gives rc=1 (same as
   // `--glob '!*'` on the same tree). We cannot rely on "empty pattern matches
   // empty string" to fall through to false inside `matchOne` — at the set
   // level, no positive pattern defaults to accept-all, so a bare `!` would
@@ -84,7 +84,7 @@ export function matchesGlobSet(
  *
  * The only difference is the trailing `/`: positive `sub/` selects no file
  * (an empty segment only matches an empty name), while `!sub/` removes the
- * **entire subtree** of directory `sub` (verified against rg 15.1.0:
+ * **entire subtree** of directory `sub` (verified against rg 15.0.0:
  * `--glob '!sub/'` drops `sub/c.ts` and `sub/deep/d.ts`). Same lineage as
  * gitignore's "directory qualification" — rg prunes directories for negative
  * globs rather than matching file by file.
@@ -114,7 +114,7 @@ function matchesNegation(relPath: string, glob: string): boolean {
  * Negation form starting with `!`; `\!` is an escaped literal `!` and stays a
  * positive pattern.
  *
- * Verified against rg 15.1.0: `--glob '!bang.ts'` does not remove `!bang.ts`
+ * Verified against rg 15.0.0: `--glob '!bang.ts'` does not remove `!bang.ts`
  * (returns the whole repo), while `--glob '\!bang.ts'` returns only
  * `!bang.ts` — the escaped `!` is a literal character.
  */
@@ -145,7 +145,7 @@ export function matchOne(relPath: string, glob: string): boolean {
   for (const expanded of expandGlob(normalized)) {
     // Empty segments are kept and are always "unmatchable": a trailing `/`
     // (`sub/`, `*/`, `a.ts/`) selects **no file at all** in rg (verified
-    // 15.1.0, same for lone and negated forms), for the same reason as a
+    // 15.0.0, same for lone and negated forms), for the same reason as a
     // middle empty segment (`a//b`) — an empty segment only matches an empty
     // name. The old implementation popped the trailing empty segment, so
     // `sub/` degenerated to `sub` and `*/` to `*`, and the Node path took the
@@ -163,7 +163,7 @@ export function matchOne(relPath: string, glob: string): boolean {
  * Brace expansion: `{a,b}` yields one alternative; nesting and multiple
  * groups produce a cartesian product.
  *
- * Semantics verified against rg 15.1.0; scanning and validation share this
+ * Semantics verified against rg 15.0.0; scanning and validation share this
  * function (`assertValidGlob` calls it, malformed input → typed rejection):
  *   - `{a,b}` alternation; `{ts}` with one element also expands (≡ `ts`);
  *     `{}` expands to the empty string, i.e. matches the empty pattern and

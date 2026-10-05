@@ -154,7 +154,7 @@ describe("stripRgPreviewMarker — rg 省略标记只在确定是 rg 加的时�
   });
 
   it("标记在、正文却没被切（切割点落在多字节字符中间）→ 仍要剥标记", () => {
-    // Measured on 15.1.0: trigger counts bytes, slicing counts code points —
+    // Measured on 15.0.0: trigger counts bytes, slicing counts code points —
     // different units, so "marker present" ≠ "line was cut". On such lines rg
     // only appends the marker and returns the body untouched. The marker must
     // be stripped, else the downstream code-point gate treats it as body text
@@ -168,7 +168,7 @@ describe("stripRgPreviewMarker — rg 省略标记只在确定是 rg 加的时�
   });
 
   it("CRLF：尾随 \\r 计入触发基数（正文 7999 字节 + \\r 恰好达线）", () => {
-    // Measured on 15.1.0: rg counts `\r` toward the "line too long" byte
+    // Measured on 15.0.0: rg counts `\r` toward the "line too long" byte
     // total but never echoes it in the body. Stripping the marker without
     // adding that byte back would under-strip 7999-byte lines.
     const head = "x".repeat(rgTransportBudgetBytes(MAX_MATCH_LINE_COLUMNS) - 1);
@@ -220,7 +220,7 @@ describe("truncateRgContent — 先洗传输层痕迹，再过 code point 闸", 
  * Binary-notice records.
  *
  * rg's detection window is 64 KiB and the same file gets different verdicts
- * per output mode (measured on 15.1.0: a file with NUL at 70 KB is listed by
+ * per output mode (measured on 15.0.0: a file with NUL at 70 KB is listed by
  * `-l`, skipped by `--count`, and emits WARNING in content mode). Notice
  * lines share the `path:line:text` shape, so without explicit recognition
  * they parse as fake hits; this tool's stance is "binary files are not
@@ -228,7 +228,7 @@ describe("truncateRgContent — 先洗传输层痕迹，再过 code point 闸", 
  */
 describe("isRgBinaryNotice — 二进制提示不是命中行", () => {
   it("识别两种原文（无 NUL 的 `path: ...` 与含 NUL 的 `path\\0 ...`）", () => {
-    // Verbatim from 15.1.0: notice lines carry no NUL (rg delimits with NUL
+    // Verbatim from 15.0.0: notice lines carry no NUL (rg delimits with NUL
     // only for content records).
     assert.equal(
       isRgBinaryNotice(

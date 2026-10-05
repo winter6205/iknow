@@ -110,7 +110,7 @@ describe("buildRgArgs — 出法", () => {
     // Unicode classes degenerated to JS's ASCII measure. Same species of
     // lever as `--engine=auto`: using rg's switches to fabricate
     // "consistency" between the engines, at the cost of breaking rg's
-    // **correct** Unicode behavior. Measured (rg 15.1.0, vendored binary):
+    // **correct** Unicode behavior. Measured (rg 15.0.0, bundled binary):
     // `rg '\w'` matches CJK ideographs, `rg --no-unicode '\w'` does not;
     // `rg '\d'` matches Arabic-Indic digits, with the switch it does not. After ADR-0089 narrowed the
     // contract: rg runs its default Unicode semantics, Node runs JS

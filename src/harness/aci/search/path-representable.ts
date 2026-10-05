@@ -7,7 +7,7 @@
  * next record); a path containing `\0` collides with the `--null` delimiter.
  * Neither character **can** be losslessly represented in a line protocol.
  *
- * Verified (rg 15.1.0; see the `--null` notes in `argv.ts` and the re-check in
+ * Verified (rg 15.0.0; see the `--null` notes in `argv.ts` and the re-check in
  * `rg-engine.ts`): on the rg side a `\n`-containing path splits its record in
  * two — the first half parses as a **fake hit** (shaped like
  * `name.txt:1:needle here`, though no such file exists on disk) and the

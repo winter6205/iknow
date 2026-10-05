@@ -246,7 +246,7 @@ describe("matchesGlobSet — `!` 否定", () => {
   });
 
   it("裸 `!` → 一条都不收（不是「无正模式→全收」）", () => {
-    // Measured with rg 15.1.0: a lone `--glob '!'` is rc=1 (empty pattern
+    // Measured with rg 15.0.0: a lone `--glob '!'` is rc=1 (empty pattern
     // matches no real path); `--glob '!*'` on the same tree is also rc=1. If
     // set semantics treated it as "no positive pattern", it would invert into
     // listing the whole repo — exactly the direction Node and rg diverge.
@@ -256,7 +256,7 @@ describe("matchesGlobSet — `!` 否定", () => {
   });
 
   it("`\\!x` 是转义后的字面 `!`，仍是正模式（不是否定）", () => {
-    // Measured with rg 15.1.0: `--glob '!bang.ts'` does not remove `!bang.ts`
+    // Measured with rg 15.0.0: `--glob '!bang.ts'` does not remove `!bang.ts`
     // (returns the whole repo); `--glob '\!bang.ts'` returns only `!bang.ts`.
     assert.equal(matchesGlobSet("!bang.ts", ["\\!bang.ts"]), true);
     assert.equal(matchesGlobSet("a.ts", ["\\!bang.ts"]), false);
@@ -267,7 +267,7 @@ describe("matchesGlobSet — `!` 否定", () => {
 /**
  * Trailing-`/` patterns.
  *
- * Measured with rg (15.1.0): `sub/`, `a.ts/`, double-star trailing slash,
+ * Measured with rg (15.0.0): `sub/`, `a.ts/`, double-star trailing slash,
  * `//`, and `sub//c.ts` all select zero files — an empty segment can only
  * match an empty name, and directories themselves are not candidate files.
  * The old implementation popped the trailing empty segment, so `sub/`
