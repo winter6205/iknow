@@ -266,3 +266,16 @@ test("running-bg 会话行带 [运行中] 静态标记", async () => {
   expect(setup.captureCharFrame()).toContain("[运行中]");
   await setup.renderer.destroy();
 });
+
+test("空标题会话行回退为 (未命名)，不再渲染 (空)", async () => {
+  // The store's presentation projection hides blank titles, except an invalid
+  // workspace binding — which stays listed so it can be rebound. That exception
+  // is the one path where a blank title still reaches the picker, so the row
+  // fallback label is the user-visible contract pinned here.
+  const setup = await renderList([makeEntry("c-blank", "")], { rows: 11 });
+  await setup.renderOnce();
+  const frame = setup.captureCharFrame();
+  expect(frame).toContain("(未命名)");
+  expect(frame).not.toContain("(空)");
+  await setup.renderer.destroy();
+});

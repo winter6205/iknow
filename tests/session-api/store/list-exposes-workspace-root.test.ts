@@ -54,12 +54,16 @@ const sampleFile = (opts: {
   };
 };
 
-// A session needs an assistant reply — list() skips sessions whose last
-// assistant text is empty (issue #96). The shape is otherwise minimal.
+// A session that a caller expects list() to RETURN must look like a real
+// one: an assistant reply (issue #96 skips sessions with empty last-assistant
+// text) and a non-blank title (issue #1197 skips blank-title sessions, except
+// invalid bindings, which stay listed for the rebind recovery path). The shape
+// is otherwise minimal.
 const withReply = (id: string): SessionFileV1 =>
   sampleFile({
     id,
     overrides: {
+      title: "listed session",
       messages: [
         { role: "user", content: [{ type: "text", text: "q" }] },
         { role: "assistant", content: [{ type: "text", text: "reply" }] },

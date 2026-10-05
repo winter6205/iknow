@@ -66,11 +66,12 @@ function makeGitRepo(): string {
 }
 
 function makeSessionFile(id: string, workspaceRoot: string): SessionFileV1 {
-  // T3 / worktreeExclusive: a stub assistant message makes the session
-  // visible to `store.list()` (which filters sessions with no assistant
-  // text per #96 — sidebar concern, see session-store.tryListEntry). The
-  // occupancy check reads `store.list()` so test fixtures must populate
-  // it; existing tests are unaffected (they read via `store.load()`).
+  // T3 / worktreeExclusive: the occupancy check reads `store.listWorkspaceClaims()`
+  // (ADR-0070), which still applies the #96 no-assistant-text filter but NOT
+  // the #1197 blank-title filter — so a claim is visible to occupancy even with
+  // a blank title. The assistant stub below is what makes these fixtures
+  // claim-visible; `title: ""` is left deliberate to prove title-independence
+  // of the claim. Existing tests are unaffected (they read via `store.load()`).
   const stubMessage = {
     role: "assistant" as const,
     content: [{ type: "text" as const, text: "stub" }],
@@ -1353,7 +1354,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     const guestProv = createTaskWorktreeProvisioner({
       store,
       worktreeExclusive: true,
-      listSessions: () => store.list(),
+      listSessions: () => store.listWorkspaceClaims(),
     });
 
     await expect(
@@ -1423,7 +1424,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     const guestProv = createTaskWorktreeProvisioner({
       store,
       worktreeExclusive: true,
-      listSessions: () => store.list(),
+      listSessions: () => store.listWorkspaceClaims(),
     });
     const entered = await guestProv.enter({
       conversationId: "conv-guest",
@@ -1673,7 +1674,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     const guestBlocked = createTaskWorktreeProvisioner({
       store,
       worktreeExclusive: true,
-      listSessions: () => store.list(),
+      listSessions: () => store.listWorkspaceClaims(),
     });
     await expect(
       guestBlocked.enter({
@@ -1690,7 +1691,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     const guestOk = createTaskWorktreeProvisioner({
       store,
       worktreeExclusive: true,
-      listSessions: () => store.list(),
+      listSessions: () => store.listWorkspaceClaims(),
     });
     const entered = await guestOk.enter({
       conversationId: "conv-guest",

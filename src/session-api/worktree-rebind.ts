@@ -105,9 +105,11 @@ export interface TaskWorktreeProvisionerOpts {
   readonly worktreeExclusive?: boolean;
   /**
    * ADR-0070 — session enumerator for the occupancy check. Required when
-   * `worktreeExclusive === true`; returns the same shape as
-   * `SessionStore.list()` (an absent `workspaceRoot` means the session
-   * claims no worktree → passes as unclaimed).
+   * `worktreeExclusive === true`; returns `SessionListEntry[]` (an absent
+   * `workspaceRoot` means the session claims no worktree → passes as
+   * unclaimed). The hub wires this to `SessionStore.listWorkspaceClaims()`,
+   * NOT the picker's `list()` — a claim must stay visible here regardless of
+   * its title (see `ListProjection` in session-store.ts).
    *
    * I/O failure: a non-ENOENT throw becomes typed `rebind_failed`
    * (host-side rerun_after_change). Never silently passed — that would

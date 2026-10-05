@@ -3484,12 +3484,12 @@ export async function runChatSession(opts: ChatSessionOpts): Promise<void> {
   const conversationId = opts.conversationId ?? opts.resumeId ?? randomUUID();
 
   // REPL-level AbortController + SessionStore injected into ctx; ask/pipe
-  // entries share the same ctx, and by default signal/store never reach the
-  // persistence path (zero change exposed to ask).
-  // Default store pool = ~/.iknow, same pool as serve/TUI; tests / ask
-  // entries pass opts.deps without a store path, so persistence is skipped
-  // naturally. Ordering: checkpointStore is constructed before state — the
-  // resume path must load the existing file first, then seed
+  // entries share the same ctx.
+  // Default store pool = ~/.iknow, same pool as serve/TUI. Persistence is NOT
+  // skipped for tests / ask: the store below is built unconditionally, so any
+  // entry that omits `dataDir` commits into the real ~/.iknow pool — pass a
+  // temp `dataDir` to isolate. Ordering: checkpointStore is constructed before
+  // state — the resume path must load the existing file first, then seed
   // state.messages; the store/state dependency graph permits this order.
   const abortController = new AbortController();
   // The store namespace keys by projectIdentityRoot, not cwd.

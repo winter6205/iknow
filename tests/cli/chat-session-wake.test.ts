@@ -5,14 +5,20 @@
  * start the silent wake as soon as that turn becomes idle, without another
  * user line.
  */
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { describe, expect, it, vi } from "vitest";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   AnthropicNativeMessage,
   AssistantTurnResult,
 } from "../../src/harness/index.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.ts";
+import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.ts";
+import { SessionStore } from "../../src/session-api/store/index.ts";
 import {
   assistantResult as fixtureAssistantResult,
   makeDeps,
@@ -117,6 +123,21 @@ function managerWithTerminalNotice(): {
 }
 
 describe("interactive chat subagent wake", () => {
+  let baseDir: string;
+  let workspaceRoot: string;
+
+  beforeEach(async () => {
+    // Fresh temp store root + workspace so the wake run commits into a temp
+    // tree, never ~/.iknow or the real repo project slug.
+    baseDir = await mkdtemp(join(tmpdir(), "iknow-chat-wake-"));
+    workspaceRoot = await mkdtemp(join(tmpdir(), "iknow-chat-wake-root-"));
+  });
+
+  afterEach(async () => {
+    await rm(baseDir, { recursive: true, force: true });
+    await rm(workspaceRoot, { recursive: true, force: true });
+  });
+
   it("flushes a pending terminal wake when the parent turn becomes idle", async () => {
     const readline = new FakeReadline();
     mockState.readline.createInterface.mockReturnValue(readline);
@@ -143,12 +164,15 @@ describe("interactive chat subagent wake", () => {
     };
 
     const { runChatSession } = await import("../../src/cli/chat-session.ts");
+    const conversationId = randomUUID();
     const sessionPromise = runChatSession({
       deps,
       session: {},
       jsonMode: false,
       subagentManager: managerFixture.manager,
-      workspaceRoot: process.cwd(),
+      dataDir: baseDir,
+      conversationId,
+      workspaceRoot,
     });
     await vi.waitFor(() =>
       expect(mockState.readline.createInterface).toHaveBeenCalledTimes(1)
@@ -174,5 +198,24 @@ describe("interactive chat subagent wake", () => {
 
     readline.close();
     await sessionPromise;
+
+    // Positive isolation proof (issue #1197 cause 1): the wake session
+    // committed into the temp dataDir namespace — the exact
+    // (resolveServeDataDir(dataDir), deriveProjectIdentityRoot({ cwd })) pair
+    // chat-session.ts builds, not ~/.iknow or the real repo project slug.
+    // load() is title-agnostic, so this asserts persistence without leaning on
+    // list()'s #1197 blank-title filter.
+    const reader = new SessionStore(
+      baseDir,
+      deriveProjectIdentityRoot({ cwd: workspaceRoot })
+    );
+    const persisted = await reader.load(conversationId);
+    const transcriptText = persisted.messages
+      .flatMap((message) => message.content)
+      .filter((block) => block.type === "text")
+      .map((block) => (block as { text: string }).text)
+      .join("\n");
+    expect(transcriptText).toContain("parent answer");
+    expect(transcriptText).toContain("silent wake answer");
   });
 });

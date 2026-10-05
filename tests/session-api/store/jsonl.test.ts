@@ -1086,10 +1086,16 @@ describe("SessionStore.readHead / writeHead", () => {
 
 describe("SessionStore.list/delete with both on-disk shapes", () => {
   it("list() returns JSONL and legacy sessions, deduping ids present in both", async () => {
+    // Titled + assistant reply: the session must survive both the #96
+    // empty-last-assistant filter and the #1197 blank-title filter so the
+    // dedup behaviour under test is what decides listing, not the title.
     const withReply = (id: string) =>
       sampleFile({
         id,
-        overrides: { messages: [userMsg("q"), assistantMsg(`reply-${id}`)] },
+        overrides: {
+          title: "listed session",
+          messages: [userMsg("q"), assistantMsg(`reply-${id}`)],
+        },
       });
     await store.save({ id: "jl-list-dual", file: withReply("jl-list-dual") });
     await mkdir(conversationDir("jl-list-legacy"), { recursive: true });
@@ -1109,10 +1115,15 @@ describe("SessionStore.list/delete with both on-disk shapes", () => {
   });
 
   it("list() skips a middle-corrupt JSONL session but keeps tail-corrupt ones", async () => {
+    // Titled so the mid-corrupt SKIP is attributable to the parse failure,
+    // not to the #1197 blank-title filter.
     const withReply = (id: string) =>
       sampleFile({
         id,
-        overrides: { messages: [userMsg("q"), assistantMsg("reply")] },
+        overrides: {
+          title: "listed session",
+          messages: [userMsg("q"), assistantMsg("reply")],
+        },
       });
     await store.save({
       id: "jl-list-midcorrupt",

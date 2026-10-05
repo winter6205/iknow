@@ -428,6 +428,7 @@ describe("SessionStore.list", () => {
         id,
         overrides: {
           updatedAt,
+          title: "list reply",
           messages: [
             {
               role: "user" as const,
@@ -532,6 +533,171 @@ describe("SessionStore.list", () => {
     );
   });
 
+  it("omits blank-title sessions from list() (issue #1197)", async () => {
+    const prefix = `list-title-filter-${randomUUID()}`;
+    const missingRoot = join(tmpdir(), `${prefix}-no-such-dir`);
+    type Case = {
+      readonly label: string;
+      readonly id: string;
+      readonly title: string;
+      readonly messages: SessionFileV1["messages"];
+      readonly workspaceRoot?: string;
+      readonly visible: boolean;
+    };
+    const cases: Case[] = [
+      {
+        label: "blank title with assistant text",
+        id: `${prefix}-blank`,
+        title: "",
+        messages: [userMsgShape("q"), assistantMsgShape("answer")],
+        visible: false,
+      },
+      {
+        label: "whitespace-only title with assistant text",
+        id: `${prefix}-whitespace`,
+        title: "  \t ",
+        messages: [userMsgShape("q"), assistantMsgShape("answer")],
+        visible: false,
+      },
+      {
+        label: "titled session with assistant text",
+        id: `${prefix}-titled`,
+        title: "Real title",
+        messages: [userMsgShape("Real title"), assistantMsgShape("answer")],
+        visible: true,
+      },
+      {
+        // Titled but with no assistant reply: proves the issue #96
+        // lastFinalText filter still fires independently of the title guard.
+        label: "titled session with no assistant text",
+        id: `${prefix}-no-assistant`,
+        title: "Has a title",
+        messages: [userMsgShape("Has a title")],
+        visible: false,
+      },
+      {
+        // Blank title but an invalid workspace binding must stay listed so the
+        // picker can still offer rebind/recreate (recovery invariant).
+        label: "blank-title session with an invalid binding",
+        id: `${prefix}-invalid-root`,
+        title: "",
+        messages: [userMsgShape("q"), assistantMsgShape("answer")],
+        workspaceRoot: missingRoot,
+        visible: true,
+      },
+    ];
+
+    await withIsolatedSessionStores(
+      `/proj/${prefix}`,
+      async (writer, reopenReader) => {
+        for (const c of cases) {
+          await writer.save({
+            id: c.id,
+            file: sampleFile({
+              id: c.id,
+              overrides: {
+                title: c.title,
+                messages: c.messages,
+                ...(c.workspaceRoot !== undefined
+                  ? { workspaceRoot: c.workspaceRoot }
+                  : {}),
+              },
+            }),
+          });
+        }
+        const listed = new Set(
+          (await reopenReader().list()).map((e) => e.conversation_id)
+        );
+        for (const c of cases) {
+          if (c.visible) {
+            assert.ok(listed.has(c.id), `${c.label} must be listed`);
+          } else {
+            assert.ok(!listed.has(c.id), `${c.label} must not be listed`);
+          }
+        }
+      }
+    );
+  });
+
+  it("listWorkspaceClaims() keeps a blank-title bound claim that list() hides (#1197 occupancy decouple)", async () => {
+    const prefix = `list-claims-${randomUUID()}`;
+    // A real, existing directory so classifyWorkspaceRoot yields "bound".
+    const claimRoot = await mkdtemp(join(tmpdir(), "iknow-claim-root-"));
+    try {
+      await withIsolatedSessionStores(
+        `/proj/${prefix}`,
+        async (writer, reopenReader) => {
+          await writer.save({
+            id: `${prefix}-claim`,
+            file: sampleFile({
+              id: `${prefix}-claim`,
+              overrides: {
+                title: "",
+                messages: [userMsgShape("q"), assistantMsgShape("answer")],
+                workspaceRoot: claimRoot,
+              },
+            }),
+          });
+          await writer.save({
+            id: `${prefix}-no-assistant`,
+            file: sampleFile({
+              id: `${prefix}-no-assistant`,
+              overrides: {
+                title: "",
+                messages: [userMsgShape("q")],
+                workspaceRoot: claimRoot,
+              },
+            }),
+          });
+          await writer.save({
+            id: `${prefix}-titled`,
+            file: sampleFile({
+              id: `${prefix}-titled`,
+              overrides: {
+                title: "Real title",
+                messages: [userMsgShape("q"), assistantMsgShape("ans")],
+                workspaceRoot: claimRoot,
+              },
+            }),
+          });
+
+          const reader = reopenReader();
+          const listed = new Set(
+            (await reader.list()).map((e) => e.conversation_id)
+          );
+          const claims = await reader.listWorkspaceClaims();
+          const claimIds = new Set(claims.map((e) => e.conversation_id));
+
+          // Picker hides the blank-title bound claim; occupancy sees it,
+          // preserving its binding so assertNotClaimed can resolve the tree.
+          assert.ok(
+            !listed.has(`${prefix}-claim`),
+            "list() must hide a blank-title bound session"
+          );
+          const claim = claims.find(
+            (e) => e.conversation_id === `${prefix}-claim`
+          );
+          assert.ok(claim, "listWorkspaceClaims() must see the blank claim");
+          assert.equal(claim.workspaceRoot, claimRoot);
+          assert.equal(claim.bindingStatus, "bound");
+
+          // Documented residual: the #96 no-assistant filter still applies to
+          // occupancy, so a bootstrap claim with no assistant reply stays out.
+          assert.ok(
+            !claimIds.has(`${prefix}-no-assistant`),
+            "listWorkspaceClaims() must still honour the #96 assistant filter"
+          );
+
+          // A titled bound claim is a claim for both consumers.
+          assert.ok(listed.has(`${prefix}-titled`));
+          assert.ok(claimIds.has(`${prefix}-titled`));
+        }
+      );
+    } finally {
+      await rm(claimRoot, { recursive: true, force: true });
+    }
+  });
+
   it("keeps a prior answer visible when the latest assistant event only calls a tool", async () => {
     const id = `list-tool-head-${randomUUID()}`;
     const toolId = `${id}-tool`;
@@ -548,6 +714,7 @@ describe("SessionStore.list", () => {
           file: sampleFile({
             id,
             overrides: {
+              title: "saved answer",
               messages: [
                 userMsgShape("question"),
                 assistantMsgShape("saved answer"),
@@ -625,6 +792,7 @@ describe("SessionStore.list", () => {
             file: sampleFile({
               id,
               overrides: {
+                title: "earlier answer",
                 messages: [
                   userMsgShape("question"),
                   assistantMsgShape("earlier answer"),
@@ -657,6 +825,7 @@ describe("SessionStore.list", () => {
           file: sampleFile({
             id,
             overrides: {
+              title: "earlier answer",
               messages: [
                 userMsgShape("question"),
                 assistantMsgShape("earlier answer"),
@@ -749,7 +918,10 @@ describe("SessionStore.list", () => {
     ];
     await store.save({
       id: "list-text",
-      file: sampleFile({ id: "list-text", overrides: { messages } }),
+      file: sampleFile({
+        id: "list-text",
+        overrides: { title: "hi", messages },
+      }),
     });
     const entries = await store.list();
     const e = entries.find((x) => x.conversation_id === "list-text");

@@ -166,6 +166,19 @@ export interface SessionListEntry {
 }
 
 /**
+ * Listing projection. Two consumers share the directory scan but differ in
+ * what they may hide:
+ *  - "presentation" (TUI / web picker): a blank title has nothing to show, so
+ *    the row is omitted rather than rendered as a placeholder. Broken
+ *    ("invalid") bindings stay listed so they can be rebound.
+ *  - "occupancy" (ADR-0070 worktree-claim check): a persisted workspaceRoot is
+ *    a claim regardless of title, so the blank-title filter is lifted — hiding a
+ *    blank-title bound claim would let two sessions silently double-claim a tree.
+ * Both keep the no-assistant-text filter and the skip-corrupt policy.
+ */
+type ListProjection = "presentation" | "occupancy";
+
+/**
  * Project namespace under the shared pool root.
  *
  * ADR-0071: the
@@ -1163,15 +1176,39 @@ export class SessionStore {
   }
 
   /**
-   * List all session files sorted by updatedAt descending.
+   * List all session files sorted by updatedAt descending — the presentation
+   * projection (TUI / web picker).
    * Corrupt / unreadable files are silently skipped (sidebar must not break).
    * Sessions with no assistant text are skipped too: bootstrap
    * creates an empty session file before the user ever sends a message, and an
    * interrupted sendMessage can leave one with no assistant reply — neither has
-   * anything to show in the sidebar. Single-session load()/get() is unaffected.
+   * anything to show in the sidebar. Blank titles are skipped as well, except an
+   * invalid workspace binding, which stays listed so it can be rebound.
+   * See `ListProjection` for why the two projections differ.
+   * Single-session load()/get() is unaffected.
    * Throws: io_error (only for directory-level failures)
    */
   async list(): Promise<SessionListEntry[]> {
+    return this.scanList("presentation");
+  }
+
+  /**
+   * Occupancy enumeration for ADR-0070 exclusive worktrees: the same scan with
+   * the presentation blank-title filter lifted, so `enter()` sees a claim
+   * whenever a session's persisted workspaceRoot matches. Read-only; never
+   * mutates. See `ListProjection`.
+   *
+   * Residual (pre-existing, out of scope here): the no-assistant-text filter and
+   * the skip-corrupt policy still apply, so a just-bootstrapped claim with no
+   * assistant reply yet, or an unreadable record, stays invisible here too.
+   */
+  async listWorkspaceClaims(): Promise<SessionListEntry[]> {
+    return this.scanList("occupancy");
+  }
+
+  private async scanList(
+    projection: ListProjection
+  ): Promise<SessionListEntry[]> {
     const names = await this.readDir();
     // Session-folder consolidation: the project dir holds one folder
     // per conversationId. Each folder contains the JSONL authority and the
@@ -1189,7 +1226,7 @@ export class SessionStore {
     }
     const entries: SessionListEntry[] = [];
     for (const id of ids) {
-      const entry = await this.tryListEntry(id);
+      const entry = await this.tryListEntry(id, projection);
       if (entry) entries.push(entry);
     }
     entries.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
@@ -1420,16 +1457,20 @@ export class SessionStore {
     }
   }
 
-  private async tryListEntry(id: string): Promise<SessionListEntry | null> {
+  private async tryListEntry(
+    id: string,
+    projection: ListProjection
+  ): Promise<SessionListEntry | null> {
     try {
       const file = await this.load(id);
       return this.buildListEntry(
         file,
-        await this.classifyWorkspaceRoot(file.workspaceRoot)
+        await this.classifyWorkspaceRoot(file.workspaceRoot),
+        projection
       );
     } catch (err) {
       if (!isInvalidWorkspaceRootError(err)) return null;
-      return this.tryListInvalidWorkspaceRoot(id);
+      return this.tryListInvalidWorkspaceRoot(id, projection);
     }
   }
 
@@ -1443,7 +1484,8 @@ export class SessionStore {
    * repaired file or backfills cwd.
    */
   private async tryListInvalidWorkspaceRoot(
-    id: string
+    id: string,
+    projection: ListProjection
   ): Promise<SessionListEntry | null> {
     try {
       const jsonlRaw = await this.tryReadFile(this.jsonlPath(id), id);
@@ -1459,7 +1501,7 @@ export class SessionStore {
           ...log,
           header: header as unknown as typeof log.header,
         });
-        return this.buildListEntry(file, "invalid", invalidRoot);
+        return this.buildListEntry(file, "invalid", projection, invalidRoot);
       }
 
       const raw = await this.tryReadFile(this.filePath(id), id);
@@ -1473,7 +1515,7 @@ export class SessionStore {
       const invalidRoot = legacy["workspaceRoot"];
       delete legacy["workspaceRoot"];
       const file = sanitizeSessionFile(legacy);
-      return this.buildListEntry(file, "invalid", invalidRoot);
+      return this.buildListEntry(file, "invalid", projection, invalidRoot);
     } catch {
       // The recovery is only for a workspaceRoot schema failure. Any other
       // malformed or unreadable content retains list()'s skip-corrupt policy.
@@ -1502,10 +1544,19 @@ export class SessionStore {
   private async buildListEntry(
     file: SessionFileV1,
     bindingStatus: SessionBindingStatus,
+    projection: ListProjection,
     rawWorkspaceRoot?: unknown
   ): Promise<SessionListEntry | null> {
     const lastFinalText = lastAssistantText(file.messages);
     if (!lastFinalText.trim()) return null;
+    // Presentation hides blank titles; occupancy does not. Invalid bindings
+    // always stay listed for rebind recovery. See `ListProjection`.
+    if (
+      projection === "presentation" &&
+      !file.title.trim() &&
+      bindingStatus !== "invalid"
+    )
+      return null;
     const workspaceRoot =
       typeof rawWorkspaceRoot === "string"
         ? rawWorkspaceRoot

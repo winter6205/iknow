@@ -86,7 +86,9 @@ const sampleFile = (id: string): SessionFileV1 =>
   ({
     schemaVersion: CURRENT_SCHEMA_VERSION,
     conversation_id: id,
-    title: "",
+    // Non-blank title so list() keeps these sessions visible; the age/quota
+    // checks must key on retention, not on the blank-title filter.
+    title: id,
     cwd: taskRoot,
     sanitized_at: new Date().toISOString(),
     messages: [],

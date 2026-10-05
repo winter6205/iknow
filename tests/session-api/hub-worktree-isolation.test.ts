@@ -21,6 +21,7 @@
  */
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import {
   existsSync,
@@ -36,7 +37,11 @@ import { join } from "node:path";
 
 import { SessionHub } from "../../src/session-api/hub.ts";
 import type { ProjectDepProvisioner } from "../../src/session-api/worktree-deps.ts";
-import { SessionStore } from "../../src/session-api/store/index.ts";
+import {
+  CURRENT_SCHEMA_VERSION,
+  NATIVE_STATE_FORMAT_VERSION,
+  SessionStore,
+} from "../../src/session-api/store/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import type {
   LoopEngineDeps,
@@ -1777,6 +1782,90 @@ describe("worktree isolation wiring (T7 - enter-worktree)", () => {
     expect(enterResult.kind).toBe("execution_failed");
     expect(enterResult.message).toContain("kind=worktree_not_found");
     expect((await store.load(convB)).workspaceRoot).toBe(repo);
+  });
+});
+
+/**
+ * Pins hub.ts's ADR-0070 occupancy wiring: the exclusive `enter()` enumerator
+ * is `SessionStore.listWorkspaceClaims()`, NOT the picker's `list()`. A claim
+ * is a fact independent of presentation — hiding it whenever the title is blank
+ * (#1197's picker filter) would let two sessions silently double-claim one
+ * tree. Reverting the wiring to `store.list()` makes the enter below SUCCEED
+ * (adopt the foreign tree) instead of rejecting `worktree_claimed`, so this is
+ * the only test that fails on that revert.
+ */
+describe("worktree exclusivity — enter reads the claim enumeration (#1197)", () => {
+  it("blocks an exclusive enter against a blank-title bound claim that the picker hides", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+
+    // Owner session A provisions a real task worktree through the hub seam, so
+    // the path equals exactly what a later enter() resolves as its target.
+    const hubA = new SessionHub({
+      store,
+      askUser: createNoAskUser(),
+      worktreeExclusive: true,
+    });
+    await hubA.bindWorkspace(repo);
+    const claimId = randomUUID();
+    const wtClaim = await hubA.provisionWorktree({
+      conversationId: claimId,
+      root: repo,
+    });
+
+    // The claim record: assistant reply present (#96 filter), blank title, and
+    // bound to the still-existing wtClaim — the exact entry `list()` hides but
+    // `listWorkspaceClaims()` keeps.
+    const now = new Date().toISOString();
+    await store.save({
+      id: claimId,
+      file: {
+        schemaVersion: CURRENT_SCHEMA_VERSION,
+        conversation_id: claimId,
+        messages: [
+          { role: "user", content: [{ type: "text", text: "occupied" }] },
+          { role: "assistant", content: [{ type: "text", text: "claiming" }] },
+        ],
+        jsonMode: false,
+        turnCount: 1,
+        updatedAt: now,
+        title: "",
+        cwd: repo,
+        sanitized_at: now,
+        checkpoints: [],
+        workspaceRoot: wtClaim,
+        nativeStateFormat: NATIVE_STATE_FORMAT_VERSION,
+      } as SessionFileV1,
+    });
+
+    // Guard the premise: if a future change makes both enumerations agree,
+    // this test no longer pins the wiring and must be revisited.
+    expect((await store.list()).map((e) => e.conversation_id)).not.toContain(
+      claimId
+    );
+    expect(
+      (await store.listWorkspaceClaims()).map((e) => e.conversation_id)
+    ).toContain(claimId);
+
+    // A second session enters A's tree under exclusivity — it must be refused.
+    const hubB = new SessionHub({
+      store,
+      askUser: createNoAskUser(),
+      worktreeExclusive: true,
+    });
+    await hubB.bindWorkspace(repo);
+    const entering = (await hubB.createSession()).session.conversation_id;
+
+    await expect(
+      hubB.enterWorktree({
+        conversationId: entering,
+        root: repo,
+        targetConversationId: claimId,
+      })
+    ).rejects.toMatchObject({ kind: "worktree_claimed" });
+
+    // The refusal wrote nothing: the entering session stays at the main repo.
+    expect((await store.load(entering)).workspaceRoot).toBe(repo);
   });
 });
 

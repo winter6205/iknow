@@ -1733,8 +1733,9 @@ export class SessionHub {
     // path. The pass-through is single-point: buildHarnessEngine resolves the
     // value in build-engine and surfaces it on BuiltEngine.worktreeExclusive;
     // this hub's opts takes that boolean and feeds it straight to the
-    // provisioner. listSessions binds directly to the hub's store
-    // (SessionStore already exposes list()). Adds **no** new disk-write path
+    // provisioner. The occupancy enumerator binds to the store's
+    // `listWorkspaceClaims()` rather than the picker's `list()`, so a claim stays
+    // visible to the check regardless of title. Adds **no** new disk-write path
     // — listing stays read-only.
     this.worktreeProvisioner = createTaskWorktreeProvisioner({
       ...(this.projectIdentityRoot !== undefined
@@ -1746,7 +1747,9 @@ export class SessionHub {
       ...(opts.worktreeExclusive === true
         ? {
             worktreeExclusive: true,
-            listSessions: () => this.store.list(),
+            // Occupancy, not the picker: a claim stays visible even when its
+            // title is blank. See `ListProjection` in session-store.ts.
+            listSessions: () => this.store.listWorkspaceClaims(),
           }
         : {}),
     });

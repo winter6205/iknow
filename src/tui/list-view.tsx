@@ -235,7 +235,7 @@ export function ListView(props: ListViewProps): ReactNode {
     const time = relativeTime(entry.updatedAt);
     rows.push(
       <text key={entry.conversation_id} fg={selected ? pal.accent : pal.text}>
-        {marker} {renderSummary(entry.title || "(空)")}
+        {marker} {renderSummary(entry.title || "(未命名)")}
         <span fg={pal.dim}> {time}</span>
         {entry.runningBg ? <span fg={pal.dim}> [运行中]</span> : ""}
       </text>
