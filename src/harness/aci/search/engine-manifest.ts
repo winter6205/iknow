@@ -1,132 +1,70 @@
 /**
  * Manifest for the bundled search engine.
  *
- * Contract: install/release downloads the pinned version + checksum per
- * platform into the install root; at runtime only that path is exec'd, and an
- * `rg` on PATH is never the main path.
+ * Contract: the engine is provisioned by the **lockfile** — the `@vscode/ripgrep`
+ * dependency carries a prebuilt `rg` per platform as its own
+ * `optionalDependencies`, so `npm ci` installs exactly the one this machine runs
+ * and no download-then-unpack step exists. At runtime only that path is exec'd,
+ * and an `rg` on PATH is never the main path.
  *
- * This module is **pure data + pure queries**: no network, no fs, so it is
- * testable offline. `scripts/install-search-engine.ts` consumes the same
- * manifest for download/unpack — URLs, checksums, and in-archive binary paths
- * have exactly one source of truth, so the installer and runtime resolution
- * cannot drift apart.
+ * This module holds no download metadata and touches no network or fs; the one
+ * thing it reads is the dependency, and it reads it *lazily* — see
+ * {@link engineBinaryPath} for why that matters.
  */
 
-/** Pinned engine version. On upgrade, regenerate `type-table.ts` (`rg --type-list`). */
-export const RIPGREP_VERSION = "15.1.0";
+/**
+ * Engine version shipped by the pinned `@vscode/ripgrep`.
+ *
+ * Not a free choice: the dependency's binaries are prebuilt upstream, so this is
+ * whatever `@vscode/ripgrep` carries. It is a documentation constant — the
+ * binary that actually runs reports its own version, and `type-table.ts` must
+ * mirror *that* binary (`rg --type-list`). On upgrade, regenerate
+ * `type-table.ts`.
+ */
+export const RIPGREP_VERSION = "15.0.0";
 
-export interface EngineAsset {
-  /** Release asset filename. */
-  readonly asset: string;
-  /** SHA-256 of this asset (taken from the release's own `.sha256`). */
-  readonly sha256: string;
-  /** Archive format; decides the unpack command. */
-  readonly archive: "tar.gz" | "zip";
-  /** Binary path relative to the archive root. */
-  readonly binaryInArchive: string;
+/**
+ * Runtime execution path of the engine the dependency provides, or `undefined`
+ * when it cannot be resolved (the caller then uses the Node engine instead of
+ * searching PATH).
+ *
+ * Lazy and failure-typed by necessity: the dependency entry runs
+ * `require.resolve()` at **import time** and rethrows a plain `Error` when its
+ * per-platform package is absent. A module-scope `import { rgPath }` would
+ * therefore turn a missing optional dependency into a process-wide crash — a
+ * failure class the call sites would then have to handle. Catching here keeps
+ * absence the same typed `undefined` they already handle, so the degrade
+ * contract is unchanged (ADR-0089: cannot-start never fails the call).
+ *
+ * Only a successful resolution is cached. A negative is dropped so a later
+ * call retries: absence is a per-call degradation, not permanent process state,
+ * and a long-lived `serve` must recover once its install settles.
+ */
+export async function engineBinaryPath(): Promise<string | undefined> {
+  resolution ??= resolveEngineBinaryPath();
+  const path = await resolution;
+  if (path !== undefined) return path;
+  resolution = undefined;
+  return undefined;
+}
+
+let resolution: Promise<string | undefined> | undefined;
+
+async function resolveEngineBinaryPath(): Promise<string | undefined> {
+  try {
+    const { rgPath } = await import("@vscode/ripgrep");
+    return rgPath;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
- * `${process.platform}-${process.arch}` → asset.
- *
- * Only assets that actually exist in the release are registered
- * (`aarch64-unknown-linux-musl` and `i686-unknown-linux-musl` are not
- * published upstream, so they are absent; missing platforms use the Node
- * engine — a legal downgrade, not an error).
- */
-const ASSETS: Readonly<Record<string, EngineAsset>> = Object.freeze({
-  "linux-x64": {
-    asset: `ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl.tar.gz`,
-    sha256: "1c9297be4a084eea7ecaedf93eb03d058d6faae29bbc57ecdaf5063921491599",
-    archive: "tar.gz",
-    binaryInArchive: `ripgrep-${RIPGREP_VERSION}-x86_64-unknown-linux-musl/rg`,
-  },
-  "linux-arm64": {
-    asset: `ripgrep-${RIPGREP_VERSION}-aarch64-unknown-linux-gnu.tar.gz`,
-    sha256: "2b661c6ef508e902f388e9098d9c4c5aca72c87b55922d94abdba830b4dc885e",
-    archive: "tar.gz",
-    binaryInArchive: `ripgrep-${RIPGREP_VERSION}-aarch64-unknown-linux-gnu/rg`,
-  },
-  "darwin-x64": {
-    asset: `ripgrep-${RIPGREP_VERSION}-x86_64-apple-darwin.tar.gz`,
-    sha256: "64811cb24e77cac3057d6c40b63ac9becf9082eedd54ca411b475b755d334882",
-    archive: "tar.gz",
-    binaryInArchive: `ripgrep-${RIPGREP_VERSION}-x86_64-apple-darwin/rg`,
-  },
-  "darwin-arm64": {
-    asset: `ripgrep-${RIPGREP_VERSION}-aarch64-apple-darwin.tar.gz`,
-    sha256: "378e973289176ca0c6054054ee7f631a065874a352bf43f0fa60ef079b6ba715",
-    archive: "tar.gz",
-    binaryInArchive: `ripgrep-${RIPGREP_VERSION}-aarch64-apple-darwin/rg`,
-  },
-  "win32-x64": {
-    asset: `ripgrep-${RIPGREP_VERSION}-x86_64-pc-windows-msvc.zip`,
-    sha256: "124510b94b6baa3380d051fdf4650eaa80a302c876d611e9dba0b2e18d87493a",
-    archive: "zip",
-    binaryInArchive: `ripgrep-${RIPGREP_VERSION}-x86_64-pc-windows-msvc/rg.exe`,
-  },
-  "win32-arm64": {
-    asset: `ripgrep-${RIPGREP_VERSION}-aarch64-pc-windows-msvc.zip`,
-    sha256: "00d931fb5237c9696ca49308818edb76d8eb6fc132761cb2a1bd616b2df02f8e",
-    archive: "zip",
-    binaryInArchive: `ripgrep-${RIPGREP_VERSION}-aarch64-pc-windows-msvc/rg.exe`,
-  },
-});
-
-/** Platform key (`${platform}-${arch}`); single source of the manifest's key space. */
-export function platformKey(platform: string, arch: string): string {
-  return `${platform}-${arch}`;
-}
-
-/** Does this platform have a pinned asset; no → no bundled engine, go straight to the Node engine. */
-export function engineAsset(
-  platform: string,
-  arch: string
-): EngineAsset | undefined {
-  return ASSETS[platformKey(platform, arch)];
-}
-
-/** All registered platform keys (consumed by the installer and tests). */
-export function enginePlatformKeys(): ReadonlyArray<string> {
-  return Object.keys(ASSETS);
-}
-
-/** Download URL. */
-export function engineDownloadUrl(asset: EngineAsset): string {
-  return `https://github.com/BurntSushi/ripgrep/releases/download/${RIPGREP_VERSION}/${asset.asset}`;
-}
-
-/**
- * Runtime execution path:
- * `<installRoot>/vendor/ripgrep/<version>/<platform>-<arch>/rg`.
- *
- * No asset for the platform → `undefined` (the caller then uses the Node
- * engine instead of searching PATH).
- */
-export function engineBinaryPath(
-  installRoot: string,
-  platform: string,
-  arch: string
-): string | undefined {
-  const asset = engineAsset(platform, arch);
-  if (asset === undefined) return undefined;
-  const binaryName = asset.binaryInArchive.split("/").pop()!;
-  return `${installRoot}/vendor/ripgrep/${RIPGREP_VERSION}/${platformKey(platform, arch)}/${binaryName}`;
-}
-
-/** Landing directory (the installer's unpack target). */
-export function engineInstallDir(
-  installRoot: string,
-  platform: string,
-  arch: string
-): string {
-  return `${installRoot}/vendor/ripgrep/${RIPGREP_VERSION}/${platformKey(platform, arch)}`;
-}
-
-/** Spawn errnos that mean "the engine cannot start". Which one the OS picks
+ * Spawn errnos that mean "the engine cannot start". Which one the OS picks
  * depends on the platform and failure shape (missing binary vs. non-executable
  * vs. restricted exec); matching only ENOENT misreads the others as hard
- * failures (#1131: PATH-less machine surfaced `spawn rg EACCES`). */
+ * failures (#1131: PATH-less machine surfaced `spawn rg EACCES`).
+ */
 const UNSTARTABLE_CODES: ReadonlySet<string> = new Set([
   "ENOENT",
   "EACCES",

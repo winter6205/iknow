@@ -139,7 +139,10 @@ describe("rebound task roots can read the stable project identity root", () => {
     const preGrep = String(
       await grep.handler({ pattern: "identity", path: "AGENTS.md" })
     );
-    assert.equal(preGrep, "");
+    // The binary is stubbed out above, so this grep answers from the Node
+    // scan and may carry the degraded-engine notice. The claim under test is
+    // that the relative name resolved to nothing, not that output was empty.
+    assert.doesNotMatch(preGrep, /AGENTS\.md/);
 
     writeLiveTaskRoot(liveRoot, task);
     assert.match(
@@ -201,9 +204,9 @@ describe("no shape fallback: task-worktree-shaped cwd alone grants no identity-r
     );
     assert.match(globOut, /AGENTS\.md/);
 
-    assert.equal(
+    assert.doesNotMatch(
       String(await grep.handler({ pattern: "identity", path: "AGENTS.md" })),
-      "",
+      /AGENTS\.md/,
       "relative name must not fall back into the main checkout without an explicit identity-root thread"
     );
   });

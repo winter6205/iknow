@@ -46,7 +46,15 @@ import {
   type GlobToolDeps,
 } from "../../../../src/harness/aci/tools/glob.ts";
 import { engineBinaryPath } from "../../../../src/harness/aci/search/engine-manifest.ts";
-import { resolveInstallRoot } from "../../../../src/harness/session-roots.ts";
+
+/**
+ * The engine `@vscode/ripgrep` provides, resolved once at module scope: the
+ * resolver is async, and the two `it.skipIf(!enginePresent)` arms below read it
+ * while their `describe` callbacks run (which are not async).
+ */
+const installedEngine: string | undefined = await engineBinaryPath();
+const enginePresent =
+  installedEngine !== undefined && existsSync(installedEngine);
 
 const execFileAsync = promisify(execFile);
 
@@ -492,20 +500,12 @@ describe("createGlobTool — pinned engine binding", () => {
   });
 
   /**
-   * With the vendor engine installed (and, on the reporting machine, no rg on
-   * PATH at all), the default no-deps call must answer from the real binary.
-   * Skipped only when this machine has no installed engine.
+   * With the engine installed (and, on the reporting machine, no rg on PATH
+   * at all), the default no-deps call must answer from the real binary.
+   * Skipped only when this machine has no engine.
    */
-  const installedEngine = engineBinaryPath(
-    resolveInstallRoot(),
-    process.platform,
-    process.arch
-  );
-  const enginePresent =
-    installedEngine !== undefined && existsSync(installedEngine);
-
   it.skipIf(!enginePresent)(
-    "default binding hits the installed vendor engine (no PATH involvement)",
+    "default binding hits the provisioned engine (no PATH involvement)",
     async () => {
       const root = await makeScratch("glob-pinned-real-");
       await buildFixtureTree(root);
@@ -764,17 +764,10 @@ describe("glob — protected-path policy enforcement", () => {
 
   /**
    * Real pinned rg half of the widened-root matrix: traversal of the outside
-   * tree answers from the vendor binary; protected entries are dropped by
+   * tree answers from the real engine; protected entries are dropped by
    * the same per-emission filter the Node walker uses (its filter position is
    * pinned engine-independent by the canned-output test below).
    */
-  const pinnedEngine = engineBinaryPath(
-    resolveInstallRoot(),
-    process.platform,
-    process.arch
-  );
-  const enginePresent = pinnedEngine !== undefined && existsSync(pinnedEngine);
-
   it.skipIf(!enginePresent)(
     "real rg on a widened outside root leaks no protected paths",
     async () => {

@@ -50,15 +50,11 @@ On a TTY, bare invocation opens chat; piped / non-TTY with no args prints usage.
 
 `package.json` declares an `iknow` bin pointing at `dist/cli.js` (produced by `npm run build`); it is meant for a future npm release and is not wired up as a global install yet.
 
-## Search engine (ripgrep, downloaded at install time)
+## Search engine (ripgrep, from the lockfile)
 
-The grep/glob tools run on a pinned ripgrep binary that is **not committed to the repo**: it is downloaded with checksum verification into a gitignored `vendor/ripgrep/` tree.
+The grep/glob tools run on a pinned ripgrep binary that arrives with the dependencies: `@vscode/ripgrep` carries a prebuilt `rg` per platform as its own `optionalDependencies`, so `npm install` / `npm ci` provisions the engine for the machine it runs on. There is no download step and no committed binary.
 
-```bash
-npm run install:search-engine   # current platform; --platform linux-x64 etc. supported
-```
-
-When the engine is unavailable (e.g. no registered asset for your platform), grep falls back to a built-in Node scan; the fallback walks files with JavaScript RegExp and may answer differently from ripgrep.
+When the engine is unavailable (e.g. the per-platform package was skipped), grep falls back to a built-in Node scan; the fallback walks files with JavaScript RegExp and may answer differently from ripgrep.
 
 ## Sandbox
 
@@ -66,32 +62,32 @@ The bash tool executes commands inside a bwrap fence: read-only system mounts, t
 
 ## Layout
 
-| Path                  | Role                                              |
-| --------------------- | ------------------------------------------------- |
-| `src/harness/`        | Loop, adapter, executor, ACI tools, sandbox, verify |
-| `src/cli/`            | `chat` / `ask` / `serve` / `tui` / `trace` entry  |
-| `src/tui/`            | OpenTUI terminal UI                               |
-| `src/session-api/`    | HTTP sessions + static SPA                        |
-| `src/traceserver/`    | Read-only trace inspection (JSONL query API)     |
-| `web/`                | Vite React console (`web/dist` served by `serve`) |
-| `specs/`              | Live module specs ([index](specs/README.md))      |
-| `docs/`               | Architecture, ADRs, guides, status                |
+| Path               | Role                                                |
+| ------------------ | --------------------------------------------------- |
+| `src/harness/`     | Loop, adapter, executor, ACI tools, sandbox, verify |
+| `src/cli/`         | `chat` / `ask` / `serve` / `tui` / `trace` entry    |
+| `src/tui/`         | OpenTUI terminal UI                                 |
+| `src/session-api/` | HTTP sessions + static SPA                          |
+| `src/traceserver/` | Read-only trace inspection (JSONL query API)        |
+| `web/`             | Vite React console (`web/dist` served by `serve`)   |
+| `specs/`           | Live module specs ([index](specs/README.md))        |
+| `docs/`            | Architecture, ADRs, guides, status                  |
 
 ## Documentation
 
-| Doc                                                                      | What it is                                        |
-| ------------------------------------------------------------------------ | ------------------------------------------------- |
-| [`docs/architecture.md`](docs/architecture.md)                           | Runtime modules                                   |
-| [`docs/STATUS.md`](docs/STATUS.md)                                       | What ships vs what does not                       |
-| [`docs/llm-config-quickstart.md`](docs/llm-config-quickstart.md)         | Provider / model / key configuration              |
-| [`docs/guides/user-hooks.md`](docs/guides/user-hooks.md)                 | Declared deny-only hooks (`settings.hooks`)       |
-| [`docs/guides/prompt-development.md`](docs/guides/prompt-development.md) | Prompt development guide                          |
-| [`docs/guides/skill-authoring.md`](docs/guides/skill-authoring.md)       | Skill author contract (body vs `references/`)     |
-| [`docs/trace-mcp-server.md`](docs/trace-mcp-server.md)                   | Trace MCP read server (`iknow-trace-mcp` bin)     |
+| Doc                                                                          | What it is                                     |
+| ---------------------------------------------------------------------------- | ---------------------------------------------- |
+| [`docs/architecture.md`](docs/architecture.md)                               | Runtime modules                                |
+| [`docs/STATUS.md`](docs/STATUS.md)                                           | What ships vs what does not                    |
+| [`docs/llm-config-quickstart.md`](docs/llm-config-quickstart.md)             | Provider / model / key configuration           |
+| [`docs/guides/user-hooks.md`](docs/guides/user-hooks.md)                     | Declared deny-only hooks (`settings.hooks`)    |
+| [`docs/guides/prompt-development.md`](docs/guides/prompt-development.md)     | Prompt development guide                       |
+| [`docs/guides/skill-authoring.md`](docs/guides/skill-authoring.md)           | Skill author contract (body vs `references/`)  |
+| [`docs/trace-mcp-server.md`](docs/trace-mcp-server.md)                       | Trace MCP read server (`iknow-trace-mcp` bin)  |
 | [`docs/coding-agent-capability-gap.md`](docs/coding-agent-capability-gap.md) | Honest gap list vs a full coding-agent harness |
-| [`specs/README.md`](specs/README.md)                                     | Active specs index                                |
-| [`docs/adr/`](docs/adr/)                                                 | Architecture decisions                            |
-| [`CHANGELOG.md`](CHANGELOG.md)                                           | Version history                                   |
+| [`specs/README.md`](specs/README.md)                                         | Active specs index                             |
+| [`docs/adr/`](docs/adr/)                                                     | Architecture decisions                         |
+| [`CHANGELOG.md`](CHANGELOG.md)                                               | Version history                                |
 
 ## License
 

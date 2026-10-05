@@ -71,7 +71,6 @@ export const CI_EXCLUDES: readonly string[] = [
   // requireBwraps at assembly time and the accepted-escape rows really spawn
   // bwrap for sed/cat/nl line-window reads (no user-namespace on the runner).
   "tests/harness/aci/tools/role-substitution-boundaries.test.ts",
-  "tests/harness/aci/tools/grep.test.ts",
   "tests/harness/aci/tools/query-trace.test.ts",
   "tests/harness/aci/tools/list-sessions.test.ts",
   "tests/harness/aci/tools/get-record.test.ts",
@@ -140,6 +139,21 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/graph/run-graph-assembly.test.ts",
   "tests/harness/prefix-stability/assertion2-matrix.test.ts",
   "tests/harness/disclosure-index-align/sc7-index-demotion.test.ts",
+  // Deadline family: the real-process e2e arms are gated on a host hasBwrap()
+  // probe, not on the runner — test-full installs bwrap, so the arms do run and
+  // the fenced sleep/kill-tree spawn fails on the missing user-namespace.
+  "tests/harness/aci/bash-background-deadline.test.ts",
+  "tests/harness/aci/bash-foreground-deadline.test.ts",
+  // Permission evidence matrix: admitted rows reach the real fenced handler and
+  // the factory probe requireBwraps at assembly, so both classes bite here.
+  "tests/harness/permission/sensitive-path-evidence.test.ts",
+  // Cleanup evidence: real runInSandbox fences (printf exit-code, killable-tree
+  // abort); the fence spawn cannot start on a runner without user-namespace.
+  "tests/harness/sandbox/cleanup-evidence.test.ts",
+  // The header claims no command executes, but handlerVerdict awaits the real
+  // handler and the admitted-arm test asserts six commands pass the gate, so
+  // those `rm -f` calls do run under the fence.
+  "tests/harness/aci/bash-cleanup-roots.test.ts",
 
   // ---- bwrap assembly-dependency class (requireBwrap fail-loud, throws at assembly time) ----
   // ACI registry assembly → createBashTool → requireBwrap
@@ -260,6 +274,27 @@ export const CI_EXCLUDES: readonly string[] = [
   // test-full runner installs bwrap but disallows user namespaces, so the
   // physical spawn would turn red there; local WSL keeps full verification.
   "tests/harness/sandbox/yolo-fence-contrast.test.ts",
+  // ADR-0125 timeout surface: the tool object is built only to read its own tier
+  // and schema; createBashTool requireBwraps at assembly, nothing is invoked.
+  "tests/harness/permission/root-find-readonly-allowance.test.ts",
+  // Route-budget wire: real createWorkerDeps to createDefaultAciRegistry to
+  // createBashTool to requireBwrap (throws at assembly time on the runner).
+  "tests/harness/route-budget-wire.test.ts",
+  // Thinking propagation: buildHarnessEngine assembly to createBashTool to
+  // requireBwrap, fail-loud at assembly.
+  "tests/harness/subagent-thinking-propagation.test.ts",
+  // Cleanup-roots production wiring: three real assembly surfaces
+  // (buildHarnessEngine twice, createWorkerDeps, createDefaultAciRegistry),
+  // each reaching requireBwrap.
+  "tests/harness/cleanup-roots-production-wiring.test.ts",
+  // Protected-target wiring intercepts the spawn argv, but only node:child_process
+  // is mocked: the createBashTool factory still requireBwraps for real at assembly.
+  "tests/harness/aci/bash-protected-targets-wiring.test.ts",
+  // Both stub the sandbox runner (requireBwrap a no-op, runInSandbox a canned
+  // result), so neither the assembly throw nor a physical spawn can occur; they
+  // are registered only because the guard anchor is a call shape in source text.
+  "tests/harness/aci/bash-protected-erofs-feedback.test.ts",
+  "tests/harness/aci/tools/bash-substitution-description.test.ts",
 ];
 
 /**

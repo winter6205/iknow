@@ -1,11 +1,11 @@
 /**
  * Engine-binding tests for the `glob` ACI tool (#1131).
  *
- * Pins the contract that glob's production path execs the absolute
- * install-root pinned binary — the same resolution as grep — and never a
+ * Pins the contract that glob's production path execs the absolute binary
+ * `@vscode/ripgrep` provides — the same resolution as grep — and never a
  * bare `"rg"` for the OS to look up on PATH. The spawn layer
  * (`sandbox/runner`) is mocked so the exec'd command is observable and the
- * test runs on machines with or without any rg (PATH or vendor).
+ * test runs on machines with or without any rg (PATH or provisioned).
  */
 
 import assert from "node:assert/strict";
@@ -62,8 +62,6 @@ const { createGlobTool } =
   await import("../../../../src/harness/aci/tools/glob.ts");
 const { engineBinaryPath } =
   await import("../../../../src/harness/aci/search/engine-manifest.ts");
-const { resolveInstallRoot } =
-  await import("../../../../src/harness/session-roots.ts");
 
 const scratchPaths: string[] = [];
 
@@ -84,7 +82,7 @@ afterEach(async () => {
 });
 
 describe("glob — production engine binding (#1131)", () => {
-  it('execs the absolute pinned vendor binary, never a PATH-resolved bare "rg"', async () => {
+  it('execs the absolute pinned engine, never a PATH-resolved bare "rg"', async () => {
     const root = await makeScratch("glob-binding-");
     await writeFile(join(root, "index.ts"), "export {};\n");
     // Canned engine stdout: what a real `rg --files --glob **/*.ts` would
@@ -98,8 +96,8 @@ describe("glob — production engine binding (#1131)", () => {
     const { command, args } = harness.spawnCalls[0];
     assert.equal(
       command,
-      engineBinaryPath(resolveInstallRoot(), process.platform, process.arch),
-      "glob must exec the install-root pinned engine"
+      await engineBinaryPath(),
+      "glob must exec the engine the dependency provides"
     );
     assert.ok(isAbsolute(command), `pinned path must be absolute: ${command}`);
     assert.notEqual(command, "rg", "a PATH lookup is never the main path");

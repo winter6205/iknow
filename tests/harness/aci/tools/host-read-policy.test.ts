@@ -855,7 +855,7 @@ describe("SC12 — pure surface: no state, concurrency-safe, mode/roots are the 
 // degrade variants are driven here by pointing `engineBinaryPath` at a
 // nonexistent file (no fake spawn); the real-rg engine is pinned with the
 // same fixtures inside grep.test.ts / glob.test.ts, which already hard-gate
-// on the vendored binary.
+// on the provisioned binary.
 
 const SECRET_BYTES = "HRP-SECRET-BYTES-4f1a";
 

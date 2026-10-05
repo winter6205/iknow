@@ -5,7 +5,7 @@
  *   - input  : { pattern: string, path?: string, limit?: integer }
  *   - output : alphabetised, root-relative paths, one per line.
  *   - empty pattern is a hard error (NOT a "match all" fallback).
- *   - try the pinned vendor engine (`<installRoot>/vendor/ripgrep/...`,
+ *   - try the pinned engine (the `@vscode/ripgrep` binary for this platform,
  *     same resolution as grep) first; when it cannot start (ENOENT /
  *     EACCES / EPERM) fall back to a Node walker with a small,
  *     intentionally-bounded glob matcher. A PATH `rg` is never exec'd.
@@ -24,7 +24,7 @@ import { readdir, realpath } from "node:fs/promises";
 import { relative, resolve, sep } from "node:path";
 
 import { ToolExecutionError } from "../../errors.js";
-import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import type { FsModeContext } from "../../sandbox/fs-mode.js";
 import {
   decideAndResolveReadReach,
@@ -63,9 +63,9 @@ export interface GlobToolDeps {
     cwd: string
   ) => Promise<{ stdout: string; stderr: string }>;
   /**
-   * Override the pinned binary path. Absent → `<resolveInstallRoot()>/vendor/ripgrep/...`
-   * (same resolution as grep). Tests may point at a nonexistent path to drive
-   * the "install-root binary missing" fallback branch.
+   * Override the pinned binary path. Absent → the path `@vscode/ripgrep`
+   * resolves for this platform (same resolution as grep). Tests may point at a
+   * nonexistent path to drive the "engine cannot start" fallback branch.
    */
   readonly engineBinaryPath?: string;
   /**
@@ -173,13 +173,7 @@ export function createGlobTool(
       //    cannot start (same resolve + degrade contract as grep, ADR-0089).
       const rawPaths = await collectMatchedPaths({
         spawnRg: deps?.spawnRg,
-        binaryPath:
-          deps?.engineBinaryPath ??
-          engineBinaryPath(
-            resolveInstallRoot(),
-            process.platform,
-            process.arch
-          ),
+        binaryPath: deps?.engineBinaryPath ?? (await engineBinaryPath()),
         pattern,
         realSearchRoot,
         signal: ctx?.signal,

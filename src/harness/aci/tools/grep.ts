@@ -20,7 +20,9 @@
  *     not executable) → Node walk + JS `RegExp` on compilable patterns; the
  *     call still succeeds. The hit set need not match rg — Node does not
  *     imitate rg's default-engine reject set. There is **no** fallback to a
- *     PATH `rg`.
+ *     PATH `rg`. The Node path appends one English disclosure line
+ *     (`DEGRADED_ENGINE_NOTICE`); the rg path is byte-identical to a run with
+ *     no such line.
  *
  * Complexity: flag parsing / argv / line parsing / window / group build /
  * sort / pagination / projection each live in their own module; this file
@@ -33,7 +35,7 @@ import { resolve } from "node:path";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
 import { assertNoGrepSubstitution } from "./role-substitution.js";
-import { resolveInstallRoot, type LiveTaskRoot } from "../../session-roots.js";
+import type { LiveTaskRoot } from "../../session-roots.js";
 import type { FsModeContext } from "../../sandbox/fs-mode.js";
 import {
   decideAndResolveReadReach,
@@ -78,9 +80,9 @@ export interface GrepToolDeps {
    */
   readonly allowProjectIdentityRoot?: boolean;
   /**
-   * Override the pinned binary path. Absent → `<resolveInstallRoot()>/vendor/ripgrep/...`.
-   * Tests may point at a nonexistent path to drive the "install-root binary
-   * missing" branch.
+   * Override the pinned binary path. Absent → the path `@vscode/ripgrep`
+   * resolves for this platform. Tests may point at a nonexistent path to drive
+   * the "engine cannot start" branch.
    */
   readonly engineBinaryPath?: string;
   /**
@@ -163,7 +165,7 @@ export function createGrepTool(
       workspaceRoot: resolvedRoot,
     };
 
-    const binaryPath = resolveGrepBinaryPath(deps);
+    const binaryPath = await resolveGrepBinaryPath(deps);
     // Sampling spec: with `also` present, read content lines (the line
     // window needs line numbers to judge).
     const sampleSpec = engineSpecFor(compiled.spec);
@@ -196,18 +198,21 @@ export function createGrepTool(
         : {}),
     });
 
-    const result = filterProtectedHits(
-      await resolveEngineResult({
-        binaryPath,
-        compiled,
-        sampleSpec,
-        spawn: deps?.spawn,
-        signal: ctx?.signal,
-      }),
-      compiled.workspaceRoot
-    );
+    const dispatch = await resolveEngineResult({
+      binaryPath,
+      compiled,
+      sampleSpec,
+      spawn: deps?.spawn,
+      signal: ctx?.signal,
+    });
+    const result = filterProtectedHits(dispatch.result, compiled.workspaceRoot);
+    const rendered = await renderResult({
+      spec: compiled.spec,
+      result,
+      readLines,
+    });
 
-    return renderResult({ spec: compiled.spec, result, readLines });
+    return dispatch.degraded ? withDegradationNotice(rendered) : rendered;
   };
 
   return Object.freeze({
@@ -225,7 +230,7 @@ export function createGrepTool(
 }
 
 /** Model-visible text: schema and description live as module constants, keeping the factory short. */
-export const GREP_DESCRIPTION = `Search file contents under a workspace directory using a regular expression; use it to discover which files carry a pattern before reading them, and pair it with read_file once you have a pinpointed path. Returns relative paths by default (output=paths) — set output=\"content\" for path:line:text or output=\"count\" for per-file counts plus a total:. Narrow with glob / type, show nearby lines with context, or keep only hits whose second literal also appears within within_lines of the match. Page a sorted result list with offset + head_limit (default 50, hard cap ${String(2000)}); an offset past the last entry returns "No entries at this offset". Runs on a bundled search engine (ripgrep ${RIPGREP_VERSION}) resolved from the install root, and falls back to a built-in Node scan when that engine is unavailable — the Node fallback walks files and matches with JavaScript RegExp and may answer differently from ripgrep.`;
+export const GREP_DESCRIPTION = `Search file contents under a workspace directory using a regular expression; use it to discover which files carry a pattern before reading them, and pair it with read_file once you have a pinpointed path. Returns relative paths by default (output=paths) — set output=\"content\" for path:line:text or output=\"count\" for per-file counts plus a total:. Narrow with glob / type, show nearby lines with context, or keep only hits whose second literal also appears within within_lines of the match. Page a sorted result list with offset + head_limit (default 50, hard cap ${String(2000)}); an offset past the last entry returns "No entries at this offset". Runs on a bundled search engine (ripgrep ${RIPGREP_VERSION}) shipped as a dependency, and falls back to a built-in Node scan when that engine is unavailable — the Node fallback walks files and matches with JavaScript RegExp and may answer differently from ripgrep.`;
 
 /**
  * Input schema (two layers of the same contract as the parsing in
@@ -282,6 +287,32 @@ async function explicitFileRelative(
 }
 
 /**
+ * Engine dispatch outcome (ADR-0089). The `EngineResult` itself never carries
+ * the unavailable tag - `pipeline.ts:56` throws on it by design - so the fact
+ * travels beside the union.
+ */
+interface EngineDispatch {
+  readonly result: EngineResult;
+  /** True only when rg could not start and the Node walk answered instead. */
+  readonly degraded: boolean;
+}
+
+/**
+ * Append the degradation notice (sel-4; ADR-0005 notice-over-failure shape).
+ * An empty body (no hits) yields the bare notice rather than a leading blank
+ * line, so the notice is never mistaken for a roster entry. Carries no path and
+ * no version, so the string stays stable to assert.
+ */
+export const DEGRADED_ENGINE_NOTICE =
+  "Note: ripgrep was unavailable, so grep fell back to a built-in Node scan and may return different results.";
+
+function withDegradationNotice(rendered: string): string {
+  return rendered === ""
+    ? DEGRADED_ENGINE_NOTICE
+    : rendered + "\n" + DEGRADED_ENGINE_NOTICE;
+}
+
+/**
  * Engine dispatch (ADR-0089).
  *
  * Production only execs the install-root pinned binary; rg present → use rg
@@ -297,7 +328,7 @@ async function resolveEngineResult(input: {
   readonly sampleSpec: QuerySpec;
   readonly spawn: SpawnFn | undefined;
   readonly signal: AbortSignal | undefined;
-}): Promise<EngineResult> {
+}): Promise<EngineDispatch> {
   const fromRg = await runRgEngine({
     spec: input.sampleSpec,
     binaryPath: input.binaryPath,
@@ -306,7 +337,9 @@ async function resolveEngineResult(input: {
     signal: input.signal,
     spawn: input.spawn,
   });
-  if (fromRg.kind !== "unavailable") return fromRg;
+  if (fromRg.kind !== "unavailable") {
+    return { result: fromRg, degraded: false };
+  }
 
   // Node degrade path (ADR-0089): the main pattern is compiled only here —
   // the rg path does not pre-judge legality, and constructs rg accepts but JS
@@ -323,7 +356,7 @@ async function resolveEngineResult(input: {
     searchRoot: input.compiled.searchRoot,
     regex,
   });
-  return { kind: "lines", lines };
+  return { result: { kind: "lines", lines }, degraded: true };
 }
 
 /**
@@ -367,12 +400,11 @@ function filterProtectedHits(
   };
 }
 
-/** Pinned engine binary: deps override (test seam) or the install-root path. */
-function resolveGrepBinaryPath(deps?: GrepToolDeps): string | undefined {
-  return (
-    deps?.engineBinaryPath ??
-    engineBinaryPath(resolveInstallRoot(), process.platform, process.arch)
-  );
+/** Engine binary: deps override (test seam) or the path the dependency provides. */
+async function resolveGrepBinaryPath(
+  deps?: GrepToolDeps
+): Promise<string | undefined> {
+  return deps?.engineBinaryPath ?? (await engineBinaryPath());
 }
 
 function readSubPath(input: unknown): string {

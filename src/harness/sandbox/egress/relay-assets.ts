@@ -6,7 +6,7 @@
  *
  * Single responsibility: resolve the relay dependency trio = node absolute
  * path + two asset absolute paths (plus the asset dir for the fence
- * `--ro-bind`). Path resolution follows the vendor/ripgrep precedent anchored
+ * `--ro-bind`). Path resolution is anchored
  * on `resolveInstallRoot()` (walks up from `import.meta.url` to package.json,
  * so dev `src/…` and packaged `dist/…` land at the same package root; never
  * falls back to `process.cwd()`).

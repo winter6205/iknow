@@ -15,17 +15,14 @@
  *   - `node` —— `engineBinaryPath` points at a nonexistent path: drives the
  *                fallback (never invokes real rg, so those tests verify the Node
  *                path shape only).
- *   - `rg`   —— the real binary under the install root.
+ *   - `rg`   —— the real binary `@vscode/ripgrep` provides.
  *
  * **Engine presence is a hard precondition**: this file covers rg's production
  * path, and rg's hits / argv / `--crlf` / traversal semantics can only be
  * verified against the real binary. Absent engine = whole file fails, with the
- * fix command `npm run install:search-engine` named in the message; there is no
- * "skip and continue" branch.
- *
- * CI shape: both CI jobs run offline, so this file is already in test-fast /
- * test-full's `--exclude` lists and the hard precondition cannot redden CI;
- * `scripts/ci-check-test-excludes.ts` remains the SSOT for that exclusion.
+ * fix named in the message; there is no "skip and continue" branch. The engine
+ * arrives with the dependencies (`@vscode/ripgrep`), so this holds on CI too and
+ * the file is not in the CI exclude set.
  *
  * Coverage contract:
  *   - Output faces: paths (default, relative paths only) / content
@@ -45,7 +42,11 @@
  *       - rg present: matches come from rg only (no second JS filter); rg's own
  *         rc=2 → handler emits `search engine rejected the query`, not a
  *         synthesized "both engines agree" error.
- *       - rg absent: Node traversal + JS `RegExp`, calls still succeed.
+ *       - rg absent: Node traversal + JS `RegExp`, calls still succeed, and the
+ *         output carries one appended English disclosure line (sel-4). The
+ *         `toolFor(root, "node")` seam strips that line so the shared roster
+ *         assertions keep pinning mode shape; its exact bytes are pinned in the
+ *         降级披露 describe.
  *   - Legacy contract retained: containment rejection, abort typed rejection,
  *     over-long line truncation, aci metadata.
  */
@@ -65,14 +66,16 @@ import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
-import { createGrepTool } from "../../../../src/harness/aci/tools/grep.ts";
+import {
+  DEGRADED_ENGINE_NOTICE,
+  createGrepTool,
+} from "../../../../src/harness/aci/tools/grep.ts";
 import { GREP_OUTPUT_VALUES } from "../../../../src/harness/aci/search/options.ts";
 import { createAciRegistry } from "../../../../src/harness/aci/aci-registry.ts";
 import { createExecutor } from "../../../../src/harness/tools/executor.ts";
 import { MAX_EXPLICIT_FILE_BYTES } from "../../../../src/harness/aci/search/file-lines.ts";
 import { GREP_SCOPE_FILE_LIMIT } from "../../../../src/harness/aci/search/scope-guard.ts";
 import { engineBinaryPath } from "../../../../src/harness/aci/search/engine-manifest.ts";
-import { resolveInstallRoot } from "../../../../src/harness/session-roots.ts";
 
 const scratchPaths: string[] = [];
 
@@ -91,29 +94,24 @@ afterEach(async () => {
 });
 
 /**
- * The engine binary pinned to the local install root.
+ * The engine binary the `@vscode/ripgrep` dependency provides.
  *
  * The control arm for the fallback, **hard precondition**: absent = whole file
- * fails (not skip), message gives the fix command. Covers both absence shapes:
- * `undefined` (no asset for this platform) and "path present, file missing".
+ * fails (not skip). Covers both absence shapes: `undefined` (the per-platform
+ * package is not installed) and "path present, file missing".
  */
-const installedEngine: string | undefined = engineBinaryPath(
-  resolveInstallRoot(),
-  process.platform,
-  process.arch
-);
+const installedEngine: string | undefined = await engineBinaryPath();
 
 if (installedEngine === undefined || !existsSync(installedEngine)) {
   throw new Error(
     [
-      "grep 测试需要自带搜索引擎：安装根上找不到 rg 二进制。",
-      `  期望路径: ${installedEngine ?? "(该平台在 engine-manifest 中无资产)"}`,
-      "  修复: npm run install:search-engine",
+      "grep 测试需要自带搜索引擎：@vscode/ripgrep 没有解析出 rg 二进制。",
+      `  期望路径: ${installedEngine ?? "(本平台的 @vscode/ripgrep-* 可选依赖未安装)"}`,
+      "  修复: npm install（该依赖按平台以 optionalDependencies 分发）",
       "为什么是硬前置：本文件直接驱动生产 handler，两条路径（rg 在场 / rg 缺席）",
       "都要在这里落字。rg 路径的命中 / argv / 遍历语义只可能在真二进制上验 —",
       "Node 降级路径专属描述块只验 ENOENT 分支，rg 那条路径缺了真二进制就无人",
-      "认证。CI 两个 job 已 --exclude 本文件（runner 无网），所以这条要求在本地",
-      "fail-loud、在 CI 不出现。",
+      "认证。CI 已不再排除本文件（npm ci 会带上引擎），所以这条要求在 CI 上也成立。",
     ].join("\n")
   );
 }
@@ -121,7 +119,7 @@ if (installedEngine === undefined || !existsSync(installedEngine)) {
 /**
  * Constructors for both engines.
  *
- * `node` drives the fallback by "binary missing from the install root" (no fake
+ * `node` drives the fallback by "the engine path cannot start" (no fake
  * spawn injection — that would bypass the real
  * `runRgEngine → isUnavailable → nodeScan` wiring).
  *
@@ -146,15 +144,33 @@ function toolFor(
     readonly scopeFileLimit?: number;
   }
 ): ReturnType<typeof createGrepTool> {
-  const deps =
-    engine === "rg"
-      ? { ...extra }
-      : {
-          ...extra,
-          // Binary missing from the install root → Node fallback.
-          engineBinaryPath: join(root, "__no_such_engine__", "rg"),
-        };
-  return createGrepTool(root, deps);
+  if (engine === "rg") return createGrepTool(root, { ...extra });
+  const node = createGrepTool(root, {
+    ...extra,
+    // Engine path present but the binary is not there → Node fallback.
+    engineBinaryPath: join(root, "__no_such_engine__", "rg"),
+  });
+  return withoutDegradationNotice(node);
+}
+
+/**
+ * Factor the degradation notice out of the Node arm output, so the ~40
+ * unrelated roster assertions pin their own mode shape instead of reading as
+ * "roster + boilerplate". Whether a notice is *due* is not decided here; the
+ * 降级披露 describe pins that, with the exact notice bytes.
+ */
+function withoutDegradationNotice(
+  tool: ReturnType<typeof createGrepTool>
+): ReturnType<typeof createGrepTool> {
+  const suffix = "\n" + DEGRADED_ENGINE_NOTICE;
+  return {
+    ...tool,
+    handler: async (input, ctx) => {
+      const output = await tool.handler(input, ctx);
+      if (output === DEGRADED_ENGINE_NOTICE) return "";
+      return output.endsWith(suffix) ? output.slice(0, -suffix.length) : output;
+    },
+  };
 }
 
 /** Run the same assertions once per engine: covers the shared downstream dispatch (engine-agnostic parts). */
@@ -1432,7 +1448,7 @@ describe("grep — 自带引擎缺席 → Node 遍历 + JS RegExp", () => {
       output: "content",
     })) as string;
 
-    assert.equal(result, "a.ts:2:beta hitOne");
+    assert.equal(result, "a.ts:2:beta hitOne\n" + DEGRADED_ENGINE_NOTICE);
   });
 
   it("Node 路径不因为自带引擎缺席就少功能：分页 + context + count 同时在场", async () => {
@@ -1453,11 +1469,12 @@ describe("grep — 自带引擎缺席 → Node 遍历 + JS RegExp", () => {
         context: 1,
         head_limit: 1,
       })) as string,
-      "a.ts:1-l1\na.ts:2:hit\na.ts:3-l3\na.ts:4:hit\na.ts:5-l5"
+      "a.ts:1-l1\na.ts:2:hit\na.ts:3-l3\na.ts:4:hit\na.ts:5-l5\n" +
+        DEGRADED_ENGINE_NOTICE
     );
     assert.equal(
       (await node.handler({ pattern: "hit", output: "count" })) as string,
-      "a.ts:2\nb.ts:1\ntotal:3"
+      "a.ts:2\nb.ts:1\ntotal:3\n" + DEGRADED_ENGINE_NOTICE
     );
     assert.equal(
       (await node.handler({
@@ -1465,7 +1482,7 @@ describe("grep — 自带引擎缺席 → Node 遍历 + JS RegExp", () => {
         output: "paths",
         offset: 1,
       })) as string,
-      "b.ts"
+      "b.ts\n" + DEGRADED_ENGINE_NOTICE
     );
   });
 
@@ -1497,6 +1514,84 @@ describe("grep — 自带引擎缺席 → Node 遍历 + JS RegExp", () => {
 
       assert.equal(result, "");
     });
+  });
+});
+
+// ───────────────────────── engine degradation disclosure ─────────────────────────
+
+describe("grep — Node 降级披露 (sel-4 / ADR-0005 notice-over-failure)", () => {
+  it("三条出法末尾各附一行披露，且引擎在场时 output 逐字节不变", async () => {
+    const root = await makeScratch("grep-degrade-notice-");
+    await writeFile(join(root, "a.ts"), "l1\nhit\nl3\nhit\nl5\n", "utf8");
+    await writeFile(join(root, "b.ts"), "hit\n", "utf8");
+    const node = createGrepTool(root, {
+      engineBinaryPath: join(root, "__no_such_engine__", "rg"),
+    });
+    const rg = createGrepTool(root);
+
+    for (const [output, roster] of [
+      ["paths", "a.ts\nb.ts"],
+      ["content", "a.ts:2:hit\na.ts:4:hit\nb.ts:1:hit"],
+      ["count", "a.ts:2\nb.ts:1\ntotal:3"],
+    ] as const) {
+      const degraded = (await node.handler({
+        pattern: "hit",
+        output,
+      })) as string;
+      const live = (await rg.handler({ pattern: "hit", output })) as string;
+
+      assert.equal(degraded, roster + "\n" + DEGRADED_ENGINE_NOTICE, output);
+      assert.equal(live, roster, output + ": rg 路径不得有披露行");
+    }
+  });
+
+  it("无命中时 output 就是那一行披露本身（不产生空行或前导换行）", async () => {
+    const root = await makeScratch("grep-degrade-empty-");
+    await writeFile(join(root, "a.ts"), "alpha\n", "utf8");
+    const node = createGrepTool(root, {
+      engineBinaryPath: join(root, "__no_such_engine__", "rg"),
+    });
+
+    for (const output of ["paths", "content", "count"] as const) {
+      assert.equal(
+        (await node.handler({ pattern: "zzz", output })) as string,
+        DEGRADED_ENGINE_NOTICE,
+        output
+      );
+    }
+  });
+
+  it("披露行点明原因、事实与后果，且不带路径或版本号", async () => {
+    // sel-4 contract: the wording names the cause (engine unavailable), the
+    // fact (a built-in Node scan answered), and the consequence (results may
+    // differ from ripgrep). A varying path or version would make the string
+    // unstable to assert, so neither may appear.
+    assert.doesNotMatch(DEGRADED_ENGINE_NOTICE, /[\\/]/);
+    assert.doesNotMatch(DEGRADED_ENGINE_NOTICE, /\d+\.\d+/);
+    assert.equal(DEGRADED_ENGINE_NOTICE.split("\n").length, 1);
+  });
+
+  it("披露行只随降级出现：可表示性闸短路时引擎并未被问起，不带披露", async () => {
+    // The engine-absent case is the only thing that degrades. rg-engine
+    // short-circuits on an unrepresentable search target *before* asking the
+    // engine, and that path returns an empty result rather than `unavailable`,
+    // so no notice may appear. Needs a real binary: with none, the
+    // `binaryPath === undefined` check fires first and the call really does
+    // degrade.
+    const root = await makeScratch("grep-unrepresentable-");
+    await writeFile(join(root, "nl\nname.txt"), "needle here\n", "utf8");
+    const tool = createGrepTool(root);
+
+    const out = (await tool.handler({
+      pattern: "needle",
+      path: "nl\nname.txt",
+    })) as string;
+
+    assert.equal(
+      out.includes(DEGRADED_ENGINE_NOTICE),
+      false,
+      `可表示性闸短路不等于降级，不应带披露：${JSON.stringify(out)}`
+    );
   });
 });
 

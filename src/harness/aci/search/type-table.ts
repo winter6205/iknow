@@ -1,5 +1,5 @@
 /**
- * The ripgrep 15.1.0 `--type` table (generated from `rg --type-list`, sorted by name).
+ * The ripgrep 15.0.0 `--type` table (generated from `rg --type-list`, sorted by name).
  *
  * Why the table lives in-repo: the Node fallback engine must implement the
  * full semantics when the bundled engine cannot start. The Node engine has no
@@ -7,8 +7,8 @@
  * same query yield different results across engines — that would be a silent
  * semantics change, not an equivalent fallback.
  *
- * Refresh: when the pinned ripgrep version is upgraded, re-run
- * `rg --type-list` to regenerate this table;
+ * Refresh: when the `@vscode/ripgrep` dependency is upgraded, re-run the
+ * pinned binary's `--type-list` to regenerate this table;
  * `tests/harness/aci/search/argv.test.ts` locks the table shape (non-empty /
  * known names present).
  */
@@ -360,7 +360,6 @@ export const TYPE_GLOBS: Readonly<Record<string, readonly string[]>> =
     spark: ["*.spark"],
     spec: ["*.spec"],
     sql: ["*.psql", "*.sql"],
-    ssa: ["*.ssa"],
     stylus: ["*.styl"],
     sv: ["*.h", "*.sv", "*.svh", "*.v", "*.vg"],
     svelte: ["*.svelte", "*.svelte.ts"],

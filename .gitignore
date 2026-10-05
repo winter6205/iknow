@@ -203,8 +203,9 @@ docs/demos
 # personal agent skill (not in specs index)
 .iknow/skills/design-taste-frontend/
 
-# D6 自带搜引擎的下载产物（scripts/install-search-engine.ts 落到安装根）：
-# 平台二进制不入仓，换台机器跑 `npm run install:search-engine` 重下即可。
+# 平台二进制不入仓。引擎现由 lockfile 提供（@vscode/ripgrep），本规则只用于
+# 挡住旧安装器留下的残留 `vendor/ripgrep/` —— 它不再被任何脚本产出，但升级
+# 上来的机器上可能还留着，不应误入仓。
 # 根锚定 —— 不误伤已跟踪的 `.cursor/vendor/`（那是团队共享的规则目录）。
 # 形态用 `/vendor/*` 而非 `/vendor/`：git 无法重新纳入被整体排除的父目录的
 # 子项，须留目录本身可进入才能反排除子树。

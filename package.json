@@ -50,7 +50,6 @@
     "web:build": "npm run build --prefix web",
     "web:typecheck": "npm run typecheck --prefix web",
     "aci:demo": "tsx src/harness/aci/demo.ts",
-    "install:search-engine": "tsx scripts/install-search-engine.ts",
     "designs:tui-preview": "bun run scripts/tui-designs-preview.tsx",
     "worktree:gc": "tsx scripts/task-worktree-gc.ts",
     "prepare": "husky"
@@ -84,6 +83,7 @@
     "@modelcontextprotocol/server": "^2.0.0",
     "@opentui/core": "0.5.1",
     "@opentui/react": "0.5.1",
+    "@vscode/ripgrep": "1.18.0",
     "ajv": "^8.17.1",
     "ajv-formats": "^2.1.1",
     "diff": "^9.0.0",
