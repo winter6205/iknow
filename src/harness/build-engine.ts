@@ -33,9 +33,16 @@ import {
   clearActiveExtraSecrets,
 } from "./sandbox/env-isolation.js";
 import { createPermissionPolicy } from "./permission/policy.js";
+import type { FsBoundaryReader } from "./permission/policy.js";
 import type { CleanupRootSnapshot } from "./permission/cleanup-roots.js";
 import { resolveProjectPermissionSource } from "./permission/project-settings.js";
 import type { PermissionModeContext } from "./permission/modes.js";
+import {
+  fsBoundaryIsActive,
+  fsBoundarySnapshot,
+  isRefusedByFsBoundary,
+} from "./sandbox/fs-boundary.js";
+import type { FsModeContext } from "./sandbox/fs-mode.js";
 import type {
   SecurityReviewRequest,
   SecurityReviewRoute,
@@ -1925,6 +1932,17 @@ export async function buildHarnessEngine(
       projectDir: sessionScratchAnchor(opts),
       conversationId: opts.sessionConversationId,
     }),
+    // ADR-0140 §2: the fence's writable set as a reader, built HERE because this
+    // is the one site holding the tier holder, the live taskRoot cell and the
+    // session scratch anchor at once. Absent tier holder → no reader, and
+    // `full_auto` answers byte-identically to before.
+    ...mainSessionFsBoundary({
+      liveTaskRoot,
+      fsMode: opts.fsMode,
+      projectDir: sessionScratchAnchor(opts),
+      conversationId: opts.sessionConversationId,
+      homeRoot: userHome,
+    }),
   });
   // Secrets guard assembly — only legacy "block" mode wires a preToolUse
   // short-circuit at the earliest step, ahead of the permission layer;
@@ -2586,6 +2604,83 @@ function mainSessionCleanupRoots(input: {
       ...(scratchRoot !== undefined ? { scratchRoot } : {}),
       ...(taskRoot !== undefined ? { taskRoot } : {}),
     };
+  };
+}
+
+/**
+ * ADR-0140 §2: the fence's writable set, as the per-call reader permission
+ * admission consumes it.
+ *
+ * This function EXISTS because it is the only site that may import both worlds:
+ * `sandbox/fs-boundary.ts` owns the boundary declaration and
+ * `permission/policy.ts` must not reach into `../sandbox/` (the dependency is
+ * one-way by design). So the root derives the snapshot and hands the permission
+ * layer a plain answer.
+ *
+ * Same vintage discipline as `mainSessionCleanupRoots` above: the writable root
+ * comes from the LIVE cell (a worktree rebind moves where a write lands) and the
+ * tier from the HOLDER (`/config` flips it mid-session), so both are read per
+ * call and the snapshot is rebuilt from that one pair. The two mounts are the
+ * roots the fence itself binds — the live wave root and this identity's session
+ * pad — passed verbatim: `createFsPolicy` would `resolve()` them, and a resolved
+ * `/tmp` is not the path bwrap was handed.
+ *
+ * Absent tier holder → no reader at all (an assembly that never configured fs
+ * isolation cannot have a boundary to cross). Absent session anchor → the pad is
+ * simply not in hand, so the mounts carry no `tmpRoot`: the narrow direction —
+ * the declared set loses a root rather than gaining a fabricated one.
+ */
+function mainSessionFsBoundary(input: {
+  readonly liveTaskRoot: LiveTaskRoot;
+  /** ADR-0092 tier holder; absent → this entry configured no fs isolation. */
+  readonly fsMode: FsModeContext | undefined;
+  /** The session-folder root the scratch pad hangs under (same as below). */
+  readonly projectDir: string | undefined;
+  /** The session anchor, read per call; absent → no pad in hand. */
+  readonly conversationId: (() => string | undefined) | undefined;
+  /** The same `userHome` the bash factory binds, so the reader's read-only
+   *  geometry is the fence's and not a re-derivation of it. */
+  readonly homeRoot: string | undefined;
+}): { readonly fsBoundary?: FsBoundaryReader } {
+  const fsMode = input.fsMode;
+  if (fsMode === undefined) return {};
+  return {
+    fsBoundary: (target: string) => {
+      const conversationId = input.conversationId?.();
+      // The same helper, and the same formula, the Bash handler binds this
+      // identity's pad with — one rule names the pad both gates read.
+      const tmpRoot =
+        conversationId === undefined || input.projectDir === undefined
+          ? undefined
+          : resolveSessionFenceTmp({
+              projectDir: input.projectDir,
+              conversationId,
+            });
+      const workspaceRoot = input.liveTaskRoot.read();
+      // `fsBoundarySnapshot` reads the tier and nothing else; the writable roots
+      // travel as MOUNTS, so the policy object here carries no tmpRoot of its own.
+      const mounts = { workspaceRoot, tmpRoot, homeRoot: input.homeRoot };
+      const boundary = fsBoundarySnapshot(
+        { tmpRoot: () => tmpRoot ?? "", mode: fsMode.get() },
+        mounts
+      );
+      // Unbounded reach (`reachableRoots === null`) is the global tier and, at
+      // the root, no fence at all: there is no edge for a call to cross. The
+      // discriminator is the shape, never the array's length — an EMPTY set
+      // under the workspace tier is still a boundary that refuses everything
+      // outside it.
+      if (!fsBoundaryIsActive(boundary)) return true;
+      // Relative spellings resolve against the call's own cwd (the live task
+      // root), which is the base the write tools resolve them against — never
+      // `process.cwd()`, which a worktree rebind can point elsewhere.
+      const resolved = path.resolve(workspaceRoot, target);
+      // ADR-0140: the question is "would the FENCE refuse this", not "is this
+      // outside the declared whitelist". The two differ — the workspace tier
+      // binds `/` writable and ro-binds over it, so `/tmp`, `/var/tmp` and
+      // `/dev/shm` are written successfully while sitting outside the whitelist.
+      // Asking about those would prompt for crossings that never happen.
+      return !isRefusedByFsBoundary(resolved, boundary, mounts);
+    },
   };
 }
 

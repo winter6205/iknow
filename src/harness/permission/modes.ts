@@ -12,7 +12,10 @@
  *                  (Today's behavior — preserves y/N safety net.)
  *   - "plan":      read-only → allow; mutating → deny (without asking).
  *                  For "read, never write" planning sessions.
- *   - "full_auto": read-only → allow; mutating → allow (no prompt).
+ *   - "full_auto": read-only → allow; mutating → allow (no prompt) inside what
+ *                  the current `fsMode` permits. At the edge of that reach the
+ *                  call raises one per-call question instead (ADR-0140); the
+ *                  answer decides that call and never changes `fsMode`.
  *                  User explicitly opted in; useful for autonomous batches
  *                  and startup scripts. Hard-walls still block sensitive
  *                  paths + dangerous commands.

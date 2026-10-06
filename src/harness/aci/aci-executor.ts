@@ -43,7 +43,7 @@ import {
 } from "../permission/permission-executor.js";
 import { partitionConcurrencyWaves } from "../tools/concurrency-waves.js";
 import { createAciCatalog } from "../permission/permission-executor.js";
-import { checkPermission } from "../permission/policy.js";
+import { checkPermission, fsBoundaryOption } from "../permission/policy.js";
 import { SECURITY_REVIEW_OPTION } from "../permission/security-review.js";
 import type { SecurityReviewRoute } from "../permission/security-review.js";
 import { errorMessage } from "../errors.js";
@@ -57,8 +57,9 @@ import type { CleanupEvidence } from "../sandbox/cleanup-result.js";
  * pin keeps that field's name welded to the frozen contract constant — a
  * rename on either side breaks the build.
  */
-const _SECURITY_REVIEW_OPTION_IS_FIELD: typeof SECURITY_REVIEW_OPTION extends
-  keyof PermissionExecutorOptions ? true : never = true;
+const _SECURITY_REVIEW_OPTION_IS_FIELD: typeof SECURITY_REVIEW_OPTION extends keyof PermissionExecutorOptions
+  ? true
+  : never = true;
 void _SECURITY_REVIEW_OPTION_IS_FIELD;
 
 export interface AciBackgroundRejection {
@@ -307,7 +308,15 @@ function emitOnDecision(
       // policy admits is reported here as a different decision than the one
       // the runtime applies.
       mode: policy.mode,
-      ...(policy.hostRoots !== undefined ? { hostRoots: policy.hostRoots } : {}),
+      ...(policy.hostRoots !== undefined
+        ? { hostRoots: policy.hostRoots }
+        : {}),
+      // ADR-0140: the fs boundary is a fourth input the enforcing gate reads,
+      // so the observer must read it too — without it an out-of-reach write is
+      // reported `allow` here while the runtime raises the boundary ask. Same
+      // helper the gate and the policy factory use, so the absent-vs-empty
+      // rule is one rule.
+      ...fsBoundaryOption(policy),
     })
   );
 }

@@ -722,7 +722,8 @@ describe("SC20 — the routed hard-deny outcomes deny at the wall surface", () =
     expect(graph.parseForSecurity(command).kind).toBe("malformed");
     expect(hitOf(graph, command)).toEqual({
       id: "unparseable",
-      pattern: "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
+      pattern:
+        "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
     });
     expectDeniedInEveryMode(
       graph,
@@ -1807,10 +1808,15 @@ describe("SC17(g) — the step's position, its sole constructors, the untouched 
     for (const name of readdirSync(PERMISSION_SOURCE_DIR)) {
       if (!name.endsWith(".ts")) continue;
       const count = countOf(sourceFile(name), 'decision: "ask"');
-      // policy.ts carries three ask constructors: the mode-scoped parse-layer
-      // step, the ordinary substitution ask tier, and the ADR-0127 review-ask
-      // arm (a requirement carried before grants and mode allowance).
-      expect(count, `${name} emits an ask`).toBe(name === "policy.ts" ? 3 : 0);
+      // policy.ts carries FOUR ask constructors: the mode-scoped parse-layer
+      // step, the ordinary substitution ask tier, the ADR-0127 review-ask
+      // arm (a requirement carried before grants and mode allowance), and
+      // ADR-0140 §2's boundary ask — `full_auto` asking at the edge of what the
+      // current fs tier permits, on the same route as the other three. The
+      // invariant this test protects is UNCHANGED and is what still matters:
+      // every ask in the directory is constructed here, in the permission
+      // decision path, and none of them appears beside the code that raises it.
+      expect(count, `${name} emits an ask`).toBe(name === "policy.ts" ? 4 : 0);
     }
   });
 
@@ -2121,9 +2127,7 @@ describe("SC7 — ${var} is bucketed by NAME, off Stage 0's expansions[] alone",
  * the `interpreter: true` rows of `command-roster.ts`'s command-name table).
  */
 function rosterMembers(source: string): string[] {
-  return [
-    ...source.matchAll(/"([a-z0-9]+)": \{[^\n]*\binterpreter: true\b/g),
-  ]
+  return [...source.matchAll(/"([a-z0-9]+)": \{[^\n]*\binterpreter: true\b/g)]
     .map((entry) => entry[1] ?? "")
     .sort();
 }
@@ -2315,7 +2319,8 @@ describe("SC9 — a heredoc body is judged by its receiver", () => {
     expect(graph.parseForSecurity(body).kind).toBe("malformed");
     expect(hitOf(graph, command)).toEqual({
       id: "unparseable",
-      pattern: "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
+      pattern:
+        "verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）",
     });
     expectDeniedInEveryMode(
       graph,

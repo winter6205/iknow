@@ -18,10 +18,11 @@
  *     never throws).
  *   - **mutable holder**: `YoloContext` — flipped in place at runtime, so no
  *     engine rebuild is needed.
- *   - **enter / exit actions**: `createYoloController` — the idempotent state
- *     combination (permission snapshot + `full_auto`, fsMode snapshot +
- *     `global`, restore on exit) plus the symmetric bwrap probe on both sides
- *     (a host without bwrap is refused either way).
+ *   - **enter / exit actions**: `createYoloController` — the idempotent fence
+ *     state combination (fsMode snapshot + `global`, restore on exit) plus the
+ *     symmetric bwrap probe on both sides (a host without bwrap is refused
+ *     either way). The **permission axis is not part of it**: yolo writes the
+ *     fence axis only, in both directions (ADR-0139).
  *
  * Boundary (ADR-0119 §ruling 8): **never persisted**. The holder is pure memory —
  * not in settings, not in the session file, no config-panel row; each session
@@ -29,20 +30,10 @@
  */
 
 import { ToolExecutionError } from "../errors.js";
-import type {
-  PermissionMode,
-  PermissionModeContext,
-} from "../permission/modes.js";
+import type { PermissionModeContext } from "../permission/modes.js";
 import type { FsIsolationMode, FsModeContext } from "./fs-mode.js";
 import { FS_ISOLATION_MODE_DEFAULT } from "./fs-mode.js";
 import { requireBwrap } from "./runner.js";
-
-/**
- * Where the permission axis lands when yolo is entered — reuses the existing
- * `full_auto` semantics (hard wall still intercepts first) and deliberately does
- * **not** add a fourth `PermissionMode` (ADR-0119 §ruling 1).
- */
-const YOLO_PERMISSION_TARGET: PermissionMode = "full_auto";
 
 /**
  * Typed refusal for a non-TUI entry point carrying `--yolo` — discriminated
@@ -150,12 +141,21 @@ export function createYoloContext(
 }
 
 /**
- * Dependency face for the enter / exit actions — the two state holders plus a
+ * Dependency face for the enter / exit actions — the state holders plus a
  * bwrap availability probe.
  *
- * An absent `permission` / `fsMode` means that axis does not join the state
- * combination (only the yolo axis flips), which keeps tests and minimal assembly
- * possible; production wiring supplies all three.
+ * An absent `permission` / `fsMode` means that axis does not join the enter /
+ * exit combination (only the yolo axis flips), which keeps tests and minimal
+ * assembly possible.
+ *
+ * `permission` is carried but **deliberately never read, written, snapshotted
+ * or restored** by any action here: the permission axis is fence-independent in
+ * both directions (ADR-0139), so the fence axis may not move it. It stays on
+ * this face because it is the shape callers already wire — `run.tsx` passes
+ * every session axis in one object — and because holding the real holder makes
+ * fence-independence testable as a claim about the object handed in rather
+ * than about a holder the controller never saw. An entry that wants a posture
+ * of its own writes it itself; `eval-state.ts` is the one that does.
  *
  * `probe` is injectable for tests; the production default is `requireBwrap`
  * (`spawnSync("bwrap", ["--version"])` in `runner.ts`, throwing
@@ -178,12 +178,12 @@ export type YoloActionResult =
   | { readonly ok: false; readonly text: string };
 
 /**
- * Pre-entry snapshot — what makes repeated entry idempotent: a second entry must
- * not re-snapshot, or the snapshot gets polluted by the previous yolo posture and
- * exit can no longer restore the real pre-entry values.
+ * Pre-entry snapshot — the fence axis' own values only. What makes repeated
+ * entry idempotent: a second entry must not re-snapshot, or the snapshot gets
+ * polluted by the previous yolo posture and exit can no longer restore the real
+ * pre-entry fs tier.
  */
 interface YoloSnapshot {
-  readonly permission: PermissionMode | undefined;
   readonly fsMode: FsIsolationMode | undefined;
 }
 
@@ -222,7 +222,7 @@ export const YOLO_ALREADY_ON_TEXT = "yolo mode is already ON.";
 
 /** Successful-exit notice. */
 export const YOLO_EXIT_TEXT =
-  "yolo mode OFF — sandbox fence restored; permission and fs mode rolled back to their pre-yolo values.";
+  "yolo mode OFF — sandbox fence restored; fs mode rolled back to its pre-yolo value; the permission posture was never touched and is unchanged.";
 
 /** Idempotent notice when exiting from a non-yolo posture. */
 export const YOLO_ALREADY_OFF_TEXT = "yolo mode is already OFF.";
@@ -294,22 +294,23 @@ function typedCauseText(cause: unknown): string {
 /**
  * Build the yolo controller.
  *
- * **Enter** (spec / ADR-0119 §ruling 1, 6, 8): return idempotently when already
- * yolo; probe bwrap and refuse with zero state change on a host without it;
- * snapshot permission / fsMode; force permission to `full_auto` (existing
- * semantics, hard wall first); force a non-default fsMode to `global` through the
- * holder only, never rewriting user settings; then set yolo true.
+ * **Enter** (spec / ADR-0119 §ruling 1, 6, 8, as amended by ADR-0139): return
+ * idempotently when already yolo; probe bwrap and refuse with zero state change
+ * on a host without it; snapshot the fsMode holder; force a non-default fsMode
+ * to `global` through the holder only, never rewriting user settings; then set
+ * yolo true. The permission axis is not read, written, snapshotted or restored
+ * on any entry path (ADR-0139) — the fence axis writes the fence axis.
  *
  * **Exit** — deliberately asymmetric with entry: leaving is always safe in
  * principle, but **still probes**. On a host without bwrap the exit is refused,
  * because with no usable non-yolo fence every bash call would become a runtime
  * failure, so refusing is the only honest fail-closed (ADR-0119 §requireBwrap
- * sequencing ruling). Otherwise restore the snapshotted permission / fsMode, then
- * set yolo false.
+ * sequencing ruling). Otherwise restore the snapshotted fsMode, then set yolo
+ * false.
  *
  * **Launch entry** (`enterAtLaunch`): the `--yolo` startup path applies the
  * same combination as enter — the flag only seeds the holder, which by itself
- * leaves permission at `default` while the fence is already gone.
+ * leaves the fs tier as it was while the fence is already gone.
  */
 export function createYoloController(opts: YoloActionOptions): YoloController {
   const probe = opts.probe ?? requireBwrap;
@@ -318,11 +319,7 @@ export function createYoloController(opts: YoloActionOptions): YoloController {
 
   /** The enter state combination — shared by `enter()` and `enterAtLaunch()`. */
   const applyEnterCombination = (): void => {
-    snapshot = {
-      permission: opts.permission?.get(),
-      fsMode: opts.fsMode?.get(),
-    };
-    opts.permission?.set(YOLO_PERMISSION_TARGET);
+    snapshot = { fsMode: opts.fsMode?.get() };
     // A `fsMode: workspace` tier has nothing to carry it without a fence, so it
     // forces back to `global` through the holder only (ADR-0092 "flip in place
     // through the holder at runtime"); exit restores the snapshot.
@@ -375,7 +372,6 @@ export function createYoloController(opts: YoloActionOptions): YoloController {
     }
     const snap = snapshot;
     snapshot = undefined;
-    if (snap?.permission !== undefined) opts.permission?.set(snap.permission);
     if (snap?.fsMode !== undefined) opts.fsMode?.set(snap.fsMode);
     opts.yolo.set(false);
     return { ok: true, yolo: false, text: YOLO_EXIT_TEXT };

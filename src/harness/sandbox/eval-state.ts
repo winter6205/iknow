@@ -9,14 +9,22 @@
  * evaluation has no use for the fence, so this module opens exactly one named
  * face for it.
  *
- * Eval state is **not a second fence shape**. Its runtime posture is what
- * entering yolo does, reached without a TUI: permission → `full_auto`,
- * `fsMode: workspace` → **全局档** (holders only, user-layer settings never
- * rewritten), the bwrap fence retired wholesale — so every route this entry
- * mounts (foreground bash) runs bare — and the egress seam retired with it
- * (ADR-0119 §ruling 3). The carrier is therefore the very same `YoloContext`
- * holder the fence factory's single branch reads, applied by the very same enter
- * action — the parity is structural, not a copy that could drift.
+ * Eval state is **not a second fence shape**. Its fence posture is what entering
+ * yolo does, reached without a TUI: `fsMode: workspace` → **全局档** (holders
+ * only, user-layer settings never rewritten), the bwrap fence retired wholesale
+ * — so every route this entry mounts (foreground bash) runs bare — and the egress
+ * seam retired with it (ADR-0119 §ruling 3). The fence carrier is therefore the
+ * very same `YoloContext` holder the fence factory's single branch reads, applied
+ * by the very same enter action, and the four routes run bare through it because
+ * the fence is gone: **the parity is structural in the fence carrier and the
+ * fence shape — the shape that could drift — not in a copy.**
+ *
+ * The permission axis is not part of that parity claim. Permission → `full_auto`
+ * is **eval's own write**, on its own line below, and it is set because an
+ * operator cannot answer per-call questions mid-benchmark (ADR-0139 §3): the two
+ * axes never write each other, so an eval posture equal to yolo's would be a
+ * coincidence rather than a guarantee. What the shared holder still prevents is
+ * the drift that actually mattered — eval's fence shape diverging from yolo's.
  *
  * Route scope: retiring the fence retires all four routes wherever they are
  * mounted (ADR-0130 §2, true for yolo). The single eval entry is `surface:
@@ -41,13 +49,30 @@
  * default, not an env var that flips silently.
  */
 
-import type { PermissionModeContext } from "../permission/modes.js";
+import type {
+  PermissionMode,
+  PermissionModeContext,
+} from "../permission/modes.js";
 import type { FsModeContext } from "./fs-mode.js";
 import { createYoloContext, createYoloController } from "./yolo.js";
 import type { YoloContext } from "./yolo.js";
 
 /** The named opt-in flag, available to the headless one-shot entries. */
 export const EVAL_STATE_FLAG = "--eval-state";
+
+/**
+ * Where the permission axis lands for an eval-state invocation — eval's **own**
+ * write, established here rather than inherited from the shared fence entry
+ * (ADR-0139 §3). It reuses the existing `full_auto` semantics (the hard wall
+ * still intercepts first) and adds no fourth `PermissionMode`.
+ *
+ * It cannot be inherited: ADR-0130 §2's central survival claim is that the hard
+ * wall intercepts "before `full_auto` grants anything", which presupposes
+ * `full_auto` is in force, and an operator cannot answer per-call questions
+ * mid-benchmark — a benchmark that deadlocked on its own prompts would measure
+ * the harness, not the model.
+ */
+const EVAL_STATE_PERMISSION_TARGET: PermissionMode = "full_auto";
 
 /**
  * The state label a published number must carry (ADR-0130 §5). One string, so
@@ -167,13 +192,20 @@ export interface EvalStateHolders {
 }
 
 /**
- * Enter eval state: apply yolo's entry state-combination to the supplied holders
- * and return the fence-retire holder alongside them.
+ * Enter eval state: apply the fence state-combination to the supplied holders,
+ * set the permission posture through this entry's own write, and return the
+ * fence-retire holder alongside them.
  *
- * It delegates to `createYoloController(...).enterAtLaunch()` — the same action
- * `iknow tui --yolo` runs (ADR-0119 Amendment (ii): "the flag only seeds the
- * holder" is not enough; the permission + fsMode combination must be applied).
- * Reusing it is what keeps "identical runtime shape" true by construction.
+ * It delegates the **fence** half to `createYoloController(...).enterAtLaunch()`
+ * — the same action `iknow tui --yolo` runs, and the same holder the fence
+ * factory's single branch reads. Reusing it is what keeps the fence shape
+ * identical by construction rather than by copy.
+ *
+ * The **permission** half is written here, on its own line, and that asymmetry
+ * is the decision rather than an accident (ADR-0139 §3). The two axes never
+ * write each other, so eval's `full_auto` is no longer evidence of parity with
+ * yolo — it is eval's own posture, set because an operator cannot answer
+ * per-call questions mid-benchmark (see `EVAL_STATE_PERMISSION_TARGET`).
  *
  * No bwrap probe on either side: the launch branch skips entry probing (a host
  * without bwrap must not block a posture that needs no fence), and there is no
@@ -197,5 +229,8 @@ export function enterEvalState(initial: {
     // would publish a number under a false label.
     throw new Error(`eval_state_entry_refused: ${action.text}`);
   }
+  // The fence combination above touched the fsMode holder only; the permission
+  // posture is this entry's own (ADR-0139 §3).
+  initial.permission.set(EVAL_STATE_PERMISSION_TARGET);
   return { yolo, permission: initial.permission, fsMode: initial.fsMode };
 }

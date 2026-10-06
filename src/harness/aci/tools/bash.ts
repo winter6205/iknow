@@ -41,11 +41,17 @@ import {
   type FsIsolationMode,
   type FsModeContext,
 } from "../../sandbox/fs-mode.js";
+import type { FsBoundaryMounts } from "../../sandbox/fs-boundary.js";
 import type { YoloContext } from "../../sandbox/yolo.js";
-// Direct module import (not the `sandbox/index.js` barrel): the EBUSY arm of
-// the protected-target feedback is this seam's own consumer, and the barrel's
-// re-export list is owned elsewhere.
-import { protectedTargetEbusyFenceGuidance } from "../../sandbox/protected-target-feedback.js";
+// Direct module import (not the `sandbox/index.js` barrel): the EBUSY arm and the
+// fs-mode boundary arm of the boundary feedback are this seam's own consumers,
+// and the barrel's re-export list is owned elsewhere.
+import {
+  fsModeFeedbackBoundary,
+  modeBoundaryFenceGuidance,
+  protectedTargetEbusyFenceGuidance,
+  type FsModeBoundary,
+} from "../../sandbox/protected-target-feedback.js";
 import {
   DEFAULT_MAX_OUTPUT_CODE_POINTS,
   requireBwrap,
@@ -141,7 +147,9 @@ function renderReceived(value: unknown): string {
  */
 function classifyDeadline(
   value: unknown
-): { readonly ok: true; readonly deadlineMs: number } | { readonly ok: false; readonly code: BashForegroundDeadlineErrorCode } {
+):
+  | { readonly ok: true; readonly deadlineMs: number }
+  | { readonly ok: false; readonly code: BashForegroundDeadlineErrorCode } {
   if (value === undefined) {
     return { ok: true, deadlineMs: DEFAULT_FOREGROUND_BASH_TIMEOUT_MS };
   }
@@ -462,6 +470,11 @@ async function runForegroundBash(
     homeRoot,
     workspaceRoot,
   });
+  // ONE workspace-mount object per call: the same value is spread into the
+  // fence argv and fed to the fs-mode boundary arm's geometry, so "what the
+  // tier mounts" has a single declaration on this path (ADR-0092's rejected
+  // second-implementation rule).
+  const mounts = fenceWorkspaceMounts(fsMode, homeRoot, waveRoot, tmpDir);
   // start session → build fence → run sandbox → install mask → record
   // ledger → finalize: 6 steps, each an extracted sub-function; this
   // function only orchestrates them in order.
@@ -482,9 +495,8 @@ async function runForegroundBash(
     fenceEnv,
     waveRoot,
     fenceIsReadonly,
-    fsMode,
-    homeRoot,
     tmpDir,
+    mounts,
     unboundMainCheckout,
     yolo,
     egressSession: egress.session,
@@ -529,6 +541,7 @@ async function runForegroundBash(
     // match — the same guard, riding the fence's own field rather than a
     // second yolo re-check.
     exactFileMaskPaths: fence.exactFileMaskPaths,
+    fsModeBoundary: fsModeBoundaryForCall({ fsPolicy, mounts }),
   });
   if (finalPath.kind === "throw") throw finalPath.throwError;
   return finalPath.envelope;
@@ -596,9 +609,15 @@ function buildForegroundFence(args: {
   readonly fenceEnv: Record<string, string>;
   readonly waveRoot: string;
   readonly fenceIsReadonly: boolean;
-  readonly fsMode: FsIsolationMode;
-  readonly homeRoot: string;
+  /** Session scratch root (the UNBOUND_FENCE `tmpPad`). NOT a tier-geometry
+   *  input — under `global` the workspace mounts are empty but the pad is
+   *  still bound, so this stays a separate entry-frozen field. */
   readonly tmpDir: string;
+  /** ADR-0092 workspace-tier mount inputs, assembled once by the caller and
+   *  shared with the fs-mode boundary arm's geometry — the argv below and the
+   *  roots that arm names read ONE object. Empty under `global`, where bwrap
+   *  emits no workspace segment. */
+  readonly mounts: FsBoundaryMounts;
   readonly unboundMainCheckout: string | undefined;
   readonly yolo: boolean;
   readonly egressSession: EgressSession | undefined;
@@ -621,14 +640,10 @@ function buildForegroundFence(args: {
     ...(args.fenceIsReadonly ? { cwdReadonly: true } : {}),
     // ADR-0092: source paths for the workspace-mode fence layers (host
     // root + system prefixes + home ro-bind + two write whitelists).
-    // Under global mode `fsPolicy.mode === "global"` and bwrap emits
-    // nothing, byte-identical to the V1 baseline.
-    ...fenceWorkspaceMounts(
-      args.fsMode,
-      args.homeRoot,
-      args.waveRoot,
-      args.tmpDir
-    ),
+    // Under global mode `fsPolicy.mode === "global"` and the caller's
+    // `mounts` is empty, so bwrap emits nothing, byte-identical to the V1
+    // baseline.
+    ...args.mounts,
     ...(args.egressSession !== undefined
       ? { egress: args.egressSession.spec }
       : {}),
@@ -738,6 +753,48 @@ function protectedTargetGuidanceForCall(
 }
 
 /**
+ * The boundary's geometry for one call, derived from the fence's single
+ * declaration (`fsBoundarySnapshot` via `fsModeFeedbackBoundary`) and from the
+ * SAME `mounts` object the fence is built with — so the roots this arm names
+ * and the roots the fence binds cannot be two lists that drift, and a caller
+ * has no list to write by hand. `fsPolicy` / `mounts` are the entry-frozen
+ * vintage, never re-read inside the guidance path, so a mid-call holder flip
+ * cannot move the fence's geometry under the message.
+ */
+function fsModeBoundaryForCall(args: {
+  readonly fsPolicy: ReturnType<typeof createFsPolicy>;
+  readonly mounts: FsBoundaryMounts;
+}): FsModeBoundary {
+  return fsModeFeedbackBoundary(args.fsPolicy, args.mounts);
+}
+
+/**
+ * Guard for the fs-MODE boundary refusal (ADR-0140, the second `[fs_denied]`
+ * refusal in specs/effect-boundary-protection.md). Same shape as the
+ * protected-target guard above on purpose: the two refusals are announced the
+ * same way, and the message is what distinguishes them. It rides the SAME
+ * `protectedTargets === undefined` yolo guard rather than re-reading the yolo
+ * holder — under yolo there is no fence, so no EROFS can be fence-attributed,
+ * and the mode boundary is a fence boundary.
+ *
+ * The conservatism lives in `modeBoundaryFenceGuidance`: an EROFS that resolves
+ * to no protected class has innocent causes, so the arm fires only on a
+ * positively identified crossing. Everything else — a protected path, a
+ * read-only system prefix, a non-zero exit that merely mentions the marker —
+ * leaves the result byte-identical to today.
+ */
+function modeBoundaryGuidanceForCall(
+  protectedTargets: ProtectedTargetInventory | undefined,
+  boundary: FsModeBoundary,
+  result: Awaited<ReturnType<typeof runInSandbox>>
+): string | undefined {
+  if (protectedTargets === undefined || result.exitCode === 0) {
+    return undefined;
+  }
+  return modeBoundaryFenceGuidance(result.stderr, protectedTargets, boundary);
+}
+
+/**
  * Violation drain + egressStartError check → typed-failure / ok decision
  * point. Extracted to control `runForegroundBash` complexity (S5 gate).
  * Logic:
@@ -762,6 +819,9 @@ async function finalizeEgressPath(args: {
   /** The `/dev/null` credential masks this fence emitted — the EBUSY arm's
    *  correlation set. Empty under yolo (the fence never assembled one). */
   readonly exactFileMaskPaths: readonly string[];
+  /** The tier's own reach for this call, from the frozen `fsMode` snapshot —
+   *  the fs-mode boundary arm's correlation set. */
+  readonly fsModeBoundary: FsModeBoundary;
 }): Promise<
   | { readonly kind: "throw"; readonly throwError: ToolExecutionError }
   | {
@@ -782,6 +842,7 @@ async function finalizeEgressPath(args: {
     unboundMainCheckout,
     protectedTargets,
     exactFileMaskPaths,
+    fsModeBoundary,
   } = args;
   const violations =
     egressSession !== undefined ? egressSession.violationSink.drain() : [];
@@ -823,10 +884,20 @@ async function finalizeEgressPath(args: {
     exactFileMaskPaths,
     result
   );
+  // fs-MODE boundary refusal (ADR-0140): a write that left what the current
+  // `fsMode` permits. Same ok-envelope stderr channel, same no-exit-semantics
+  // and no-violation-count contract as the arm above — and the two never
+  // double-speak, because the protected-class test lives inside the resolver.
+  const modeBoundaryGuidance = modeBoundaryGuidanceForCall(
+    protectedTargets,
+    fsModeBoundary,
+    result
+  );
   const guidanceLines = [
     f4Guidance,
     erofsGuidance,
     protectedTargetGuidance,
+    modeBoundaryGuidance,
   ].filter((line): line is string => line !== undefined);
   const effectiveResult =
     guidanceLines.length === 0
@@ -1010,11 +1081,8 @@ function assembleBashToolResult(
       // reason: it asserts nothing happened, so it is not worth a key on every
       // ordinary call. The states that DO carry a claim (`confirmed_stopped` /
       // `unconfirmed`) are always reported, and are never dropped.
-      ...(result.deadline_expired === true
-        ? { deadline_expired: true }
-        : {}),
-      ...(result.cleanup !== undefined &&
-      result.cleanup.state !== "not_started"
+      ...(result.deadline_expired === true ? { deadline_expired: true } : {}),
+      ...(result.cleanup !== undefined && result.cleanup.state !== "not_started"
         ? { cleanup: result.cleanup }
         : {}),
     }),

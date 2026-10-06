@@ -31,7 +31,10 @@ import {
   hardWalls,
 } from "../../../src/harness/permission/hard-walls.js";
 import { VIOLATION_PREFIXES } from "../../../src/harness/permission/prefixes.js";
-import { protectedTargetErofsGuidance } from "../../../src/harness/sandbox/protected-target-feedback.js";
+import {
+  protectedTargetErofsGuidance,
+  modeBoundaryErofsGuidance,
+} from "../../../src/harness/sandbox/protected-target-feedback.js";
 import type { AciToolDef } from "../../../src/harness/aci/types.js";
 
 const MATCHED = "rm -rf /";
@@ -112,10 +115,20 @@ function reachableCopy(): ReadonlyArray<string> {
     // bash tool visible copy (handler refusal + ok-envelope static text)
     `bash: command targets a sensitive path: ${MATCHED}`,
     "Write into the project at taskRoot. Write scratch files that need not enter the repo into the session tmp dir ($TMPDIR — same lifetime as the current identity, not a delivery destination).",
-    // the NEW boundary-refusal template's own copy
+    // the boundary-refusal templates' own copy — both protected arms AND the
+    // mode-boundary arm (ADR-0140), which reaches this audit for the first time
+    // here: a reachable string nobody audits is a reachable string nobody pins.
     protectedTargetErofsGuidance(
       "rm: cannot remove '/home/u/.ssh/id_ed25519': Read-only file system",
       "ssh_key_material"
+    ) ?? "",
+    modeBoundaryErofsGuidance(
+      "touch: cannot touch '/home/u/notes.txt': Read-only file system",
+      {
+        mode: "workspace",
+        readOnlyRoots: ["/home/u"],
+        writableRoots: ["/workspace/task", "/tmp/iknow-session"],
+      }
     ) ?? "",
   ];
   return out;

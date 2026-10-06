@@ -388,12 +388,14 @@ export function teardownTuiTerminal(
 
 /**
  * ADR-0119 §launch: `--yolo` seeds the holder only; the enter state
- * combination (permission -> full_auto, fsMode -> global, snapshot for exit)
- * must be applied at startup too, or the session runs fence-less with a
- * default permission posture. The gate reads the **normalized holder** (the
- * single source of truth for the yolo axis), never the raw flag value. No
- * probe gate: a bwrap-less host still assembles yolo (requireBwrap sequencing
- * ruling); its exit refusal stays symmetric.
+ * combination (fsMode -> global, snapshot for exit) must be applied at
+ * startup too, or the session runs fence-less with a workspace-tier posture
+ * the fence no longer backs. ADR-0139: the permission axis is NOT part of
+ * this combination — a yolo session keeps whatever posture it had, so
+ * "fence-less" and "no questions" are now independent. The gate reads the
+ * **normalized holder** (the single source of truth for the yolo axis), never
+ * the raw flag value. No probe gate: a bwrap-less host still assembles yolo
+ * (requireBwrap sequencing ruling); its exit refusal stays symmetric.
  */
 function applyYoloLaunchSeed(yolo: YoloContext, controller: YoloController) {
   if (yolo.get()) {

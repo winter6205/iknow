@@ -25,15 +25,15 @@ import {
 
 /**
  * Content of the entry confirmation modal (one SSOT for rendering and row
- * accounting) — dangerous operation: the no-sandbox consequences, the permission
- * posture, and how to get back. Key path: Enter -> controller.enter(),
+ * accounting) — dangerous operation: the no-sandbox consequences and how to get
+ * back. Key path: Enter -> controller.enter(),
  * Esc -> close the panel with zero change.
  */
 export function yoloEnterConfirmContent(): SelectModalContent {
   return {
     title: "启用 yolo 模式？",
     description:
-      "危险操作：沙箱围栏将整体退场——bash 不再经 bwrap，网络与文件系统不受限，权限面貌切到 full_auto。/yolo 即时退出并恢复进入前快照。",
+      "危险操作：沙箱围栏将整体退场——bash 不再经 bwrap，网络与文件系统不受限。/yolo 即时退出并恢复进入前快照。",
     options: [
       { value: "execute", label: "启用 yolo" },
       { value: "cancel", label: "取消" },

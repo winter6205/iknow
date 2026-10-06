@@ -9,6 +9,7 @@ import {
   INTERPRETER_COMMAND_NAMES,
 } from "./command-roster.js";
 import { splitShellSegments } from "./text-segments.js";
+import { PATH_TARGET_KEYS } from "./path-target-keys.js";
 import {
   isContainedFileTarget,
   isDeterminedPathWord,
@@ -256,7 +257,9 @@ function isAllowedFromParse(parsed: SecurityParseOk): boolean {
  * fold.
  */
 function parseBoundedUnits(parsed: SecurityParseOk): string[] {
-  const bounds = [...parsed.operators].sort((a, b) => a.span.start - b.span.start);
+  const bounds = [...parsed.operators].sort(
+    (a, b) => a.span.start - b.span.start
+  );
   const units: string[] = [];
   let from = 0;
   for (const op of bounds) {
@@ -265,9 +268,7 @@ function parseBoundedUnits(parsed: SecurityParseOk): string[] {
     from = op.span.end;
   }
   units.push(parsed.text.slice(from));
-  return units
-    .map((unit) => unit.trim())
-    .filter((unit) => unit.length > 0);
+  return units.map((unit) => unit.trim()).filter((unit) => unit.length > 0);
 }
 
 /**
@@ -712,14 +713,16 @@ function rootSearchFeedsDestructiveConsumer(
     // The run hands its operand on — `xargs sh -c '…'` is the shape — and a
     // destructive name anywhere in what it hands on is enough.
     const rest = tokens.slice(at.index + 1);
-    if (rest.some((token) => isDestructiveWord(commandWord(stripQuoteLayer(token))))) {
+    if (
+      rest.some((token) =>
+        isDestructiveWord(commandWord(stripQuoteLayer(token)))
+      )
+    ) {
       return true;
     }
   }
   return false;
 }
-
-
 
 /**
  * True when a `find` command's token run walks the whole machine. This is the
@@ -1136,7 +1139,10 @@ function trailingRedirectOwners(parse: SecurityParseOk): Set<number> {
   const owners = new Set<number>();
   for (const redirect of parse.redirects) {
     const owner = redirect.ownerCommandIndex;
-    if (owner !== null && redirect.span.start >= parse.commands[owner]?.span.end) {
+    if (
+      owner !== null &&
+      redirect.span.start >= parse.commands[owner]?.span.end
+    ) {
       owners.add(owner);
     }
   }
@@ -1314,7 +1320,10 @@ function routeParseVerdict(
 ): DangerousPatternHit | null {
   switch (result.kind) {
     case "malformed":
-      return { id: "unparseable", pattern: `verdict=malformed ${result.reason}` };
+      return {
+        id: "unparseable",
+        pattern: `verdict=malformed ${result.reason}`,
+      };
     case "aborted":
       return { id: "unparseable", pattern: "verdict=aborted" };
     case "over-cap":
@@ -1627,7 +1636,10 @@ export type BoundedCleanupException = {
 
 /** The `$TMPDIR` / `${TMPDIR}` prefix of an operand, consumed, or `null`. */
 function consumeScratchEnvPrefix(word: string): string | null {
-  for (const form of [`$${TRUSTED_SCRATCH_ENV_NAME}/`, `$${TRUSTED_SCRATCH_ENV_NAME}`]) {
+  for (const form of [
+    `$${TRUSTED_SCRATCH_ENV_NAME}/`,
+    `$${TRUSTED_SCRATCH_ENV_NAME}`,
+  ]) {
     if (word.startsWith(form)) return word.slice(form.length);
   }
   const braced = `\${${TRUSTED_SCRATCH_ENV_NAME}}`;
@@ -1778,7 +1790,8 @@ export function classifyBoundedCleanupException(
   command: string,
   roots: CleanupRootSnapshot
 ): BoundedCleanupException | null {
-  if (roots.scratchRoot === undefined && roots.taskRoot === undefined) return null;
+  if (roots.scratchRoot === undefined && roots.taskRoot === undefined)
+    return null;
   if (command.length === 0) return null;
   const parse = parseForSecurity(command);
   if (parse.kind !== "ok") return null;
@@ -1792,7 +1805,10 @@ export function classifyBoundedCleanupException(
   if (established === null) return null;
   if (established.length === 0) return null;
   return {
-    scope: established[0]!.root === roots.scratchRoot ? "identity-scratch" : "task-root",
+    scope:
+      established[0]!.root === roots.scratchRoot
+        ? "identity-scratch"
+        : "task-root",
     root: established[0]!.root,
     targets: established.map((entry) => entry.target),
   };
@@ -1824,7 +1840,8 @@ function establishedCleanupTargets(
     }
     const resolved = cleanupTargetRoot(text, word.quoteKind, roots, base);
     if (resolved === null) return null;
-    if (established.length > 0 && established[0]!.root !== resolved.root) return null;
+    if (established.length > 0 && established[0]!.root !== resolved.root)
+      return null;
     established.push(resolved);
   }
   return established;
@@ -2186,15 +2203,7 @@ function isColonNamedDefinition(head: string): boolean {
  * denies name `eval` and a shell `-c` only.
  */
 const SHELL_CODE_OPERAND_NAMES: ReadonlySet<string> = Object.freeze(
-  new Set([
-    "eval",
-    "bash",
-    "sh",
-    "zsh",
-    "dash",
-    "ksh",
-    ...SHELL_FAMILY_ROSTER,
-  ])
+  new Set(["eval", "bash", "sh", "zsh", "dash", "ksh", ...SHELL_FAMILY_ROSTER])
 );
 
 /**
@@ -3660,10 +3669,7 @@ export type SensitivePathEvidence =
 
 /** The parse-established sites this classification distinguishes. */
 export type SensitivePathSite =
-  | "argv-operand"
-  | "redirect-target"
-  | "code-region"
-  | "heredoc-body";
+  "argv-operand" | "redirect-target" | "code-region" | "heredoc-body";
 
 /** No roster entry matched: this wall has nothing to classify. */
 const NO_MATCH: SensitivePathEvidence = Object.freeze({ class: "non_path" });
@@ -3689,7 +3695,7 @@ function sensitiveFragmentAt(
           const index = text.indexOf(fragment);
           return index < 0
             ? null
-            : { index, "0": fragment } as unknown as RegExpExecArray;
+            : ({ index, "0": fragment } as unknown as RegExpExecArray);
         })();
     if (at === null) continue;
     const start = offset + at.index;
@@ -4049,9 +4055,7 @@ function codeRegionEvidenceIn(
 }
 
 /** One command node's first sensitive argv operand, or `null` for none. */
-function argvOperandEvidence(
-  node: CommandFact
-): SensitivePathEvidence | null {
+function argvOperandEvidence(node: CommandFact): SensitivePathEvidence | null {
   for (let i = 1; i < node.argv.length; i++) {
     const word = node.argv[i]!;
     const hit = sensitiveFragmentAt(word.text, 0);
@@ -4133,7 +4137,8 @@ function argvSpans(parse: SecurityParseOk): FactSpan[] {
   for (const node of parse.commands) {
     for (const word of node.argv) argvCovered.push(word.span);
   }
-  for (const redirect of parse.redirects) argvCovered.push(redirect.target.span);
+  for (const redirect of parse.redirects)
+    argvCovered.push(redirect.target.span);
   return argvCovered;
 }
 
@@ -4165,7 +4170,8 @@ function unattributedGapEvidence(
     if (span.start > cursor) gaps.push({ start: cursor, end: span.start });
     cursor = Math.max(cursor, span.end);
   }
-  if (cursor < parse.text.length) gaps.push({ start: cursor, end: parse.text.length });
+  if (cursor < parse.text.length)
+    gaps.push({ start: cursor, end: parse.text.length });
   for (const gap of gaps) {
     const text = spanText(parse.text, gap);
     if (text === undefined) continue;
@@ -4214,7 +4220,10 @@ function untrustworthySpanEvidence(
 /** The scan's full answer set. `invalid` and `fault` end in typed denies. */
 export type SecurityReviewScan =
   | { readonly verdict: "clean" }
-  | { readonly verdict: "review"; readonly requirement: SecurityReviewRequirement }
+  | {
+      readonly verdict: "review";
+      readonly requirement: SecurityReviewRequirement;
+    }
   | { readonly verdict: "invalid"; readonly reason: string }
   | { readonly verdict: "fault"; readonly reason: string };
 
@@ -4249,9 +4258,7 @@ function securityRelevantPattern(text: string): string | null {
  * here — `awk` on purpose, because its program operand can call `system()`
  * and nothing in this file establishes whether it does.
  */
-function commandNodeReview(
-  cmd: CommandFact
-): SecurityReviewRequirement | null {
+function commandNodeReview(cmd: CommandFact): SecurityReviewRequirement | null {
   const at = destructiveCommandAt(cmd);
   const name = at === undefined ? undefined : at.name;
   if (name !== undefined && operandOwnershipEstablished(name)) return null;
@@ -4340,7 +4347,12 @@ function heredocBodyReview(
       `a quoted heredoc body carries \`${pattern}\` and no command owns the redirect`
     );
   }
-  return heredocReceiverReview(parse, heredoc.receiverCommandIndex, span, pattern);
+  return heredocReceiverReview(
+    parse,
+    heredoc.receiverCommandIndex,
+    span,
+    pattern
+  );
 }
 
 /**
@@ -4434,9 +4446,7 @@ export function securityReviewForParse(
  * mode flow ADR-0124 assigned them, and the empty command asks nothing of
  * nobody.
  */
-export function analyzeSecurityReview(
-  command: unknown
-): SecurityReviewScan {
+export function analyzeSecurityReview(command: unknown): SecurityReviewScan {
   if (typeof command !== "string") {
     return {
       verdict: "invalid",
@@ -4475,7 +4485,7 @@ export function analyzeSecurityReview(
 function getPathLikeString(input: unknown): string | undefined {
   if (input === null || typeof input !== "object") return undefined;
   const obj = input as Record<string, unknown>;
-  for (const key of ["path", "file", "filepath", "target"]) {
+  for (const key of PATH_TARGET_KEYS) {
     const value = obj[key];
     if (typeof value === "string") return value;
   }

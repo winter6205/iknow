@@ -25,7 +25,11 @@ import type {
 } from "../tools/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import type { AciCatalog, AciToolDef } from "../aci/types.js";
-import { checkPermission, type PermissionPolicy } from "./policy.js";
+import {
+  checkPermission,
+  fsBoundaryOption,
+  type PermissionPolicy,
+} from "./policy.js";
 import type { CleanupRootSnapshot } from "./cleanup-roots.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type {
@@ -187,8 +191,9 @@ export interface PermissionExecutorOptions {
  * Compile-time pin: the options field above must keep the exact name the
  * frozen contract exports, so a rename on either side breaks the build.
  */
-const _SECURITY_REVIEW_OPTION_IS_FIELD: typeof SECURITY_REVIEW_OPTION extends
-  keyof PermissionExecutorOptions ? true : never = true;
+const _SECURITY_REVIEW_OPTION_IS_FIELD: typeof SECURITY_REVIEW_OPTION extends keyof PermissionExecutorOptions
+  ? true
+  : never = true;
 void _SECURITY_REVIEW_OPTION_IS_FIELD;
 
 export type PermissionGate =
@@ -413,6 +418,7 @@ export function createPermissionRuntime(
       defaultByCategory: policy.defaultByCategory,
       mode: policy.mode,
       ...hostRootsOption(policy),
+      ...fsBoundaryOption(policy),
     });
 
     if (outcome.decision === "ask") {
@@ -694,9 +700,9 @@ function getOrCompileValidator(def: AciToolDef): ValidateFunction {
  * difference between "no cleanup scope exists" and "a scope with no roots in
  * it", which the wall would otherwise have to tell apart.
  */
-function hostRootsOption(
-  policy: PermissionPolicy
-): { readonly hostRoots?: () => CleanupRootSnapshot } {
+function hostRootsOption(policy: PermissionPolicy): {
+  readonly hostRoots?: () => CleanupRootSnapshot;
+} {
   if (policy.hostRoots === undefined) return {};
   return { hostRoots: policy.hostRoots };
 }

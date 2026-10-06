@@ -3,14 +3,18 @@
  *
  * ADR-0130 **eval state** — the entry's runtime shape and its non-persistence.
  *
- * Eval state is the headless, named, non-default face of the same posture yolo
- * reaches through the TUI (ADR-0119 Amendment 2026-09-29): permission →
- * `full_auto`, `fsMode: workspace` → `global`, fence retired wholesale, egress
- * seam retired. What this file certifies:
+ * Eval state is the headless, named, non-default face of the unsandboxed
+ * posture (ADR-0119 Amendment 2026-09-29): the fence posture yolo reaches
+ * through the TUI — `fsMode: workspace` → `global`, fence retired wholesale,
+ * egress seam retired — plus permission → `full_auto`, which eval now writes
+ * through its OWN entry (ADR-0139 §3: the two axes never write each other, and
+ * an operator cannot answer per-call questions mid-benchmark). What this file
+ * certifies:
  *
- *   1. the state combination is yolo's combination (reused, not re-implemented),
- *      so "identical runtime shape" is a structural fact rather than a copy that
- *      can drift;
+ *   1. the fence carrier and fence shape are yolo's, reused rather than
+ *      re-implemented, while the permission posture is eval's own write — so
+ *      the narrowed structural-parity claim is a fact, not a copy that can
+ *      drift;
  *   2. **holders only** — a user-layer settings file that says `workspace` is
  *      still `workspace` on disk and in the loaded object afterwards, byte for
  *      byte (ADR-0084 discipline inherited by ADR-0119 §ruling 1);
@@ -53,6 +57,8 @@ import {
   rejectEvalStateEntry,
 } from "../../../src/harness/sandbox/eval-state.ts";
 import {
+  createYoloContext,
+  createYoloController,
   YOLO_TUI_ONLY_REJECTED_COMMANDS,
   rejectYoloForCommand,
 } from "../../../src/harness/sandbox/yolo.ts";
@@ -119,6 +125,43 @@ describe("eval state — the entry state combination is yolo's, reused (ADR-0130
       "holders are flipped in place"
     );
     assert.equal(holders.fsMode, fsMode, "holders are flipped in place");
+  });
+
+  it("full_auto is eval's OWN write, not the fence carrier's (ADR-0139 §3)", () => {
+    // The narrowed parity claim: eval and a plain yolo session share the FENCE
+    // carrier and the fence shape, and each entry sets its own permission
+    // posture. So the same holder, driven by yolo's enter action alone, must
+    // stay at its starting mode — otherwise the shared action is still writing
+    // the permission axis and the "eval writes its own" claim is a copy, not a
+    // fact. (ADR-0130 §4 lists `full_auto` alone as a rejected option: it fixes
+    // approvals, not the fence.)
+    const permission = createPermissionModeContext("default");
+    const yolo = createYoloContext(false);
+    const fenceOnly = createYoloController({
+      yolo,
+      permission,
+      fsMode: createFsModeContext("workspace"),
+    }).enterAtLaunch();
+    assert.equal(fenceOnly.ok, true);
+    assert.equal(
+      yolo.get(),
+      true,
+      "the shared action still applies the fence axis"
+    );
+    assert.equal(
+      permission.get(),
+      "default",
+      "the shared enter action writes nothing to the permission axis"
+    );
+
+    // Eval's own entry raises it, from the same starting holder.
+    const holders = enterEvalState({
+      permission,
+      fsMode: createFsModeContext("workspace"),
+    });
+    assert.equal(holders.permission.get(), "full_auto");
+    assert.equal(holders.fsMode.get(), "global");
+    assert.equal(holders.yolo.get(), true);
   });
 
   it("a global fs tier stays global (the flip is conditional, not a forced write)", () => {

@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { ToolExecutionError } from "../errors.js";
+import { fsBoundarySnapshot } from "./fs-boundary.js";
 import type { FsPolicy } from "./fs-policy.js";
 import {
   OPTIONAL_HOST_RO_PREFIXES,
@@ -286,6 +287,14 @@ function workspaceHomeRoBindArgs(
  * read-only) first, then `--bind <workspaceRoot>` + `--bind <tmpRoot>` (the two
  * write whitelists re-covered as writable).
  *
+ * The two write whitelists are NOT enumerated here: they come from the shared
+ * `fsBoundarySnapshot`, the one place the tier's reachable set is derived
+ * (ADR-0092's rejected-option record / ADR-0140 §2 reason 3), and they are
+ * emitted in the order that snapshot declares — which is this argv's
+ * last-mount-wins order, so the two cannot drift. `homeRoot` stays a separate
+ * input because it is a read-only layer, not a reachable root: the snapshot
+ * deliberately excludes it, and bwrap still needs the raw path for its ro-bind.
+ *
  * Non-workspace mode → no layer is emitted (and no homeRoot guard — the global
  * tier never emits the home ro-bind, so absence is not a degradation there).
  * Home layer absent → typed fail-loud (see `workspaceHomeRoBindArgs`); each
@@ -297,11 +306,16 @@ function workspaceMountArgs(
   workspaceRoot: string | undefined,
   tmpRoot: string | undefined
 ): string[] {
-  if (fsPolicy.mode !== "workspace") return [];
+  const boundary = fsBoundarySnapshot(fsPolicy, {
+    homeRoot,
+    workspaceRoot,
+    tmpRoot,
+  });
+  const roots = boundary.reachableRoots;
+  if (roots === null) return [];
   return [
     ...workspaceHomeRoBindArgs(homeRoot),
-    ...bindArgs(workspaceRoot),
-    ...bindArgs(tmpRoot),
+    ...roots.flatMap((root) => bindArgs(root)),
   ];
 }
 
@@ -396,9 +410,7 @@ function assertProtectedTargetsExpressible(
  * mountable inventory target, in inventory order, placed by the caller as the
  * write segment of the boundary block. Every emitted target is `--ro-bind`.
  */
-function protectedTargetMountArgs(
-  inventory: ProtectedTargetInventory
-): {
+function protectedTargetMountArgs(inventory: ProtectedTargetInventory): {
   args: string[];
   skipped: ProtectedTargetSkippedWarning[];
   materialized: readonly ProtectedTargetBindPath[];

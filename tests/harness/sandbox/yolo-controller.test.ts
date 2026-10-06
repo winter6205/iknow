@@ -1,19 +1,20 @@
 /**
  * ADR-0119 / specs/yolo-mode.md Contract — the enter/exit **idempotent set** on
  * the controller axis (the `/yolo` TUI route, not the `--yolo` launch route
- * pinned by yolo-launch.test.ts).
+ * pinned by yolo-launch.test.ts), under ADR-0139 (the permission axis is
+ * fence-independent).
  *
  * Invariants pinned here:
+ *  - the permission axis is fence-independent in BOTH directions: entry writes
+ *    nothing to it, a mid-yolo flip sticks, and exit restores nothing on it —
+ *    from each of the three starting modes;
  *  - repeated entry takes no second snapshot (the guard against snapshot
- *    self-pollution: a permission flip under yolo must never become the
- *    restore target);
+ *    self-pollution: a mid-yolo flip must never become the restore target);
  *  - repeated exit overwrites nothing (early return before the probe, so an
  *    OFF session on a bwrap-less host still gets the plain already-OFF notice,
  *    not a refusal);
  *  - re-entry after a completed exit takes a **fresh** snapshot (the cleared
- *    snapshot is not stale);
- *  - yolo does not lock the permission axis: Shift+Tab-style flips under yolo
- *    stick, and exit restores the pre-entry snapshot, not the mid-yolo value.
+ *    snapshot is not stale).
  */
 import { describe, expect, it } from "vitest";
 
@@ -28,11 +29,26 @@ import {
   YOLO_ENTER_TEXT,
   YOLO_EXIT_TEXT,
 } from "../../../src/harness/sandbox/yolo.js";
+import type { PermissionMode } from "../../../src/harness/permission/modes.js";
+import type { FsIsolationMode } from "../../../src/harness/sandbox/fs-mode.js";
 
-function makeControllerFixture(probeWorks = true) {
+/**
+ * A fixture whose starting posture is the test's to choose, because "unchanged
+ * by the fence axis" is only a meaningful claim against a KNOWN starting value
+ * (a `full_auto` start is what distinguishes "yolo wrote it" from "it already
+ * was").
+ */
+function makeControllerFixture(opts?: {
+  readonly probeWorks?: boolean;
+  readonly permissionStart?: PermissionMode;
+  readonly fsModeStart?: FsIsolationMode;
+}) {
   const yolo = createYoloContext(false);
-  const permission = createPermissionModeContext("default");
-  const fsMode = createFsModeContext("workspace");
+  const permission = createPermissionModeContext(
+    opts?.permissionStart ?? "default"
+  );
+  const fsMode = createFsModeContext(opts?.fsModeStart ?? "workspace");
+  const probeWorks = opts?.probeWorks ?? true;
   let probeCalls = 0;
   const controller = createYoloController({
     yolo,
@@ -54,9 +70,12 @@ function makeControllerFixture(probeWorks = true) {
   };
 }
 
-describe("yolo controller enter/exit idempotent set (ADR-0119)", () => {
-  it("repeated enter() takes no second snapshot — a permission flip under yolo never becomes the restore target", () => {
-    const fx = makeControllerFixture();
+describe("yolo controller enter/exit idempotent set (ADR-0119, as amended by ADR-0139)", () => {
+  it("repeated enter() takes no second snapshot — a mid-yolo flip is never the restore target", () => {
+    // Starting at `global` makes the two candidates distinguishable: the
+    // snapshot is `global`, and a mid-yolo flip to `workspace` is the value a
+    // polluted snapshot would wrongly restore.
+    const fx = makeControllerFixture({ fsModeStart: "global" });
     expect(fx.controller.enter()).toEqual({
       ok: true,
       yolo: true,
@@ -73,19 +92,19 @@ describe("yolo controller enter/exit idempotent set (ADR-0119)", () => {
     });
     expect(fx.probeCalls()).toBe(probesBefore);
 
-    // Even an external permission flip between the two enters cannot pollute
-    // the snapshot: exit restores the TRUE pre-entry value.
-    fx.permission.set("plan");
+    // An external fsMode flip between the two enters cannot pollute the
+    // snapshot: exit restores the TRUE pre-entry value, not this one.
+    fx.fsMode.set("workspace");
     fx.controller.enter();
-    fx.permission.set("full_auto");
-    expect(fx.controller.exit().ok).toBe(true);
     expect(fx.permission.get()).toBe("default");
-    expect(fx.fsMode.get()).toBe("workspace");
+    expect(fx.controller.exit().ok).toBe(true);
+    expect(fx.fsMode.get()).toBe("global");
+    expect(fx.permission.get()).toBe("default");
     expect(fx.yolo.get()).toBe(false);
   });
 
   it("repeated exit() on an OFF session returns the already-OFF notice with zero state change — before the probe (a bwrap-less host is not refused)", () => {
-    const fx = makeControllerFixture(false);
+    const fx = makeControllerFixture({ probeWorks: false });
     const result = fx.controller.exit();
     expect(result).toEqual({
       ok: true,
@@ -104,34 +123,57 @@ describe("yolo controller enter/exit idempotent set (ADR-0119)", () => {
     fx.controller.enter();
     fx.controller.exit();
     expect(fx.yolo.get()).toBe(false);
+    expect(fx.fsMode.get()).toBe("workspace");
 
-    // The session's posture moved between entry cycles: the second enter must
-    // snapshot "plan", not the first cycle's "default".
-    fx.permission.set("plan");
+    // The session's fs tier moved between entry cycles: the second entry must
+    // snapshot "global", not the first cycle's "workspace".
+    fx.fsMode.set("global");
     expect(fx.controller.enter().ok).toBe(true);
-    expect(fx.permission.get()).toBe("full_auto");
-    expect(fx.controller.exit().ok).toBe(true);
-    expect(fx.permission.get()).toBe("plan");
-    expect(fx.fsMode.get()).toBe("workspace");
-  });
-
-  it("permission axis stays orthogonal under yolo: entry lands on full_auto, later flips stick, exit restores the pre-entry snapshot", () => {
-    const fx = makeControllerFixture();
-    fx.controller.enter();
-    expect(fx.permission.get()).toBe("full_auto");
-
-    // Shift+Tab under yolo still cycles (yolo never re-forces full_auto).
+    expect(fx.fsMode.get()).toBe("global");
+    fx.fsMode.set("workspace");
     fx.permission.set("plan");
+    expect(fx.controller.exit().ok).toBe(true);
+    expect(fx.fsMode.get()).toBe("global");
+    // The permission holder is never in the snapshot, so the mid-yolo flip is
+    // still standing after exit — exit restored the fs tier and nothing else.
     expect(fx.permission.get()).toBe("plan");
-    expect(fx.yolo.get()).toBe(true);
-
-    // Exit restores the snapshot taken at entry, not the mid-yolo value.
-    expect(fx.controller.exit()).toEqual({
-      ok: true,
-      yolo: false,
-      text: YOLO_EXIT_TEXT,
-    });
-    expect(fx.permission.get()).toBe("default");
-    expect(fx.fsMode.get()).toBe("workspace");
   });
+
+  it.each(["default", "plan", "full_auto"] as const)(
+    "permission axis is fence-independent from %s: entry leaves the holder exactly as it was, a mid-yolo flip sticks, exit changes nothing",
+    (start) => {
+      const fx = makeControllerFixture({ permissionStart: start });
+      expect(fx.permission.get()).toBe(start);
+
+      expect(fx.controller.enter()).toEqual({
+        ok: true,
+        yolo: true,
+        text: YOLO_ENTER_TEXT,
+      });
+      // Entry wrote the fence axis only: the permission holder reads back as
+      // the value it started at, not as a constant the action imposes, while
+      // the fence axis really did land (`workspace` tier forced to `global`).
+      expect(fx.permission.get()).toBe(start);
+      expect(fx.fsMode.get()).toBe("global");
+      expect(fx.yolo.get()).toBe(true);
+
+      // Shift+Tab under yolo still cycles (the fence axis never re-forces it).
+      const midYolo: PermissionMode = start === "plan" ? "full_auto" : "plan";
+      fx.permission.set(midYolo);
+      expect(fx.permission.get()).toBe(midYolo);
+      expect(fx.yolo.get()).toBe(true);
+
+      expect(fx.controller.exit()).toEqual({
+        ok: true,
+        yolo: false,
+        text: YOLO_EXIT_TEXT,
+      });
+      // Exit restores the fence axis' own snapshot and leaves the permission
+      // holder on whatever the session last chose — here the mid-yolo value,
+      // which the pre-change action would have overwritten with `start`.
+      expect(fx.permission.get()).toBe(midYolo);
+      expect(fx.fsMode.get()).toBe("workspace");
+      expect(fx.yolo.get()).toBe(false);
+    }
+  );
 });

@@ -357,6 +357,11 @@ export const CI_EXCLUDES: readonly string[] = [
   // ADR-0125 timeout surface: the tool object is built only to read its own tier
   // and schema; createBashTool requireBwraps at assembly, nothing is invoked.
   "tests/harness/permission/root-find-readonly-allowance.test.ts",
+  // ADR-0140 production wiring for the fs-boundary ask: the suite builds the
+  // real engine through buildHarnessEngine so the composition root is the thing
+  // under test; that chain reaches createBashTool -> requireBwrap and fail-louds
+  // at assembly on the runner. Class 2 (assembly-dependent, no spawn).
+  "tests/harness/permission/full-auto-fs-boundary-wiring.test.ts",
   // Route-budget wire: real createWorkerDeps to createDefaultAciRegistry to
   // createBashTool to requireBwrap (throws at assembly time on the runner).
   "tests/harness/route-budget-wire.test.ts",

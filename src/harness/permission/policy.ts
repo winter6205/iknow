@@ -11,6 +11,7 @@ import { parseForSecurity } from "./shell-parse.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type { SecurityReviewRequirement } from "./security-review.js";
 import type { CleanupRootSnapshot } from "./cleanup-roots.js";
+import { PATH_TARGET_KEYS } from "./path-target-keys.js";
 import type {
   CodeBuiltInPolicySource,
   HardRuleSpec,
@@ -28,6 +29,16 @@ import {
 } from "./modes.js";
 
 export type CategoryDefault = "allow" | "ask" | "ask+hardwall";
+
+/**
+ * ADR-0140 §2: the fence's boundary question as this layer consumes it — given a
+ * write target, is it inside what the CURRENT fs isolation tier permits?
+ *
+ * The authority for that answer is the fence's own single declaration
+ * (`sandbox/fs-boundary.ts`); this layer asks and acts on the answer, it does
+ * not re-derive the set.
+ */
+export type FsBoundaryReader = (target: string) => boolean;
 
 export const DEFAULT_BY_CATEGORY: Readonly<
   Record<ToolCategory, CategoryDefault>
@@ -100,6 +111,12 @@ export interface PermissionPolicy {
    * every verdict byte-identical.
    */
   readonly hostRoots?: () => CleanupRootSnapshot;
+  /**
+   * ADR-0140 §2: the same reader, for the fence's writable set — absent → no
+   * fs boundary is configured and `full_auto` answers exactly as it did before
+   * the seam existed.
+   */
+  readonly fsBoundary?: FsBoundaryReader;
 }
 
 export interface CreatePermissionPolicyOpts {
@@ -116,6 +133,29 @@ export interface CreatePermissionPolicyOpts {
    * without a root context nothing can establish one.
    */
   readonly hostRoots?: () => CleanupRootSnapshot;
+  /**
+   * ADR-0140 §2: the host's fence-boundary reader, built at the composition
+   * root — the one place allowed to import both the sandbox's boundary
+   * derivation and this policy. Absent → no fs boundary is configured and
+   * `full_auto` answers exactly as it did before the seam existed.
+   */
+  readonly fsBoundary?: FsBoundaryReader;
+}
+
+/**
+ * The `fsBoundary` reader as the optional `checkPermission` field, or nothing
+ * at all when the assembly wired none. ONE helper for the field, read by the
+ * policy factory, the permission executor's gate and the executor's prediction
+ * pass: `{}` reaches `checkPermission` as a missing field, not as a reader that
+ * could only answer "outside" — the difference between "no boundary is
+ * configured" and "a boundary with an empty set", which ADR-0140 §2 would
+ * otherwise have to tell apart three times over.
+ */
+export function fsBoundaryOption(
+  source: { readonly fsBoundary?: FsBoundaryReader | undefined } | undefined
+): { readonly fsBoundary?: FsBoundaryReader } {
+  if (source?.fsBoundary === undefined) return {};
+  return { fsBoundary: source.fsBoundary };
 }
 
 export function createPermissionPolicy(
@@ -136,6 +176,7 @@ export function createPermissionPolicy(
       : DEFAULT_BY_CATEGORY,
     mode: asModeContext(opts?.mode),
     ...(opts?.hostRoots !== undefined ? { hostRoots: opts.hostRoots } : {}),
+    ...fsBoundaryOption(opts),
   });
 }
 
@@ -155,6 +196,23 @@ export interface CheckPermissionInput {
    * reachable and every verdict is the pre-existing one.
    */
   readonly hostRoots?: () => CleanupRootSnapshot;
+  /**
+   * ADR-0140 §2: "is this write target inside what the CURRENT fs isolation tier
+   * permits?" — `true` is inside the fence's declared writable set, `false` is
+   * a crossing of its edge.
+   *
+   * A CLOSURE, not a snapshot value, for two reasons. **Layering:** the boundary
+   * derivation lives in `sandbox/fs-boundary.ts` and the dependency between the
+   * two layers is deliberately one-way (sandbox imports permission, never the
+   * reverse), so a value typed by that module would drag `../sandbox/` into
+   * `permission/`; the composition root imports both worlds and hands this layer
+   * a plain answer instead. **Vintage:** `fsMode` is a mid-session holder, so
+   * the answer is read per call — once, one vintage — exactly as `hostRoots`
+   * above is.
+   *
+   * Absent → no boundary is configured and every verdict is the pre-existing one.
+   */
+  readonly fsBoundary?: FsBoundaryReader;
 }
 
 /** The ask tier's own reason prefix; `[hard_wall]` is deny's, never reused here. */
@@ -379,6 +437,90 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
 }
 
 /**
+ * The declared write target of a path-bearing call, or `undefined` for a call
+ * that declares none.
+ *
+ * The field roster is the shared one (`PATH_TARGET_KEYS`, read by the
+ * protected-target wall too) — the two ACCESSORS stay separate because they
+ * answer different questions: that module asks "is this a protected target",
+ * this one asks "is this a write the current tier cannot reach", and merging
+ * them would couple two unrelated verdicts' scope. The key list, by contrast,
+ * must not drift: a tool declaring its target under a key the wall reads and
+ * this accessor omits is denied by the wall yet silently escapes the boundary
+ * ask.
+ *
+ * A call that derives its own target (`bash`, `todo_write`) declares none here
+ * and is therefore NOT narrowed by this question — the fence stays the thing
+ * that refuses those, through the `[fs_denied]` channel. This decision is an
+ * additional refusal source, never a substitute for it (ADR-0140 §2).
+ */
+function writeTargetOf(input: unknown): string | undefined {
+  if (input === null || typeof input !== "object") return undefined;
+  const obj = input as Record<string, unknown>;
+  for (const key of PATH_TARGET_KEYS) {
+    const value = obj[key];
+    if (typeof value === "string" && value.length > 0) return value;
+  }
+  return undefined;
+}
+
+/**
+ * The write target that leaves what the current fs tier permits, or `undefined`
+ * when this call cannot cross that edge. Three gates, in the fail-toward-quiet
+ * order:
+ *   - no reader wired → nothing is configured, nothing is asked;
+ *   - a read-only category → the boundary is a WRITE boundary (home stays
+ *     `--ro-bind`, so an outside read is inside what the tier permits);
+ *   - no declared target, or a target the reader places inside → no crossing.
+ */
+function boundaryCrossing(
+  opts: CheckPermissionInput,
+  category: ToolCategory,
+  ctx: { tool: string; input: unknown }
+): string | undefined {
+  const fsBoundary = opts.fsBoundary;
+  if (fsBoundary === undefined) return undefined;
+  if (category === "read-only") return undefined;
+  const target = writeTargetOf(ctx.input);
+  if (target === undefined) return undefined;
+  return fsBoundary(target) ? undefined : target;
+}
+
+/**
+ * ADR-0140 §1: `full_auto` asks nothing INSIDE what the current tier permits and
+ * raises the ordinary `ask` decision at its edge. The answer decides that one
+ * call — nothing here writes a mode, a settings file or any holder, so the
+ * question stays per-call (ADR-0140 §3) rather than becoming a session grant the
+ * way the egress gate's `askIfUnknown` is.
+ *
+ * Reached only below the hard wall and the security review, which are
+ * pre-filters in every mode (ADR-0068 / ADR-0127) — the narrowing occupies only
+ * the gap between them.
+ */
+function fullAutoOutcome(
+  opts: CheckPermissionInput,
+  category: ToolCategory,
+  ctx: { tool: string; input: unknown }
+): PermissionOutcome {
+  const crossing = boundaryCrossing(opts, category, ctx);
+  if (crossing !== undefined) {
+    return {
+      decision: "ask",
+      reason:
+        `mode: full_auto → boundary ask: the fence would refuse this write ` +
+        `(${crossing}); answering yes means the call is ATTEMPTED, not that ` +
+        `it will succeed — the fence and the tool's own root guard stay ` +
+        `authoritative and may still refuse, and the fs mode is not changed`,
+    };
+  }
+  // Inside the tier's reach the mode is unbounded by design — that is its value.
+  return {
+    decision: "allow",
+    reason: `mode: full_auto → allow (${category})`,
+  };
+}
+
+/**
  * Step 3's answer for everything ABOVE the category default, or `null` when the
  * call reaches the default.
  *
@@ -393,15 +535,7 @@ function modeAndCategoryOutcome(
   category: ToolCategory,
   ctx: { tool: string; input: unknown }
 ): PermissionOutcome | null {
-  if (mode === "full_auto") {
-    // Full-auto allows every non-hard-walled tool. The user opted in
-    // explicitly; sensitive paths / dangerous commands are still blocked by
-    // step 1 above.
-    return {
-      decision: "allow",
-      reason: `mode: full_auto → allow (${category})`,
-    };
-  }
+  if (mode === "full_auto") return fullAutoOutcome(opts, category, ctx);
   if (planBlocksMutation(mode, category)) {
     // Plan mode treats mutating tools as denied without asking — useful for
     // "read, never write" planning sessions.

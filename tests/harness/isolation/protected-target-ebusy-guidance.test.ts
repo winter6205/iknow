@@ -47,9 +47,11 @@ import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createProtectedTargetInventory } from "../../../src/harness/sandbox/protected-targets.js";
 import {
   describeProtectedTargetClass,
+  modeBoundaryFenceGuidance,
   protectedTargetEbusyFenceGuidance,
   protectedTargetEbusyGuidance,
   protectedTargetFenceGuidance,
+  type FsModeBoundary,
 } from "../../../src/harness/sandbox/protected-target-feedback.js";
 import { VIOLATION_PREFIXES } from "../../../src/harness/permission/prefixes.js";
 
@@ -225,28 +227,39 @@ describe("protectedTargetEbusyFenceGuidance — correlation against emitted mask
   });
 });
 
+/**
+ * The two protected-target wordings, rendered once at module scope so the
+ * pairwise (two-arm) and the three-arm distinctness matrices below read the
+ * SAME strings — a per-describe re-render would let the two matrices drift
+ * onto different inputs.
+ */
+const EBUSY_COPY = protectedTargetEbusyGuidance(NETRC_RM, "netrc_credential")!;
+const EROFS_COPY = protectedTargetFenceGuidance(
+  `rm: cannot remove '${NETRC}': Read-only file system`,
+  INVENTORY
+)!;
+/** seven lines, so the cap-and-count remainder markers exist. `.ssh/kN` is a
+ *  real subtree member, so the EROFS arm resolves a class for every line (an
+ *  unresolved class would yield no message at all). */
+const seven = (marker: string): string =>
+  Array.from(
+    { length: 7 },
+    (_, i) => `rm: cannot remove '${HOME}/.ssh/k${i}': ${marker}`
+  ).join("\n");
+const EBUSY_LONG = protectedTargetEbusyGuidance(
+  seven("Device or resource busy"),
+  "netrc_credential"
+)!;
+const EROFS_LONG = protectedTargetFenceGuidance(
+  seven("Read-only file system"),
+  INVENTORY
+)!;
+
 describe("EBUSY wording is DISTINCT from EROFS wording (both directions)", () => {
-  const ebusy = protectedTargetEbusyGuidance(NETRC_RM, "netrc_credential")!;
-  const erofs = protectedTargetFenceGuidance(
-    `rm: cannot remove '${NETRC}': Read-only file system`,
-    INVENTORY
-  )!;
-  // seven lines each, so the cap-and-count remainder markers exist in both.
-  // `.ssh/kN` is a real subtree member, so the EROFS arm resolves a class for
-  // every line (an unresolved class would yield no message at all).
-  const seven = (marker: string): string =>
-    Array.from(
-      { length: 7 },
-      (_, i) => `rm: cannot remove '${HOME}/.ssh/k${i}': ${marker}`
-    ).join("\n");
-  const ebusyLong = protectedTargetEbusyGuidance(
-    seven("Device or resource busy"),
-    "netrc_credential"
-  )!;
-  const erofsLong = protectedTargetFenceGuidance(
-    seven("Read-only file system"),
-    INVENTORY
-  )!;
+  const ebusy = EBUSY_COPY;
+  const erofs = EROFS_COPY;
+  const ebusyLong = EBUSY_LONG;
+  const erofsLong = EROFS_LONG;
 
   it("the EBUSY copy carries none of the EROFS copy's distinctive sentences", () => {
     for (const erofsOnly of [
@@ -282,6 +295,153 @@ describe("EBUSY wording is DISTINCT from EROFS wording (both directions)", () =>
     for (const copy of [ebusy, erofs]) {
       expect(copy.toLowerCase()).not.toContain("worktree");
       expect(copy).not.toContain("create_worktree");
+    }
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ * THREE arms, one prefix. ADR-0140 added a second refusal to this
+ * channel: a write that left what the current `fsMode` permits. It is a
+ * DIFFERENT boundary with a different truth condition (temporary and
+ * answerable, not permanent), so it carries its own sentences.
+ *
+ * The property is pairwise distinctness across all three, both
+ * directions: for every ordered pair (A, B), every distinctive claim of A
+ * is absent from B. Scope note, stated so the test is not read as
+ * stronger than it is: this asserts distinctness of the arms' DISTINCTIVE
+ * claims (the convention the two protected arms already use), not
+ * byte-level sentence disjointness — the two protected arms do share one
+ * framing sentence ("This is a boundary refusal, not a command-syntax
+ * judgment"), and that shared sentence is not what separates the
+ * boundaries.
+ * ------------------------------------------------------------------ */
+
+/** A write that left the writable roots while the tier is `workspace`. */
+const OUT_OF_TIER_TOUCH =
+  "touch: cannot touch '/home/u/notes.txt': Read-only file system";
+const TIER: FsModeBoundary = {
+  mode: "workspace",
+  readOnlyRoots: [HOME],
+  writableRoots: ["/workspace/task", "/tmp/session"],
+};
+
+describe("THREE-way wording distinctness (EROFS / EBUSY / fs-mode boundary)", () => {
+  const mode = modeBoundaryFenceGuidance(OUT_OF_TIER_TOUCH, INVENTORY, TIER)!;
+  const sevenOutOfTier = (marker: string): string =>
+    Array.from(
+      { length: 7 },
+      (_, i) => `touch: cannot touch '/home/u/n${i}.txt': ${marker}`
+    ).join("\n");
+  const modeLong = modeBoundaryFenceGuidance(
+    sevenOutOfTier("Read-only file system"),
+    INVENTORY,
+    TIER
+  )!;
+
+  /** Each arm's distinctive claims: sentences that state what THIS boundary
+   *  is. Absent from the other two, in both directions. */
+  const CLAIMS: ReadonlyArray<{
+    readonly arm: string;
+    readonly copy: string;
+    readonly distinctive: readonly string[];
+  }> = [
+    {
+      arm: "protected-target EROFS",
+      copy: EROFS_COPY,
+      distinctive: [
+        "mounted read-only by the sandbox fence",
+        "kernel (EROFS) refused the write",
+        "is not an operation this session can perform",
+        "the target stays read-only for the whole session",
+      ],
+    },
+    {
+      arm: "protected-target EBUSY",
+      copy: EBUSY_COPY,
+      distinctive: [
+        "individually masked mount point",
+        "kernel (EBUSY)",
+        // the template's own sentence, not the bare "cannot remove" that the
+        // EROFS arm's quoted stderr clue also contains
+        "This session cannot remove",
+      ],
+    },
+    {
+      arm: "fs-mode boundary",
+      copy: mode,
+      distinctive: [
+        "left what this session's filesystem isolation tier permits",
+        "mounts that region read-only",
+        "a narrower destination can still work",
+      ],
+    },
+  ];
+
+  it("each arm really does carry its own distinctive claims (the matrix is not vacuous)", () => {
+    for (const { arm, copy, distinctive } of CLAIMS) {
+      for (const claim of distinctive) {
+        expect(copy, `${arm} should carry: ${claim}`).toContain(claim);
+      }
+    }
+  });
+
+  it("no arm carries another arm's distinctive claims — every ordered pair, both directions", () => {
+    for (const a of CLAIMS) {
+      for (const b of CLAIMS) {
+        if (a.arm === b.arm) continue;
+        for (const claim of a.distinctive) {
+          expect(
+            b.copy,
+            `${b.arm} must not carry ${a.arm}'s claim: ${claim}`
+          ).not.toContain(claim);
+        }
+      }
+    }
+  });
+
+  it("all three share the typed prefix and nothing else: the three strings are pairwise unequal", () => {
+    for (const copy of [EROFS_COPY, EBUSY_COPY, mode]) {
+      expect(copy.startsWith(`${VIOLATION_PREFIXES.fsDenied} `)).toBe(true);
+    }
+    expect(new Set([EROFS_COPY, EBUSY_COPY, mode]).size).toBe(3);
+  });
+
+  it("the fs-mode copy carries NO permanence claim and NO re-spelling claim", () => {
+    // The whole point of the third arm (spec amendment 2026-10-06): a
+    // permanent-sounding refusal about a temporary condition tells the model
+    // there is no narrower spelling to try, which is the one thing it needs
+    // to know.
+    for (const permanent of [
+      "stays read-only for the whole session",
+      "is not an operation this session can perform",
+      "re-spelling the command will not help",
+      "at all",
+    ]) {
+      expect(mode).not.toContain(permanent);
+    }
+    // ...and it does name the narrower route instead.
+    expect(mode).toContain("a narrower destination can still work");
+  });
+
+  it("each arm has its own cap-and-count remainder marker", () => {
+    expect(EROFS_LONG).toContain("(+2 more EROFS lines)");
+    expect(EBUSY_LONG).toContain("(+2 more EBUSY lines)");
+    expect(modeLong).toContain("(+2 more out-of-tier EROFS lines)");
+    expect(EROFS_LONG).not.toContain("more EBUSY lines");
+    expect(EROFS_LONG).not.toContain("more out-of-tier EROFS lines");
+    expect(EBUSY_LONG).not.toContain("more EROFS lines");
+    expect(EBUSY_LONG).not.toContain("more out-of-tier EROFS lines");
+    expect(modeLong).not.toContain("more EBUSY lines");
+    expect(modeLong).not.toContain("(+2 more EROFS lines)");
+  });
+
+  it("the fs-mode copy mentions neither the worktree boundary nor a protected class", () => {
+    expect(mode.toLowerCase()).not.toContain("worktree");
+    expect(mode).not.toContain("create_worktree");
+    // No protected class is claimed: the refused path resolved to none, which
+    // is the precondition for this arm firing at all.
+    for (const phrase of ["an SSH private key", "a netrc credential file"]) {
+      expect(mode).not.toContain(phrase);
     }
   });
 });

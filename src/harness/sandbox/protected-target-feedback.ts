@@ -7,6 +7,15 @@
  * physical ro-bind (kernel EROFS), this module turns the stderr into one
  * actionable guidance line in the `[fs_denied]` family.
  *
+ * It also holds the FS-MODE boundary refusal (ADR-0140) — a write that left
+ * what the current `fsMode` permits. That arm is the second refusal named in the
+ * 2026-10-06 amendment to specs/effect-boundary-protection.md, and the
+ * amendment's rule is the file's: two refusals, one typed prefix, no shared
+ * sentence. The amendment also records that fixing the two templates' wording was
+ * the first implementation step; both templates state the boundary's truth
+ * condition unconditionally, and this arm states its own (temporary, with a
+ * narrower route) just as unconditionally.
+ *
  * The shape is shared with the ADR-0109 worktree donor
  * (`isolation/worktree-gate.ts:unboundFenceErofsGuidance`) — typed
  * `VIOLATION_PREFIXES.fsDenied` prefix, EROFS-stderr trigger, cap-and-count
@@ -35,13 +44,30 @@
  * `execution_failed` kinds, so appending here surfaces the boundary to the
  * model without opening a new violation-counting tier.
  *
- * TWO templates live here, deliberately not one: the EROFS arm above (a write
- * into a read-only protected mount) and the EBUSY arm below (an unlink of a
- * per-file `/dev/null` mask point, which is a mount point and therefore EBUSY,
- * not EROFS). They share the typed prefix and nothing else — not a sentence,
- * not a constant, not a parameter. See the EBUSY section header for why.
+ * THREE templates live here, deliberately not one: the EROFS arm and the EBUSY
+ * arm are PROTECTED-TARGET boundaries (permanent — the physical ro-bind and the
+ * `/dev/null` mask hold for the whole session), while the FS-MODE arm at the
+ * bottom is a different boundary with a different truth condition (ADR-0140: the
+ * write left what the current `fsMode` permits — temporary and answerable, the
+ * operator is asked about that one call). They share the typed prefix and
+ * nothing else — not a sentence, not a constant, not a parameter — because the
+ * protected sentences are PERMANENT-sounding on purpose, and reusing one on a
+ * temporary condition would tell the model "re-spelling the command will not
+ * help" and "there is no narrower spelling to try" about a boundary the operator
+ * can widen, which is the one fact it needs. See each arm's own header.
+ *
+ * The wording pairwise-distinctness this family is held to is pinned as a
+ * THREE-way property in tests/harness/isolation/protected-target-ebusy-guidance.test.ts.
  */
 import { VIOLATION_PREFIXES } from "../permission/prefixes.js";
+import {
+  fsBoundarySnapshot,
+  isWithinFsBoundary,
+  type FsBoundaryMounts,
+  type FsBoundarySnapshot,
+} from "./fs-boundary.js";
+import type { FsIsolationMode } from "./fs-mode.js";
+import type { FsPolicy } from "./fs-policy.js";
 import type { ProtectedTargetInventory } from "./protected-targets.js";
 
 /** One EROFS line in program stderr: the fence's physical refusal signature. */
@@ -345,4 +371,187 @@ export function protectedTargetEbusyFenceGuidance(
   );
   if (groups.size === 0) return undefined;
   return renderBoundaryRefusals(groups, protectedTargetEbusyGuidance);
+}
+
+/* ------------------------------------------------------------------ *
+ * The FS-MODE boundary refusal — the THIRD template, and the only one
+ * whose boundary is TEMPORARY.
+ * ------------------------------------------------------------------ */
+
+/**
+ * The boundary this arm attributes, as the fence ACTUALLY assembled it for one
+ * call. Derived by `fsModeFeedbackBoundary` below from the call's frozen `fsMode`
+ * snapshot and the very mounts the fence binds — this is the fence's emitted
+ * geometry, not an inference from the stderr, so a path can be classified
+ * against it without guessing.
+ *
+ * `global` mode is expressible with an empty `readOnlyRoots` (it is host
+ * read-write below the protected layer, so there is no tier boundary to cross);
+ * `workspace` mode carries the ro-bind roots and the two writable whitelists.
+ */
+export interface FsModeBoundary {
+  readonly mode: FsIsolationMode;
+  /** Roots the tier mounts read-only. A crossing must name one of these. */
+  readonly readOnlyRoots: readonly string[];
+  /** Roots the tier leaves writable. A crossing must name none of these. */
+  readonly writableRoots: readonly string[];
+}
+
+/**
+ * The one derivation of this arm's geometry: the fence's declaration
+ * (`fsBoundarySnapshot`, which ADR-0092's rejected-option record makes the
+ * single authority for "what the tier permits") projected onto the shape the
+ * classifier below reads. No caller lists roots itself — a hand-written pair
+ * would be the second declaration ADR-0092 rules out, and only
+ * `fs-boundary-parity.test.ts` could catch it.
+ *
+ * `readOnlyRoots` cannot be the COMPLEMENT of `reachableRoots`, and the reason
+ * is what the complement contains: every host path outside the writable roots,
+ * including `/etc`, `/usr` and `/opt`, which the fence mounts read-only in BOTH
+ * tiers and which no session decision took back. Naming them would make every
+ * read-only system prefix read as a session fs-mode crossing — a host condition
+ * relabelled as an operator-answerable one, the fabrication the arm's
+ * conservatism exists to prevent. The tier-specific root it DOES take back is
+ * the one the mount inputs carry, home; under `global` the fence mounts no home
+ * layer at all, so the list is empty and no crossing is expressible.
+ */
+export function fsModeFeedbackBoundary(
+  fsPolicy: FsPolicy,
+  mounts: FsBoundaryMounts
+): FsModeBoundary {
+  const snapshot = fsBoundarySnapshot(fsPolicy, mounts);
+  const home = mounts.homeRoot;
+  return {
+    mode: snapshot.mode,
+    readOnlyRoots: home === undefined || home.length === 0 ? [] : [home],
+    writableRoots: snapshot.reachableRoots ?? [],
+  };
+}
+
+/** Its own cap constant, for the same reason the EBUSY arm has one: a shared
+ *  budget would let one arm's growth silently shrink the other's clues. */
+const MAX_MODE_BOUNDARY_CLUE_LINES = 5;
+
+/** Attempted-path patterns for the out-of-tier arm. Separate from the EROFS
+ *  family's because these lines are NOT protected-target lines — they are lines
+ *  that failed the protected-class check — and a shared array would let one
+ *  arm's pattern reach the other's parsing. */
+const MODE_BOUNDARY_PATH_PATTERNS: readonly RegExp[] = [
+  QUOTED_PATH_BEFORE,
+  QUOTED_PATH_AFTER,
+  UNQUOTED_ABS_PATH,
+];
+
+/**
+ * The tier's geometry as this arm classifies against it. Two composed
+ * snapshots of the fence's OWN single declaration (`fs-boundary.ts`), one per
+ * list — `isWithinFsBoundary` is the ONLY containment implementation on this
+ * path, so an unresolved spelling (`/workspace/task/../home/u/x`) is placed by
+ * its resolved target and cannot be called "inside a writable root" by a prefix
+ * test that resolves neither side. Composing here rather than importing a
+ * snapshot keeps the arm's inputs a pair of lists: the fence's declaration is
+ * the reachable set, and this arm needs the read-only roots too (which the
+ * declaration deliberately does not carry — home is bound read-only, so it is
+ * not in `reachableRoots`).
+ */
+function boundarySnapshotOf(
+  boundary: FsModeBoundary,
+  roots: readonly string[]
+): FsBoundarySnapshot {
+  return { mode: boundary.mode, reachableRoots: roots };
+}
+
+/**
+ * The out-of-tier EROFS lines: a line naming a path that is inside one of the
+ * tier's read-only roots, outside every writable root, and resolving to NO
+ * protected class. The last test is the arm's firewall — a protected path is
+ * inside the tier's read-only root too, and the protected-target arm above owns
+ * that refusal, so letting it through would put two different boundary
+ * sentences on one refusal.
+ */
+function outOfTierLines(
+  stderr: string,
+  inventory: ProtectedTargetInventory,
+  boundary: FsModeBoundary
+): readonly string[] {
+  const writable = boundarySnapshotOf(boundary, boundary.writableRoots);
+  const readOnly = boundarySnapshotOf(boundary, boundary.readOnlyRoots);
+  const isCrossing = (path: string): boolean => {
+    if (inventory.protectedTargetFor(path) !== undefined) return false;
+    if (isWithinFsBoundary(path, writable)) return false;
+    return isWithinFsBoundary(path, readOnly);
+  };
+  return erofsLines(stderr).filter((line) =>
+    extractCandidatePaths(line, MODE_BOUNDARY_PATH_PATTERNS).some(isCrossing)
+  );
+}
+
+/**
+ * The fs-mode boundary refusal. Shares the typed prefix with the two protected
+ * arms and NOT ONE SENTENCE with either — the structural reason it sits BESIDE
+ * `renderBoundaryRefusals` rather than joining that skeleton: that skeleton is
+ * a per-PROTECTED-CLASS fan-out (it groups lines by inventory `targetClass` and
+ * renders one message per class), and this boundary has no class to group by —
+ * its subject is the tier itself. Forcing it through would mean inventing a
+ * pseudo-class id and threading it as a parameter, which is exactly the shared
+ * parameter the file header forbids; sitting beside it also keeps the two
+ * protected arms' per-class fan-out untouched.
+ *
+ * What it says, in order: the typed prefix; that the write LEFT what this
+ * session's filesystem isolation tier permits (the target class for this
+ * boundary — a location outside the tier's reach, not a protected target); the
+ * attribution (the tier mounts that region read-only, and the kernel refused at
+ * the filesystem layer); and — the sentence neither protected arm has — that a
+ * narrower destination can still work, with the writable roots named.
+ *
+ * The ABSENCE of the protected sentences is the contract, not an oversight:
+ * "stays read-only for the whole session", "is not an operation this session can
+ * perform" and "re-spelling the command will not help" are all true of a
+ * protected target and all FALSE here, because this boundary is a temporary
+ * session decision the operator is asked about (ADR-0140).
+ */
+export function modeBoundaryErofsGuidance(
+  stderr: string,
+  boundary: FsModeBoundary
+): string | undefined {
+  const lines = erofsLines(stderr);
+  if (lines.length === 0) return undefined;
+  const shown = lines.slice(0, MAX_MODE_BOUNDARY_CLUE_LINES);
+  const rest = lines.length - shown.length;
+  const roots = boundary.writableRoots.join(", ");
+  return (
+    `${VIOLATION_PREFIXES.fsDenied} the refused write left what this session's ` +
+    `filesystem isolation tier permits: the target is a location outside the ` +
+    `reach of the \`${boundary.mode}\` tier, which mounts that region read-only ` +
+    `while leaving only these roots writable (${roots}); the write reached the ` +
+    `kernel and came back EROFS. This is a refusal of where ` +
+    `this session may write, not a statement about the target — the target is ` +
+    `not a protected credential, and this boundary is not permanent: a ` +
+    `narrower destination can still work, so write inside one of the writable ` +
+    `roots named above. ` +
+    `Attempted paths (from stderr): ${shown.join(" | ")}` +
+    (rest > 0 ? ` (+${rest} more out-of-tier EROFS lines)` : "")
+  );
+}
+
+/**
+ * Resolve the fs-mode boundary refusal — the second `[fs_denied]` refusal of
+ * specs/effect-boundary-protection.md (2026-10-06 amendment).
+ *
+ * The conservatism is the point. An EROFS that resolves to no protected class
+ * has many innocent causes (a read-only host filesystem, a read-only system
+ * prefix, a failure that merely mentions the marker), so this arm fires ONLY on
+ * a positively identified crossing: a non-protected path inside one of the
+ * tier's read-only roots and outside every writable root. Every other EROFS —
+ * and every non-zero exit without one — returns `undefined`, so the result stays
+ * byte-identical to today. Guidance annotates; it never relabels.
+ */
+export function modeBoundaryFenceGuidance(
+  stderr: string,
+  inventory: ProtectedTargetInventory,
+  boundary: FsModeBoundary
+): string | undefined {
+  const crossing = outOfTierLines(stderr, inventory, boundary);
+  if (crossing.length === 0) return undefined;
+  return modeBoundaryErofsGuidance(crossing.join("\n"), boundary);
 }

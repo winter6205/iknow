@@ -142,7 +142,7 @@ function hostExitImmediately(
 }
 
 describe("T5 six cases: /yolo confirmed switch (pure reducer + injected failing probe)", () => {
-  test("1 confirm -> yolo ON with the T3 state combination applied (permission=full_auto, fsMode workspace->global)", () => {
+  test("1 confirm -> yolo ON with the fence combination applied (fsMode workspace->global; permission untouched)", () => {
     const f = makeFixture();
     expect(f.yolo.get()).toBe(false);
     const setters = makeHostSetters(f.permission);
@@ -154,11 +154,13 @@ describe("T5 six cases: /yolo confirmed switch (pure reducer + injected failing 
     expect(closed).toBe(true);
     expect(result).toEqual({ ok: true, yolo: true, text: YOLO_ENTER_TEXT });
     expect(f.yolo.get()).toBe(true);
-    expect(f.permission.get()).toBe("full_auto");
     expect(f.fsMode.get()).toBe("global");
+    // ADR-0139: the confirm entry writes the fence axis only. The permission
+    // posture is whatever the session already had.
+    expect(f.permission.get()).toBe("default");
     // The mode-row mirrors land together: yolo marker + permission label.
     expect(setters.yoloOnCalls).toEqual([true]);
-    expect(setters.permModeCalls).toEqual(["full_auto"]);
+    expect(setters.permModeCalls).toEqual(["default"]);
   });
 
   test("2 cancel -> panel closes, all three holders unchanged", () => {
@@ -208,20 +210,22 @@ describe("T5 six cases: /yolo confirmed switch (pure reducer + injected failing 
     });
   });
 
-  test("4 second entry -> takes the exit path: yolo OFF, snapshot restored (permission / fsMode back to pre-entry values)", () => {
+  test("4 second entry -> takes the exit path: yolo OFF, fs tier snapshot restored, permission posture untouched", () => {
     const f = makeFixture();
     f.setProbeFails(false);
     f.controller.enter();
-    expect(f.permission.get()).toBe("full_auto");
     expect(f.fsMode.get()).toBe("global");
+    expect(f.permission.get()).toBe("default");
     // With yolo ON another /yolo exits immediately (ADR-0119 ruling 6: no
     // confirmation; the asymmetry with entry is deliberate).
     const setters = makeHostSetters(f.permission);
     const result = hostExitImmediately(f.controller, setters);
     expect(result).toEqual({ ok: true, yolo: false, text: YOLO_EXIT_TEXT });
     expect(f.yolo.get()).toBe(false);
-    expect(f.permission.get()).toBe("default"); // pre-entry snapshot
     expect(f.fsMode.get()).toBe("workspace"); // pre-entry snapshot
+    // The exit notice claims the permission posture was never touched, so the
+    // mirror must land on the value the session already had — not on a restore.
+    expect(f.permission.get()).toBe("default");
     // The stale-mirror bug fix: the mode-row permission label re-reads the
     // holder after exit (it showed Auto after a real exit until the mirror synced).
     expect(setters.yoloOnCalls).toEqual([false]);
@@ -245,7 +249,8 @@ describe("T5 six cases: /yolo confirmed switch (pure reducer + injected failing 
       // typed-error rendering contract: the injected ToolExecutionError keeps its message.
       expect(result.text).toContain("injected failing probe");
     }
-    // Zero state change: yolo not flipped, no full_auto, fsMode untouched.
+    // Zero state change: yolo not flipped, permission posture untouched,
+    // fsMode untouched.
     expect(f.yolo.get()).toBe(false);
     expect(f.permission.get()).toBe("default");
     expect(f.fsMode.get()).toBe("workspace");
@@ -264,13 +269,13 @@ describe("T5 six cases: /yolo confirmed switch (pure reducer + injected failing 
       expect(result.text).toContain("quit the TUI");
     }
     // Zero state change: yolo stays ON (a silent exit would turn every bash call
-    // into a runtime failure) and the snapshot is not misapplied — permission /
-    // fsMode keep their yolo-posture values.
+    // into a runtime failure) and the snapshot is not misapplied — the fs tier
+    // keeps its yolo-posture value and the permission posture is not restored.
     expect(f.yolo.get()).toBe(true);
-    expect(f.permission.get()).toBe("full_auto");
+    expect(f.permission.get()).toBe("default");
     expect(f.fsMode.get()).toBe("global");
     // Mirrors re-read the untouched holders: same values, never stale-wrong.
     expect(setters.yoloOnCalls).toEqual([true]);
-    expect(setters.permModeCalls).toEqual(["full_auto"]);
+    expect(setters.permModeCalls).toEqual(["default"]);
   });
 });
