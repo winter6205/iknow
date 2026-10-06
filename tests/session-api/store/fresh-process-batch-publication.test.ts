@@ -55,6 +55,7 @@ import {
   runRoleInFreshProcess,
   type CrashHost,
 } from "../crash/crash-harness.ts";
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.ts";
 
 /** Every child pays module load and this file forks several per test. */
 const CRASH_TEST_TIMEOUT = 180_000;
@@ -450,7 +451,19 @@ afterEach(async () => {
 });
 
 describe("SC5 — full batch checkpoint, crashed before publication (fresh process)", () => {
-  it(
+  // Only THIS case needs the sandbox, so only this case is gated. The
+  // difference is which harness entry it reaches: the `reopen_chat` role runs
+  // the production tool probe, and that probe builds the real production
+  // surface — armProductionToolProbe → buildProbedProductionSurface →
+  // createDefaultAciRegistry → createBashTool → requireBwrap
+  // (tests/session-api/crash/crash-host-entry.ts:616, :1138). None of those
+  // call shapes appears in this file, so the static guard cannot see the
+  // dependency; it arrives through a child process. The control below is
+  // deliberately left ungated: it drives only the `publish` role and this
+  // file's own forked arm, neither of which builds a production tool surface,
+  // and it passes on a bwrap-less runner (measured). Gating the whole file
+  // would have thrown that case away.
+  it.skipIf(!canRunBwrapFence())(
     "SC5: with one call still in flight and one error result settled, a SIGKILL before the batch publication leaves no batch checkpoint; a fresh process recovers the base checkpoint plus the two durable facts, reports the third call unaccounted, and retries nothing",
     async () => {
       host = await createCrashHost({

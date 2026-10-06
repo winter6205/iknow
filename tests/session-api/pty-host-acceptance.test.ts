@@ -72,7 +72,6 @@ import {
   type PtyChatHost,
 } from "./crash/pty-harness.ts";
 import { parseSessionJsonl } from "../../src/session-api/store/jsonl.ts";
-import { canRunBwrapFence } from "../_helpers/bwrap-capability.ts";
 
 /** A real host pays ~1s of module loading before it prints anything, and the
  *  reopen is a second boot, so these are IO budgets, not contract timeouts. */
@@ -257,18 +256,22 @@ describe("SC24 — normal-permission host acceptance over a real pty", () => {
     await disposeAllCrashHosts();
   });
 
-  // SC24 needs a real fence: the host must admit the write because the test
-  // answered its `[ask]` prompt, which only happens when the fence really
-  // isolates rather than refusing outright. On a runner that cannot unshare a
-  // namespace the host dies at `runInSandbox: bwrap is required` and the case
-  // times out waiting for the REPL prompt — a 120s stall, not a clean skip.
+  // SC24 needs a real fence, and so does every other case in this file — which
+  // is why the file is registered in `CI_EXCLUDES` rather than gated case by
+  // case. The host process itself assembles through buildHarnessEngine →
+  // createDefaultAciRegistry → createBashTool → requireBwrap, so on a runner
+  // that cannot unshare a namespace it dies at
+  // `runInSandbox: bwrap is required` before printing its REPL prompt, and
+  // each case then burns its full 120s wait for a prompt that never arrives.
   //
-  // The other two cases deliberately expect the fence to DENY the write, so
-  // they pass on exactly the hosts where this one cannot run: absent bwrap the
-  // fence refuses early and the assertion holds. They are deliberately left
-  // ungated — registering this whole file to silence SC24 would throw away two
-  // cases that are green in CI today.
-  it.skipIf(!canRunBwrapFence())(
+  // An earlier revision gated only this first case, on the reasoning that the
+  // other two assert the fence DENIES the write and would therefore pass
+  // exactly where this one cannot run. That was wrong: the host has to start
+  // before it can ask about a write at all, so a "deny" case cannot be reached
+  // on a host that cannot boot. Measured under a bwrap-less PATH, the two
+  // ungated cases time out at 120117ms and 120071ms — the same stall as this
+  // one. So there is no per-case split to preserve here.
+  it(
     "accepts input, writes a file under the fence, dies abnormally, and reopens with no replay",
     async () => {
       const host = await createCrashHost({

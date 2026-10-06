@@ -235,6 +235,60 @@ export const CI_EXCLUDES: readonly string[] = [
   // status=1", 87s). There is no skip mechanism to convert into a gate, so the
   // file is all-or-nothing — which is what this exclude set means.
   "tests/session-api/store/fresh-process-recovery.test.ts",
+  // Same spawn-transitive class as the entry above, and the same guard
+  // blindness: not one of the 7 anchor call shapes occurs anywhere in this
+  // file, so it can only be hand-registered. Every one of its 12 cases spawns a
+  // REAL `iknow ask` child (`src/cli.ts ask` under tsx), and that child's
+  // assembly runs buildHarnessEngine → createDefaultAciRegistry →
+  // createBashTool → requireBwrap; with no bwrap the child dies before it
+  // issues a single bash call, so all 12 fail on `call(rows, n)` — "the run
+  // issued 0 bash call(s)" (ask-scratch-cleanup.test.ts:223). The 9
+  // `still denies` arms need it too, and not because a deny is special: a
+  // hard-wall denial is only observable as a tool_call row the run really
+  // wrote, so those arms have nothing to assert once the child is dead. There
+  // is no case left to gate, hence an exclude rather than probe gates.
+  // Measured under a bwrap that exists but cannot isolate (the GHA runner's
+  // shape): 12/12 red.
+  "tests/cli/ask-scratch-cleanup.test.ts",
+  // Same spawn-transitive class, and the one that proves the class is not
+  // confined to `ask-scratch-cleanup`: this file also drives a real
+  // `node --import tsx src/cli.ts ask` child, whose assembly reaches
+  // requireBwrap, so it never names an anchor and the guard cannot see it.
+  // All 4 cases depend on the child actually completing — they assert on trace
+  // rows it wrote and on its parsed stdout — so with no bwrap the child dies
+  // at `runInSandbox: bwrap is required` and every one fails, three of them
+  // within 7ms. Measured under the GHA runner's shape (bwrap present, isolation
+  // refused): 4/4 red, with `expected '{"error":"error","message":"runInSand…'
+  // to contain 'session killed'` as the tell. No case survives to gate, so this
+  // is an exclude rather than a probe gate.
+  "tests/cli/ask-trace-evidence.test.ts",
+  // Same class, one hop further out, so it is invisible to the guard twice
+  // over: this file never names an anchor, and the dependency lives in the
+  // crash harness it drives. Its `reopen()` helper is
+  // runRoleInFreshProcess({ role: "reopen_chat" }), and the harness runs that
+  // role in a FRESH PROCESS whose entry arms the production tool probe —
+  // armProductionToolProbe → buildProbedProductionSurface →
+  // createDefaultAciRegistry → createBashTool → requireBwrap
+  // (tests/session-api/crash/crash-host-entry.ts:616 and :1138). All 3 cases
+  // call `reopen()`, so the file is all-or-nothing. Established by
+  // measurement, not by a CI log: this file is absent from the failure list
+  // of CI run 37409774890.
+  "tests/session-api/store/session-tmp-reopen.test.ts",
+  // Spawn-transitive class, and the entry that corrects an earlier mis-gate.
+  // All 3 cases boot a REAL `iknow chat` host on a real pty
+  // (createPtyChatHost → src/cli.ts chat), and it is the HOST PROCESS that
+  // assembles through buildHarnessEngine → createDefaultAciRegistry →
+  // createBashTool → requireBwrap. With no bwrap the host dies at
+  // `runInSandbox: bwrap is required` before printing its REPL prompt, so
+  // every case dies on the 120s wait for that prompt. A previous pass gated
+  // only the FIRST case, reasoning that the other two assert the fence DENIES
+  // the write and therefore survive a host that cannot isolate; measurement
+  // disproves that, because the host never reaches the point where it could
+  // deny anything — the two ungated cases time out identically (120117ms /
+  // 120071ms under a bwrap-less PATH). With no case left that passes in CI,
+  // the file is registered rather than gated, and the per-case gate and its
+  // incorrect rationale were removed from the file itself.
+  "tests/session-api/pty-host-acceptance.test.ts",
   // ADR-0037 / #814 evidenced: hub executor really mutates → runInSandbox → requireBwrap
   "tests/session-api/hub-worktree-isolation.test.ts",
   // Subagent worker assembly → createWorkerDeps → createBashTool → requireBwrap
