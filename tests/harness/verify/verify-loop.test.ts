@@ -6,7 +6,7 @@
  *    misjudged as pass);
  *  - exec launch failure (spawn error -> exit 127 -> true-failure branch);
  *  - real-sandbox default assembly (runInSandbox executes via bwrap, guarded
- *    by a canRunSandbox() fence probe).
+ *    by a shared fence-capability probe).
  *
  * Orchestration:
  *  - runFn seam: real run() + stub model, or a deterministic scripted stand-in;
@@ -22,7 +22,8 @@ import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+
+import { canRunBwrapFence } from "../../_helpers/bwrap-capability.ts";
 
 import {
   DEFAULT_MAX_ROUNDS,
@@ -325,29 +326,20 @@ function failN(prefix: string, n: number): SandboxRunResult {
 
 /**
  * Physical-sandbox capability probe for the default-runVerify test below.
- * `hasBwrap()` (binary presence) is the wrong gate: a GitHub Actions runner
- * installs bwrap but disallows user-namespace network isolation, so the fence's
- * constant `--unshare-net` fails at spawn (RTM_NEWADDR) and the default
- * runVerify throws. Require an actual fence spawn to succeed so this case only
- * runs on a host that can really build the sandbox (local WSL).
+ *
+ * This used to be a local copy of the probe now shared at
+ * `tests/_helpers/bwrap-capability.ts`. Binary presence (`hasBwrap()`) is the
+ * wrong gate: a GitHub Actions runner installs bwrap but disallows
+ * user-namespace network isolation, so the fence's constant `--unshare-net`
+ * fails at spawn (RTM_NEWADDR) and the default runVerify throws. Requiring an
+ * actual fence spawn is what makes the case run only on a host that can really
+ * build the sandbox.
+ *
+ * The shared probe additionally discriminates a genuine namespace refusal
+ * (skip) from an environment fault such as a timeout or EAGAIN (throws). The
+ * local copy had neither a timeout nor `r.error` inspection, so a wedged probe
+ * there silently became a skip — losing real coverage with nothing in the log.
  */
-function canRunSandbox(): boolean {
-  const r = spawnSync(
-    "bwrap",
-    [
-      "--ro-bind",
-      "/",
-      "/",
-      "--dev",
-      "/dev",
-      "--unshare-net",
-      "--",
-      "/bin/true",
-    ],
-    { stdio: "ignore" }
-  );
-  return r.status === 0;
-}
 
 function defaultOptions(over: {
   readonly runFn: VerifyLoopOptions["runFn"];
@@ -990,7 +982,7 @@ describe("边界: 空输出 / exec 启动失败 / 真实沙箱", () => {
   });
 
   it("默认 runVerify 经 bwrap 沙箱执行验证命令", async () => {
-    if (!canRunSandbox()) {
+    if (!canRunBwrapFence()) {
       console.warn("skip: bwrap fence cannot run here (no user-namespace)");
       return;
     }
