@@ -22,6 +22,8 @@
 
 ### Permission / shell parsing
 
+- `permission-axis-semantics.md` — what the fence axis and the permission axis each control, every reachable combination (including the no-fence-with-questions posture), where the boundary question is asked and why it is not in `policy.ts`, and the two refusals a `[fs_denied]` message can carry (ADR-0139 / ADR-0140)
+
 One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 stage table; serial, one PR per stage, revert-only rollback):
 
 - `shell-parse-foundation.md` — Stage 0: the tree-sitter parse foundation as its own module (`parseForSecurity`), the six-verdict contract + pre-parse veto roster, the degrade state machine, and the offline divergence corpus; no wall consumes it yet (ADR-0123 / ADR-0124)

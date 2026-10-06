@@ -29,6 +29,8 @@ Two filesystem-isolation modes. The default is the **global mode**: real host pa
 
 **Why not add a write-tool-side home blacklist to the workspace mode:** the write tools' writable set is already taskRoot ∪ session tmp. The workspace mode's added semantics are "bash can no longer write the rest of home", which does not change the write tools; implementing it in both places means two implementations that can each drift.
 
+> **2026-10-06 note (ADR-0139 / ADR-0140).** This rejection stands and is load-bearing for a later decision, so it is recorded here rather than left to be re-litigated: the paragraph above forbids **duplicating** this boundary, not deciding it in the permission layer. When a call leaves what the current mode permits, one boundary decision is made **before the call runs**, in the permission decision path where every other "does this call need the operator" question is already decided, and the operator is asked through the product's existing ask route (ADR-0140). The fence remains what physically enforces the mode's reach, so this is one decision plus the existing physical enforcement — not two implementations of the boundary. Recording the reason here so a later implementer does not conclude that asking at the fence is required, or that a second authority is forbidden. The boundary contract lives in `specs/permission-axis-semantics.md`.
+
 ## Consequences
 
 - Amends ADR-0037 §9 (the default closed-world posture is superseded; the workspace mode may reuse the write whitelist).
