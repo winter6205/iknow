@@ -14,9 +14,24 @@
  *
  * A staging file that survives a SIGKILL is expected and asserted as inert,
  * not as a defect: a killed process cannot run a `finally`.
+ *
+ * Child topology: the child is spawned as `node --import tsx/dist/esm/index.mjs
+ * --input-type=module -e <script>`, NOT a bare `.ts` entry and NOT the tsx CLI.
+ * CI pins Node 20 (`.github/workflows/test.yml`), which cannot execute a bare
+ * `.ts` entry at all (ERR_UNKNOWN_FILE_EXTENSION — the same class recorded for
+ * `tests/integration/mcp-resources-fixture.test.ts` in vitest.ci-excludes.ts);
+ * tsx's ESM register supplies the transform instead of relying on Node's
+ * type-stripping, so the child runs identically on Node 20 and Node 24. The
+ * register entry (`dist/esm/index.mjs`) is used rather than `dist/cli.mjs` because
+ * the CLI is a wrapper that spawns a second script layer and escalates a signal
+ * to SIGKILL after ~30ms, which would destroy the real-SIGKILL seam this file
+ * exists to prove — the child under test must BE the spawned process, so that
+ * `process.kill(process.pid, "SIGKILL")` is observed as `signal === "SIGKILL"`.
+ * (Same reasoning, and the same helper, as `tests/cli/register-shutdown.test.ts`.)
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { statSync } from "node:fs";
 import {
   chmod,
   lstat,
@@ -30,7 +45,8 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, describe, it } from "vitest";
 
 import { publishFile } from "../../src/util/atomic-file-publish.ts";
@@ -39,6 +55,38 @@ const PUBLISH_MODULE = new URL(
   "../../src/util/atomic-file-publish.ts",
   import.meta.url
 ).href;
+
+/**
+ * Locate tsx's ESM register entry, walking up from this file's directory to the
+ * first `node_modules` that has it (a worktree's node_modules may be empty with
+ * deps hoisted to the main repo). Uses `dist/esm/index.mjs` — the
+ * `node --import` register entry — never `dist/cli.mjs`, the wrapper CLI.
+ */
+function resolveTsxEsm(): string {
+  let dir = dirname(fileURLToPath(import.meta.url));
+  for (;;) {
+    const candidate = join(
+      dir,
+      "node_modules",
+      "tsx",
+      "dist",
+      "esm",
+      "index.mjs"
+    );
+    try {
+      if (statSync(candidate).isFile()) {
+        return candidate;
+      }
+    } catch {
+      // keep climbing
+    }
+    const parent = join(dir, "..");
+    if (parent === dir) throw new Error("cannot locate tsx/dist/esm/index.mjs");
+    dir = parent;
+  }
+}
+
+const tsxEsm = resolveTsxEsm();
 
 let root: string;
 beforeEach(async () => {
@@ -262,6 +310,10 @@ describe("publishFile — atomic per-file publish", () => {
  * named seam. The seam and the payload travel by env because `node -e` takes
  * no positional arguments. Fails the test unless the OS actually reported the
  * signal, so this can never silently degrade into an in-process throw.
+ *
+ * `--import <tsx esm register>` is what makes the `.ts` import resolvable on
+ * the Node 20 CI runner; without it the child dies at module load with
+ * ERR_UNKNOWN_FILE_EXTENSION and `signal` is null instead of "SIGKILL".
  */
 function runChildCrash(
   target: string,
@@ -275,7 +327,7 @@ function runChildCrash(
   `;
   const out = spawnSync(
     process.execPath,
-    ["--input-type=module", "-e", script],
+    ["--import", tsxEsm, "--input-type=module", "-e", script],
     {
       encoding: "utf8",
       env: { ...process.env, TARGET_PATH: target, NEW_CONTENT: content },

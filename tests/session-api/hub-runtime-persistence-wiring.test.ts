@@ -15,12 +15,31 @@
  *
  * Real `SessionStore` over a real temp tree. Every record is counted off disk
  * after parsing the real JSONL, so a second producer cannot hide.
+ *
+ * Settings isolation: the two cases that assemble a real production engine
+ * (surface "serve" + askUser, no deps) reach SessionHub.buildProductionEngine,
+ * which calls the real loadIknowEnv() with no envProvider. The model is a
+ * user-layer key whose sole source is `~/.iknow/settings.json` (ADR-0084), so on
+ * a machine without one — every CI runner — that call throws
+ * LLM_MODEL_MISSING_MESSAGE (src/config/env.ts) and the case fails for a reason
+ * that has nothing to do with the wiring under test. installTestSettingsSource
+ * redirects HOME to a tmp dir carrying a model + apiKey, which keeps the real
+ * loadIknowEnv() on the path and keeps the developer's own settings unread
+ * (same helper, same reason, as tests/session-api/max-turns-serve.test.ts).
  */
 import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, it, vi } from "vitest";
+import {
+  afterAll,
+  afterEach,
+  beforeAll,
+  beforeEach,
+  describe,
+  it,
+  vi,
+} from "vitest";
 
 import type { NativeStateMessage } from "../../src/shared/native-state-port.ts";
 import { isNativeStatePortError } from "../../src/shared/native-state-port.ts";
@@ -28,6 +47,7 @@ import type { RuntimePersistenceBinder } from "../../src/shared/runtime-persiste
 import type { LoopEngineDeps } from "../../src/harness/index.ts";
 import { assistantResult, makeDeps, makeNative } from "../cli/_fixtures.ts";
 import { createNoAskUser } from "../../src/harness/permission/index.ts";
+import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 
 /** Options the hub hands `buildHarnessEngine`, captured for the wiring asserts. */
 const assembly = vi.hoisted(() => ({
@@ -70,11 +90,22 @@ let baseDir: string;
 let taskRoot: string;
 let projectDir: string;
 let store: SessionStore;
+let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 const conversationDir = (id: string): string =>
   resolveConversationDir({ projectDir, conversationId: id });
 const jsonlFor = (id: string): string =>
   join(conversationDir(id), `${id}${SESSION_JSONL_EXT}`);
+
+beforeAll(() => {
+  // Must precede every engine build: the serve-surface cases below call the
+  // real loadIknowEnv(), which fail-fasts without settings.llm.model.
+  settingsSource = installTestSettingsSource();
+});
+
+afterAll(() => {
+  settingsSource.restore();
+});
 
 beforeEach(async () => {
   baseDir = await mkdtemp(join(tmpdir(), "iknow-hub-persist-wire-"));
