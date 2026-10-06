@@ -151,7 +151,7 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
     expect(slashSuggestions("")).toEqual([]);
   });
 
-  test('"/" → 全部静态命令（按词表插入顺序；graph 后追加 config、再追加 model、再追加 yolo，无 /profile）', () => {
+  test('"/" → 全部静态命令（按词表插入顺序；graph 后追加 config、再追加 permissions、再 model、再 yolo，无 /profile）', () => {
     const commands = vocabularyCommands();
     expect(commands.slice(0, 14)).toEqual([
       "sessions",
@@ -169,7 +169,12 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       "mcp",
       "graph",
     ]);
-    expect(commands.slice(14)).toEqual(["config", "model", "yolo"]);
+    expect(commands.slice(14)).toEqual([
+      "config",
+      "permissions",
+      "model",
+      "yolo",
+    ]);
     expect(slashSuggestions("/")).toEqual(
       commands.map((command) => ({ kind: "command" as const, command }))
     );
@@ -1034,13 +1039,13 @@ describe("#361 Phase D /mcp 词表", () => {
     ]);
   });
 
-  test('"/" 全部候选含 mcp；尾部 append-only 为 graph, config, model, yolo', () => {
+  test('"/" 全部候选含 mcp；尾部 append-only 为 graph, config, permissions, model, yolo', () => {
     const all = slashSuggestions("/");
     expect(all).toContainEqual({ kind: "command", command: "mcp" });
     const tail = all
-      .slice(-4)
+      .slice(-5)
       .map((c) => (c.kind === "command" ? c.command : c.name));
-    expect(tail).toEqual(["graph", "config", "model", "yolo"]);
+    expect(tail).toEqual(["graph", "config", "permissions", "model", "yolo"]);
   });
 
   test('/mcp 唯一匹配 → 补全 "/mcp "（尾随空格）', () => {

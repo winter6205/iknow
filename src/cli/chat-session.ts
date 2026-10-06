@@ -88,11 +88,10 @@ import {
   formatToolStatusLine,
   summarizePartialInput,
 } from "../shared/tool-line.js";
-import {
-  parsePermissionMode,
-  type PermissionMode,
-  type PermissionModeContext,
-} from "../harness/permission/modes.js";
+import { type PermissionModeContext } from "../harness/permission/modes.js";
+// Shared with the TUI's `/permissions`: one parse / status / usage
+// implementation (the REPL's inline copy was the reason the TUI had none).
+import { applyPermissionsCommand } from "../harness/permission/permissions-command.js";
 import {
   agentModeLabel,
   applyGraphCommand,
@@ -2143,45 +2142,17 @@ async function processSlash(opts: {
         ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
       });
 
-    case "permissions": {
-      // Permission-mode query/switch. Without ctx.permissionMode (ask/serve
-      // don't pass it) → show "not available". Empty args / "status" → show
-      // the current mode; valid mode → set; invalid → error text.
-      const modeCtx = ctx.permissionMode;
-      const target = (effect.args[0] ?? "").toLowerCase();
-      if (!modeCtx) {
-        return {
-          quit: false,
-          output: "",
-          stderr: "/permissions: 当前入口不提供权限模式上下文（ask/serve）",
-        };
-      }
-      if (target === "" || target === "status" || target === "help") {
-        const current = modeCtx.get();
-        const hint =
-          target === "help"
-            ? "  · 用法: /permissions [default|plan|full_auto]"
-            : "";
-        return {
-          quit: false,
-          output: `权限模式: ${current}${hint}`,
-        };
-      }
-      const parsed: PermissionMode | undefined = parsePermissionMode(target);
-      if (parsed === undefined) {
-        return {
-          quit: false,
-          output: "",
-          stderr:
-            "Usage: /permissions [default|plan|full_auto]（或空 / status 查看当前）",
-        };
-      }
-      modeCtx.set(parsed);
-      return {
-        quit: false,
-        output: `权限模式已切换: ${parsed}`,
-      };
-    }
+    case "permissions":
+      // Permission-mode query/switch. Parse / status / usage / set are
+      // single-sourced in harness/permission/permissions-command.ts (shared
+      // with the TUI); chat only decides stdout vs stderr and carries its own
+      // "holder absent" wording for ask/serve. Empty args / "status" → show
+      // the current mode; valid mode → set; invalid → usage error.
+      return applyHolderSlash(
+        ctx.permissionMode,
+        (h) => applyPermissionsCommand(h, effect.args),
+        "/permissions: 当前入口不提供权限模式上下文（ask/serve）"
+      );
 
     case "graph":
       // Graph-mode query/switch for the orchestration overlay. Semantics and

@@ -129,6 +129,7 @@ import {
   slashSuggestions,
   type SkillEntryLike,
   type SlashCandidate,
+  type TuiSlashCommand,
 } from "./slash.js";
 import { activeToolNameOf, liveToolReduce } from "./live-tool-state.js";
 import type { LiveToolRun } from "./live-tool-state.js";
@@ -326,10 +327,18 @@ import {
   type FsIsolationMode,
   type FsModeContext,
 } from "../harness/sandbox/fs-mode.js";
+// Shared with the REPL's `/permissions`: one parse / status / usage
+// implementation, imported from its own module rather than the barrel so the
+// command surface has a single visible owner (same discipline as graph/mode.ts).
+import {
+  applyPermissionsCommand,
+  splitPermissionArgs,
+} from "../harness/permission/permissions-command.js";
 // ADR-0119 / specs/yolo-mode.md: yolo-axis types (holder + enter/exit action
 // single point). Type-only import — the flip semantics live in
-// harness/sandbox/yolo.ts (snapshot + full_auto + fsMode→global + symmetric
-// bwrap probe on enter and exit); this component never rebuilds them and never
+// harness/sandbox/yolo.ts (fsMode→global + snapshot for exit + symmetric
+// bwrap probe on enter and exit); the permission axis is deliberately not
+// among them (ADR-0139); this component never rebuilds them and never
 // writes the holder directly.
 import type { YoloContext, YoloController } from "../harness/sandbox/yolo.js";
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
@@ -615,6 +624,11 @@ function pickerRowsForBudget(opts: {
  * at a floor of 40 (`Math.max(width ?? 80, 40)`) — the narrow branch is
  * unreachable in a real mount, so it can only be asserted through this pure
  * function.
+ *
+ * The narrow form carries `plan` as its own token: `plan` became reachable in
+ * the TUI via `/permissions`, and a narrow row reading `[def]` while the
+ * session denies every write is a false label in the one spot the mode is
+ * always on screen.
  */
 export function modeRowBaseLabel(opts: {
   readonly graphOn: boolean;
@@ -622,7 +636,7 @@ export function modeRowBaseLabel(opts: {
   readonly cols: number;
 }): string {
   return opts.cols < 40
-    ? `[${opts.graphOn ? "graph" : opts.permMode === "full_auto" ? "auto" : "def"}]`
+    ? `[${opts.graphOn ? "graph" : opts.permMode === "full_auto" ? "auto" : opts.permMode === "plan" ? "plan" : "def"}]`
     : `mode: ${agentModeLabel({ permission: opts.permMode, graph: opts.graphOn })}`;
 }
 
@@ -1100,6 +1114,88 @@ function runConfigSlashCommand(
   }
 }
 
+/** The session-holder slash commands, resolved before handleSubmit's switch. */
+type HolderSlashCommand = "graph" | "config" | "permissions";
+
+function isHolderSlashCommand(
+  command: TuiSlashCommand
+): command is HolderSlashCommand {
+  return (
+    command === "graph" || command === "config" || command === "permissions"
+  );
+}
+
+/**
+ * The session-holder slash commands share one dispatch entry.
+ *
+ * `/graph`, `/config` and `/permissions` have the same shape — resolve a
+ * holder, run its harness command SSOT, re-read any mirror, show the result as
+ * a notice — so they are one guard + one call instead of three switch arms.
+ * Bodies stay in the per-command helpers below; this only routes.
+ */
+function runHolderSlashCommand(
+  command: HolderSlashCommand,
+  props: TuiAppProps,
+  text: string,
+  setters: HolderSlashSetters
+): void {
+  switch (command) {
+    case "graph":
+      runGraphSlashCommand(props, text, setters.setGraphOn, setters.setNotice);
+      return;
+    case "config":
+      runConfigSlashCommand(
+        props,
+        text,
+        setters.setNotice,
+        setters.setConfigPickerOpen,
+        setters.setConfigFocusIndex,
+        setters.setThinkingPickerOpen,
+        setters.setMemoryPickerOpen,
+        setters.setModelPickerOpen
+      );
+      return;
+    case "permissions":
+      runPermissionsSlashCommand(
+        setters.permissionMode,
+        text,
+        setters.setPermMode,
+        setters.setNotice
+      );
+      return;
+  }
+}
+
+/**
+ * `/permissions` case body: the permission-mode switch, shared with the REPL's
+ * `/permissions` (parse / status / usage live once in
+ * harness/permission/permissions-command.ts — a second copy of that parse is
+ * how the TUI ended up with no entry at all).
+ *
+ * `plan` is deliberately not a Shift+Tab wheel station (harness/permission/
+ * modes.ts), so this command is how a TUI session enters and leaves it; the
+ * holder it flips is the same one Shift+Tab and yolo touch.
+ *
+ * Module-level for the same reason as `runGraphSlashCommand` /
+ * `runConfigSlashCommand` (every case in handleSubmit's switch counts toward
+ * the S5 gate).
+ */
+function runPermissionsSlashCommand(
+  permissionMode: PermissionModeContext,
+  text: string,
+  setPermMode: (mode: PermissionMode) => void,
+  setNotice: (notice: Notice) => void
+): void {
+  const res = applyPermissionsCommand(
+    permissionMode,
+    splitPermissionArgs(slashRemainder(text))
+  );
+  // The permMode mirror has no subscription to the holder, so every writer
+  // re-reads it after the flip (same discipline as the yolo and Shift+Tab arms).
+  setPermMode(permissionMode.get());
+  setNotice({ lines: [res.text] });
+}
+
 export function chromeReserveRows(opts: {
   readonly noticeRows: number;
   readonly inputHintRows: number;
@@ -1242,8 +1338,10 @@ export interface TuiAppProps {
   readonly yolo?: YoloContext;
   /**
    * ADR-0119 / specs/yolo-mode.md: the yolo enter / exit action single point
-   * (permission snapshot + full_auto, fsMode snapshot + global, exit restores
-   * the snapshot, symmetric bwrap probe on both the enter and exit sides).
+   * (fsMode snapshot + global, exit restores the snapshot, symmetric bwrap
+   * probe on both the enter and exit sides). The permission axis is not part
+   * of it — ADR-0139 made the two axes independent, so entering yolo leaves
+   * the permission posture exactly as it was and exiting changes nothing.
    * `/yolo` calls enter() / exit() after confirmation, and
    * YoloActionResult.text goes to the notice. Absent → `/yolo` warns
    * not-wired and does not open the confirm modal (fail-closed: never give
@@ -1717,6 +1815,28 @@ function seedYoloOn(props: TuiAppProps): boolean {
   const fromController = props.yoloController?.context.get();
   if (fromController !== undefined) return fromController;
   return props.yolo?.get() ?? false;
+}
+
+/**
+ * The setter surface of the holder-slash family (`/graph`, `/config`,
+ * `/permissions`) — a narrowed pass-through of host state, same shape as
+ * `YoloSetters`. Grouped so the three commands share one dispatch arm and one
+ * call site instead of three copies of the same setter list.
+ */
+interface HolderSlashSetters {
+  /** Permission-mode holder (the resolved one, so `/permissions` flips exactly
+   *  the holder Shift+Tab flips). */
+  readonly permissionMode: PermissionModeContext;
+  readonly setGraphOn: (v: boolean) => void;
+  /** The permMode mirror (mode-row label); unsubscribed, so every holder writer
+   *  re-reads it after the flip. */
+  readonly setPermMode: (mode: PermissionMode) => void;
+  readonly setNotice: (v: Notice) => void;
+  readonly setConfigPickerOpen: (open: boolean) => void;
+  readonly setConfigFocusIndex: (index: 0 | 1 | 2) => void;
+  readonly setThinkingPickerOpen: (open: null | "thinking" | "effort") => void;
+  readonly setMemoryPickerOpen: (open: boolean) => void;
+  readonly setModelPickerOpen: (open: boolean) => void;
 }
 
 /** The three setter surface of the yolo confirm modal (a narrowed pass-through of host state). */
@@ -3813,6 +3933,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       return;
     }
+    // The session-holder commands resolve before the switch: three extra
+    // `case` labels there cost three `SwitchCase[test]` points against
+    // handleSubmit's S5 baseline, while one guard costs one (same remedy as
+    // applyAskShortcut above — route the family, not the branch).
+    if (isHolderSlashCommand(parsed.command)) {
+      runHolderSlashCommand(parsed.command, props, text, {
+        permissionMode,
+        setGraphOn,
+        setPermMode,
+        setNotice,
+        setConfigPickerOpen,
+        setConfigFocusIndex,
+        setThinkingPickerOpen,
+        setMemoryPickerOpen,
+        setModelPickerOpen,
+      });
+      return;
+    }
     switch (parsed.command) {
       case "sessions": {
         await safeList();
@@ -3849,23 +3987,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             envDisplay.get().model
           ),
         });
-        return;
-      }
-      case "graph": {
-        runGraphSlashCommand(props, text, setGraphOn, setNotice);
-        return;
-      }
-      case "config": {
-        runConfigSlashCommand(
-          props,
-          text,
-          setNotice,
-          setConfigPickerOpen,
-          setConfigFocusIndex,
-          setThinkingPickerOpen,
-          setMemoryPickerOpen,
-          setModelPickerOpen
-        );
         return;
       }
       case "yolo":

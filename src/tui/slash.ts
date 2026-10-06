@@ -3,13 +3,17 @@
  * Pure TS: no ink / OpenTUI dependencies.
  *
  * Vocabulary: /sessions /new /quit /exit /help /info /thinking /effort /memory
- * /compact /continue /rewind /mcp /graph /config /model /yolo — VOCABULARY
- * below is the single source (don't duplicate the count here, it drifts).
- * /reset is absent from the vocabulary and thus unreachable.
+ * /compact /continue /rewind /mcp /graph /config /permissions /model /yolo —
+ * VOCABULARY below is the single source (don't duplicate the count here, it
+ * drifts). /reset is absent from the vocabulary and thus unreachable.
  * - /config: ADR-0092 filesystem-isolation mode switch; value domain and copy
  *   live in harness/sandbox/fs-mode.ts; chat / TUI / serve share semantics.
  * - /graph: non-TTY peer of the graph-mode overlay; value domain and copy
  *   live in harness/graph/mode.ts; same three-entry semantics.
+ * - /permissions: permission-mode switch. Parse / status / usage are shared
+ *   with the REPL's /permissions via harness/permission/permissions-command.ts.
+ *   `plan` is deliberately NOT a Shift+Tab wheel station (harness/permission/
+ *   modes.ts), so this command is how a TUI session enters and leaves it.
  * - /effort help text is derived from ADJUSTABLE_EFFORT_LEVELS (no second
  *   hardcoded list).
  * - Key binding: Esc = interrupt foreground turn (double-press = rewind),
@@ -68,6 +72,7 @@ export type TuiSlashCommand =
   | "mcp"
   | "graph"
   | "config"
+  | "permissions"
   | "model"
   | "yolo";
 
@@ -120,6 +125,7 @@ const VOCABULARY: ReadonlySet<string> = new Set<TuiSlashCommand>([
   "mcp",
   "graph",
   "config",
+  "permissions",
   "model",
   "yolo",
 ]);
@@ -161,6 +167,7 @@ export function helpLines(
     "/rewind    回退到更早的回合（选择锚点后确认）",
     "/graph     图模式开关（on|off|status；下一次 run() 装配生效）",
     "/config    文件系统隔离档（status|fs global|fs workspace；下一次 bash 调用生效）",
+    "/permissions  权限模式（default|plan|full_auto；缺省/status 查看当前）",
     "/yolo      无沙箱模式开关（确认后切换；会话级不落盘）",
     "/model     切换模型（provider/model；下一轮生效）",
     "/quit      退出（别名 /exit）",
@@ -187,6 +194,7 @@ const HINT_DESCRIPTIONS: Record<TuiSlashCommand, string> = {
   rewind: "回退到更早的回合",
   graph: "图模式开关（on|off|status）",
   config: "文件系统隔离档（status|fs global|fs workspace）",
+  permissions: "权限模式（default|plan|full_auto）",
   yolo: "无沙箱模式（确认后切换）",
   model: "切换模型",
   quit: "退出（别名 /exit）",
