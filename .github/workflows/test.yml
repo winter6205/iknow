@@ -43,7 +43,16 @@ jobs:
   # 兜底（与 test-full 一致）。
   test-fast:
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    # 20 分钟，与 test-full 对齐。原先是 8 分钟，但那是从"大部分测试快速
+    # 失败"时代留下的数字：`--bail=10` 每次都在 6 分钟内早停，所以 8 分钟看似
+    # 从未被逼近。bwrap 的失败修好后没有失败可 bail，vitest 真正跑完全量，
+    # 8 分钟随即变成硬墙——run 被判 cancelled 而非 failure，掩盖了"它其实
+    # 一直跑不完"这个事实（test-fast 收集 11016 项，test-full 11092 项，
+    # 差距仅 0.7%）。
+    #
+    # 注意这只止血，不解决"fast 该有多快"：CI_FAST_EXCLUDES 目前只有 3 个
+    # 整目录，fast 与 full 几乎同规模。那个是设计问题，不在本次修复范围。
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
