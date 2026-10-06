@@ -222,11 +222,19 @@ export const CI_EXCLUDES: readonly string[] = [
   // construct `new SessionHub({...})` with no injected `deps`, then call the
   // private `ensureDeps(hub, root)` → `getOrBuildEngine` → `buildProductionEngine`
   // → `buildHarnessEngine → requireBwrap`, so assembly throws on the runner.
-  // `new SessionHub(` is deliberately NOT a guard anchor (43 of its 50 callers
-  // inject a stub `deps` and never build a production engine), so the guard
-  // cannot surface these — the dependency is verified by hand here instead.
+  // `new SessionHub(` is deliberately NOT a guard anchor (40 of its 50
+  // unregistered callers inject a stub `deps` and never build a production
+  // engine), so the guard cannot surface these — verified by hand instead.
   "tests/session-api/hub-file-intent.test.ts",
   "tests/session-api/store/capture-disabled-needs-handling.test.ts",
+  // Spawn-transitive class, and the reason this one is hand-registered rather
+  // than anchor-driven: none of the guard's 7 call shapes occurs anywhere in
+  // this file. It drives real recovery through `../crash/mutant-tree.ts` in a
+  // FRESH PROCESS, and that child reaches runInSandbox → requireBwrap, so all
+  // 8 cases die on a runner with no bwrap ("reopen process must succeed, got
+  // status=1", 87s). There is no skip mechanism to convert into a gate, so the
+  // file is all-or-nothing — which is what this exclude set means.
+  "tests/session-api/store/fresh-process-recovery.test.ts",
   // ADR-0037 / #814 evidenced: hub executor really mutates → runInSandbox → requireBwrap
   "tests/session-api/hub-worktree-isolation.test.ts",
   // Subagent worker assembly → createWorkerDeps → createBashTool → requireBwrap
