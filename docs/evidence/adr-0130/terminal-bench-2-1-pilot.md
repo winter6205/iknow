@@ -8,6 +8,14 @@
 > surfaces underneath are unchanged — `--eval-state` (ADR-0130) and the
 > native JSONL trace still work.
 
+> **Model-side re-count (added 2026-10-04, no recorded figure altered).**
+> [#1169](https://github.com/winner6205build/iknow/issues/1169) was split out of
+> #1167 to report only the model-attributable results of this same run: 6 pass /
+> 8 fail among 14, against the 6 pass / 13 fail among 19 valid results recorded
+> below. The counts differ by attributability filter, not by a second run, and
+> #1169 is the model-side authority. Neither is a capability estimate and neither
+> should be divided into a pass rate.
+
 External-capability measurement of the iknow harness driving
 `minimax-cn/MiniMax-M3.1-Flash-Preview` over
 `terminal-bench/terminal-bench-2-1`, under ADR-0130 eval state.

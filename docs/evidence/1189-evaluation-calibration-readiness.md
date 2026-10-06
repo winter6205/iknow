@@ -1,0 +1,38 @@
+# Evaluation calibration readiness and evidence register
+
+Date: 2026-10-04
+
+Execution contract: [issue #1189](https://github.com/winner6205build/iknow/issues/1189)
+
+State: Calibration pending. This register records no Plan C runtime evaluation, real-model attempt, or score.
+
+Use #1189 for the bounded execution steps and acceptance criteria. This page is a concise evidence register, not a second run plan.
+
+## Readiness evidence
+
+| Area                    | Evidence and current limit                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ----------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Revision                | Plan C merged through #1183 at commit `9fa88f570e20be3835694c6822802955d6ed4e17`. Pin that commit or a verified descendant, plus the actual checkout, clean/dirty state, and build/bundle hash. The local `feat/search-engine-lockfile-provisioning` checkout inspected when #1189 was opened was `c0acae236`; it had moved to `c61571c8b` by this document pass, and to `0b0a7c754` afterwards. None of those commits contains Plan C: `9fa88f570` is not an ancestor of any of them, and `final_request_evidence` is absent from `src/` at each. None may be used as the calibration base.             |
+| Plan C runtime evidence | Schema, emission, and reader support exist, but no real evaluation artifact yet proves that `dispatch_evidence` and the `final_request_evidence` projection contain readable messages, system instructions, and tools for an actual dispatch. #1179's report records a one-off end-to-end check against a real local HTTP server, which is useful evidence for the path it tested; the committed test is `tests/traceserver/final-request-evidence.test.ts`, a filesystem-pool integration test. Neither is this calibration.                                                                            |
+| Environment and grader  | Calibration must first show that one pinned public task's environment/oracle and original grader run successfully. The 2026-10-02 #1173 preflight scored zero model attempts: its Jammy task image measured `GLIBCXX_3.4.30` while that old shipped bundle required `GLIBCXX_3.4.31`. This is evidence about that measured image/bundle pair, not a requirement for a future build. See the [#1173 report](adr-0130/polyglot-1173-pilot.md) and [environment record](adr-0130/polyglot-1173-environment.md).                                                                                             |
+| Permission provenance   | #1170 delivered and closed on 2026-10-04; it records concrete historical denial traces, including a reported hard-wall over-deny and session kill for `gpt2-codegolf`. Its causal conclusions are historical report findings and have not been independently revalidated as part of #1189. Approval Gap B limits complete attribution of why a permissioned call was allowed or denied, but does not block this calibration or all denial analysis. Any Gap B work needs separate scoping and must not reopen or be assigned to #1170.                                                                   |
+| Turn cap and grader     | A turn-cap stop and the grader result are separate facts: `overfull-hbox` passed at 40 turns in #1169. A capped failure is still evidence of performance under the stated budget; a trace alone cannot show that 80 turns would solve it. A same-task budget comparison would be a separate follow-up.                                                                                                                                                                                                                                                                                                   |
+| Historical totals       | One [#1167](https://github.com/winner6205build/iknow/issues/1167) run, counted twice. The [Terminal-Bench report](adr-0130/terminal-bench-2-1-pilot.md) (2026-09-29) records 6 pass / 13 fail among 19 valid results, from 36 of 89 tasks run. [#1169](https://github.com/winner6205build/iknow/issues/1169) (2026-09-30) was split out of #1167 to report only model-attributable results, and records 6 pass / 8 fail among 14. The later, narrower count is the model-side authority; the two differ by attributability filter, not by a second run. Neither is a capability estimate or a pass rate. |
+| Retained artifacts      | The old `/tmp/tb21-iknow/jobs` directory was absent on the inspected host on 2026-10-04. Archive recovery is optional and is not a prerequisite for the new calibration. The Harbor adapter used by old reports was retired in #1175; historical Harbor commands are not the current in-tree execution path.                                                                                                                                                                                                                                                                                             |
+
+## Next action and decision
+
+Follow #1189: pin a Plan C revision, task, environment, and model configuration; verify the task oracle and original grader; then make exactly one real-model attempt with `ask --eval-state`, `max_turns=40`, one attempt, and no retry. Preserve the native trace JSONL and referenced blobs, session JSONL, process stdout/stderr, run metadata, environment/oracle output, and raw grader output/reward.
+
+Inspect the actual `final_request_evidence`: dereference messages, system, and tools; verify call and session linkage and reference resolution; record missing/null/unresolved values and trace-write-failure visibility. If a counter is unavailable, say so rather than treating it as zero.
+
+Report task outcome separately from evidence readiness. Mark the calibration ready only when the environment and original grader ran, the real attempt was retained, and required request/session evidence is readable with limitations stated. Otherwise mark it blocked at the precise boundary and retain the failing output. No full pilot, general evaluation framework, Harbor restoration, broad permission repair, or capability score is in scope for #1189.
+
+## Sources
+
+- [#1189 execution issue](https://github.com/winner6205build/iknow/issues/1189)
+- [#1169 historical model results](https://github.com/winner6205build/iknow/issues/1169)
+- [#1170 historical denial analysis](https://github.com/winner6205build/iknow/issues/1170)
+- [#1175 Harbor retirement](https://github.com/winner6205build/iknow/issues/1175)
+- [#1183 Plan C merge](https://github.com/winner6205build/iknow/issues/1183)
+- [ADR-0130](../adr/0130-eval-state-unsandboxed-benchmark-entry.md)
