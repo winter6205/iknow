@@ -1,0 +1,320 @@
+{
+  "note": "Product reader (createGetRecordCore) output over the retained eval-state trace.",
+  "source_artifact": "runs/attempt1/reader/reader-output.json (full reader output, 5.7 MB, retained on the run host)",
+  "reader_input_layout": "projects/app-calibration/<conversationId>/trace.jsonl",
+  "reader_input_layout_reason": "The reader resolves conversations through the session tree; ask --eval-state --trace-out writes a flat <trace-out>/<conversationId>.jsonl. Staged, not modified.",
+  "conversation_id": "99c04290-f43b-498c-863e-aa68e65322ba",
+  "llm_call_records": 41,
+  "final_request_evidence_present": 40,
+  "final_request_evidence_absent": 1,
+  "evidence_gap_unreadable": 0,
+  "what_the_reader_returns": "The reader dereferences the blob references and returns the bodies themselves as strings, not further references.",
+  "_comment_parts_field": "In per_record_key_presence, `parts` is j.parts.length from the reader's addressing of the RESPONSE-side row.messages of that llm_call record (content blocks across all messages, after blob dereference). It is NOT derived from final_request_evidence and it is not a request-evidence count. So the terminal record legitimately shows \"final_request_evidence\": \"ABSENT\" next to \"parts\": 10: its request envelope was not written, while its captured conversation messages were still readable. Reported by createGetRecordCore (src/traceserver/get-record-core.ts), detail=messages arm.",
+  "_comment_units": "The `chars` values here are CHARACTER counts of the decoded JSON bodies. The report's byte figures (system 5164 B, tools 28256 B) are the on-disk blob byte lengths of the same content; they differ only by JSON escaping.",
+  "sample_populated_entry": {
+    "invocationId": "492a4cab-a115-4c6c-97ae-9b3019a41c2a",
+    "stream": true,
+    "evidence_keys": ["invocationId", "messages", "stream", "system", "tools"],
+    "messages": {
+      "chars": 422,
+      "head": "[{\"role\":\"user\",\"content\":[{\"type\":\"text\",\"text\":\"Ensure that the LaTeX document main.tex compiles successfully using the installed TeX distribution and pdflatex compiler with no \\\"overfull hbox\\\" warnings. In doing so, ..."
+    },
+    "system": {
+      "chars": 5012,
+      "head": "# iknow Identity\n\n- Name: iknow\n- Kind: personal agent\n- Signature: <iknow>\n\n# iknow Soul\n\n## Core Truths\n- Be resourceful before asking. Read the file, check the context, inspect the state.\n- Have judgment. Prefer one o..."
+    },
+    "tools": {
+      "chars": 28210,
+      "head": "[{\"name\":\"bash\",\"description\":\"Run shell commands inside the bwrap sandbox for builds, scripts, or one-shot operations without a dedicated tool; pair with read_file / grep / glob / edit_file / write_file for file work in..."
+    }
+  },
+  "per_record_key_presence": [
+    {
+      "llm_call_id": "1f73eaf0-d492-4e2e-bf3f-1c39d8435fc3",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 0
+    },
+    {
+      "llm_call_id": "20f0e3aa-cb32-4fab-99c0-cc19463484b1",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 2
+    },
+    {
+      "llm_call_id": "291047a8-8802-46cb-8571-07bca497c12d",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 4
+    },
+    {
+      "llm_call_id": "243b95f9-d819-4df5-8abb-a65b373c9145",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 5
+    },
+    {
+      "llm_call_id": "c3f5c555-dee0-425f-8a46-15ae9f9ae1c2",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 6
+    },
+    {
+      "llm_call_id": "a67aab40-0e40-414f-978a-44eb5430e639",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 7
+    },
+    {
+      "llm_call_id": "81f24189-cf3d-4a61-905c-0efcc56bea2b",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 8
+    },
+    {
+      "llm_call_id": "9870793c-bb2d-4091-96e3-7d4b82da5fc7",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 9
+    },
+    {
+      "llm_call_id": "17f9c591-a511-4185-8408-2c9530809c04",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 11
+    },
+    {
+      "llm_call_id": "9246efc1-2b7d-4ce0-b875-49b63fa77ac2",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 12
+    },
+    {
+      "llm_call_id": "71ef1dfd-1696-4617-be20-a0ce793e3fc9",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 13
+    },
+    {
+      "llm_call_id": "8c4c541e-286a-4cf3-b5e1-92f3f63ccfe8",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 14
+    },
+    {
+      "llm_call_id": "0eae0f4c-c9fb-4dfd-9cca-4d37048088bc",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 15
+    },
+    {
+      "llm_call_id": "966b6fae-ea70-49f7-b2e1-88abb27d2593",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 16
+    },
+    {
+      "llm_call_id": "0cfcb78d-cb00-4821-b55d-7c6746ecc8f1",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 17
+    },
+    {
+      "llm_call_id": "662b036e-b3f2-4011-8191-9df944851f84",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 19
+    },
+    {
+      "llm_call_id": "8ecd4abe-871f-4fa4-ad59-ef50922f1c9a",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 20
+    },
+    {
+      "llm_call_id": "270c4d85-ddd1-428d-b664-1fdec18dd7fa",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 21
+    },
+    {
+      "llm_call_id": "d044f904-01c0-42f6-9efa-3dbf34cdf1b4",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 22
+    },
+    {
+      "llm_call_id": "6f1d9300-f76f-4e01-9ebb-04da71cc4ec8",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 23
+    },
+    {
+      "llm_call_id": "1824bc64-472a-462c-a39c-3396b72cbbd5",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 24
+    },
+    {
+      "llm_call_id": "4d747b37-fc2b-40f8-bc8f-b941387b1607",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 25
+    },
+    {
+      "llm_call_id": "30ecf6c6-acf7-47e2-ba45-dd6d3ed584bd",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 26
+    },
+    {
+      "llm_call_id": "3609bb77-e6b1-4e8b-9e2e-4ae0c7712a73",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 27
+    },
+    {
+      "llm_call_id": "c2798b0e-0f5c-4f3b-8749-00dec3d868c7",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 28
+    },
+    {
+      "llm_call_id": "ecb19a5b-bda3-437c-a678-4b4c2ea54f5b",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 29
+    },
+    {
+      "llm_call_id": "7b9d2f6f-8bee-4efa-9bcc-41c626a5cc23",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 30
+    },
+    {
+      "llm_call_id": "6ee8d209-9b6e-47fe-aae0-c68905ee23cb",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 31
+    },
+    {
+      "llm_call_id": "d94354fc-e9ff-458f-895b-f6158c5bc81a",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 32
+    },
+    {
+      "llm_call_id": "ec5e5020-c58c-4bcc-8d70-b25ea4caaa53",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 33
+    },
+    {
+      "llm_call_id": "d645e643-291d-41dd-83db-45d758a92d12",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 34
+    },
+    {
+      "llm_call_id": "36d3df55-7251-4e64-a2d3-1d7395152bd3",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 35
+    },
+    {
+      "llm_call_id": "9d25f358-ca4f-42a3-98a4-a01a512b423a",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 36
+    },
+    {
+      "llm_call_id": "bb0a28e3-43da-4e98-866c-2b51f97cbb13",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 37
+    },
+    {
+      "llm_call_id": "e7941e8f-772b-4ce1-8026-42a9e55eee47",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 38
+    },
+    {
+      "llm_call_id": "37cdc538-1c0f-4846-b60d-8316f37e46ef",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 39
+    },
+    {
+      "llm_call_id": "cff9ed8b-e5ee-46d8-95a1-351e1ab65aca",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 40
+    },
+    {
+      "llm_call_id": "f445c4e3-2344-4025-a92c-c52da80b7f5c",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 41
+    },
+    {
+      "llm_call_id": "fbdd1097-d214-4f29-8622-d39a79bc85e3",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 42
+    },
+    {
+      "llm_call_id": "fa24c2a2-419e-4a68-8edf-f2eebdec2558",
+      "supplier_stop": "other",
+      "final_request_evidence": "present",
+      "evidence_gap": "absent",
+      "parts": 43
+    },
+    {
+      "llm_call_id": "86b1c233-ec8e-4ea4-8bdd-7ea4a8d30a77",
+      "supplier_stop": "success",
+      "final_request_evidence": "ABSENT",
+      "evidence_gap": "absent",
+      "parts": 10
+    }
+  ]
+}

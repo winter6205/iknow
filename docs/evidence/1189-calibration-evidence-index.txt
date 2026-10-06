@@ -1,0 +1,97 @@
+# Evidence index — #1189 one-task Plan C calibration
+# generated: 2026-10-04T18:11:29Z
+# artifact_root: /home/winner/eval-1189/runs/attempt1
+# preflight_artifact_root: /home/winner/eval-1189/runs/oracle2/logs
+# posture: ADR-0130 eval state for every count and digest below that derives from the ask run.
+#           Bundle/dataset digests are build-time and preflight facts, not eval-state numbers.
+#           Paths are relative to artifact_root unless a section header names
+#           preflight_artifact_root.
+# coverage:   digests are listed for every retained file these numbers are derived
+#            from, plus the unlisted-but-retained files noted below.
+
+## Pinned inputs (build-time, not eval state)
+source_commit=9fa88f570e20be3835694c6822802955d6ed4e17
+bundle_sha256=1525d540457b0cb5a68535890eb2960319fcb4a25126c62b51273954ac1b27e7
+bundle_bytes=50072788
+dataset_repo=harbor-framework/terminal-bench-2-1
+dataset_sha=7131e4375048a0e408a8fb404b5f499d726b695b
+dataset_task_dirs=89
+task=overfull-hbox
+image=alexgshaw/overfull-hbox:20260403
+model=minimax-cn/MiniMax-M3.1-Flash-Preview
+
+## Eval-state run (ADR-0130)
+conversation_id=99c04290-f43b-498c-863e-aa68e65322ba
+attempts=1
+max_turns=40
+elapsed_sec=1129
+stop_reason=max_turns_exceeded (turnsRan=40)
+reward=0
+cost=unavailable
+
+## Artifact digests (sha256, relative to artifact_root)
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  process/ask.stdout
+346e5e1aab3e80943d585f54df4d6d9c5028652962242d467b1cd72e6868263e  process/ask.stderr
+592d6501b9e0496064973529a6e7d1f313d6ab56c1b63bd4fae30f864b80345c  process/grader.log
+9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa  logs/verifier/reward.txt
+a30625bb3304053b7fc6592794c0cc3b06fafbba69de8bd2ea5e044bbead786b  logs/verifier/ctrf.json
+3e2749a4ebd430ae07183a69bd9a300914cf3a509a53deaef23f9b49fcbf47a0  meta/attempt-timing.env
+91381d7490afbbf11255e22471d3ed76317353d8e1da372fbc91887e65c57f47  meta/instruction.md
+35180bae0c20ababaf88ddd017a54c6624ac54b9dd79fcceaf1dae56b408bef2  reader/reader-output-compact.json
+618c7aa60d6a753aa0862740ef7958aca829d7b5d1b33693f69e2c5979f38a8e  trace/99c04290-f43b-498c-863e-aa68e65322ba.jsonl
+
+## Also retained, not used to derive the counts above
+be8613e85896255b83d97c2d58e82d8d2b638bd85878fbfa5bbbed2e2d878c78  reader/reader-output.json
+3ae7d937700aeb45351e369f15ef025b6a99a9134d94fab9e722e6589048af0f  process/provision.log
+
+## Repo-committed forms
+# The committed reader JSON is the prettier-formatted copy of reader/reader-output-compact.json.
+# It is JSON-semantically identical but not byte-identical, so both digests are recorded:
+35180bae0c20ababaf88ddd017a54c6624ac54b9dd79fcceaf1dae56b408bef2  reader/reader-output-compact.json  (retained original)
+c46748862d6e452523712f56534960a2a41bd040963e3196d16fbf1ef5a503ca  docs/evidence/1189-calibration-reader-output.json  (committed, prettier-formatted)
+
+## Preflight (oracle + original grader, NOT eval state; report §2)
+# paths relative to preflight_artifact_root. These predate the model attempt and
+# back the report's §2 rows only. They are not inputs to any eval-state count below.
+#
+# Per-file provenance (report §7 records why more than one oracle log survives):
+#   oracle-solve.log  clean final oracle solve: 5-page main.pdf, no overfull hbox.
+#   grader.log       clean final original-grader run on the oracle state.
+#   oracle-full.log  an EARLIER combined run of mine, retained as evidence for §7's
+#                    harness-failure note. Its phase 2 (oracle) is the run that
+#                    reports solve_exit=0 / overfull_left=0; its phase 3 (grader)
+#                    FAILED with `cd: /tests: No such file or directory`,
+#                    grader_exit=1 — a missing mount in my harness, not a task or
+#                    grader defect. Do not read its grader_exit as a preflight result.
+oracle_solve_exit=0            # oracle-full.log phase 2 (matches oracle-solve.log output)
+oracle_overfull_left=0         # oracle-full.log phase 2
+oracle_pdf_pages=5             # "Output written on main.pdf (5 pages, ...)"
+preflight_grader_exit=0        # grader.log
+preflight_reward=1             # verifier/reward.txt
+preflight_ctrf_passed=4        # verifier/ctrf.json results.summary
+preflight_ctrf_warnings=1      # grader.log result line
+preflight_grader_elapsed=39.30s  # grader.log result line (NOT the attempt's 34.68s)
+e89e38c8f15ba0cb881968182e1a18a2fb1f4e0ad1a3f6adadcfcd2230a48eae  bytes=10846  grader.log
+09acd258c64ea7ec2e5e756a9274fc252f021500bb104fdbcaa16daf2afd2b20  bytes=73115  oracle-full.log
+de6eea9ed77c4891a3064ac386a4950fb81fcd60daaa1385d7316da2dd6bb554  bytes=10064  oracle-solve.log
+fde5030d8ca244a6d0088c3de7d1cbe7f50ab89338d0f8b627df1621bdb7e86d  bytes=1808   verifier/ctrf.json
+4355a46b19d348dc2f57c046f8ef63d4538ebb936000f3c9ee954a27460dd865  bytes=2      verifier/reward.txt
+
+## Counts (ADR-0130 eval state)
+trace_rows=125
+  llm_call=41
+  tool_call=44 (ok=43, execution_failed=1)
+  turn=40
+llm_call_with_dispatch_evidence=40
+llm_call_referenced_by_a_turn=40
+final_request_evidence_present=40
+final_request_evidence_absent=1
+evidence_gap_unreadable=0
+blob_refs_request_side_masked_trace_v1=120
+blob_refs_all_representations=1741
+blob_files_on_disk=124
+blob_orphans=0
+tool_call_result_bodies_captured=0 (result_captured=false on all 44)
+session_pool_files=87
+session_jsonl_files=0
+trace_bytes=293153
