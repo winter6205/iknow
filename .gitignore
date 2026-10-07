@@ -136,10 +136,14 @@ docs/kb-assistant-guide
 !.claude/
 .claude/*
 !.claude/settings.json
-# Team test policy referenced by CLAUDE.md; keep other rule files personal.
+# Rule files AGENTS.md pulls in with `@` — these are part of the project
+# contract, so a fresh clone must carry them. Anything else under rules/ stays
+# personal.
 !.claude/rules/
 .claude/rules/*
 !.claude/rules/test.md
+!.claude/rules/code-quality.md
+!.claude/rules/security-boundaries.md
 # Mirror of the same team-shared policy for the Codex CLI, same convention:
 # only the shared rule files and generic settings are tracked; config.toml
 # wires machine-local MCP daemons (nvm-pinned binary paths) and stays personal.
