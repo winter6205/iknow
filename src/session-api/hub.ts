@@ -4829,6 +4829,14 @@ export class SessionHub {
       // loadIknowSettings({cwd}) would silently drop project settings
       // (`.iknow/` is gitignored inside the worktree).
       ...(this.startupSettings ? { settings: this.startupSettings } : {}),
+      // Total memory OFF (ADR-0031 amendment 2026-10-07): this host builds
+      // the memory layer for every session, so `memory.enabled` is passed
+      // explicitly rather than relying on the default. The capability
+      // switch itself is read inside build-engine from the same settings
+      // object above (memory.autoExtract / memory.dream), so a dual-off
+      // user gets no memory surface on this path too — this option is
+      // layer presence, not the capability gate.
+      memory: { enabled: true },
       preimageCapture: this.preimageCapture(),
       // ADR-0037: mutate-gate host seam — the switch is read at the
       // build-engine startup load point; provision builds the tree and rebinds
@@ -5019,6 +5027,9 @@ export class SessionHub {
       // Review High-2 (hard req 9): fallback path reuses the startup settings
       // object too (rebind-rebuilt engines must not reload settings).
       ...(this.startupSettings ? { settings: this.startupSettings } : {}),
+      // Same memory layer presence as the primary assembly site above (its
+      // comment carries the ADR-0031 amendment rationale).
+      memory: { enabled: true },
       preimageCapture: this.preimageCapture(),
       // ADR-0037: the un-bound-root fallback path also wires the isolation
       // host seam (repoRoot = sandboxRoot ?? process.cwd(); sessions lacking a

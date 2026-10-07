@@ -30,6 +30,7 @@ export {
 
 export {
   MemoryCapabilityRejected,
+  MemoryDisabled,
   MemoryError,
   MemoryExtractError,
   MemoryGcOptionInvalid,
@@ -172,3 +173,5 @@ export {
   formatMemoryCatalog,
 } from "./catalog.js";
 export { createSystemResolver, type SystemResolver } from "./refresh.js";
+export { memoryCapabilityOn } from "./memory-capability.js";
+export type { MemoryCapabilityFlags } from "./memory-capability.js";

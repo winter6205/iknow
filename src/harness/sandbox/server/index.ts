@@ -176,9 +176,7 @@ export function createSandboxServer(
         env: req.env,
         killGraceMs: req.killGraceMs,
         groupObserveMs: req.groupObserveMs,
-        ...(req.deadlineMs !== undefined
-          ? { deadlineMs: req.deadlineMs }
-          : {}),
+        ...(req.deadlineMs !== undefined ? { deadlineMs: req.deadlineMs } : {}),
       }
     );
     try {
@@ -187,10 +185,12 @@ export function createSandboxServer(
         exitCode: result.code ?? signalExitCode(result.signal),
         stdout: truncateByCodePoint(result.stdout, maxOutputCodePoints),
         stderr: truncateByCodePoint(result.stderr, maxOutputCodePoints),
+        // Signal-terminated runs report the name next to 128+N; the exit code
+        // alone cannot say whether 137 came from the bounded teardown or from
+        // the command itself.
+        ...(result.signal !== null ? { signal: result.signal } : {}),
         ...(result.cleanup !== undefined ? { cleanup: result.cleanup } : {}),
-        ...(result.deadlineExpired === true
-          ? { deadline_expired: true }
-          : {}),
+        ...(result.deadlineExpired === true ? { deadline_expired: true } : {}),
       };
     } catch (cause) {
       // exception: child exited without acknowledgement / spawn failed — typed

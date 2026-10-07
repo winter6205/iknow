@@ -187,13 +187,35 @@ interface DiagnosticsInput {
 }
 
 /**
+ * The `spawn-failed` arm: serverId + the failing stage + the retained cause +
+ * the server's installHint (hint sentence omitted when the declaration is
+ * absent), or the bare `unavailable` parenthetical when a start failure
+ * carried no evidence at all.
+ */
+function renderSpawnFailed(failure: LspClientFailure): string {
+  const hint = SERVERS.find((s) => s.id === failure.serverId)?.installHint;
+  const details: string[] = [];
+  if (failure.stage !== undefined) details.push(`stage: ${failure.stage}`);
+  if (failure.cause !== undefined && failure.cause.length > 0) {
+    details.push(`cause: ${failure.cause}`);
+  }
+  if (hint !== undefined) details.push(`hint: ${hint}`);
+  const base = `(LSP server ${failure.serverId ?? "unknown-server"} unavailable`;
+  return details.length > 0 ? `${base}; ${details.join("; ")})` : `${base})`;
+}
+
+/**
  * Sentinel rendering when no usable LSP client exists, layered by
  * failure.reason. Always a plain string:
  *   - no-server: list every supported extension (in SERVERS declaration order);
  *   - no-root: explain that no root marker for the serverId was found above
  *     the file but within ctx.directory;
- *   - spawn-failed: serverId unavailable + installHint (hint sentence omitted
- *     when the server declaration is absent).
+ *   - spawn-failed: serverId + the failing stage + the retained cause +
+ *     installHint (hint sentence omitted when the server declaration is absent).
+ *
+ * A start failure carries its stage and evidence into the model-visible string:
+ * "unavailable" alone could not tell a missing binary from a server that died
+ * during its handshake, and the model must report only the observed layer.
  */
 export function renderNoServer(
   ctx: LspCtx,
@@ -209,11 +231,8 @@ export function renderNoServer(
     }
     case "no-root":
       return `(no LSP project root found above ${file} within ${ctx.directory}; missing root marker for ${failure.serverId ?? "unknown-server"})`;
-    case "spawn-failed": {
-      const hint = SERVERS.find((s) => s.id === failure.serverId)?.installHint;
-      const base = `(LSP server ${failure.serverId ?? "unknown-server"} unavailable`;
-      return hint !== undefined ? `${base}; hint: ${hint})` : `${base})`;
-    }
+    case "spawn-failed":
+      return renderSpawnFailed(failure);
   }
 }
 

@@ -518,6 +518,10 @@ describe("buildHarnessEngine (SSOT assembly)", () => {
     const { deps } = await buildHarnessEngine({
       env: makeEnv("sk-test-sentinel-2"),
       askUser: createNoAskUser(),
+      // Memory capability ON: dual-off is total memory OFF (ADR-0031
+      // amendment 2026-10-07), which filters the memory pair out of
+      // promptTools — covered in tests/harness/memory/memory-capability-off.test.ts.
+      settings: { memory: { autoExtract: true } },
     });
 
     // Injection seam: buildHarnessEngine threads reg.visibleSchemas into promptTools.

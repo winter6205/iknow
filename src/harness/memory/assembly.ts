@@ -109,6 +109,14 @@ export interface AssemblyContext {
   readonly workspaceRoot?: string;
   readonly memoryDir: string;
   readonly autoExtract?: boolean;
+  /**
+   * Total memory OFF (ADR-0031 amendment 2026-10-07): when false, the memory
+   * index — the existence pointer and the catalog — is left out, so no memory
+   * state reaches the model request. The static layer (AGENTS.md + the rules
+   * manifest) is project instruction, not memory state, and is unaffected.
+   * Absent / non-false = today's behavior.
+   */
+  readonly memoryIndex?: boolean;
   /** Accepted but ignored — see file header (ADR-0044). */
   readonly promoteEntries?: ReadonlyArray<MemoryEntryV1>;
 }
@@ -159,10 +167,11 @@ export async function assembleSystemPrompt(
   const staticPrompt = await assembleStaticSystemPrompt(ctx, {
     rulesMode: "manifest",
   });
-  const hasMemory = await memoryLibraryNonEmpty(ctx.memoryDir);
+  const memoryIndex = ctx.memoryIndex !== false;
+  const hasMemory = memoryIndex && (await memoryLibraryNonEmpty(ctx.memoryDir));
   const parts: string[] = staticPrompt ? [staticPrompt] : [];
   if (hasMemory) parts.push(EXISTENCE_POINTER);
-  if (ctx.autoExtract === true) {
+  if (ctx.autoExtract === true && memoryIndex) {
     const catalog = await loadCatalogSegment(ctx.memoryDir);
     if (catalog) parts.push(catalog);
   }

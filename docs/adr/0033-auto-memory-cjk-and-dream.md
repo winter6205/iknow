@@ -3,6 +3,8 @@
 Date: 2026-08-28
 Status: accepted
 
+> **Amendment 2026-10-07** (total memory OFF): D3's dual-off carve-out goes with ADR-0031's — the hook is absent when both flags are off, with no mechanical-only exception. The existing TUI `/memory` **Automatic memory** switch is the total memory capability switch; OFF takes effect on the next model request and assembles no hook, so extraction, Dream, mechanical GC, and the ADR-0086 capability sweep all stay down until ON. Unchanged: hook presence is `autoExtract || dream`; `autoExtract === true` still implies Dream when D2's gate holds (24h ∧ 5 distinct sessions, gate state in `dream.json`, never per-turn); Dream-only (`dream === true`, `autoExtract !== true`) remains allowed; ON restores exactly today's schedule; the on-disk store is untouched while OFF; and ADR-0010's `ask` opt-out is unaffected. No new Dream scheduling rule is introduced.
+
 ## Context
 
 ADR-0031 shipped extract + four-state ingest + mechanical GC and deferred LLM offline merge so the first unattended write path could gather evidence. STATUS §2.5 then showed the four-state table is vacuous for CJK (ASCII-only tokenize → empty tokens → always ADD) and that serve's auto-memory hook is process-global (first root wins). This ADR discharges the merge deferral and locks the tokenize + wiring seams. It does not change ADR-0009 dual-channel trust, ADR-0010 ask opt-out, or ADR-0031's default-OFF extract flag.
@@ -32,3 +34,4 @@ ADR-0031 shipped extract + four-state ingest + mechanical GC and deferred LLM of
 
 - `docs/adr/0031-auto-memory-extract-and-mechanical-gc.md` (merge deferral)
 - `docs/STATUS.md` §2.5 (CJK tokenize; first-root hook; dual notify)
+- `docs/guides/runtime-capability-recovery.md` §"Memory switch behavior" and `docs/implementation-plans/runtime-capability-recovery.md` T3 — the approved total-OFF contract this 2026-10-07 amendment records; the implementation it requires landed on `feat/runtime-capability-recovery` (commit `a7985406f`), with the observed OFF/ON request surface recorded in `docs/evidence/runtime-capability-recovery-validation-matrix.md`.

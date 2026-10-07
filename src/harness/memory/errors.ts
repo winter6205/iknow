@@ -88,6 +88,32 @@ export class MemoryCapabilityRejected
 }
 
 /**
+ * Total memory OFF (ADR-0031 / ADR-0033 / ADR-0042, amendment 2026-10-07):
+ * a `memory_recall` / `memory_save` call reached execution while the memory
+ * capability is off. Thrown by the tool handler before any store read or
+ * write, so a call produced before the toggle (including one replayed from
+ * older conversation history) cannot touch the store.
+ *
+ * Model-facing so the executor projects the reason verbatim: the model must
+ * learn the capability is off rather than retry a tool that is gone.
+ */
+export class MemoryDisabled extends MemoryError implements ModelFacingError {
+  override readonly name: string = "MemoryDisabled";
+  readonly modelFacing = true as const;
+  /** The tool that was refused — the only call site is the memory pair. */
+  readonly tool: string;
+  constructor(tool: string) {
+    super(
+      `[${tool}] memory is disabled: the memory capability switch is off for ` +
+        `this session, so this call was refused before any memory was read or ` +
+        `written. Do not retry it; the store is untouched and the capability ` +
+        `restores its previous behavior when switched back on.`
+    );
+    this.tool = tool;
+  }
+}
+
+/**
  * Quarantine classification for memory_save rejection (spec SC 9). Stored
  * alongside the rejected draft so the loader / UI can surface a stable
  * machine-readable reason. String values are wire-stable: future versions

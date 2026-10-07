@@ -48,6 +48,59 @@ interface BashOutputInput {
 }
 
 /**
+ * A background-task refusal on the read route, carrying the manager's
+ * discriminated failure.
+ *
+ * The manager already decided which kind it is; the rendered message alone
+ * leaves a caller parsing prose to recover it. `kind` / `context` / `cause`
+ * keep that identity (and the underlying cause where the union carries one) on
+ * the owning interface, while the message keeps the exact text the existing
+ * consumers match on.
+ */
+export class BashOutputTaskError extends ToolExecutionError {
+  override readonly name: string = "BashOutputTaskError";
+  /** The manager's discriminated refusal kind, verbatim. */
+  readonly kind: string;
+  /** The manager's context for that kind, verbatim. */
+  readonly context: string;
+  /** The union's `cause` when this kind carries one, else undefined. */
+  readonly cause: string | undefined;
+  constructor(args: {
+    readonly kind: string;
+    readonly context: string;
+    readonly cause: string | undefined;
+    readonly message: string;
+  }) {
+    super(args.message);
+    this.kind = args.kind;
+    this.context = args.context;
+    this.cause = args.cause;
+  }
+}
+
+/**
+ * Typed-error catch contract: discriminate `kind`, then render via
+ * renderTaskError as `${kind}: ${context}` — never [object Object]. The
+ * manager throws plain objects (the BackgroundTaskError discriminated union),
+ * not Error instances, so the contract path must run before any
+ * JSON-or-errorMessage fallback. The rendered text is unchanged; the kind /
+ * context / cause ride on the typed error so a caller can branch without
+ * parsing prose.
+ */
+function projectTaskError(err: unknown): BashOutputTaskError {
+  const taskError = err as Partial<BackgroundTaskError> & { kind: string };
+  return new BashOutputTaskError({
+    kind: taskError.kind,
+    context: taskError.context ?? "",
+    cause:
+      "cause" in taskError && typeof taskError.cause === "string"
+        ? taskError.cause
+        : undefined,
+    message: `bash_output: ${renderTaskError(err as BackgroundTaskError)}`,
+  });
+}
+
+/**
  * Factory: createBashOutputTool(deps) — the bash_output tool.
  *
  * The returned AciToolDef satisfies:
@@ -55,9 +108,9 @@ interface BashOutputInput {
  *   - inputSchema: { task_id required, max_bytes? number },
  *     additionalProperties:false
  *   - aci metadata: read-only / concurrency-safe / cancel / fast tier
- *   - handler emits the JSON envelope `{text, status, exit_code, task_id}`
- *     (one-to-one with manager.output's return shape, no extra decoding on
- *     the model side).
+ *   - handler emits the JSON envelope `{text, stderr, status, exit_code,
+ *     task_id}` (one-to-one with manager.output's return shape, no extra
+ *     decoding on the model side).
  */
 export function createBashOutputTool(
   opts: CreateBashOutputToolOptions
@@ -79,15 +132,11 @@ export function createBashOutputTool(
         ctx?.conversationId
       );
     } catch (err) {
+      // EXIT: an already-typed tool error (compile / schema layer) travels
+      // unchanged; anything else is the manager's discriminated refusal and is
+      // projected onto BashOutputTaskError.
       if (err instanceof ToolExecutionError) throw err;
-      // Typed-error catch contract: discriminate `kind`, then render via
-      // renderTaskError as `${kind}: ${context}` — never [object Object].
-      // The manager throws plain objects (the BackgroundTaskError discriminated
-      // union), not Error instances, so the contract path must run before
-      // any JSON-or-errorMessage fallback.
-      throw new ToolExecutionError(
-        `bash_output: ${renderTaskError(err as BackgroundTaskError)}`
-      );
+      throw projectTaskError(err);
     }
     return JSON.stringify(result);
   };
@@ -95,7 +144,7 @@ export function createBashOutputTool(
   return Object.freeze({
     name: "bash_output",
     description:
-      "Read the log tail and current state of a background bash task previously spawned with bash(background: true). Use after a background task has returned its task_id and you want to inspect progress, check whether the command has exited, or read accumulated output before deciding the next step (continue waiting, call bash_stop to terminate, or relaunch with adjusted parameters). Pair with bash_stop to terminate the task once its output shows the work is done (server ready, build finished, error surfaced). Returns one JSON envelope with text (log tail), status (running / exited / killed / dead), exit_code, and task_id. The text is truncated by default to the last 12 KB (configurable via max_bytes, capped at 100 KB); stale tasks return empty text rather than erroring.",
+      "Read the log tail and current state of a background bash task previously spawned with bash(background: true). Use after a background task has returned its task_id and you want to inspect progress, check whether the command has exited, or read accumulated output before deciding the next step (continue waiting, call bash_stop to terminate, or relaunch with adjusted parameters). Pair with bash_stop to terminate the task once its output shows the work is done (server ready, build finished, error surfaced). Returns one JSON envelope with text (log tail, stdout and stderr interleaved), stderr (the same window containing only what the task wrote to stderr, empty when it wrote none), status (running / exited / killed / dead), exit_code, and task_id. Read stderr to classify a line instead of parsing the merged text. The text is truncated by default to the last 12 KB (configurable via max_bytes, capped at 100 KB); stale tasks return empty text rather than erroring.",
     inputSchema: {
       type: "object",
       properties: {

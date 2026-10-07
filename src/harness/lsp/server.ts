@@ -83,30 +83,64 @@ function isInsideOrEqual(child: string, stop: string): boolean {
 }
 
 /**
- * Resolve an npm-wrapper language server's executable.
+ * Absolute executable paths owned by the active project / worktree, in probe
+ * order: the npm bin shim first (what `npm i` creates), then the project
+ * virtualenvs (what `pip install` / `uv` create).
  *
- * Reuses the existing `resolveLanguageServerBin` pattern (createRequire
- * same-source resolution + which fallback), parameterized as `(pkgName,
- * binName)`:
- *   1) read `pkgName/package.json`'s `bin` field for the entry's relative
- *      path, resolve it absolutely via
- *      `createRequire(import.meta.url).resolve(pkgName/<binRel>)`;
- *   2) resolution failure / file missing → fall back to PATH `which` semantics
- *      (spawnSync binName probe).
- *
- * Returns the bin entry; unavailable → `undefined` (spawn marks broken on it,
- * no throw).
+ * Why these are probed before the harness's own `node_modules`: the server that
+ * understands a project is the one that project pins — its TypeScript version,
+ * its Python environment, its plugin set. Resolution that only looks at the
+ * harness module cannot see a dependency installed into the user's project at
+ * all, which is the gap T1 reproduced.
  */
-async function resolveNpmBin(
-  pkgName: string,
-  binName: string,
-  ctx?: LspCtx
-): Promise<string | undefined> {
-  if (ctx?.resolveBin) {
-    const override = await ctx.resolveBin(pkgName, binName);
-    if (override !== undefined) return override;
+export function projectExecutableCandidates(
+  root: string,
+  binName: string
+): readonly string[] {
+  // EXIT: an empty root yields an empty list (no paths, no throw) so a caller
+  // with no resolved root degrades to the harness + PATH layers instead of
+  // probing relative paths against an unknown cwd.
+  if (root.length === 0 || binName.length === 0) return [];
+  return [
+    path.join(root, "node_modules", ".bin", binName),
+    path.join(root, "node_modules", ".bin", `${binName}.cmd`),
+    path.join(root, ".venv", "bin", binName),
+    path.join(root, ".venv", "Scripts", `${binName}.exe`),
+    path.join(root, "venv", "bin", binName),
+    path.join(root, "venv", "Scripts", `${binName}.exe`),
+  ];
+}
+
+/**
+ * First existing project/worktree executable, or undefined. `existsSync`
+ * follows the symlink an npm bin shim points at, so a dangling link (an
+ * interrupted install) is correctly reported as absent.
+ */
+function resolveProjectBin(root: string, binName: string): string | undefined {
+  for (const candidate of projectExecutableCandidates(root, binName)) {
+    if (existsSync(candidate)) return candidate;
   }
-  // 1) Same-source resolution of this package's bin entry under node_modules.
+  return undefined;
+}
+
+/**
+ * `createRequire` anchored at the project root instead of the harness module:
+ * node's own resolution then walks the project's `node_modules` chain, which is
+ * how any tool in that project resolves its dependency versions.
+ */
+function requireFromRoot(root: string): NodeRequire {
+  return createRequire(path.join(root, "__iknow_lsp_resolve__.js"));
+}
+
+/**
+ * Layer 3 of `resolveServerExecutable`: this package's own `node_modules` under
+ * the harness module — read `pkg/package.json`'s `bin` field and resolve the
+ * entry absolutely (the pre-existing `resolveLanguageServerBin` pattern).
+ */
+function resolvePackageBinEntry(
+  pkgName: string,
+  binName: string
+): string | undefined {
   try {
     const pkgJson = createRequire(import.meta.url).resolve(
       `${pkgName}/package.json`
@@ -114,23 +148,61 @@ async function resolveNpmBin(
     const binField = JSON.parse(readFileSync(pkgJson, "utf8")).bin;
     const binRel: string | undefined =
       typeof binField === "string" ? binField : binField?.[binName];
-    if (typeof binRel === "string") {
-      const bin = createRequire(import.meta.url).resolve(
-        `${pkgName}/${binRel}`
-      );
-      if (existsSync(bin)) return bin;
-    }
+    if (typeof binRel !== "string") return undefined;
+    const bin = createRequire(import.meta.url).resolve(
+      `${pkgName}/${binRel}`
+    );
+    return existsSync(bin) ? bin : undefined;
   } catch {
-    // package.json or bin entry unresolvable → fall back to PATH which semantics.
+    // EXIT: an unresolvable package.json / bin entry leaves this layer empty;
+    // the caller continues to PATH which semantics.
+    return undefined;
+  }
+}
+
+/**
+ * Resolve an npm-wrapper language server's executable.
+ *
+ * Precedence (explicit override first, process `PATH` as the last fallback):
+ *   1) `ctx.resolveBin` — the explicit override, highest by contract;
+ *   2) the active project / worktree: `node_modules/.bin/<bin>` then the project
+ *      virtualenv `bin`/`Scripts` (see `projectExecutableCandidates`);
+ *   3) this package's own `node_modules` under the harness module (the existing
+ *      `resolveLanguageServerBin` pattern: read `pkg/package.json`'s `bin`
+ *      field, resolve it absolutely);
+ *   4) PATH `which` semantics (`spawnSync <bin> --version`).
+ *
+ * An empty root simply skips layer 2. Unavailable → `undefined` (the caller
+ * marks the start failed with the `executable-resolution` stage, no throw).
+ */
+export async function resolveServerExecutable(
+  pkgName: string,
+  binName: string,
+  root: string,
+  ctx?: LspCtx
+): Promise<string | undefined> {
+  if (ctx?.resolveBin) {
+    const override = await ctx.resolveBin(pkgName, binName);
+    if (override !== undefined) return override;
   }
 
-  // 2) which semantics: find binName directly on PATH.
+  // 2) Active project / worktree executable.
+  const projectBin = resolveProjectBin(root, binName);
+  if (projectBin !== undefined) return projectBin;
+
+  // 3) Same-source resolution of this package's bin entry under node_modules.
+  const packageBin = resolvePackageBinEntry(pkgName, binName);
+  if (packageBin !== undefined) return packageBin;
+
+  // 4) which semantics: find binName directly on PATH.
   // spawnSync throwing ENOENT (command absent) or a nonzero exit both mean
   // unavailable.
   try {
     const probe = spawnSync(binName, ["--version"], { stdio: "ignore" });
     if (probe.status === 0) return binName;
   } catch {
+    // EXIT: spawnSync threw ENOENT — the binary is absent from PATH entirely,
+    // so no executable resolves and the caller records executable-resolution.
     return undefined;
   }
   return undefined;
@@ -186,40 +258,47 @@ const TS_LOCKFILES: readonly string[] = [
  */
 const TS_EXCLUDE: readonly string[] = ["deno.json", "deno.jsonc"];
 
-/** Resolve the typescript-language-server executable (not installed / unresolvable → undefined). */
+/**
+ * Resolve the typescript-language-server executable (not installed /
+ * unresolvable → undefined). Same precedence chain as
+ * `resolveServerExecutable`; kept as a named helper because the TypeScript
+ * server also needs a separate tsserver entry point below.
+ */
 async function resolveLanguageServerBin(
+  root: string,
   ctx?: LspCtx
 ): Promise<string | undefined> {
-  if (ctx?.resolveBin) {
-    const override = await ctx.resolveBin(
-      "typescript-language-server",
-      "typescript-language-server"
-    );
-    if (override !== undefined) return override;
-  }
-  // 1) Same-source resolution of typescript-language-server's bin (lib/cli.mjs)
-  // under node_modules.
+  return resolveServerExecutable(
+    "typescript-language-server",
+    "typescript-language-server",
+    root,
+    ctx
+  );
+}
+
+/**
+ * tsserver entry point passed to typescript-language-server's
+ * `initializationOptions.tsserver.path`.
+ *
+ * The project's own `typescript` wins over the harness's: the language server
+ * and the TypeScript compiler must come from the same project, otherwise
+ * diagnostics are computed against a different compiler than the project pins.
+ */
+function resolveTsserverEntry(root: string): string | undefined {
   try {
-    const bin = createRequire(import.meta.url).resolve(
-      "typescript-language-server"
-    );
+    const bin = requireFromRoot(root).resolve("typescript/lib/tsserver.js");
     if (existsSync(bin)) return bin;
   } catch {
-    // Not installed → fall back to PATH which semantics.
+    // EXIT: the project does not ship typescript → fall back to the harness's
+    // own copy (below), which is the pre-existing behavior.
   }
-
-  // 2) which semantics: find typescript-language-server directly on PATH.
-  // spawnSync throwing ENOENT (command absent) or a nonzero exit both mean
-  // unavailable.
   try {
-    const probe = spawnSync("typescript-language-server", ["--version"], {
-      stdio: "ignore",
-    });
-    if (probe.status === 0) return "typescript-language-server";
+    return createRequire(import.meta.url).resolve("typescript/lib/tsserver.js");
   } catch {
+    // EXIT: neither the project nor the harness ships typescript → no tsserver
+    // entry point to pass, so the server cannot start (spawn returns undefined).
     return undefined;
   }
-  return undefined;
 }
 
 /**
@@ -237,22 +316,23 @@ export const Typescript: LspServerInfo = {
   installHint: "npm i -g typescript typescript-language-server",
   root: NearestRoot(TS_LOCKFILES, TS_EXCLUDE),
   extensions: [".ts", ".tsx", ".js", ".jsx", ".mjs", ".cjs", ".mts", ".cts"],
+  executableCandidates: (root) =>
+    projectExecutableCandidates(root, "typescript-language-server"),
   async spawn(root, ctx) {
     let tsserver: string | undefined;
     if (ctx.resolveBin) {
       tsserver = await ctx.resolveBin("typescript", "tsserver");
     }
     if (!tsserver) {
-      try {
-        tsserver = createRequire(import.meta.url).resolve(
-          "typescript/lib/tsserver.js"
-        );
-      } catch {
-        return undefined;
-      }
+      tsserver = resolveTsserverEntry(root);
+      // EXIT: neither the project nor the harness ships typescript → no
+      // tsserver to point the server at, so the server cannot start.
+      if (!tsserver) return undefined;
     }
 
-    const bin = await resolveLanguageServerBin(ctx);
+    const bin = await resolveLanguageServerBin(root, ctx);
+    // EXIT: the language-server executable resolved nowhere (override, project
+    // node_modules/.bin, project venv, harness node_modules, PATH).
     if (!bin) return undefined;
 
     const child = spawnProcess(bin, ["--stdio"], {
@@ -272,7 +352,7 @@ export const Typescript: LspServerInfo = {
  * / pyrightconfig.json. exclude is omitted (Python has no Deno-style conflict
  * markers).
  *
- * spawn: `resolveNpmBin("pyright", "pyright-langserver")` probes the bin;
+ * spawn: `resolveServerExecutable("pyright", "pyright-langserver", root, ctx)` probes the bin;
  * `detectVenvPython` probes VIRTUAL_ENV → .venv → venv, passing through
  * `{ pythonPath }` on a hit; otherwise initialization is omitted (legitimate —
  * pyright falls back to system python).
@@ -289,8 +369,15 @@ export const Pyright: LspServerInfo = {
     "pyrightconfig.json",
   ]),
   extensions: [".py", ".pyi"],
+  executableCandidates: (root) =>
+    projectExecutableCandidates(root, "pyright-langserver"),
   async spawn(root, ctx) {
-    const bin = await resolveNpmBin("pyright", "pyright-langserver", ctx);
+    const bin = await resolveServerExecutable(
+      "pyright",
+      "pyright-langserver",
+      root,
+      ctx
+    );
     if (!bin) return undefined;
     const pythonPath = await detectVenvPython(root);
     const child = spawnProcess(bin, ["--stdio"], {
@@ -310,7 +397,7 @@ export const Pyright: LspServerInfo = {
  *
  * root: no YAML-specific root marker, so it keeps the current
  * `_file => ctx.directory` (same behavior as vscode-json-languageserver).
- * spawn: `resolveNpmBin("yaml-language-server", "yaml-language-server")`; no
+ * spawn: `resolveServerExecutable("yaml-language-server", ...)`; no
  * init options.
  */
 export const YamlLS: LspServerInfo = {
@@ -318,10 +405,13 @@ export const YamlLS: LspServerInfo = {
   installHint: "npm i -g yaml-language-server",
   root: (_file, ctx) => Promise.resolve(ctx.directory),
   extensions: [".yaml", ".yml"],
+  executableCandidates: (root) =>
+    projectExecutableCandidates(root, "yaml-language-server"),
   async spawn(root, ctx) {
-    const bin = await resolveNpmBin(
+    const bin = await resolveServerExecutable(
       "yaml-language-server",
       "yaml-language-server",
+      root,
       ctx
     );
     if (!bin) return undefined;
@@ -339,7 +429,7 @@ export const YamlLS: LspServerInfo = {
  * languages.
  *
  * root: JSON has no project-root concept, `_file => ctx.directory`.
- * spawn: `resolveNpmBin("vscode-json-languageserver",
+ * spawn: `resolveServerExecutable("vscode-json-languageserver",
  * "vscode-json-languageserver")`; no required init (schemas go through
  * workspace/config).
  */
@@ -348,10 +438,13 @@ export const JsonLS: LspServerInfo = {
   installHint: "npm i -g vscode-langservers-extracted",
   root: (_file, ctx) => Promise.resolve(ctx.directory),
   extensions: [".json"],
+  executableCandidates: (root) =>
+    projectExecutableCandidates(root, "vscode-json-languageserver"),
   async spawn(root, ctx) {
-    const bin = await resolveNpmBin(
+    const bin = await resolveServerExecutable(
       "vscode-json-languageserver",
       "vscode-json-languageserver",
+      root,
       ctx
     );
     if (!bin) return undefined;
@@ -369,7 +462,7 @@ export const JsonLS: LspServerInfo = {
  * first four languages.
  *
  * root: `_file => ctx.directory` (Dockerfiles have no project-root concept).
- * spawn: `resolveNpmBin("dockerfile-language-server-nodejs",
+ * spawn: `resolveServerExecutable("dockerfile-language-server-nodejs",
  * "docker-langserver")`; no init options.
  *
  * extensions includes the extension-less `"Dockerfile"` (full filename):
@@ -381,10 +474,13 @@ export const DockerfileLS: LspServerInfo = {
   installHint: "npm i -g dockerfile-language-server-nodejs",
   root: (_file, ctx) => Promise.resolve(ctx.directory),
   extensions: [".dockerfile", "Dockerfile"],
+  executableCandidates: (root) =>
+    projectExecutableCandidates(root, "docker-langserver"),
   async spawn(root, ctx) {
-    const bin = await resolveNpmBin(
+    const bin = await resolveServerExecutable(
       "dockerfile-language-server-nodejs",
       "docker-langserver",
+      root,
       ctx
     );
     if (!bin) return undefined;

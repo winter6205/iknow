@@ -44,7 +44,17 @@ export interface SystemResolver {
  */
 export function createSystemResolver(
   ctx: AssemblyContext,
-  opts?: { readonly flags?: SystemResolverFlags }
+  opts?: {
+    readonly flags?: SystemResolverFlags;
+    /**
+     * Live memory-capability gate (ADR-0042 amendment 2026-10-07): absent =
+     * always on. False resolves to `undefined` before any snapshot slot is
+     * touched, so a total-OFF turn carries no `memory_layer` at all — no
+     * existence pointer, no catalog — instead of re-resolving another
+     * per-flag-value frozen copy.
+     */
+    readonly isEnabled?: () => boolean;
+  }
 ): SystemResolver {
   // Project memory lives in the home project tree at
   // `projects/<slug>/memory` (ADR-0099) (eager mkdir at assembly; failures
@@ -54,6 +64,10 @@ export function createSystemResolver(
   // each freeze one snapshot; without flags it is the original single
   // snapshot. Assembly failure does not poison the corresponding slot.
   const snapshots = new Map<boolean, Promise<string | undefined>>();
+  // Total memory OFF gets its own tier: the static layer (AGENTS.md + the
+  // rules manifest) still assembles, the memory index (existence pointer +
+  // catalog) does not. Assembled at most once per session.
+  let offSnapshot: Promise<string | undefined> | undefined;
 
   const assembleFor = (flag: boolean): Promise<string | undefined> =>
     flag === ctx.autoExtract
@@ -61,6 +75,26 @@ export function createSystemResolver(
       : assembleSystemPrompt({ ...ctx, autoExtract: flag });
 
   const resolver = (() => {
+    // Total memory OFF: assemble the index-free tier rather than re-resolving
+    // another per-flag-value frozen copy. Assembly failure must not poison it.
+    // EXIT: an absent gate reads as always-on, so only an explicit `false`
+    // selects the index-free tier.
+    if (opts?.isEnabled?.() === false) {
+      if (offSnapshot === undefined) {
+        const snap = assembleSystemPrompt({
+          ...ctx,
+          autoExtract: false,
+          memoryIndex: false,
+        }).catch((err: unknown) => {
+          // EXIT: a fault drops the tier so the next call retries (same
+          // contract as the per-flag tiers).
+          if (offSnapshot === snap) offSnapshot = undefined;
+          throw err;
+        });
+        offSnapshot = snap;
+      }
+      return offSnapshot;
+    }
     const flag = opts?.flags
       ? opts.flags.autoExtract === true
       : ctx.autoExtract === true;
@@ -80,6 +114,7 @@ export function createSystemResolver(
   }) as SystemResolver;
   resolver.invalidate = (): void => {
     snapshots.clear();
+    offSnapshot = undefined;
   };
   return resolver;
 }

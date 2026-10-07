@@ -26,6 +26,7 @@ import type { AciToolDef } from "../../aci/types.js";
 import { ToolExecutionError } from "../../errors.js";
 import { scoreMemoryEntries } from "../bm25.js";
 import { isCapabilityObservationEntry } from "../capability-gate.js";
+import { MemoryDisabled } from "../errors.js";
 import { MEMORY_ADVISORY_PREFIX } from "../prefetch.js";
 import { parseMemoryEntry } from "../frontmatter.js";
 import type { MemoryEntryV1 } from "../schema.js";
@@ -38,6 +39,13 @@ export interface MemoryRecallToolDeps {
   readonly memoryDir: string;
   /** Test / upstream seam: override disk reads with pre-built entries. */
   readonly entries?: ReadonlyArray<MemoryEntryV1>;
+  /**
+   * Live memory-capability gate (ADR-0031 amendment 2026-10-07). Absent =
+   * always on. False refuses the call before the store is read, so a call
+   * produced while memory was on — including one replayed from older
+   * conversation history — cannot read the store.
+   */
+  readonly isEnabled?: () => boolean;
 }
 
 export function createMemoryRecallTool(deps: MemoryRecallToolDeps): AciToolDef {
@@ -66,6 +74,10 @@ export function createMemoryRecallTool(deps: MemoryRecallToolDeps): AciToolDef {
       timeoutTier: "fast",
     } as const,
     handler: async (input: unknown) => {
+      // Total memory OFF: refuse before the store is read.
+      // EXIT: absent gate = always on (ask path / direct construction).
+      if (deps.isEnabled?.() === false)
+        throw new MemoryDisabled("memory_recall");
       const params = parseInput(input);
       const resolved =
         deps.entries ?? (await readEntriesFromDisk(deps.memoryDir));

@@ -984,7 +984,7 @@ const policyEntry = (): MemoryEntryV1 => ({
   updated_at: NOW_ISO,
 });
 
-describe("createAutoMemoryHook — mechanical-only segment on dual-off", () => {
+describe("createAutoMemoryHook — mechanical-only segment while ON", () => {
   it("sweeps capability rows on the gated turn with zero LLM calls", async () => {
     const llm = countingLlm(FACT);
     await writeFile(
@@ -1001,7 +1001,7 @@ describe("createAutoMemoryHook — mechanical-only segment on dual-off", () => {
       memoryDir,
       llm,
       enabled: false,
-      dream: false,
+      dream: true,
       now: () => NOW_ISO,
       nowMs: Date.parse(NOW_ISO),
     });
@@ -1041,7 +1041,10 @@ describe("createAutoMemoryHook — mechanical-only segment on dual-off", () => {
     );
   });
 
-  it("reads live flags so a TUI flip to dual-off keeps the mechanical segment", async () => {
+  it("reads live flags so a TUI flip to dual-off stops the mechanical segment", async () => {
+    // ADR-0031 amendment 2026-10-07: dual-off is total memory OFF, so the
+    // hook stays wired (hook presence is `autoExtract || dream`) but runs
+    // nothing — no mechanical pass, no sweep, no LLM call.
     const llm = countingLlm(FACT);
     await writeFile(
       join(memoryDir, "cap.md"),
@@ -1058,8 +1061,7 @@ describe("createAutoMemoryHook — mechanical-only segment on dual-off", () => {
       now: () => NOW_ISO,
       nowMs: Date.parse(NOW_ISO),
     });
-    // Flip to dual-off before the turn: the hook stays wired and must still
-    // reach the mechanical segment on the gate.
+    // Flip to dual-off before the turn.
     flags.autoExtract = false;
     flags.dream = false;
     hook.onTurnComplete({
@@ -1071,31 +1073,42 @@ describe("createAutoMemoryHook — mechanical-only segment on dual-off", () => {
     assert.equal(
       parseMemoryEntry(await readFile(join(memoryDir, "cap.md"), "utf8"))
         .disabled,
-      true
+      false,
+      "total memory OFF runs no mechanical pass either"
     );
   });
 
   // SC2 empty: a due mechanical pass on an empty store is a zero-LLM no-op
-  // that creates nothing and is idempotent.
+  // that creates no entry and is idempotent. `dream: true` keeps the memory
+  // capability ON (dual-off is total OFF as of ADR-0031 amendment
+  // 2026-10-07) with the extract arm off; the dream gate is not met, so the
+  // turn runs exactly one mechanical pass and only the dream cursor — which
+  // that gate is entitled to write — may appear.
   it("is an idempotent no-op on an empty store", async () => {
     const llm = countingLlm(FACT);
     const hook = createAutoMemoryHook({
       memoryDir,
       llm,
       enabled: false,
-      dream: false,
+      dream: true,
       minCompletedTurns: 1,
       now: () => NOW_ISO,
       nowMs: Date.parse(NOW_ISO),
     });
+    const entryFiles = async (): Promise<string[]> =>
+      (await readdir(memoryDir)).filter((name) => name !== DREAM_CURSOR_FILENAME);
     hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
     await hook.drain();
     assert.equal(llm.calls(), 0);
-    assert.deepEqual(await readdir(memoryDir), [], "zero new files");
+    assert.deepEqual(await entryFiles(), [], "zero entry files");
     hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
     await hook.drain();
     assert.equal(llm.calls(), 0);
-    assert.deepEqual(await readdir(memoryDir), [], "still zero new files");
+    assert.deepEqual(
+      await entryFiles(),
+      [],
+      "still zero entry files"
+    );
   });
 
   // SC5 exception: a write-path fault (archive target is a regular file)
@@ -1116,7 +1129,7 @@ describe("createAutoMemoryHook — mechanical-only segment on dual-off", () => {
       memoryDir,
       llm: countingLlm(FACT),
       enabled: false,
-      dream: false,
+      dream: true,
       minCompletedTurns: 1,
       now: () => NOW_ISO,
       nowMs: Date.parse(NOW_ISO),
@@ -1144,15 +1157,18 @@ describe("createAutoMemoryHook — mechanical-only segment on dual-off", () => {
       memoryDir: join(blocker, "memory"),
       llm: countingLlm(FACT),
       enabled: false,
-      dream: false,
+      dream: true,
       minCompletedTurns: 1,
       nowMs: Date.parse(NOW_ISO),
       onError: (error) => seen.push(error),
     });
+    // Driven through the exit seam: it runs the mechanical pass alone, so the
+    // unreadable dir exercises GC's empty-store reading rather than the dream
+    // cursor's own (separately typed) failure path.
     assert.doesNotThrow(() => {
-      hook.onTurnComplete({ stopReason: "completed", transcript: "user: hi" });
+      void hook.onExit?.();
     });
-    await hook.drain();
+    await hook.onExit?.();
     assert.deepEqual(seen, []);
   });
 
@@ -1166,7 +1182,7 @@ describe("createAutoMemoryHook — mechanical-only segment on dual-off", () => {
       memoryDir,
       llm: countingLlm(FACT),
       enabled: false,
-      dream: false,
+      dream: true,
       minCompletedTurns: 1,
       now: () => NOW_ISO,
       nowMs: Date.parse(NOW_ISO),
@@ -1331,7 +1347,7 @@ describe("createAutoMemoryHook — process-exit mechanical pass", () => {
       memoryDir,
       llm,
       enabled: false,
-      dream: false,
+      dream: true,
       minCompletedTurns: 1,
       now: () => NOW_ISO,
       nowMs: Date.parse(NOW_ISO),
@@ -1357,7 +1373,7 @@ describe("createAutoMemoryHook — process-exit mechanical pass", () => {
       memoryDir,
       llm: countingLlm(FACT),
       enabled: false,
-      dream: false,
+      dream: true,
       nowMs: Date.parse(NOW_ISO),
     });
     // A sub-gate turn and an exit sweep both run; the second exit is a no-op.
@@ -1392,7 +1408,7 @@ describe("createAutoMemoryHook — process-exit mechanical pass", () => {
       memoryDir,
       llm: countingLlm(FACT),
       enabled: false,
-      dream: false,
+      dream: true,
       nowMs: Date.parse(NOW_ISO),
       onError: (error) => seen.push(error),
     });
@@ -1422,7 +1438,7 @@ describe("createAutoMemoryHook — process-exit mechanical pass", () => {
       memoryDir,
       llm: countingLlm(FACT),
       enabled: false,
-      dream: false,
+      dream: true,
       nowMs: Date.parse(NOW_ISO),
       onError: (error) => seen.push(error),
     });

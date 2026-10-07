@@ -101,6 +101,19 @@ export interface LspServerInfo {
    * when rendering the spawn-failed sentinel. Absent → sentinel omits the hint.
    */
   readonly installHint?: string;
+  /**
+   * Absolute executable paths this server probes inside the active project /
+   * worktree, in the order it probes them.
+   *
+   * Doubles as recovery evidence: client.ts re-checks these paths after an
+   * `executable-resolution` failure, so a completed install into the project is
+   * detectable without a new caller. Absent → no automatic recovery signal
+   * (an explicit `retryFailedLspStart` still works).
+   */
+  readonly executableCandidates?: (
+    root: string,
+    ctx: LspCtx
+  ) => Promise<readonly string[]> | readonly string[];
 }
 
 /** Handle returned by spawn: subprocess + initializationOptions (passes tsserver.path to typescript-language-server). */

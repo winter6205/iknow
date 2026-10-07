@@ -274,6 +274,15 @@ export interface CreateDefaultAciRegistryOptions {
   readonly sandboxRoot: string;
   /** Memory base dir. When absent, memory_recall / memory_save are not registered. */
   readonly memoryDir?: string;
+  /**
+   * Live memory-capability gate (ADR-0031 amendment 2026-10-07), same shape
+   * as the graph `isEnabled` gate: absent = always on. False means the memory
+   * capability switch is OFF — the memory pair stays registered (so a stale
+   * call is refused by the handler with a typed failure rather than an
+   * unknown-tool error) while the assembly layer keeps its schemas out of
+   * promptTools.
+   */
+  readonly memoryCapability?: () => boolean;
   /** Skill index catalog. When absent, skill is not registered (after
    *  skill_search was removed, only the one skill tool remains). */
   readonly skillCatalog?: SkillCatalog;
@@ -961,8 +970,16 @@ export function createDefaultAciRegistry(
       }),
     ...(memoryDir
       ? {
-          memory_recall: () => createMemoryRecallTool({ memoryDir }),
-          memory_save: () => createMemorySaveTool({ memoryDir }),
+          memory_recall: () =>
+            createMemoryRecallTool({
+              memoryDir,
+              isEnabled: opts.memoryCapability,
+            }),
+          memory_save: () =>
+            createMemorySaveTool({
+              memoryDir,
+              isEnabled: opts.memoryCapability,
+            }),
         }
       : {}),
     tool_search: () =>

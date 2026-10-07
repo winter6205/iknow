@@ -22,8 +22,8 @@ agent 符号工具（15 件）
 
 - **The model-facing surface is symbol identity, not coordinates**: tools take
   `{ file, symbol_path }`; row/column decoding lives in `symbol-resolver.ts`.
-  The original 10 coordinate-face `lsp_*` tools were retired from the *model
-  face*, but not from the codebase — `createLspToolSet`
+  The original 10 coordinate-face `lsp_*` tools were retired from the _model
+  face_, but not from the codebase — `createLspToolSet`
   (`aci/tools/lsp.ts:857`) is the real-stack smoke-test instrument used by
   `scripts/lsp-probe.ts:266` (run via `npx tsx scripts/lsp-probe.ts`).
   Shared helpers (`getClientForWorkspaceDetailed` / `renderNoServer` /
@@ -54,13 +54,13 @@ The `web/` subpackage has no LSP dependencies.
 
 ### 1.3 15 model-facing tools → the 10 methods actually sent
 
-| tool                                               | method                      |
-| -------------------------------------------------- | --------------------------- |
-| `find_declaration`                                 | `textDocument/definition`   |
-| `find_referencing_symbols`, `safe_delete_symbol`   | `textDocument/references`   |
-| `find_implementations`                             | `textDocument/implementation` |
-| `get_hover`                                        | `textDocument/hover`        |
-| `get_symbols_overview`, `symbol-resolver`          | `textDocument/documentSymbol` |
+| tool                                             | method                        |
+| ------------------------------------------------ | ----------------------------- |
+| `find_declaration`                               | `textDocument/definition`     |
+| `find_referencing_symbols`, `safe_delete_symbol` | `textDocument/references`     |
+| `find_implementations`                           | `textDocument/implementation` |
+| `get_hover`                                      | `textDocument/hover`          |
+| `get_symbols_overview`, `symbol-resolver`        | `textDocument/documentSymbol` |
 
 | `prepare_call_hierarchy` | `textDocument/prepareCallHierarchy` |
 | `list_incoming_calls` / `list_outgoing_calls` | `callHierarchy/{incoming,outgoing}Calls` |
@@ -78,7 +78,7 @@ Plus the three text-sync notifications `didOpen` / `didChange` / `didClose`.
 - **Request-scoped document open**: `withDocumentOpen` opens on entry and closes
   on exit (including throw and timeout paths), with a refs count plus a `pinned`
   exception; tsserver builds no project for unopened files, so this is a
-  *prerequisite* for project context, not an optimization (see the term entry in
+  _prerequisite_ for project context, not an optimization (see the term entry in
   `docs/CONTEXT.md`)
 - **Out-of-band change alignment**: `alignToDisk` compares mtime before each
   RPC and sends `didChange` only on a diff (`client.ts:560-580`, call site
@@ -109,8 +109,8 @@ npm test                           # tests/harness/lsp/ + tests/harness/aci/lsp.
 
 ## 2. Design boundaries
 
-The iknow LSP stack serves *in-loop agent symbol lookup, diagnostics, and
-symbol-level edits* — it is not an editor integration:
+The iknow LSP stack serves _in-loop agent symbol lookup, diagnostics, and
+symbol-level edits_ — it is not an editor integration:
 
 - handlers return plain strings (contract Y1); no UI decoration
 - single local project: `LspCtx.directory` + `NearestRoot` suffice; no
@@ -128,14 +128,14 @@ symbol-level edits* — it is not an editor integration:
 
 ### 3.1 Capability gaps (ordered by agent value)
 
-| gap | current state | impact |
-| --- | ------------- | ------ |
-| **`codeAction` + `workspace/executeCommand`** | absent (`executeCommand` appears nowhere in `src/`) | the agent sees diagnostics but **cannot make the server fix them**: no quick-fix, no auto-import, no organize-imports; every fix must be hand-assembled as text |
-| **`prepareRename`** | absent; `rename_symbol` sends `textDocument/rename` directly | "can this position be renamed?" is only discovered by a failed request, with no clean pre-check |
-| **`typeHierarchy/*`** | absent | the call graph exists (both directions), the type graph does not; `find_implementations` covers only half |
-| **pull diagnostics** | `textDocument/diagnostic` is in the capability table but nobody sends it; push only | relies on "edit, wait for a re-push, deadline" — the complexity of `waitForDiagnostics` is the price |
-| **`willRenameFiles` / `didRenameFiles`** | absent | moving/renaming a file leaves imports un-updated by the server |
-| `completion` / `signatureHelp` / `formatting` / `codeLens` | absent | low agent value (see §5) |
+| gap                                                        | current state                                                                       | impact                                                                                                                                                          |
+| ---------------------------------------------------------- | ----------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **`codeAction` + `workspace/executeCommand`**              | absent (`executeCommand` appears nowhere in `src/`)                                 | the agent sees diagnostics but **cannot make the server fix them**: no quick-fix, no auto-import, no organize-imports; every fix must be hand-assembled as text |
+| **`prepareRename`**                                        | absent; `rename_symbol` sends `textDocument/rename` directly                        | "can this position be renamed?" is only discovered by a failed request, with no clean pre-check                                                                 |
+| **`typeHierarchy/*`**                                      | absent                                                                              | the call graph exists (both directions), the type graph does not; `find_implementations` covers only half                                                       |
+| **pull diagnostics**                                       | `textDocument/diagnostic` is in the capability table but nobody sends it; push only | relies on "edit, wait for a re-push, deadline" — the complexity of `waitForDiagnostics` is the price                                                            |
+| **`willRenameFiles` / `didRenameFiles`**                   | absent                                                                              | moving/renaming a file leaves imports un-updated by the server                                                                                                  |
+| `completion` / `signatureHelp` / `formatting` / `codeLens` | absent                                                                              | low agent value (see §5)                                                                                                                                        |
 
 ### 3.2 Language coverage
 
@@ -206,12 +206,12 @@ use LSP `textDocument/*`** — `symbol-mutate.ts:519` states there is no
 These were once listed as gaps and have since landed — older versions of this
 file still described them as missing:
 
-| formerly missing | current state |
-| ---------------- | ------------- |
+| formerly missing                                                    | current state                                                            |
+| ------------------------------------------------------------------- | ------------------------------------------------------------------------ |
 | `initialize` sent empty capabilities and ignored the server's reply | non-empty advertised capabilities, snapshot stored (`client.ts:467-478`) |
-| no `didClose`, `openedUris` only grew | request-scoped open windows; close on exit + refs count |
-| rebind / idle left child processes alive | all three reclamation seams send `SIGTERM` (`client.ts:187-197`) |
-| out-of-band changes not synced | `alignToDisk` mtime comparison before each RPC |
+| no `didClose`, `openedUris` only grew                               | request-scoped open windows; close on exit + refs count                  |
+| rebind / idle left child processes alive                            | all three reclamation seams send `SIGTERM` (`client.ts:187-197`)         |
+| out-of-band changes not synced                                      | `alignToDisk` mtime comparison before each RPC                           |
 
 **Deliberately rejected**: "prune tool registration / descriptions by declared
 server capabilities" — typescript-language-server measurably does **not**
@@ -244,18 +244,18 @@ are discovered at runtime via `-32601` → method-not-found sentinel
 
 ## 6. Related paths
 
-| path | role |
-| ---- | ---- |
-| `src/harness/lsp/client.ts` | connection pool, spawn, request-scoped open windows, mtime alignment, diagnostics subscription, child-process cleanup |
-| `src/harness/lsp/server.ts` | 5 language-server declarations + `NearestRoot` + `resolveServer` |
-| `src/harness/lsp/language.ts` | language detection |
-| `src/harness/lsp/notifier.ts` | invalidate after edit |
-| `src/harness/lsp/warmup.ts` | post-assembly warmup (real samples + pinned open) |
-| `src/harness/aci/tools/symbol.ts` | the 10 lookup tools (model face) |
-| `src/harness/aci/tools/symbol-mutate.ts` | the 5 mutation tools (model face, category=write) |
-| `src/harness/aci/tools/symbol-resolver.ts` | symbol identity → row/column decoding + content-fingerprint cache |
-| `src/harness/aci/tools/lsp.ts` | the retired coordinate-face 10 tools + still-used shared helpers (sentinels / stringify / workspace client) |
-| `scripts/lsp-probe.ts` | real-server smoke test |
+| path                                       | role                                                                                                                  |
+| ------------------------------------------ | --------------------------------------------------------------------------------------------------------------------- |
+| `src/harness/lsp/client.ts`                | connection pool, spawn, request-scoped open windows, mtime alignment, diagnostics subscription, child-process cleanup |
+| `src/harness/lsp/server.ts`                | 5 language-server declarations + `NearestRoot` + `resolveServer`                                                      |
+| `src/harness/lsp/language.ts`              | language detection                                                                                                    |
+| `src/harness/lsp/notifier.ts`              | invalidate after edit                                                                                                 |
+| `src/harness/lsp/warmup.ts`                | post-assembly warmup (real samples + pinned open)                                                                     |
+| `src/harness/aci/tools/symbol.ts`          | the 10 lookup tools (model face)                                                                                      |
+| `src/harness/aci/tools/symbol-mutate.ts`   | the 5 mutation tools (model face, category=write)                                                                     |
+| `src/harness/aci/tools/symbol-resolver.ts` | symbol identity → row/column decoding + content-fingerprint cache                                                     |
+| `src/harness/aci/tools/lsp.ts`             | the retired coordinate-face 10 tools + still-used shared helpers (sentinels / stringify / workspace client)           |
+| `scripts/lsp-probe.ts`                     | real-server smoke test                                                                                                |
 
 ---
 
@@ -292,11 +292,11 @@ contract for the anchor-less `find_symbol` branch are in §8 and §3.3.
 
 The probe has three verdicts (`ProbeVerdict`, `scripts/lsp-probe.ts:141-145`):
 
-| verdict | output marker                | meaning                                              |
-| ------- | ---------------------------- | ---------------------------------------------------- |
-| pass    | `✓ <op>`                     | returned a non-empty plain string, not any failure sentinel |
+| verdict | output marker                | meaning                                                                             |
+| ------- | ---------------------------- | ----------------------------------------------------------------------------------- |
+| pass    | `✓ <op>`                     | returned a non-empty plain string, not any failure sentinel                         |
 | skip    | `- <op> (skipped: <reason>)` | the server does not implement the method (MethodNotFound); **not counted in total** |
-| fail    | `✗ <op> (<detail>)`          | empty return / non-string / failure sentinel / other RPC error |
+| fail    | `✗ <op> (<detail>)`          | empty return / non-string / failure sentinel / other RPC error                      |
 
 - **skips carry no score**: `passed === total` is decided over ops **actually
   checked**; a capability-gap op neither passes nor loses a point
@@ -332,38 +332,38 @@ MethodNotFound sentinel — server 未实现该方法
 
 Skip details (matrix column → the LSP method the probe actually sent):
 
-| serverId                            | skipped ops                                                                                                                                          | corresponding method                                                                                                                                            |
-| ----------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `typescript`                        | none                                                                                                                                                 | —                                                                                                                                                               |
+| serverId                            | skipped ops                                                                                                                                         | corresponding method                                                                                                                                            |
+| ----------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `typescript`                        | none                                                                                                                                                | —                                                                                                                                                               |
 | `pyright`                           | `lsp_go_to_implementation`                                                                                                                          | `textDocument/implementation`                                                                                                                                   |
 | `yaml-language-server`              | `lsp_references` / `lsp_workspace_symbol` / `lsp_go_to_implementation` / `lsp_prepare_call_hierarchy` / `lsp_incoming_calls` / `lsp_outgoing_calls` | `textDocument/references` / `workspace/symbol` / `textDocument/implementation` / `textDocument/prepareCallHierarchy` / `callHierarchy/{incoming,outgoing}Calls` |
-| `json-language-server`              | the same six as yaml + `lsp_definition`                                                                                                              | the same six as yaml + `textDocument/definition`                                                                                                                |
-| `dockerfile-language-server-nodejs` | the same six as `yaml-language-server`                                                                                                               | same as the yaml row                                                                                                                                            |
+| `json-language-server`              | the same six as yaml + `lsp_definition`                                                                                                             | the same six as yaml + `textDocument/definition`                                                                                                                |
+| `dockerfile-language-server-nodejs` | the same six as `yaml-language-server`                                                                                                              | same as the yaml row                                                                                                                                            |
 
 Matrix column → method, full table:
 
-| op                           | method                                                |
-| ---------------------------- | ----------------------------------------------------- |
-| `lsp_definition`             | `textDocument/definition`                             |
-| `lsp_references`             | `textDocument/references`                             |
-| `lsp_hover`                  | `textDocument/hover`                                  |
-| `lsp_document_symbol`        | `textDocument/documentSymbol`                         |
-| `lsp_workspace_symbol`       | `workspace/symbol`                                    |
-| `lsp_go_to_implementation`   | `textDocument/implementation`                         |
-| `lsp_prepare_call_hierarchy` | `textDocument/prepareCallHierarchy`                   |
-| `lsp_incoming_calls`         | `callHierarchy/incomingCalls`                         |
-| `lsp_outgoing_calls`         | `callHierarchy/outgoingCalls`                         |
+| op                           | method                                                               |
+| ---------------------------- | -------------------------------------------------------------------- |
+| `lsp_definition`             | `textDocument/definition`                                            |
+| `lsp_references`             | `textDocument/references`                                            |
+| `lsp_hover`                  | `textDocument/hover`                                                 |
+| `lsp_document_symbol`        | `textDocument/documentSymbol`                                        |
+| `lsp_workspace_symbol`       | `workspace/symbol`                                                   |
+| `lsp_go_to_implementation`   | `textDocument/implementation`                                        |
+| `lsp_prepare_call_hierarchy` | `textDocument/prepareCallHierarchy`                                  |
+| `lsp_incoming_calls`         | `callHierarchy/incomingCalls`                                        |
+| `lsp_outgoing_calls`         | `callHierarchy/outgoingCalls`                                        |
 | `lsp_diagnostics`            | `textDocument/publishDiagnostics` (push subscription, not a request) |
 
 ### 7.4 Fixtures and root markers
 
-| --lang     | target file                                                  | kind             | root marker                                                |
-| ---------- | ------------------------------------------------------------ | ---------------- | ---------------------------------------------------------- |
-| typescript | `src/harness/lsp/client.ts` (line 94, char 22)               | real repo file   | `package-lock.json` (`TS_LOCKFILES`, `server.ts:157-163`)  |
-| json       | `tsconfig.json` (line 2, char 1)                             | real repo file   | none (`JsonLS.root = ctx.directory`, `server.ts:323`)      |
-| python     | `.iknow/probe-lsp/python/probe.py` (line 1, char 4)          | generated fixture | `pyrightconfig.json` (`ProbeTarget.rootMarkers`)          |
-| yaml       | `.iknow/probe-lsp/yaml/probe.yml` (line 5, char 9)           | generated fixture | none (`YamlLS.root = ctx.directory`, `server.ts:295`)     |
-| dockerfile | `.iknow/probe-lsp/dockerfile/Dockerfile` (line 1, char 5)    | generated fixture | none (`DockerfileLS.root = ctx.directory`, `server.ts:354`) |
+| --lang     | target file                                               | kind              | root marker                                                 |
+| ---------- | --------------------------------------------------------- | ----------------- | ----------------------------------------------------------- |
+| typescript | `src/harness/lsp/client.ts` (line 94, char 22)            | real repo file    | `package-lock.json` (`TS_LOCKFILES`, `server.ts:157-163`)   |
+| json       | `tsconfig.json` (line 2, char 1)                          | real repo file    | none (`JsonLS.root = ctx.directory`, `server.ts:323`)       |
+| python     | `.iknow/probe-lsp/python/probe.py` (line 1, char 4)       | generated fixture | `pyrightconfig.json` (`ProbeTarget.rootMarkers`)            |
+| yaml       | `.iknow/probe-lsp/yaml/probe.yml` (line 5, char 9)        | generated fixture | none (`YamlLS.root = ctx.directory`, `server.ts:295`)       |
+| dockerfile | `.iknow/probe-lsp/dockerfile/Dockerfile` (line 1, char 5) | generated fixture | none (`DockerfileLS.root = ctx.directory`, `server.ts:354`) |
 
 Fixtures are always written under `.iknow/probe-lsp/<lang>/` (`.iknow/*` is
 gitignored), never at the repo root, so they cannot be mistaken for real
@@ -405,17 +405,22 @@ npx tsx scripts/lsp-probe.ts --lang json
 npx tsx scripts/lsp-probe.ts --lang dockerfile
 ```
 
-All 5 server packages were present in `node_modules` and resolved at step 1 of
-`resolveNpmBin` (`createRequire`, same-source resolution); the PATH `which`
-fallback was never used:
+All 5 server packages were present in `node_modules` and resolved by the
+harness-anchored `createRequire` layer; the PATH `which` fallback was never
+used. Resolution order is now explicit (`resolveServerExecutable`): explicit
+`ctx.resolveBin` override → the active project / worktree
+(`node_modules/.bin/<bin>`, then the project venv `bin`) → the harness's own
+`node_modules` → the PATH `which` probe. The project layer is new: a dependency
+installed into the user's project was previously invisible to the running
+harness, which could only see its own `node_modules` and `PATH`.
 
-| serverId                            | package                               | measured version | bin name                   |
-| ----------------------------------- | ----------------------------------- | -------- | ---------------------------- |
-| `typescript`                        | `typescript-language-server`        | 5.3.0    | `typescript-language-server` |
-| `pyright`                           | `pyright`                           | 1.1.411  | `pyright-langserver`         |
-| `yaml-language-server`              | `yaml-language-server`              | 1.24.0   | `yaml-language-server`       |
-| `json-language-server`              | `vscode-json-languageserver`        | 1.3.4    | `vscode-json-languageserver` |
-| `dockerfile-language-server-nodejs` | `dockerfile-language-server-nodejs` | 0.15.0   | `docker-langserver`          |
+| serverId                            | package                             | measured version | bin name                     |
+| ----------------------------------- | ----------------------------------- | ---------------- | ---------------------------- |
+| `typescript`                        | `typescript-language-server`        | 5.3.0            | `typescript-language-server` |
+| `pyright`                           | `pyright`                           | 1.1.411          | `pyright-langserver`         |
+| `yaml-language-server`              | `yaml-language-server`              | 1.24.0           | `yaml-language-server`       |
+| `json-language-server`              | `vscode-json-languageserver`        | 1.3.4            | `vscode-json-languageserver` |
+| `dockerfile-language-server-nodejs` | `dockerfile-language-server-nodejs` | 0.15.0           | `docker-langserver`          |
 
 ### 7.6 Recording convention for untested cells
 
@@ -457,11 +462,11 @@ results are trustworthy.
 
 ### 8.1 Prior attributions this round refutes
 
-| Prior claim                                   | Measured                                                                                                                                                                                   |
-| --------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `lsp.ts:495` comment / §3.3: empty result blamed on "no file to open"  | The attribution is wrong. A file **was** open (warmup's bare `ensureOpen`) and the query still returned `[]` — even **right after returning hits** (§8.4 flip). The deciding factor is the **project** owning the anchor file, not "was any file ever opened" |
-| Earlier claim: after `ensureOpen(registry.ts)` the same query returned 3 hits and stayed stable | Reproduced, but the real numbers are **4 hits / 3 files**, and the result **falls back to 0–1 hits after 6–8 s**. That observation landed inside a project-rebuild **transient window** (§8.4) |
-| Earlier claim: waiting 10 s never changes `[]`         | True for this worktree's **production anchor scenario** (`0` throughout the 40 s window in §8.3), but **not generalizable**: with an in-project anchor, `0` becomes `4` within 10 s (§8.2 anchor A) |
+| Prior claim                                                                                     | Measured                                                                                                                                                                                                                                                      |
+| ----------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `lsp.ts:495` comment / §3.3: empty result blamed on "no file to open"                           | The attribution is wrong. A file **was** open (warmup's bare `ensureOpen`) and the query still returned `[]` — even **right after returning hits** (§8.4 flip). The deciding factor is the **project** owning the anchor file, not "was any file ever opened" |
+| Earlier claim: after `ensureOpen(registry.ts)` the same query returned 3 hits and stayed stable | Reproduced, but the real numbers are **4 hits / 3 files**, and the result **falls back to 0–1 hits after 6–8 s**. That observation landed inside a project-rebuild **transient window** (§8.4)                                                                |
+| Earlier claim: waiting 10 s never changes `[]`                                                  | True for this worktree's **production anchor scenario** (`0` throughout the 40 s window in §8.3), but **not generalizable**: with an in-project anchor, `0` becomes `4` within 10 s (§8.2 anchor A)                                                           |
 
 ### 8.2 Mechanism
 
@@ -499,10 +504,10 @@ directory.
 `src/harness/aci/tools/symbol.ts` (inside `include`), B =
 `archive/onetime-probes/closed-world-inventory-probe.ts` (outside `include`):
 
-| Query                                                 | Anchor A (in `include`)             | Anchor B (out of `include`) |
-| ----------------------------------------------------- | ----------------------- | -------------------------- |
-| `createAciRegistry` (`src/`, never opened)            | `4` hits (stable after ~7 s)        | `0` (stable across 40 s)   |
-| `createSymbolQueryToolSetForTest` (`tests/`, never opened) | `0` (stable for 30 s+)         | —                          |
+| Query                                                      | Anchor A (in `include`)      | Anchor B (out of `include`) |
+| ---------------------------------------------------------- | ---------------------------- | --------------------------- |
+| `createAciRegistry` (`src/`, never opened)                 | `4` hits (stable after ~7 s) | `0` (stable across 40 s)    |
+| `createSymbolQueryToolSetForTest` (`tests/`, never opened) | `0` (stable for 30 s+)       | —                           |
 
 The `tests/` row is a second measurement: `tsconfig.json:26` sets `include` to
 `["src/**/*.ts", "src/**/*.tsx"]` and `tests/` is in `exclude`
@@ -580,13 +585,13 @@ and **an empty result may be merely transient under any anchor**.
 
 ### 8.5 Verdicts on the candidate mechanisms
 
-| #   | Candidate                                      | Verdict                                          | Decisive evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| --- | --------------------------------------- | ---------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| a   | warmup failed silently                             | **RULED OUT** (not a cause on its own)                          | Measured `getWarmupOutcome()`: `status=partial`, non-empty `pinnedSamples`, `failures` only pyright. Warmup ran successfully. But it **picked the wrong sample** (pinned the first hit outside the tsconfig `include`) — that half shares a root with (d)                                                                                                                                                                                                                                                                   |
-| b   | pool-key mismatch                                  | **RULED OUT** (production shape); **REACHABLE** (general shape) | Production shape measured: warmup pin and the synthetic-path dispatch share a pid, and the pool has a single `typescript` key (§8.3). The general shape is constructible: with nested lockfiles, warmup's sample root ≠ the synthetic-path root, producing 2 keys and 2 tsserver processes, and warmup's pin is **completely invisible** to the no-`file` path (`<ROOT>/sub:typescript` vs `<ROOT>:typescript`, measured). Not triggered in this repo                                                                                                                                           |
-| c   | `ctx.directory` not the repo root                  | **RULED OUT** (production path)                            | `build-engine.ts:620-632`: non-ask surfaces take `mcpRoots.workspaceRoot`; `resolveWorkspaceRoot` is a three-step chain `[opts.workspaceRoot, env IKNOW_WORKSPACE_ROOT, cwd]` (`config/workspace-root.ts:151-171`) that returns a subdirectory unvalidated — theoretically reachable when a user starts a session from a subdirectory, not triggered in this repo. Related fact: in worktree scenarios `ctx.directory` = the worktree (ADR-0019), which equals "the repo root in the user's mind"                                                                                                   |
-| c′  | **workspace-level dispatch lands on a non-target server** | **ESTABLISHED** (general shape)                          | When the directory has `.ts` files but **no TS root marker**, typescript / pyright each return `no-root` (measured), and the third declared server `yaml-language-server` (`root = ctx.directory`) **becomes the live client**; `find_symbol` then returns the **missing-method sentinel** `(LSP server does not implement workspace/symbol; use another tool for this query)`. What the model reads is "use another tool"; the truth is "TS was never asked" — a **misleading signal**. Measured `process.spawnargs[0]` = `node_modules/yaml-language-server/bin/yaml-language-server` |
-| d   | `workspace/symbol` / tsserver behavior itself      | **ESTABLISHED** (primary cause)                              | §8.2–8.4: the search set = the project owning the file pointed to by `lastFileOrDummy()`; an inferred project contains only that file + its import closure; a tsconfig project is bounded by `include`; switching anchors triggers project rebuilds and the observed hits → none flip                                                                                                                                                                                                                                                               |
+| #   | Candidate                                                 | Verdict                                                         | Decisive evidence                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
+| --- | --------------------------------------------------------- | --------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| a   | warmup failed silently                                    | **RULED OUT** (not a cause on its own)                          | Measured `getWarmupOutcome()`: `status=partial`, non-empty `pinnedSamples`, `failures` only pyright. Warmup ran successfully. But it **picked the wrong sample** (pinned the first hit outside the tsconfig `include`) — that half shares a root with (d)                                                                                                                                                                                                                                                                                                                               |
+| b   | pool-key mismatch                                         | **RULED OUT** (production shape); **REACHABLE** (general shape) | Production shape measured: warmup pin and the synthetic-path dispatch share a pid, and the pool has a single `typescript` key (§8.3). The general shape is constructible: with nested lockfiles, warmup's sample root ≠ the synthetic-path root, producing 2 keys and 2 tsserver processes, and warmup's pin is **completely invisible** to the no-`file` path (`<ROOT>/sub:typescript` vs `<ROOT>:typescript`, measured). Not triggered in this repo                                                                                                                                   |
+| c   | `ctx.directory` not the repo root                         | **RULED OUT** (production path)                                 | `build-engine.ts:620-632`: non-ask surfaces take `mcpRoots.workspaceRoot`; `resolveWorkspaceRoot` is a three-step chain `[opts.workspaceRoot, env IKNOW_WORKSPACE_ROOT, cwd]` (`config/workspace-root.ts:151-171`) that returns a subdirectory unvalidated — theoretically reachable when a user starts a session from a subdirectory, not triggered in this repo. Related fact: in worktree scenarios `ctx.directory` = the worktree (ADR-0019), which equals "the repo root in the user's mind"                                                                                       |
+| c′  | **workspace-level dispatch lands on a non-target server** | **ESTABLISHED** (general shape)                                 | When the directory has `.ts` files but **no TS root marker**, typescript / pyright each return `no-root` (measured), and the third declared server `yaml-language-server` (`root = ctx.directory`) **becomes the live client**; `find_symbol` then returns the **missing-method sentinel** `(LSP server does not implement workspace/symbol; use another tool for this query)`. What the model reads is "use another tool"; the truth is "TS was never asked" — a **misleading signal**. Measured `process.spawnargs[0]` = `node_modules/yaml-language-server/bin/yaml-language-server` |
+| d   | `workspace/symbol` / tsserver behavior itself             | **ESTABLISHED** (primary cause)                                 | §8.2–8.4: the search set = the project owning the file pointed to by `lastFileOrDummy()`; an inferred project contains only that file + its import closure; a tsconfig project is bounded by `include`; switching anchors triggers project rebuilds and the observed hits → none flip                                                                                                                                                                                                                                                                                                   |
 
 ### 8.6 Is the no-`file` path salvageable? — Yes, provided the **anchor lands inside the target project's tsconfig `include`**
 
@@ -606,12 +611,19 @@ and **an empty result may be merely transient under any anchor**.
 
 The decision semantics of the three existing prefixes (`lsp.ts:181-239`):
 
-| Prefix                               | Meaning                  | `isLspFailureSentinel` | probe verdict |
-| ------------------------------------ | ------------------------- | ---------------------- | ------------- |
-| `(no LSP server configured`          | no matching server        | true (FAIL)            | fail          |
-| `(no LSP project root found`         | server exists, no root marker | true (FAIL)        | fail          |
-| `(LSP server … unavailable`          | spawn failed / bin missing | true (FAIL)           | fail          |
-| `(LSP server … does not implement …` | server capability gap     | **false** (skip)       | skip          |
+| Prefix                               | Meaning                                    | `isLspFailureSentinel` | probe verdict |
+| ------------------------------------ | ------------------------------------------ | ---------------------- | ------------- |
+| `(no LSP server configured`          | no matching server                         | true (FAIL)            | fail          |
+| `(no LSP project root found`         | server exists, no root marker              | true (FAIL)            | fail          |
+| `(LSP server … unavailable`          | start failed (carries `stage:` + `cause:`) | true (FAIL)            | fail          |
+| `(LSP server … does not implement …` | server capability gap                      | **false** (skip)       | skip          |
+
+The `spawn-failed` sentinel now carries the failing **stage** and the retained
+**cause** inside the same prefix — `stage: executable-resolution | process-spawn
+| process-exit | initialization | pool-shutdown`, plus `cause: …` (bounded
+stderr tail and/or the underlying error). Server identity, stage and evidence
+therefore reach the model-visible projection together; the three prefixes
+themselves are unchanged, so no predicate below changes.
 
 **Decision: do not add a fourth prefix branch to the family.** Rationale:
 

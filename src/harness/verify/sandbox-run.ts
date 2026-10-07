@@ -7,7 +7,11 @@
  * assembly semantics removes duplicated fence wiring from verify-loop.
  */
 import { homedir, tmpdir } from "node:os";
-import type { SandboxCmdRecord, TraceService } from "../trace/index.js";
+import type {
+  SandboxCmdRecord,
+  TraceError,
+  TraceService,
+} from "../trace/index.js";
 import type { YoloContext } from "../sandbox/yolo.js";
 import type {
   EgressPolicyInput,
@@ -32,11 +36,18 @@ import {
 /**
  * Verification executor: command → sandbox exec → { exitCode, stdout, stderr }.
  * Production default uses runInSandbox + bwrap; tests inject scripted doubles.
+ *
+ * `disposeEgressSession` is the release channel the default assembly attaches
+ * so a caller holding only the function can still return the proxy. It is
+ * optional: an injected executor that owns no session has nothing to release,
+ * and `runVerifyOnce` treats its absence as "nothing to do".
  */
-export type RunVerifyFn = (
+export type RunVerifyFn = ((
   command: string,
   ctx: { readonly signal?: AbortSignal }
-) => Promise<SandboxRunResult>;
+) => Promise<SandboxRunResult>) & {
+  readonly disposeEgressSession?: () => Promise<void>;
+};
 
 /**
  * Production default runVerify: same sandbox assembly as the bash tool (verify
@@ -85,12 +96,12 @@ export function makeDefaultRunVerify(opts: {
    * Egress proxy seam policy — passed through by the caller (verify-loop
    *
    // (ADR-0097)
-   * assembly, usually derived via `createEgressPolicyFactory`). Verify's
-   * module-level form: one per-session singleton shared by all verify
-   * commands, lazy-started on the first `runVerify` call and reused after
-   * (module-level singleton); start failure → no seam (fail-closed, same
-   * semantics as background); the caller disposes it (hub / verify-loop at
-   * session exit via `disposeEgressSessionForVerify`).
+   * assembly, usually derived via `createEgressPolicyFactory`). The session
+   * lives for one command's traffic: lazily started by the first `runVerify`
+   * call and released when that command's execution ends (every outcome);
+   * start failure → no seam (fail-closed, same semantics as background), with
+   * the cause reported through `log`. A caller holding only the executor can
+   * still release it via `disposeEgressSessionForVerify`.
    *
    * Default = caller injected nothing = no seam (baseline equivalent; the
    * sandbox still has `--unshare-net`). **Production assembly TODO**: hub /
@@ -115,6 +126,13 @@ export function makeDefaultRunVerify(opts: {
    * not emitted (baseline bytes unchanged).
    */
   readonly worktreeOnMutate?: WorktreeGateReader;
+  /**
+   * Diagnostic sink for egress lifecycle faults (start / release). Absent =
+   * silent by caller choice, the same default the background manager uses;
+   * the per-command trace record carries the release fault independently, so
+   * no fault is lost when this is absent.
+   */
+  readonly log?: (message: string) => void;
 }): RunVerifyFn {
   // Note: the caller (verify-loop.ts) rebuilds this closure per round, so the
   // factory-time snapshot here == that round's per-call snapshot — same
@@ -122,6 +140,7 @@ export function makeDefaultRunVerify(opts: {
   const tmpDir = opts.tmpDir ?? tmpdir();
   const fsMode = opts.fsMode ?? "global";
   const homeRoot = opts.homeRoot;
+  const log = opts.log ?? ((): void => undefined);
   // Read the holder once at factory time — same vintage as the fsMode snapshot.
   const unboundMainCheckout = unboundFenceMainCheckout({
     gateOn: opts.worktreeOnMutate?.get() === true,
@@ -133,12 +152,11 @@ export function makeDefaultRunVerify(opts: {
   const yolo = opts.yolo?.get() === true;
   const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
-  // Module-level per-session egress singleton — lazy-started on first call.
-  // (ADR-0097)
-  // Start failure (typically a missing relay dependency / unix socket in use)
-  // leaves session undefined and every later fence runs with plain network
-  // isolation (fail-closed). Callers release it via
-  // `disposeEgressSessionForVerify` (verify-loop / hub at session exit).
+  // Egress session — lazy-started on first call and released once the command
+  // that used it is done (see `releaseEgressSession`); a later command starts
+  // its own. Start failure (typically a missing relay dependency) leaves the
+  // session undefined and every later fence runs with plain network isolation
+  // (fail-closed), with the cause reported through `log` rather than dropped.
   let egressSession: EgressSession | undefined;
   let egressStartAttempted = false;
   async function ensureEgressSession(): Promise<EgressSession | undefined> {
@@ -149,12 +167,47 @@ export function makeDefaultRunVerify(opts: {
       egressSession = await createEgressSession({
         policy: opts.egressPolicy,
       });
-    } catch {
+    } catch (err) {
+      // EXIT: a start fault pins the session undefined for every later command
+      // of this closure — each fence stays fail-closed on plain network
+      // isolation, and the cause is reported rather than dropped.
       egressSession = undefined;
+      log(
+        `verify egress session start failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
     }
     return egressSession;
   }
-  return async (command, ctx) => {
+
+  /**
+   * The single release channel: idempotent, never throws, and always leaves a
+   * trace of a failed release. Clearing the handle first keeps a throwing
+   * dispose from being retried against a session nobody can use.
+   */
+  async function releaseEgressSession(): Promise<void> {
+    const session = egressSession;
+    egressSession = undefined;
+    egressStartAttempted = false;
+    if (session === undefined) return;
+    try {
+      await session.dispose();
+    } catch (err) {
+      // EXIT: the release itself failed. The command has already reported its
+      // own status, so this cannot change the verdict; the proxy may still be
+      // live, which is exactly why the cause is reported instead of dropped.
+      // Drop this branch once every session implementation proves a
+      // non-throwing dispose.
+      log(
+        `verify egress session release failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
+    }
+  }
+
+  const runVerify = async (command: string, ctx: { signal?: AbortSignal }) => {
     // ADR-0092: `$TMPDIR` and the `tmpRoot` handed to createBwrapFence must be
     // the **same** real host path (same shape and timing as bash.ts's fenceEnv).
     // `envIsolation.filter` only passes a host TMPDIR through
@@ -195,7 +248,7 @@ export function makeDefaultRunVerify(opts: {
       ...(fsMode === "workspace"
         ? { homeRoot, workspaceRoot: opts.cwd, tmpRoot: tmpDir }
         : {}),
-      // Egress seam (per-call fence argv, module-level session).
+      // Egress seam (per-call fence argv, session owned by this closure).
       // (ADR-0097)
       ...(session !== undefined ? { egress: session.spec } : {}),
       // PROTECTED_TARGETS wiring (T7 write block + T8 credential read mask) —
@@ -233,25 +286,41 @@ export function makeDefaultRunVerify(opts: {
       env: fenceEnv,
     });
   };
+  // The release channel travels with the function: a caller holding only the
+  // executor can still return the proxy this route started.
+  return Object.assign(runVerify, {
+    disposeEgressSession: releaseEgressSession,
+  });
 }
 
 /**
- * Release the module-level egress session of `makeDefaultRunVerify` (hub /
- *
- // (ADR-0097)
- * verify-loop call this at session exit). Silent success when the session was
- * never started or already disposed (idempotent).
+ * Release the egress session `makeDefaultRunVerify` started, for a caller that
+ * drives the executor directly. Idempotent and silent when nothing was started
+ * or the session is already released — the same release channel the loop layer
+ * runs after every command.
  */
 export async function disposeEgressSessionForVerify(
   verifyFn: RunVerifyFn
 ): Promise<void> {
-  // verifyFn is a closure with no reference bridge — holding the session for
-  // disposal is the caller's responsibility. Minimal contract for now: the
-  // factory keeps `egressSession` inside its closure and this function has no
-  // bridge. **Production assembly TODO**: dispose bridging comes with the
-  // hub / verify-loop assembly — this ticket only defines the contract and
-  // avoids polluting the RunVerifyFn signature with a placeholder field.
-  void verifyFn;
+  // A route that owns no session (an injected executor) has nothing to release;
+  // the default assembly attaches the channel, and it is idempotent by
+  // construction, so a second call is a silent success.
+  await verifyFn.disposeEgressSession?.();
+}
+
+/**
+ * The cause line a failed verify command leaves in its record: the command's
+ * own stderr when it produced any, otherwise the signal that ended it,
+ * otherwise the bare status. A failure with no text is still a failure and
+ * must not read as an unexplained empty error.
+ */
+function verifyFailureDetail(result: SandboxRunResult): string {
+  const stderr = result.stderr.trim();
+  if (stderr.length > 0) return `exit ${result.exitCode}: ${stderr}`;
+  if (result.signal !== undefined) {
+    return `exit ${result.exitCode} (terminated by ${result.signal})`;
+  }
+  return `exit ${result.exitCode} (no stderr output)`;
 }
 
 /**
@@ -262,6 +331,10 @@ export async function disposeEgressSessionForVerify(
  * converges to exit=127 (true-failure branch semantics). Every execution
  * persists one SandboxCmdRecord whose parentTurnId is the completed turn that
  * triggered the round (single-valued parent).
+ *
+ * The route's egress session is released on the way out of every outcome —
+ * success, non-zero exit, timeout, abort, or a spawn failure that never
+ * produced a child — because the session lives for one command's traffic.
  */
 export async function runVerifyOnce(
   runVerify: RunVerifyFn,
@@ -303,6 +376,16 @@ export async function runVerifyOnce(
       sandboxError = err instanceof Error ? err.message : String(err);
     }
     const endedAt = new Date().toISOString();
+    // The command has settled on every path (the spawn failure above is one of
+    // them), so the proxy it used goes back here — before the row is written,
+    // so a failed release lands on the same row instead of a second one.
+    const releaseFailure = await verifyReleaseOutcome(runVerify);
+    const commandFailure = commandError({
+      timedOut,
+      sandboxError,
+      result,
+      releaseFailure,
+    });
     const record: SandboxCmdRecord = {
       parentTurnId: opts.parentTurnId,
       command,
@@ -312,29 +395,79 @@ export async function runVerifyOnce(
       startedAt,
       endedAt,
       durationMs: Math.round(performance.now() - startMono),
-      status: timedOut ? "error" : "ok",
-      // Failure root cause persisted explicitly (timeouts / startup failures never silent);
-      // Postel: successful runs carry no error key.
-      ...(timedOut
-        ? {
-            error: {
-              type: "timeout" as const,
-              message: "verify command timed out",
-            },
-          }
-        : sandboxError !== undefined
-          ? {
-              error: {
-                type: "execution_failed" as const,
-                message: sandboxError,
-              },
-            }
-          : {}),
+      // The status the command actually reached. A non-zero exit is a failed
+      // command; recording it as `ok` is the false success this row exists to
+      // prevent, and it is what made a failing verify look clean to a reader.
+      status: commandFailure !== undefined ? "error" : "ok",
+      // Failure root cause persisted explicitly (timeout / startup failure /
+      // non-zero exit never silent); Postel: a clean run carries no error key.
+      ...(commandFailure !== undefined ? { error: commandFailure } : {}),
     };
     void opts.trace?.recordSandboxCmd(record);
     return { result, timedOut };
   } finally {
     clearTimeout(timer);
     opts.signal?.removeEventListener("abort", onUserAbort);
+  }
+}
+
+/**
+ * The row's typed cause, most specific first: our own timeout, then a startup
+ * failure we folded into exit 127, then the command's own non-zero exit (whose
+ * stderr is the diagnostic), then an egress release fault that happened after
+ * a command that itself may well have passed.
+ */
+function commandError(args: {
+  readonly timedOut: boolean;
+  readonly sandboxError: string | undefined;
+  readonly result: SandboxRunResult;
+  readonly releaseFailure: string | undefined;
+}): TraceError | undefined {
+  if (args.timedOut) {
+    const signalNote =
+      args.result.signal !== undefined
+        ? ` (terminated by ${args.result.signal})`
+        : "";
+    return {
+      type: "timeout",
+      message: `verify command timed out${signalNote}`,
+    };
+  }
+  if (args.sandboxError !== undefined) {
+    return { type: "execution_failed", message: args.sandboxError };
+  }
+  if (args.result.exitCode !== 0) {
+    return {
+      type: "execution_failed",
+      message: verifyFailureDetail(args.result),
+    };
+  }
+  if (args.releaseFailure !== undefined) {
+    return {
+      type: "execution_failed",
+      message: `egress session release failed: ${args.releaseFailure}`,
+    };
+  }
+  return undefined;
+}
+
+/**
+ * Return the route's egress session, reporting a failed release instead of
+ * swallowing it. An executor with no release channel owns no session, so the
+ * absence is the "nothing to release" answer rather than a fault.
+ */
+async function verifyReleaseOutcome(
+  runVerify: RunVerifyFn
+): Promise<string | undefined> {
+  const release = runVerify.disposeEgressSession;
+  if (release === undefined) return undefined;
+  try {
+    await release.call(runVerify);
+    return undefined;
+  } catch (err) {
+    // EXIT: a throwing release cannot change the command's status, so its
+    // cause travels as recorded evidence on the same row. Drop this branch
+    // once every route proves a non-throwing dispose.
+    return err instanceof Error ? err.message : String(err);
   }
 }

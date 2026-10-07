@@ -33,6 +33,7 @@ import { join } from "node:path";
 import type { AciToolDef } from "../../aci/types.js";
 import {
   MemoryCapabilityRejected,
+  MemoryDisabled,
   MemoryError,
   MemoryIOError,
   MemorySchemaInvalid,
@@ -64,6 +65,13 @@ export interface MemorySaveToolDeps {
   readonly now?: () => string;
   /** 6 bytes hex = 12 chars; defaults to node:crypto randomBytes. */
   readonly randomBytes?: (n: number) => Buffer;
+  /**
+   * Live memory-capability gate (ADR-0031 amendment 2026-10-07). Absent =
+   * always on. False refuses the call before any draft validation or disk
+   * mutation, so a call produced while memory was on — including one replayed
+   * from older conversation history — cannot write the store.
+   */
+  readonly isEnabled?: () => boolean;
 }
 
 export function createMemorySaveTool(deps: MemorySaveToolDeps): AciToolDef {
@@ -96,6 +104,10 @@ export function createMemorySaveTool(deps: MemorySaveToolDeps): AciToolDef {
       timeoutTier: "default",
     } as const,
     handler: async (input: unknown) => {
+      // Total memory OFF: refuse before validation and before any disk
+      // mutation.
+      // EXIT: absent gate = always on (ask path / direct construction).
+      if (deps.isEnabled?.() === false) throw new MemoryDisabled("memory_save");
       const params = parseInput(input);
       assertDraftAllowed(params);
       const draft: MemoryEntryV1 = {

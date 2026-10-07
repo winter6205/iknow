@@ -32,6 +32,7 @@
  */
 import { pathToFileURL } from "node:url";
 import { readFile, stat } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { createHash } from "node:crypto";
 import type { ChildProcess } from "node:child_process";
 
@@ -42,7 +43,7 @@ import {
 } from "vscode-jsonrpc/node";
 import type { MessageConnection } from "vscode-jsonrpc/node";
 
-import type { LspCtx, LspServerInfo } from "./types.js";
+import type { LspCtx, LspServerHandle, LspServerInfo } from "./types.js";
 import { resolveServer } from "./server.js";
 import { languageIdFor } from "./language.js";
 
@@ -149,19 +150,101 @@ export interface LspClient {
 }
 
 /**
+ * Where a language-server interaction failed. The six stages the failure
+ * contract must keep distinguishable, plus the pool's own terminal state:
+ *
+ *   - `server-selection`: no server matched the file, the server is disabled,
+ *     or no project root marker was found — nothing was started;
+ *   - `executable-resolution`: the server's own resolution chain (override →
+ *     project node_modules/.bin → project venv → harness node_modules → PATH)
+ *     found no executable;
+ *   - `process-spawn`: the process could not be spawned (ENOENT, EACCES) or has
+ *     no usable stdio;
+ *   - `process-exit`: the server process died before the handshake completed;
+ *   - `initialization`: the `initialize` handshake itself failed;
+ *   - `request-timeout` / `unsupported-method`: **not** startup stages — a
+ *     per-request deadline and a server capability gap respectively. They are
+ *     rendered by the tool layer (timeout error / method-not-found sentinel) and
+ *     must never mark a server broken, so they are named here to keep the whole
+ *     vocabulary in one place;
+ *   - `pool-shutdown`: the pool latched by a host-exit seam; it never respawns.
+ */
+export type LspFailureStage =
+  | "server-selection"
+  | "executable-resolution"
+  | "process-spawn"
+  | "process-exit"
+  | "initialization"
+  | "request-timeout"
+  | "unsupported-method"
+  | "pool-shutdown";
+
+/**
  * Failure reasons from getClientDetailed (sentinel layering):
  *   - `no-server`: resolveServer matched no extension, or the hit server.id is
  *     in ctx.disabledServers (treated as unconfigured);
  *   - `no-root`: server.root() found no project root marker;
- *   - `spawn-failed`: spawn returned undefined / threw (missing bin etc.), or
- *     the broken memory was hit.
- * `serverId` is carried when the target is known (the extension-mismatch
- * branch of no-server has no id).
+ *   - `spawn-failed`: the start failed (see `stage`) or the broken memory was hit.
+ *
+ * `stage` and `cause` are what make the result actionable: `serverId` alone
+ * could not distinguish a missing binary from a crashed server, which is the gap
+ * the T1 evidence recorded. `stage` is optional only because call sites outside
+ * this module construct synthetic `{ reason }` fallbacks; every failure this
+ * module produces carries one.
  */
 export type LspClientFailure = {
   reason: "no-server" | "no-root" | "spawn-failed";
   serverId?: string;
+  stage?: LspFailureStage;
+  /** Bounded evidence: the underlying error message and/or server stderr tail. */
+  cause?: string;
 };
+
+/** A recorded failed start, kept per (root, serverId) until a retry clears it. */
+export interface LspBrokenStart {
+  readonly reason: "spawn-failed";
+  readonly serverId: string;
+  readonly stage: LspFailureStage;
+  readonly cause?: string;
+}
+
+/**
+ * Cap on retained stderr / cause text. A language server can flood stderr
+ * before dying; the failure record keeps only the tail, which is where the
+ * actionable message lives.
+ */
+const MAX_CAUSE_CHARS = 500;
+
+/** Last-resort truncation of a single stderr chunk before it reaches the tail. */
+const MAX_STDERR_CHUNK_CHARS = 4096;
+
+/**
+ * Same-session recovery attempts allowed per (root, serverId) key. Bounded on
+ * purpose: a repair that keeps failing must not turn into an unbounded respawn
+ * loop. Exhausting the budget leaves the key broken and keeps every other key
+ * working — recovery is per key, never a pool-wide disable.
+ */
+export const MAX_LSP_RECOVERY_ATTEMPTS = 3;
+
+/** Short, bounded description of an unknown thrown value. */
+function errorCause(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return message.slice(0, MAX_CAUSE_CHARS);
+}
+
+/**
+ * Keep the tail of the server's stderr as evidence for a failed start. The old
+ * behavior (`child.stderr?.resume()`) drained and discarded it, so a startup
+ * failure reported no cause at all.
+ */
+function captureStderrTail(child: ChildProcess): () => string {
+  let tail = "";
+  child.stderr?.on("data", (chunk: Buffer | string) => {
+    const text = typeof chunk === "string" ? chunk : chunk.toString("utf8");
+    tail = (tail + text.slice(-MAX_STDERR_CHUNK_CHARS)).slice(-MAX_CAUSE_CHARS);
+  });
+  return () => tail.trim();
+}
 
 /**
  * Instantiable LSP connection pool. Production engines share the process-level
@@ -179,9 +262,15 @@ export type LspClientFailure = {
 export class LspClientPool {
   /** key = `${root}:${server.id}` → established, reused clients. */
   readonly clients = new Map<string, LspClient>();
-  readonly broken = new Map<string, "spawn-failed">();
+  /** key = `${root}:${server.id}` → the failed start, with its stage and cause. */
+  readonly broken = new Map<string, LspBrokenStart>();
   readonly inflight = new Map<string, Promise<LspClient | undefined>>();
   readonly lastUsedAt = new Map<string, number>();
+  /**
+   * Recovery attempts already spent per key. Survives clearing a broken entry
+   * so the budget cannot be reset by retrying (see `retryFailedStart`).
+   */
+  readonly recoveryAttempts = new Map<string, number>();
 
   /**
    * Last observed `directoryCell` value. At the `getClient` entry, if the
@@ -290,7 +379,46 @@ export class LspClientPool {
       this.terminate(key, client);
     }
     this.broken.clear();
+    this.recoveryAttempts.clear();
     this.inflight.clear();
+  }
+
+  /**
+   * Clear one recorded failed start so the next `getClient` really spawns again
+   * — the install-to-retry recovery seam.
+   *
+   * Bounded: at most `MAX_LSP_RECOVERY_ATTEMPTS` clears per key per session,
+   * counted in `recoveryAttempts` which survives the clear, so a repair that
+   * keeps failing cannot become an unbounded respawn loop. Returns false once
+   * the budget is spent (the key stays broken) or when nothing was failed.
+   *
+   * Deliberately **not** a shutdown path: it never touches the `shutDown`
+   * latch, never terminates other entries, and never clears the whole pool, so
+   * a recovered key and every untouched key stay usable in the same session.
+   */
+  retryFailedStart(root: string, serverId: string): boolean {
+    const key = `${root}:${serverId}`;
+    if (!this.broken.has(key)) return false;
+    const spent = this.recoveryAttempts.get(key) ?? 0;
+    // EXIT: budget spent → refuse and leave the failed start recorded, so the
+    // caller keeps seeing the typed stage instead of an endless retry.
+    if (spent >= MAX_LSP_RECOVERY_ATTEMPTS) return false;
+    this.recoveryAttempts.set(key, spent + 1);
+    this.broken.delete(key);
+    return true;
+  }
+
+  /**
+   * Spend one recovery attempt for `key` and drop its failed-start record.
+   * Shared by the explicit `retryFailedStart` and the automatic
+   * install-detected path so both draw on the same bounded budget.
+   */
+  consumeRecovery(key: string): boolean {
+    const spent = this.recoveryAttempts.get(key) ?? 0;
+    if (spent >= MAX_LSP_RECOVERY_ATTEMPTS) return false;
+    this.recoveryAttempts.set(key, spent + 1);
+    this.broken.delete(key);
+    return true;
   }
 
   /**
@@ -312,6 +440,7 @@ export class LspClientPool {
     this.clients.clear();
     this.lastUsedAt.clear();
     this.broken.clear();
+    this.recoveryAttempts.clear();
     this.inflight.clear();
   }
 }
@@ -378,12 +507,35 @@ export async function getClientDetailed(
   const pool = poolOf(ctx);
   // After the terminal lifecycle latch, never spawn again (guards against
   // re-spawn leaks on exit paths) — see shutdownAll.
-  if (pool.shutDown) return { failure: { reason: "spawn-failed" } };
+  if (pool.shutDown) {
+    return {
+      failure: {
+        reason: "spawn-failed",
+        stage: "pool-shutdown",
+        cause: "LSP pool was shut down by a host-exit seam; it never respawns",
+      },
+    };
+  }
   pool.sweepIdleClients(ctx.idleTimeoutMs);
   const server = opts?.server ?? resolveServer(file);
-  if (!server) return { failure: { reason: "no-server" } };
+  if (!server) {
+    return {
+      failure: {
+        reason: "no-server",
+        stage: "server-selection",
+        cause: `no LSP server handles ${file}`,
+      },
+    };
+  }
   if (ctx.disabledServers?.includes(server.id)) {
-    return { failure: { reason: "no-server", serverId: server.id } };
+    return {
+      failure: {
+        reason: "no-server",
+        serverId: server.id,
+        stage: "server-selection",
+        cause: `server ${server.id} is disabled in settings.lsp.disabledServers`,
+      },
+    };
   }
   // Per-call directory snapshot: read the live root cell once at entry so the
   // whole path (NearestRoot stop / pool key) uses the same value. Consistency
@@ -402,36 +554,64 @@ export async function getClientDetailed(
     pool.sweepStaleForRebind(directorySnapshot);
   }
   const root = await server.root(file, ctxForRoot);
-  if (!root) return { failure: { reason: "no-root", serverId: server.id } };
+  if (!root) {
+    return {
+      failure: {
+        reason: "no-root",
+        serverId: server.id,
+        stage: "server-selection",
+        cause: `no project root marker for ${server.id} above ${file} within ${ctxForRoot.directory}`,
+      },
+    };
+  }
 
   const key = `${root}:${server.id}`;
-  const spawnFailed = (): { failure: LspClientFailure } => ({
-    failure: { reason: "spawn-failed", serverId: server.id },
-  });
   const cached = pool.clients.get(key);
   if (cached) {
     pool.lastUsedAt.set(key, Date.now());
     return { client: cached };
   }
-  if (pool.broken.has(key)) return spawnFailed();
+  // Nothing established for this key yet: a recorded failed start blocks it
+  // unless an approved install has since landed within the recovery budget.
+  const blocked = await blockedByRecordedFailure({
+    pool,
+    server,
+    root,
+    ctx: ctxForRoot,
+    key,
+  });
+  if (blocked !== undefined) return blocked;
   const pending = pool.inflight.get(key);
   if (pending) {
     const client = await pending;
-    return client ? { client } : spawnFailed();
+    return client ? { client } : spawnFailedFor(server.id, pool.broken.get(key));
   }
 
   const task = spawnClient(pool, server, root, ctxForRoot)
-    .then((client) => {
-      if (client) {
-        pool.clients.set(key, client);
+    .then((outcome) => {
+      if ("client" in outcome) {
+        pool.clients.set(key, outcome.client);
         pool.lastUsedAt.set(key, Date.now());
-        return client;
+        return outcome.client;
       }
-      pool.broken.set(key, "spawn-failed");
+      pool.broken.set(key, {
+        reason: "spawn-failed",
+        serverId: server.id,
+        stage: outcome.stage,
+        ...(outcome.cause !== undefined ? { cause: outcome.cause } : {}),
+      });
       return undefined;
     })
-    .catch(() => {
-      pool.broken.set(key, "spawn-failed");
+    .catch((err: unknown) => {
+      // EXIT: an unexpected throw inside the start path (not one of the typed
+      // outcomes) still records a typed failure instead of escaping as an
+      // unhandled rejection.
+      pool.broken.set(key, {
+        reason: "spawn-failed",
+        serverId: server.id,
+        stage: "process-spawn",
+        cause: errorCause(err),
+      });
       return undefined;
     })
     .finally(() => {
@@ -439,7 +619,95 @@ export async function getClientDetailed(
     });
   pool.inflight.set(key, task);
   const client = await task;
-  return client ? { client } : spawnFailed();
+  return client
+    ? { client }
+    : spawnFailedFor(server.id, pool.broken.get(key));
+}
+
+/**
+ * Typed spawn-failed projection for one key: the recorded stage plus whatever
+ * evidence was retained, defaulting to `executable-resolution` when nothing
+ * was recorded.
+ */
+function spawnFailedFor(
+  serverId: string,
+  broken: LspBrokenStart | undefined
+): { failure: LspClientFailure } {
+  return {
+    failure: {
+      reason: "spawn-failed",
+      serverId,
+      stage: broken?.stage ?? "executable-resolution",
+      ...(broken?.cause !== undefined ? { cause: broken.cause } : {}),
+    },
+  };
+}
+
+/**
+ * The recorded-failure gate for one key. `undefined` means the caller may
+ * spawn: either nothing was recorded, or an approved install has landed since
+ * the failure and the bounded recovery budget still has an attempt.
+ * Otherwise the typed failure to return verbatim.
+ */
+async function blockedByRecordedFailure(args: {
+  readonly pool: LspClientPool;
+  readonly server: LspServerInfo;
+  readonly root: string;
+  readonly ctx: LspCtx;
+  readonly key: string;
+}): Promise<{ failure: LspClientFailure } | undefined> {
+  const recorded = args.pool.broken.get(args.key);
+  if (recorded === undefined) return undefined;
+  // An approved install into the project may have landed since the failure.
+  // Re-check the server's own candidate paths and spend one bounded recovery
+  // attempt when one now exists, so the next call really spawns.
+  const installed = await serverHasExecutableNow(
+    args.server,
+    args.root,
+    args.ctx
+  );
+  return installed && args.pool.consumeRecovery(args.key)
+    ? undefined
+    : spawnFailedFor(args.server.id, recorded);
+}
+
+/**
+ * Whether the server's project/worktree executable candidates exist right now.
+ *
+ * The install-completed signal for automatic recovery: the recorded failure said
+ * "no executable", and now one of the exact paths resolution probes is present.
+ * A server that declares no candidates yields false — an unchanged environment
+ * keeps its recorded failure.
+ */
+async function serverHasExecutableNow(
+  server: LspServerInfo,
+  root: string,
+  ctx: LspCtx
+): Promise<boolean> {
+  if (server.executableCandidates === undefined) return false;
+  try {
+    const candidates = await server.executableCandidates(root, ctx);
+    return candidates.some((candidate) => existsSync(candidate));
+  } catch {
+    // EXIT: candidate probing itself failed → no evidence of an install, so the
+    // recorded failed start stands.
+    return false;
+  }
+}
+
+/**
+ * Clear one failed start for (root, serverId) so the next `getClient` respawns —
+ * the same-session recovery seam after an approved install or repair.
+ *
+ * Bounded by `MAX_LSP_RECOVERY_ATTEMPTS` per key (returns false when spent) and
+ * never routed through `shutdownAll` / the `shutDown` latch, so it is not
+ * terminal. Returns true when the failed start was cleared.
+ */
+export function retryFailedLspStart(
+  ctx: LspCtx,
+  opts: { readonly root: string; readonly serverId: string }
+): boolean {
+  return poolOf(ctx).retryFailedStart(opts.root, opts.serverId);
 }
 
 /**
@@ -456,51 +724,243 @@ export async function getClient(
 }
 
 /**
+ * Result of one start attempt: an established client, or the stage that failed
+ * plus whatever evidence was available (server stderr tail, error message,
+ * exit status).
+ */
+type SpawnOutcome =
+  | { readonly client: LspClient }
+  | { readonly stage: LspFailureStage; readonly cause?: string };
+
+/** How one `initialize` round-trip ended: the response, or what beat it. */
+type Handshake =
+  | { readonly kind: "ok"; readonly result: unknown }
+  | { readonly kind: "error"; readonly err: unknown }
+  | { readonly kind: "exited"; readonly exit: { readonly code: number | null } }
+  | { readonly kind: "spawn-error"; readonly reason: string };
+
+/**
+ * The server's process handle, or the typed stage that stopped it. A server
+ * that resolved no executable and a server whose spawn threw are both
+ * `executable-resolution` failures, each carrying its own evidence.
+ */
+async function resolveServerHandle(
+  server: LspServerInfo,
+  root: string,
+  ctx: LspCtx
+): Promise<
+  | { readonly ok: true; readonly handle: LspServerHandle }
+  | { readonly ok: false; readonly outcome: SpawnOutcome }
+> {
+  try {
+    const spawned = await server.spawn(root, ctx);
+    // EXIT: the server's resolution chain (override → project node_modules/.bin
+    // → project venv → harness node_modules → PATH) found no executable.
+    if (!spawned) {
+      return {
+        ok: false,
+        outcome: {
+          stage: "executable-resolution",
+          cause: `no executable resolved for ${server.id} (root ${root})`,
+        },
+      };
+    }
+    return { ok: true, handle: spawned };
+  } catch (err) {
+    // EXIT: spawn threw while resolving / creating the process — no child
+    // exists, so there is nothing to keep alive; report the cause instead of
+    // swallowing.
+    return {
+      ok: false,
+      outcome: { stage: "executable-resolution", cause: errorCause(err) },
+    };
+  }
+}
+
+/**
+ * The `initialize` request raced against the two ways it can be lost — the
+ * process exiting first, or the spawn failing / the pipe closing before any
+ * answer. Whichever lands first wins; the caller names the stage and tears
+ * down.
+ */
+async function awaitInitialize(args: {
+  readonly connection: MessageConnection;
+  readonly child: ChildProcess;
+  readonly root: string;
+  readonly initialization: Record<string, unknown> | undefined;
+  readonly spawnErrorPromise: Promise<string>;
+  readonly exitedEarly: Promise<{ readonly code: number | null }>;
+}): Promise<Handshake> {
+  // tsserver wants `path` passed through in initializationOptions.
+  // connection.listen() must come first to start the reader loop, or
+  // sendRequest throws "Call listen() first." (vscode-jsonrpc requirement).
+  args.connection.listen();
+  return Promise.race([
+    Promise.resolve(
+      args.connection.sendRequest("initialize", {
+        processId: args.child.pid ?? null,
+        rootUri: pathToFileURL(args.root).href,
+        // Advertise only the methods the harness actually sends: textDocument
+        // sync + diagnostic push subscription. Symbol capabilities are the
+        // **server's** (reported in its capabilities response), not declared
+        // client-side.
+        capabilities: {
+          textDocument: {
+            synchronization: { dynamicRegistration: false },
+            publishDiagnostics: { relatedInformation: true },
+          },
+          workspace: { symbol: { dynamicRegistration: false } },
+        },
+        initializationOptions: args.initialization,
+      })
+    ).then(
+      (result) => ({ kind: "ok" as const, result }),
+      (err: unknown) => ({ kind: "error" as const, err })
+    ),
+    args.exitedEarly.then((exit) => ({ kind: "exited" as const, exit })),
+    // A process that dies without ever exiting emits `error` and then `close`;
+    // surface it as soon as the event lands instead of waiting on a handshake
+    // that can never be answered.
+    Promise.race([
+      args.spawnErrorPromise,
+      new Promise<string>((resolve) =>
+        args.child.once("close", () => resolve("closed"))
+      ),
+    ]).then((reason) => ({ kind: "spawn-error" as const, reason })),
+  ]);
+}
+
+/**
+ * Teardown + typed stage for a handshake that never answered: release what
+ * this attempt created (a connection without a live, handshaken server is
+ * useless), kill the child, and attach the retained stderr tail to the cause
+ * so the failure carries its evidence.
+ */
+function failedStartOutcome(args: {
+  readonly serverId: string;
+  readonly connection: MessageConnection;
+  readonly child: ChildProcess;
+  readonly stderrTail: string;
+  readonly handshake: Exclude<Handshake, { readonly kind: "ok" }>;
+}): SpawnOutcome {
+  args.connection.dispose();
+  args.child.kill("SIGTERM");
+  const stderr = args.stderrTail;
+  const withStderr = (cause: string): string =>
+    stderr.length > 0 ? `${cause} | stderr: ${stderr}` : cause;
+  switch (args.handshake.kind) {
+    case "exited":
+      return {
+        stage: "process-exit",
+        cause: withStderr(
+          `${args.serverId} exited with code ${String(args.handshake.exit.code)} before initialize`
+        ),
+      };
+    case "spawn-error":
+      return { stage: "process-spawn", cause: withStderr(args.handshake.reason) };
+    default:
+      return {
+        stage: "initialization",
+        cause: withStderr(errorCause(args.handshake.err)),
+      };
+  }
+}
+
+/**
  * Establish a single server connection: spawn the subprocess → pipe stdio into
  * a MessageConnection → send the `initialize` handshake → `listen()` → wrap as
  * an `LspClient`.
  *
- * `server.spawn` returning `undefined` (missing bin etc.) → return
- * `undefined` for the caller to mark broken; no throwing, no silent swallowing.
- * Unpiped stdio (missing stdout/stdin) is likewise unusable → `undefined`.
+ * Every failure path names its stage instead of collapsing to `undefined`:
+ *   - `server.spawn` resolved nothing → `executable-resolution` (its own
+ *     resolution chain found no executable);
+ *   - `server.spawn` threw, or the child has no stdio, or the process failed to
+ *     spawn (ENOENT / EACCES) → `process-spawn`;
+ *   - the child died before the handshake answered → `process-exit`;
+ *   - `initialize` itself failed → `initialization`.
+ *
+ * A failed start disposes the connection and kills the child it created, so a
+ * dead server never accumulates processes in a long session.
  */
 async function spawnClient(
   pool: LspClientPool,
   server: LspServerInfo,
   root: string,
   ctx: LspCtx
-): Promise<LspClient | undefined> {
+): Promise<SpawnOutcome> {
   // Same cache key as getClient: the exit self-heal hook needs it to evict from `clients`.
   const key = `${root}:${server.id}`;
-  const handle = await server.spawn(root, ctx);
-  if (!handle) return undefined;
+  const started = await resolveServerHandle(server, root, ctx);
+  if (!started.ok) return started.outcome;
+  const handle = started.handle;
 
   const { process: child, initialization } = handle;
-  if (!child.stdout || !child.stdin) return undefined;
+  if (!child.stdout || !child.stdin) {
+    // EXIT: without both pipes the JSON-RPC transport cannot exist. Nothing was
+    // started successfully; report it as a spawn-stage failure, not silence.
+    child.kill("SIGTERM");
+    return {
+      stage: "process-spawn",
+      cause: `${server.id} process exposes no stdio pipes`,
+    };
+  }
+
+  // EXIT: once a failed start is torn down (below), an already-queued write on
+  // the request pipe surfaces as EPIPE / ERR_STREAM_DESTROYED. The failure is
+  // being reported through the typed outcome, so absorb the pipe error here
+  // rather than letting it reach the host as an unhandled rejection.
+  child.stdin?.on("error", () => undefined);
+
+  let spawnError: string | undefined;
+  const spawnErrorPromise = new Promise<string>((resolve) => {
+    child.once("error", (err: Error) => {
+      spawnError = errorCause(err);
+      resolve(spawnError);
+    });
+  });
+  // A spawn that never created a process has no pid. That is the only reliable
+  // synchronous signal for "the OS refused the executable", so the handshake is
+  // never written into a pipe with nothing behind it.
+  if (typeof child.pid !== "number" || child.pid <= 0) {
+    const reason = await Promise.race([
+      spawnErrorPromise,
+      new Promise<string>((resolve) =>
+        setTimeout(() => resolve(`${server.id} could not be spawned`), 250)
+      ),
+    ]);
+    child.kill("SIGTERM");
+    return { stage: "process-spawn", cause: reason };
+  }
+
+  const stderrTail = captureStderrTail(child);
+  const exitedEarly = new Promise<{ code: number | null }>((resolve) => {
+    child.once("exit", (code: number | null) => resolve({ code }));
+  });
 
   const connection = createMessageConnection(child.stdout, child.stdin);
-  child.stderr?.resume();
 
-  // LSP initialize handshake: tsserver wants `path` passed through in
-  // initializationOptions. connection.listen() must come first to start the
-  // reader loop, or sendRequest throws "Call listen() first." (vscode-jsonrpc
-  // requirement).
-  connection.listen();
-  const initializeResult = (await connection.sendRequest("initialize", {
-    processId: child.pid ?? null,
-    rootUri: pathToFileURL(root).href,
-    // Advertise only the methods the harness actually sends: textDocument sync
-    // + diagnostic push subscription. Symbol capabilities are the **server's**
-    // (reported in its capabilities response), not declared client-side.
-    capabilities: {
-      textDocument: {
-        synchronization: { dynamicRegistration: false },
-        publishDiagnostics: { relatedInformation: true },
-      },
-      workspace: { symbol: { dynamicRegistration: false } },
-    },
-    initializationOptions: initialization,
-  })) as { capabilities?: Record<string, unknown> } | undefined;
+  const handshake = await awaitInitialize({
+    connection,
+    child,
+    root,
+    initialization,
+    spawnErrorPromise,
+    exitedEarly,
+  });
+
+  if (handshake.kind !== "ok") {
+    // Release what this attempt created before reporting: the connection is
+    // useless without a live, handshaken server.
+    return failedStartOutcome({
+      serverId: server.id,
+      connection,
+      child,
+      stderrTail: stderrTail(),
+      handshake,
+    });
+  }
+  const initializeResult = handshake.result as
+    { capabilities?: Record<string, unknown> } | undefined;
   // Snapshot of declared server capabilities: only used for the "explicit
   // false → don't send" check (absent ≠ unsupported, see getServerCapabilities).
   const serverCapabilities = initializeResult?.capabilities ?? {};
@@ -796,7 +1256,7 @@ async function spawnClient(
     pool.evictCachedClient(key, client);
   });
 
-  return client;
+  return { client };
 }
 
 /**

@@ -173,6 +173,13 @@ export interface VerifyLoopOptions {
   readonly signal?: AbortSignal;
   /** Observation sink (trace-domain VerificationRecord; every round's verdict is persisted, never throws). */
   readonly trace?: TraceService;
+  /**
+   * Diagnostic sink for the verify route's egress lifecycle faults (session
+   * start / release). Absent = silent by caller choice, matching the
+   * background manager's `log` convention. Independent of `trace`: the per
+   * command row is the durable record; this is the live diagnostic line.
+   */
+  readonly log?: (message: string) => void;
   /** Test seam for the verification executor; default built internally via runInSandbox (bwrap). */
   readonly runVerify?: RunVerifyFn;
   /**
@@ -289,6 +296,13 @@ interface RoundObservation {
   readonly signature?: string;
   /** Initial verification stdout (raw input for the envelope's output_excerpt; truncation is inject's job). */
   readonly outputText: string;
+  /**
+   * Initial verification stderr. Kept beside stdout because the diagnostic a
+   * failing toolchain produces usually lands here; the envelope excerpt joins
+   * them (see buildCommandFailureEnvelope) so the model's failure text is not
+   * built from stdout alone.
+   */
+  readonly stderrText?: string;
   /** Classifier branch: the judge's one-line rationale (envelope reason; absent on the command path). */
   readonly reason?: string;
   /** Classifier branch: judge-listed missing items (envelope missing; absent on the command path). */
@@ -376,6 +390,7 @@ async function runVerificationRound(opts: {
   const { result: initialResult, timedOut: initialTimedOut } = initial;
   const exitCode = initialResult.exitCode;
   const outputText = initialResult.stdout;
+  const stderrText = initialResult.stderr;
   const failedCount = countFailures(outputText, countRegex, exitCode);
   const signature = buildFailureSignature({
     exitCode,
@@ -390,6 +405,7 @@ async function runVerificationRound(opts: {
       failedCount,
       signature,
       outputText,
+      stderrText,
     };
   }
   if (exitCode === 0) {
@@ -406,6 +422,7 @@ async function runVerificationRound(opts: {
       failedCount,
       signature,
       outputText,
+      stderrText,
     };
   }
   const rerunPassed = rerun.result.exitCode === 0;
@@ -426,6 +443,7 @@ async function runVerificationRound(opts: {
         failedCount,
         signature,
         outputText,
+        stderrText,
       };
     }
     singleRunPassed = single.result.exitCode === 0;
@@ -438,7 +456,7 @@ async function runVerificationRound(opts: {
       : confirmation.verdict === "unstable"
         ? "unstable"
         : "true-failure";
-  return { verdict, exitCode, failedCount, signature, outputText };
+  return { verdict, exitCode, failedCount, signature, outputText, stderrText };
 }
 
 /* ------------------------------ disposition ------------------------------ */
@@ -1329,6 +1347,23 @@ function produceCommandObservation(opts: {
   };
 }
 
+/**
+ * The envelope's `output_excerpt`: the command's stdout plus its stderr.
+ *
+ * A failing toolchain usually speaks on stderr, so an excerpt built from stdout
+ * alone can hand the model an empty failure and no cause to fix. Byte-identical
+ * to stdout when the command wrote nothing to stderr (Postel — every envelope
+ * byte pinned by existing tests is unchanged).
+ */
+function buildOutputExcerpt(
+  stdout: string,
+  stderr: string | undefined
+): string {
+  const trimmed = stderr?.trim() ?? "";
+  if (trimmed.length === 0) return stdout;
+  return stdout.length > 0 ? `${stdout}\n${trimmed}` : trimmed;
+}
+
 /** Command-path failure envelope: buildValidationEnvelope with all command fields. */
 function buildCommandFailureEnvelope(opts: {
   readonly command: string;
@@ -1351,7 +1386,10 @@ function buildCommandFailureEnvelope(opts: {
       ...(observation.signature !== undefined
         ? { signature: observation.signature }
         : {}),
-      outputExcerpt: observation.outputText,
+      outputExcerpt: buildOutputExcerpt(
+        observation.outputText,
+        observation.stderrText
+      ),
     });
 }
 
@@ -1463,6 +1501,7 @@ function buildVerifyRunnerArgs(options: VerifyLoopOptions): {
   tmpDir?: string;
   egressPolicy?: VerifyLoopOptions["egressPolicy"];
   worktreeOnMutate?: VerifyLoopOptions["worktreeOnMutate"];
+  log?: VerifyLoopOptions["log"];
 } {
   return {
     cwd: options.cwd,
@@ -1476,6 +1515,10 @@ function buildVerifyRunnerArgs(options: VerifyLoopOptions): {
     ...(options.egressPolicy !== undefined
       ? { egressPolicy: options.egressPolicy }
       : {}),
+    // The default runVerify owns the egress session, so its release faults
+    // need the host's diagnostic sink — otherwise the only evidence is the
+    // command row, and nothing says so when a proxy may still be live.
+    ...(options.log !== undefined ? { log: options.log } : {}),
   };
 }
 

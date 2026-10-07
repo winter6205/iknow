@@ -209,3 +209,46 @@ describe("runVerifyLoop — default runVerify assembly threads cwd", () => {
     assert.equal(outcome.outcome, "passed");
   });
 });
+
+/**
+ * The verify route's egress release diagnostics must reach the host, not just
+ * the test that injected a spy: `runVerifyLoop` forwards its `log` into the
+ * default runVerify, which is the code that owns the session.
+ */
+describe("verify-loop forwards the host diagnostic sink to the default runVerify", () => {
+  it("options.log reaches makeDefaultRunVerify; absent puts no key on the opts", async () => {
+    const cwd = mkdtempSync(join(tmpdir(), "verify-loop-log-"));
+    SCRATCH.push(cwd);
+    const captured: Array<Record<string, unknown>> = [];
+    vi.mocked(makeDefaultRunVerify).mockImplementation((opts) => {
+      captured.push(opts as Record<string, unknown>);
+      return async () => ({ exitCode: 0, stdout: "ok", stderr: "" });
+    });
+
+    const log = vi.fn();
+    await runVerifyLoop({
+      runFn: async (text) => stubRun("done", text),
+      userText: "do it",
+      config: { command: "true" },
+      sessionId: "verify-loop-default-runverify-log",
+      cwd,
+      log,
+    });
+    expect(captured).toHaveLength(1);
+    assert.equal(captured[0]!.log, log);
+
+    captured.length = 0;
+    await runVerifyLoop({
+      runFn: async (text) => stubRun("done", text),
+      userText: "do it",
+      config: { command: "true" },
+      sessionId: "verify-loop-default-runverify-nolog",
+      cwd,
+    });
+    assert.equal(
+      "log" in captured[0]!,
+      false,
+      "absent sink → no key (Postel: the route's own default applies)"
+    );
+  });
+});

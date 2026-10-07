@@ -78,7 +78,11 @@ import {
   createSymbolMutateToolSet,
   SYMBOL_MUTATE_TOOL_NAMES,
 } from "../../../src/harness/aci/tools/symbol-mutate.ts";
-import { classifyProbeResult } from "../../../scripts/lsp-probe.ts";
+import {
+  classifyProbeResult,
+  summarizeProbeVerdict,
+} from "../../../scripts/lsp-probe.ts";
+import { PROBE_TARGETS } from "../../../scripts/lsp-probe-targets.ts";
 import type { AciToolDef } from "../../../src/harness/aci/types.ts";
 
 function makeFakeClient(
@@ -1590,6 +1594,51 @@ describe("tiered no-server sentinel (B3)", () => {
     expect(out).toBe("(LSP server no-hint-server unavailable)");
   });
 
+  it("spawn-failed carries the failing stage and the retained cause to the model", async () => {
+    mockGetClientDetailed.mockResolvedValue({
+      failure: {
+        reason: "spawn-failed",
+        serverId: "typescript",
+        stage: "executable-resolution",
+        cause: "no executable resolved for typescript (root /work)",
+      },
+    });
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.ts",
+      line: 1,
+      character: 0,
+    })) as string;
+
+    // Identity + stage + evidence together: "unavailable" alone could not say
+    // which layer failed.
+    expect(out).toContain("typescript");
+    expect(out).toContain("stage: executable-resolution");
+    expect(out).toContain("cause: no executable resolved");
+    expect(isLspFailureSentinel(out)).toBe(true);
+  });
+
+  it("an initialization-stage failure is distinguishable from a missing executable", async () => {
+    mockGetClientDetailed.mockResolvedValue({
+      failure: {
+        reason: "spawn-failed",
+        serverId: "pyright",
+        stage: "initialization",
+        cause:
+          "handshake refused | stderr: Fatal: could not locate tsserver.js",
+      },
+    });
+    const tools = createLspToolSet(ctx);
+    const out = (await byName(tools, "lsp_definition").handler({
+      file: "/work/src/a.py",
+      line: 1,
+      character: 0,
+    })) as string;
+
+    expect(out).toContain("stage: initialization");
+    expect(out).toContain("stderr: Fatal: could not locate tsserver.js");
+  });
+
   it("disabledServers hit renders no-server with serverId (B7)", async () => {
     mockGetClientDetailed.mockResolvedValue({
       failure: { reason: "no-server", serverId: "typescript" },
@@ -1937,6 +1986,179 @@ describe("probe verdict: method-not-found sentinel skips like a MethodNotFound e
     expect(classifyProbeResult({ kind: "ok", value: undefined }).kind).toBe(
       "fail"
     );
+  });
+});
+
+// ── required operations may not be skipped and counted as success (plan T5) ──
+//
+// T1 evidence Finding 4 reproduced a green run that exercised nothing: a
+// MethodNotFound skip was excluded from `total`, so `passed === total` could be
+// `0 === 0`. The strengthened contract keeps optional capability gaps skipping
+// but makes a REQUIRED operation's MethodNotFound a named, counted failure.
+
+describe("probe verdict: required operations cannot skip into success", () => {
+  const methodNotFound = (): Parameters<typeof classifyProbeResult>[0] => ({
+    kind: "ok",
+    value: renderMethodNotFound("textDocument/references", "pyright"),
+  });
+
+  it("a MethodNotFound on a REQUIRED operation fails and names the operation", () => {
+    const verdict = classifyProbeResult(methodNotFound(), {
+      required: true,
+      operation: "lsp_references",
+    });
+    expect(verdict.kind).toBe("fail");
+    if (verdict.kind === "fail") {
+      expect(verdict.detail).toContain("lsp_references");
+      expect(verdict.detail).toContain("MethodNotFound");
+    }
+  });
+
+  it("an escaped MethodNotFound error on a REQUIRED operation also fails", () => {
+    const verdict = classifyProbeResult(
+      {
+        kind: "err",
+        detail: "Unhandled method textDocument/hover",
+        error: "Unhandled method textDocument/hover",
+      },
+      { required: true, operation: "lsp_hover" }
+    );
+    expect(verdict.kind).toBe("fail");
+    if (verdict.kind === "fail") expect(verdict.detail).toContain("lsp_hover");
+  });
+
+  it("the same MethodNotFound stays a skip when the operation is optional", () => {
+    expect(classifyProbeResult(methodNotFound()).kind).toBe("skip");
+  });
+
+  it("a required operation that really answered still passes", () => {
+    expect(
+      classifyProbeResult(
+        { kind: "ok", value: '[{"uri":"offset.py"}]' },
+        { required: true, operation: "lsp_references" }
+      ).kind
+    ).toBe("pass");
+  });
+
+  it("content assertions turn a missing expectation into a counted failure", () => {
+    const missed = classifyProbeResult(
+      { kind: "ok", value: '[{"uri":"other.ts"}]' },
+      {
+        required: true,
+        operation: "lsp_definition",
+        expect: { contains: ["offset.py", "compute_offset"] },
+      }
+    );
+    expect(missed.kind).toBe("fail");
+
+    const hit = classifyProbeResult(
+      { kind: "ok", value: '[{"uri":"offset.py"},{"name":"compute_offset"}]' },
+      {
+        required: true,
+        operation: "lsp_definition",
+        expect: { contains: ["offset.py", "compute_offset"] },
+      }
+    );
+    expect(hit.kind).toBe("pass");
+  });
+
+  it("an empty diagnostics render never satisfies a diagnostics expectation", () => {
+    const emptyXml = '<diagnostics file="/work/a.ts">\n\n</diagnostics>';
+    expect(
+      classifyProbeResult(
+        { kind: "ok", value: emptyXml },
+        {
+          required: true,
+          operation: "lsp_diagnostics",
+          expect: { contains: ["not assignable"], nonEmpty: true },
+        }
+      ).kind
+    ).toBe("fail");
+  });
+});
+
+describe("probe exit accounting: a run that checked nothing cannot be green", () => {
+  it("exits non-zero when no operation was checked at all", () => {
+    const summary = summarizeProbeVerdict({ passed: 0, total: 0 });
+    expect(summary.exitCode).not.toBe(0);
+    expect(summary.summary).toContain("no operation");
+  });
+
+  it("exits 0 only when every checked operation passed", () => {
+    expect(summarizeProbeVerdict({ passed: 4, total: 4 })).toEqual({
+      exitCode: 0,
+      summary: "all green (4/4)",
+    });
+  });
+
+  it("exits non-zero when any checked operation failed", () => {
+    const summary = summarizeProbeVerdict({ passed: 9, total: 10 });
+    expect(summary.exitCode).not.toBe(0);
+    expect(summary.summary).toContain("failures");
+  });
+});
+
+// ── the Python probe target must be a real, multi-file project (plan T5) ──────
+
+describe("probe targets: Python is a real project with assertable cross-file work", () => {
+  const python = PROBE_TARGETS.python;
+
+  it("declares a pyproject.toml project root marker", () => {
+    expect(python.rootMarkers).toContain("pyproject.toml");
+  });
+
+  it("provides a real project .venv", () => {
+    expect(python.venv).toBe(true);
+  });
+
+  it("ships at least two source files plus a pyproject.toml", () => {
+    const files = python.fixtureFiles ?? [];
+    const sources = files.filter((f) => f.path.endsWith(".py"));
+    expect(sources.length).toBeGreaterThanOrEqual(2);
+    expect(files.some((f) => f.path === "pyproject.toml")).toBe(true);
+  });
+
+  it("one file really imports and uses a symbol from another", () => {
+    const files = python.fixtureFiles ?? [];
+    const importer = files.find((f) => f.path === "probe.py");
+    const imported = files.find((f) => f.path.includes("offset.py"));
+    expect(importer?.content ?? "").toMatch(
+      /from\s+[\w.]*offset\s+import\s+compute_offset/
+    );
+    expect(importer?.content ?? "").toContain("compute_offset(");
+    expect(imported?.content ?? "").toContain("def compute_offset");
+  });
+
+  it("definition / hover / references / diagnostics are required ops with content expectations", () => {
+    expect(python.requiredOps).toEqual(
+      expect.arrayContaining([
+        "lsp_definition",
+        "lsp_hover",
+        "lsp_references",
+        "lsp_diagnostics",
+      ])
+    );
+    // The definition anchor must sit in one file and resolve into another.
+    expect(python.expectDefinition?.file).not.toBe(python.targetFile);
+    expect(python.expectDefinition?.symbol).toBeTruthy();
+    expect(python.expectHover?.contains.length).toBeGreaterThan(0);
+    expect(python.expectReferences?.expectFile).toBeTruthy();
+    expect(python.expectReferences?.expectSymbol).toBeTruthy();
+    expect(python.expectDiagnostics?.contains.length).toBeGreaterThan(0);
+    // Diagnostics must be asserted on a file no other operation opens: a
+    // server that only publishes on the first didOpen returns an empty set for
+    // a file that a previous operation already opened and closed.
+    expect(python.expectDiagnostics?.file).not.toBe(python.targetFile);
+  });
+
+  it("the TypeScript target asserts content too (not just a non-empty string)", () => {
+    const ts = PROBE_TARGETS.typescript;
+    expect(ts.expectDefinition?.file).toBeTruthy();
+    expect(ts.expectDefinition?.symbol).toBeTruthy();
+    expect(ts.expectHover?.contains.length).toBeGreaterThan(0);
+    expect(ts.expectReferences?.expectFile).toBeTruthy();
+    expect(ts.expectDiagnostics?.contains.length).toBeGreaterThan(0);
+    expect(ts.expectDiagnostics?.file).not.toBe(ts.targetFile);
   });
 });
 

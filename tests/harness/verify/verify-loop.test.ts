@@ -367,6 +367,7 @@ function defaultOptions(over: {
   readonly completionMode?: VerifyLoopOptions["completionMode"];
   readonly cwd?: string;
   readonly userText?: string;
+  readonly log?: (message: string) => void;
 }): VerifyLoopOptions {
   return {
     runFn: over.runFn,
@@ -813,11 +814,32 @@ describe("SC8: 每轮判定写 TraceService VerificationRecord", () => {
     assert.ok(cmds.length >= 2, "至少初始 + 全量复跑两条 SandboxCmdRecord");
     assert.equal(cmds[0]!.command, "npm test");
     assert.equal(cmds[0]!.exitCode, 1);
-    assert.equal(cmds[0]!.status, "ok");
+    // Behavior, not shape: a verification command that exited non-zero is a
+    // failure, so its SandboxCmdRecord must say so and carry the cause. The
+    // row used to report status "ok" with no error — a failing verification
+    // reading as clean to anyone following the trace.
+    assert.equal(
+      cmds[0]!.status,
+      "error",
+      "非零退出的验证命令在 trace 里必须记为失败，不能记为 ok"
+    );
+    assert.equal(
+      cmds[0]!.error?.type,
+      "execution_failed",
+      "失败必须带类型化的成因（不是裸字符串）"
+    );
+    assert.match(
+      cmds[0]!.error?.message ?? "",
+      /1/,
+      "成因要带上命令的实际退出码"
+    );
     assert.match(cmds[0]!.parentTurnId, /^[0-9]+$|^round-/);
-    // The verification command of the passing re-check exits 0.
+    // The verification command of the passing re-check exits 0 — and a clean
+    // run stays clean (Postel: no error key on success).
     const lastCmd = cmds[cmds.length - 1]!;
     assert.equal(lastCmd.exitCode, 0);
+    assert.equal(lastCmd.status, "ok");
+    assert.equal(lastCmd.error, undefined);
   });
 });
 
@@ -2110,5 +2132,79 @@ describe("自动探测取路径: 标志文件经 loop 派生复验命令并注�
       [],
       "零注入信封 (既不复验也不训斥)"
     );
+  });
+});
+
+/* ── model-visible failure text carries the command's stderr ──────────────── */
+
+describe("verify failure envelope reports stderr, not stdout alone", () => {
+  it("a command that speaks only on stderr still puts that text in the envelope", async () => {
+    // The diagnostic for a failing toolchain usually lands on stderr; an
+    // excerpt built from stdout alone hands the model an empty failure.
+    const envelopeTexts: string[] = [];
+    let verifyCall = 0;
+    const runVerify: VerifyLoopOptions["runVerify"] = async () => {
+      verifyCall += 1;
+      return verifyCall <= 2
+        ? {
+            exitCode: 1,
+            stdout: "",
+            stderr: "TypeError: Cannot find module 'vitest'\n",
+          }
+        : { exitCode: 0, stdout: "all pass\n", stderr: "" };
+    };
+    const { runFn } = makeRecordingRunFn(["wrong1", "wrong2", "right"]);
+    await runVerifyLoop(
+      defaultOptions({
+        runFn: (text, opts) => {
+          const last = opts?.priorMessages?.at(-1);
+          const body = last?.content.find(
+            (b): b is { type: "text"; text: string } => b.type === "text"
+          );
+          if (body !== undefined) envelopeTexts.push(body.text);
+          return runFn(text, opts);
+        },
+        runVerify,
+        sessionId: "s1-stderr",
+      })
+    );
+    const envelope = envelopeTexts.find((t) =>
+      t.includes("[VALIDATION FAILED]")
+    );
+    assert.ok(envelope !== undefined, "a failure envelope was injected");
+    assert.ok(
+      envelope.includes("Cannot find module"),
+      "the model's failure text must carry the stderr, not just stdout"
+    );
+  });
+
+  it("no stderr → the excerpt stays byte-identical (Postel: no new section)", async () => {
+    const texts: string[] = [];
+    let verifyCall = 0;
+    const runVerify: VerifyLoopOptions["runVerify"] = async () => {
+      verifyCall += 1;
+      return verifyCall <= 2
+        ? { exitCode: 1, stdout: "FAIL a\n", stderr: "" }
+        : { exitCode: 0, stdout: "all pass\n", stderr: "" };
+    };
+    const { runFn } = makeRecordingRunFn(["wrong1", "wrong2", "right"]);
+    await runVerifyLoop(
+      defaultOptions({
+        runFn: (text, opts) => {
+          const last = opts?.priorMessages?.at(-1);
+          const body = last?.content.find(
+            (b): b is { type: "text"; text: string } => b.type === "text"
+          );
+          if (body !== undefined) texts.push(body.text);
+          return runFn(text, opts);
+        },
+        runVerify,
+        sessionId: "s1-nostderr",
+      })
+    );
+    const envelope = texts.find((t) => t.includes("[VALIDATION FAILED]"));
+    assert.ok(envelope !== undefined);
+    assert.ok(!envelope.includes("stderr"));
+    assert.ok(envelope.includes("FAIL a"));
   });
 });

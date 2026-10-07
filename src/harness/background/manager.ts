@@ -117,6 +117,17 @@ interface BackgroundTask {
   /** Serialized log appendFile chain: each chunk continues off the previous chain tail, preserving order. */
   writeChain: Promise<void>;
   /**
+   * First failed append, per channel, kept as task evidence. A failed WRITE
+   * leaves the reader on the ENOENT → "" path — the very state
+   * `readStderrTail` refuses to hand back, since a stderr channel that reads
+   * empty is indistinguishable from a task that wrote nothing. Recording the
+   * message here lets that read raise the same typed `io_failure` a failed
+   * read would, instead of reporting an intact-looking empty channel.
+   */
+  stderrAppendFailure?: string;
+  /** Merged-log counterpart of `stderrAppendFailure` (stdout + stderr appends). */
+  logAppendFailure?: string;
+  /**
    * Bounded-teardown evidence for this task's process group. `not_started`
    * until stop() requests a teardown and the observation publishes its
    * verdict; a caller reads it through `status` to tell a confirmed stop
@@ -396,6 +407,12 @@ export interface BackgroundStatusResult {
 export interface BackgroundOutputResult {
   /** Return only the tail text (default 12KB, cap 100KB), truncated beyond the cap. */
   readonly text: string;
+  /**
+   * The stderr tail on its own (same window and cap as `text`), empty when the
+   * task wrote nothing there. `text` still holds both streams interleaved —
+   * this field is what lets a reader classify a line without parsing the merge.
+   */
+  readonly stderr: string;
   readonly status: BackgroundTaskStatus;
   readonly exit_code: number | null;
   readonly task_id: string;
@@ -632,7 +649,7 @@ function validateRequest(
  * started detached child (SIGKILL, no orphan leak); on success returns
  * undefined. Its own function (complexity gate: spawn does orchestration
  * only).
- */async function saveSpawnRecordOrReap(
+ */ async function saveSpawnRecordOrReap(
   record: BackgroundTaskRecord,
   child: ChildProcess,
   registry: BackgroundRegistry
@@ -703,7 +720,10 @@ function createSettleClosure(args: {
   readonly persistCommand: string;
   readonly logPath: string;
   readonly registry: BackgroundRegistry;
-  readonly disposeEgress: (session: EgressSession | undefined) => Promise<void>;
+  readonly disposeEgress: (
+    session: EgressSession | undefined,
+    taskId: string
+  ) => Promise<void>;
   readonly log: (msg: string) => void;
 }): (status: BackgroundTaskStatus, exitCode: number | null) => Promise<void> {
   const { task, record, client, persistCommand, logPath, registry, log } = args;
@@ -717,10 +737,10 @@ function createSettleClosure(args: {
     }
     // ADR-0097: the egress session is released inside the settle guard — same
     // lifetime as the task (the child-exit event is the release moment);
-    // dispose failures are swallowed, and shutdown()'s convergence step does
-    // not re-dispose (this guard is idempotent).
+    // a failed release is reported rather than swallowed, and shutdown()'s
+    // convergence step does not re-dispose (this guard is idempotent).
     if (task.egressSession !== undefined) {
-      await args.disposeEgress(task.egressSession);
+      await args.disposeEgress(task.egressSession, task.task_id);
     }
     client.status = status;
     client.exit_code = exitCode;
@@ -734,7 +754,9 @@ function createSettleClosure(args: {
       exit_code: exitCode,
       created_at: record.created_at,
       log_path: logPath,
-      ...(record.starttime !== undefined ? { starttime: record.starttime } : {}),
+      ...(record.starttime !== undefined
+        ? { starttime: record.starttime }
+        : {}),
       ...terminalDeadlineFields(task),
     };
     try {
@@ -762,8 +784,7 @@ function claimExitCause(
   signal: NodeJS.Signals | null
 ): void {
   if (task.terminationCause !== null) return;
-  task.terminationCause =
-    signal !== null ? "stop_requested" : "exit";
+  task.terminationCause = signal !== null ? "stop_requested" : "exit";
 }
 
 /**
@@ -821,7 +842,9 @@ function freezeDeadlineAt(
  * contributes nothing here — the absence of these fields IS the signal that no
  * runtime deadline exists.
  */
-function terminalDeadlineFields(task: BackgroundTask): Partial<BackgroundTaskRecord> {
+function terminalDeadlineFields(
+  task: BackgroundTask
+): Partial<BackgroundTaskRecord> {
   return {
     ...(task.timeoutMs !== null
       ? { timeout_ms: task.timeoutMs, deadline_at: task.deadlineAt as string }
@@ -842,10 +865,7 @@ function terminalDeadlineFields(task: BackgroundTask): Partial<BackgroundTaskRec
  * same reason the stop escalation timer is unref'd. Nothing here is ever
  * re-armed: a poll, a log read or a stop request cannot reach this function.
  */
-function armTaskDeadline(
-  task: BackgroundTask,
-  onExpired: () => void
-): void {
+function armTaskDeadline(task: BackgroundTask, onExpired: () => void): void {
   if (task.timeoutMs === null) return;
   const timer = setTimeout(() => {
     if (task.client.status !== "running") return;
@@ -877,17 +897,27 @@ export function createBackgroundTaskManager(
   /**
    * ADR-0097: the single release channel for the egress session — shared by
    * the spawn abnormal path, settle, and the shutdown fallback. dispose is
-   * idempotent and failures are swallowed (the manager never reclaims
-   * twice); one helper removes per-site try/catch duplication.
+   * idempotent and the manager never reclaims twice; a failure is reported
+   * (never rethrown — it would replace the task's own outcome) so a proxy that
+   * may still be live leaves a trace naming the task.
    */
   async function disposeEgressQuietly(
-    session: EgressSession | undefined
+    session: EgressSession | undefined,
+    taskId: string
   ): Promise<void> {
     if (session === undefined) return;
     try {
       await session.dispose();
-    } catch {
-      /* dispose failure swallowed; the manager does not reclaim twice */
+    } catch (err) {
+      // EXIT: the release failed. The task's status/exit code are already
+      // settled and must not be replaced by a teardown fault, so the cause is
+      // logged as evidence. Drop this branch once every session implementation
+      // proves a non-throwing dispose.
+      log(
+        `background egress session release failed for ${taskId}: ${
+          err instanceof Error ? err.message : String(err)
+        }`
+      );
     }
   }
 
@@ -961,13 +991,13 @@ export function createBackgroundTaskManager(
       // Abnormal path: the manager already started the egress session before
       // the spawn factory threw, so dispose is mandatory here (ownership:
       // "abnormal and normal paths release through the same channel").
-      await disposeEgressQuietly(egressSession);
+      await disposeEgressQuietly(egressSession, taskId);
       return { status: "spawn_error", task_id: taskId, error };
     }
     if (child.pid === undefined) {
       log(`background spawn returned no pid: ${taskId}`);
       // Abnormal path: dispose as above.
-      await disposeEgressQuietly(egressSession);
+      await disposeEgressQuietly(egressSession, taskId);
       return {
         status: "spawn_error",
         task_id: taskId,
@@ -1007,7 +1037,7 @@ export function createBackgroundTaskManager(
     const saveFailure = await saveSpawnRecordOrReap(record, child, registry);
     if (saveFailure !== undefined) {
       // Abnormal path: registry.save failed; the egress session disposes too.
-      await disposeEgressQuietly(egressSession);
+      await disposeEgressQuietly(egressSession, taskId);
       return { status: "spawn_error", task_id: taskId, error: saveFailure };
     }
 
@@ -1056,15 +1086,47 @@ export function createBackgroundTaskManager(
     // Streaming log append: stdout + stderr merge into the same log file.
     // The serialized chain preserves order: each chunk continues off
     // task.writeChain's tail, so concurrent data events never reorder.
+    // stderr chunks are ALSO appended to a sidecar beside the log, so a reader
+    // can tell which side a line came from; the merged log keeps the exact
+    // bytes existing consumers read.
+    const stderrLogPath = `${logPath}.stderr`;
+    /** Bounded reason of a failed append, so the read side can raise it typed. */
+    const failureReason = (err: unknown): string =>
+      err instanceof Error ? err.message : String(err);
     const enqueue = (chunk: Buffer | string): void => {
       task.writeChain = task.writeChain.then(() =>
-        appendFile(logPath, chunk, "utf8").catch(() => {
+        appendFile(logPath, chunk, "utf8").catch((err: unknown) => {
+          // EXIT: the chunk is dropped and the append is never retried; the
+          // reason is kept on the task so `output` raises io_failure instead of
+          // the ENOENT → "" path that would look like "the task wrote nothing".
+          task.logAppendFailure ??= failureReason(err);
           log(`background log append failed: ${taskId}`);
         })
       );
     };
+    const enqueueStderr = (chunk: Buffer | string): void => {
+      task.writeChain = task.writeChain
+        .then(() =>
+          appendFile(stderrLogPath, chunk, "utf8").catch((err: unknown) => {
+            // EXIT: the sidecar chunk is dropped and never retried; the reason
+            // is kept on the task so `readStderrTail` raises io_failure rather
+            // than the ENOENT → "" tail it must never produce.
+            task.stderrAppendFailure ??= failureReason(err);
+            log(`background stderr log append failed: ${taskId}`);
+          })
+        )
+        .then(() =>
+          appendFile(logPath, chunk, "utf8").catch((err: unknown) => {
+            // EXIT: same merged-log evidence as the stdout path above — the
+            // chunk is dropped, never retried, and `output` raises the typed
+            // io_failure instead of reading a silently short log.
+            task.logAppendFailure ??= failureReason(err);
+            log(`background log append failed: ${taskId}`);
+          })
+        );
+    };
     child.stdout?.on("data", (chunk: Buffer) => enqueue(chunk));
-    child.stderr?.on("data", (chunk: Buffer) => enqueue(chunk));
+    child.stderr?.on("data", (chunk: Buffer) => enqueueStderr(chunk));
 
     child.on("error", (err) => {
       log(`background child error: ${err.message}`);
@@ -1176,6 +1238,17 @@ export function createBackgroundTaskManager(
       maxBytes > 0 ? maxBytes : DEFAULT_LOG_MAX_BYTES,
       MAX_LOG_READ_BYTES
     );
+    // EXIT: an append that already failed leaves this read unable to see the
+    // bytes the task wrote, and the ENOENT → "" branch below cannot tell that
+    // apart from a task that wrote nothing — so the recorded reason is raised
+    // as the same typed io_failure a failed read would be.
+    if (task.logAppendFailure !== undefined) {
+      throw {
+        kind: "io_failure",
+        context: `output ${taskId}`,
+        cause: task.logAppendFailure,
+      } satisfies BackgroundTaskError;
+    }
     let raw: string;
     try {
       raw = await readFile(task.client.log_path, "utf8");
@@ -1192,10 +1265,49 @@ export function createBackgroundTaskManager(
     }
     return {
       text: raw.length > effectiveMax ? raw.slice(-effectiveMax) : raw,
+      stderr: await readStderrTail(task, effectiveMax),
       status: task.client.status,
       exit_code: task.client.exit_code,
       task_id: taskId,
     };
+  }
+
+  /**
+   * The stderr sidecar's tail, with the same absent-is-empty contract the
+   * merged log read uses (a task that never wrote to stderr has no sidecar).
+   * A read failure that is not ENOENT propagates as the same typed
+   * `io_failure` the merged read raises — a stderr channel that silently
+   * reads empty would be indistinguishable from a task that wrote nothing.
+   */
+  async function readStderrTail(
+    task: BackgroundTask,
+    maxBytes: number
+  ): Promise<string> {
+    // EXIT: a recorded sidecar append failure is the write-side twin of the
+    // non-ENOENT read failure below — raised as the same typed io_failure, so
+    // the tail is never the silently-empty "task wrote nothing" answer.
+    if (task.stderrAppendFailure !== undefined) {
+      throw {
+        kind: "io_failure",
+        context: `output stderr ${task.task_id}`,
+        cause: task.stderrAppendFailure,
+      } satisfies BackgroundTaskError;
+    }
+    let raw: string;
+    try {
+      raw = await readFile(`${task.client.log_path}.stderr`, "utf8");
+    } catch (err) {
+      // EXIT: no sidecar at all means no stderr byte was ever persisted, and a
+      // failed append raises io_failure above this read — so the empty tail is
+      // only ever "the task wrote nothing to stderr".
+      if ((err as NodeJS.ErrnoException).code === "ENOENT") return "";
+      throw {
+        kind: "io_failure",
+        context: `output stderr ${task.task_id}`,
+        cause: err instanceof Error ? err.message : String(err),
+      } satisfies BackgroundTaskError;
+    }
+    return raw.length > maxBytes ? raw.slice(-maxBytes) : raw;
   }
 
   /**
@@ -1479,7 +1591,7 @@ export function createBackgroundTaskManager(
       task.terminationCause ??= "shutdown";
       // ADR-0097: shutdown fallback dispose (session-start exception /
       // settle path never fired).
-      await disposeEgressQuietly(task.egressSession);
+      await disposeEgressQuietly(task.egressSession, task.task_id);
       const rec: BackgroundTaskRecord = {
         task_id: task.task_id,
         command: task.client.command,

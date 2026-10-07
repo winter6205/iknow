@@ -4,7 +4,7 @@
  */
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -19,6 +19,7 @@ import {
   MEMORY_PREFETCH_END,
 } from "../../src/harness/memory/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
+import { createAutoMemoryHook } from "../../src/harness/memory/index.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import type { LoopState } from "../../src/harness/model-adapter/types.ts";
 
@@ -337,5 +338,63 @@ describe("SessionHub — session-level prefetch dedup", () => {
       "resumed conversation must not re-inject"
     );
     assert.ok(turn1Own.includes("resumed query"));
+  });
+});
+
+/**
+ * Total memory OFF (ADR-0031 amendment 2026-10-07): the hub still reports each
+ * finished turn to the auto-memory hook, but a dual-off capability runs
+ * nothing — no extract, no Dream, no mechanical GC, no capability sweep, no
+ * store write. Asserted through the real hub → notifyAutoMemory → hook path.
+ */
+describe("SessionHub — total memory OFF", () => {
+  it("runs no memory work for a turn reported while the capability is off", async () => {
+    const store = new SessionStore(
+      await tmpDir("iknow-off-store-"),
+      process.cwd()
+    );
+    const root = await tmpDir("iknow-off-root-");
+    const memoryDir = await tmpDir("iknow-off-memory-");
+    const llmCalls: string[] = [];
+
+    const hook = createAutoMemoryHook({
+      memoryDir,
+      llm: {
+        complete: async (prompt: string) => {
+          llmCalls.push(prompt);
+          return "[]";
+        },
+      },
+      // The TUI OFF transition: both flags false.
+      flags: { autoExtract: false, dream: false },
+      minCompletedTurns: 1,
+      onError: () => {},
+    });
+
+    const hub = new SessionHub({
+      store,
+      askUser: createNoAskUser(),
+      surface: "serve",
+      buildEngine: async () => ({
+        deps: makeDeps([assistantResult({ texts: ["ok"] })]),
+        autoMemory: hook,
+      }),
+    });
+
+    await hub.bindWorkspace(root);
+    const session = await hub.createSession();
+    await hub.postMessage({
+      conversationId: session.session.conversation_id,
+      text: "what do you know?",
+    });
+    await hook.drain();
+    await hook.onExit?.();
+
+    assert.deepEqual(llmCalls, [], "no extract / dream LLM call while OFF");
+    assert.deepEqual(
+      await readdir(memoryDir),
+      [],
+      "no memory_gc, no capability sweep, no write while OFF"
+    );
   });
 });

@@ -51,6 +51,10 @@
  */
 export const CI_EXCLUDES: readonly string[] = [
   // ---- bwrap physical-execution class (really spawns bwrap; runner has no user-namespace) ----
+  // T4: signal termination is asserted against real process groups, and the
+  // exec seam under test is runInSandbox itself.
+  "tests/harness/aci/bash-signal-and-pipeline.test.ts",
+  "tests/harness/sandbox/exec-signal-termination.test.ts",
   "tests/harness/aci/bash-sandbox.test.ts",
   "tests/harness/aci/bash-background.test.ts",
   "tests/harness/aci/bash-output-stop.test.ts",
@@ -165,6 +169,14 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/scratch-cleanup-host-wiring.test.ts",
 
   // ---- bwrap assembly-dependency class (requireBwrap fail-loud, throws at assembly time) ----
+  // T4: the background route's fail-closed egress and its stderr channel are
+  // both observed through a real createBashTool assembly.
+  "tests/harness/aci/bash-background-egress-fail-closed.test.ts",
+  "tests/harness/aci/bash-background-output-stderr.test.ts",
+  // T6: the total memory OFF gate is observed on a real buildHarnessEngine
+  // assembly, so the memory tool set, system surface and executor gate are
+  // checked as assembled rather than through a stubbed registry.
+  "tests/harness/memory/memory-capability-off.test.ts",
   // ACI registry assembly → createBashTool → requireBwrap
   "tests/harness/aci/permission.test.ts",
   // ADR-0097 egress seam: the three bash-surface arms (approval gate / typed

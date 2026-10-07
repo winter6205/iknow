@@ -125,6 +125,33 @@ export class BashTimeoutInputError extends ToolInputValidationError {
   }
 }
 
+/**
+ * Background spawn refusal, carrying the manager's discriminated failure.
+ *
+ * The manager already decides which kind of refusal it is
+ * (`concurrency_limit_reached` / `spawn_validation_failed` / `io_failure` /
+ * `task_not_found`); the message alone leaves a caller parsing prose to
+ * recover it. `kind` + `context` keep that identity on the owning interface,
+ * while the `ToolExecutionError` message keeps the model-visible projection
+ * byte-identical to what the flattened string used to be.
+ */
+export class BashBackgroundSpawnError extends ToolExecutionError {
+  override readonly name: string = "BashBackgroundSpawnError";
+  /** The manager's discriminated refusal kind, verbatim. */
+  readonly kind: string;
+  /** The manager's context for that kind, verbatim. */
+  readonly context: string;
+  constructor(args: {
+    readonly kind: string;
+    readonly context: string;
+    readonly detail: string;
+  }) {
+    super(`bash: background spawn failed: ${args.kind}: ${args.detail}`);
+    this.kind = args.kind;
+    this.context = args.context;
+  }
+}
+
 /** How the offending value is echoed back. `JSON.stringify` cannot render a
  *  NaN / Infinity, and a bare `String(...)` would print an empty line for null
  *  and an empty string — both read as "no value was given", which is the one
@@ -502,6 +529,7 @@ async function runForegroundBash(
     egressSession: egress.session,
     fenceWiring,
   });
+  let egressReleaseFailure: string | undefined;
   const result = await runSandboxDisposingEgress(
     {
       fence,
@@ -515,7 +543,10 @@ async function runForegroundBash(
       // frontend wait that returns while the command keeps running.
       deadlineMs: deadlineMs,
     },
-    egress.session
+    egress.session,
+    (detail) => {
+      egressReleaseFailure = detail;
+    }
   );
   const mask = buildOutputMask(opts);
   await recordForegroundRead(opts, ctx, {
@@ -542,6 +573,7 @@ async function runForegroundBash(
     // second yolo re-check.
     exactFileMaskPaths: fence.exactFileMaskPaths,
     fsModeBoundary: fsModeBoundaryForCall({ fsPolicy, mounts }),
+    egressReleaseFailure,
   });
   if (finalPath.kind === "throw") throw finalPath.throwError;
   return finalPath.envelope;
@@ -822,6 +854,8 @@ async function finalizeEgressPath(args: {
   /** The tier's own reach for this call, from the frozen `fsMode` snapshot —
    *  the fs-mode boundary arm's correlation set. */
   readonly fsModeBoundary: FsModeBoundary;
+  /** Non-empty when this call's egress release failed after the fence ended. */
+  readonly egressReleaseFailure?: string;
 }): Promise<
   | { readonly kind: "throw"; readonly throwError: ToolExecutionError }
   | {
@@ -843,6 +877,7 @@ async function finalizeEgressPath(args: {
     protectedTargets,
     exactFileMaskPaths,
     fsModeBoundary,
+    egressReleaseFailure,
   } = args;
   const violations =
     egressSession !== undefined ? egressSession.violationSink.drain() : [];
@@ -893,11 +928,13 @@ async function finalizeEgressPath(args: {
     fsModeBoundary,
     result
   );
+  const releaseGuidance = egressReleaseGuidance(egressReleaseFailure);
   const guidanceLines = [
     f4Guidance,
     erofsGuidance,
     protectedTargetGuidance,
     modeBoundaryGuidance,
+    releaseGuidance,
   ].filter((line): line is string => line !== undefined);
   const effectiveResult =
     guidanceLines.length === 0
@@ -1031,26 +1068,60 @@ function composeEgressFailure(args: {
 }
 
 /**
+ * The single release channel for one call's egress session. Returns the
+ * failure detail when dispose threw, `undefined` on success or when no session
+ * was started — never throws, so the caller's own status is never replaced by
+ * a release fault.
+ *
+ * Standalone function (S5 gate).
+ */
+async function releaseEgressSession(
+  session: EgressSession | undefined
+): Promise<string | undefined> {
+  if (session === undefined) return undefined;
+  try {
+    await session.dispose();
+    return undefined;
+  } catch (err) {
+    // EXIT: dispose itself failed. The fence has already finished, so the
+    // call keeps its real exit status and the detail travels as evidence in the
+    // result's stderr channel. Drop this branch once every session
+    // implementation proves a non-throwing dispose.
+    return err instanceof Error ? err.message : String(err);
+  }
+}
+
+/**
+ * Egress release evidence: the session's dispose threw after the fence had
+ * finished, so the status stays the command's own and the detail is announced
+ * on the same stderr channel as every other fence-attributed annotation (no
+ * exit-semantics change).
+ */
+function egressReleaseGuidance(detail: string | undefined): string | undefined {
+  return detail === undefined
+    ? undefined
+    : `[egress_release] egress session release failed: ${detail}`;
+}
+
+/**
  * runInSandbox + per-call egress session release in `finally` — exception
  * and normal paths share one release channel (the pinned ownership /
  * dispose contract). dispose is idempotent, repeat calls are safe.
+ * A release failure is handed to `onReleaseFailure` instead of being dropped:
+ * a proxy that may not have closed must leave evidence, and the release cannot
+ * change the exit status because it runs after the fence.
  * Standalone function (S5 gate).
  */
 async function runSandboxDisposingEgress(
   runArgs: Parameters<typeof runInSandbox>[0],
-  egressSession: EgressSession | undefined
+  egressSession: EgressSession | undefined,
+  onReleaseFailure: (detail: string) => void
 ): Promise<Awaited<ReturnType<typeof runInSandbox>>> {
   try {
     return await runInSandbox(runArgs);
   } finally {
-    if (egressSession !== undefined) {
-      try {
-        await egressSession.dispose();
-      } catch {
-        // best-effort: a dispose error must not pollute the caller's
-        // control flow.
-      }
-    }
+    const detail = await releaseEgressSession(egressSession);
+    if (detail !== undefined) onReleaseFailure(detail);
   }
 }
 
@@ -1082,6 +1153,10 @@ function assembleBashToolResult(
       // ordinary call. The states that DO carry a claim (`confirmed_stopped` /
       // `unconfirmed`) are always reported, and are never dropped.
       ...(result.deadline_expired === true ? { deadline_expired: true } : {}),
+      // The signal that ended the run, when it ended by signal: 128+N alone
+      // reads the same whether the bounded teardown or the command's own
+      // `kill` delivered it. Absent for every naturally-exited run.
+      ...(result.signal !== undefined ? { signal: result.signal } : {}),
       ...(result.cleanup !== undefined && result.cleanup.state !== "not_started"
         ? { cleanup: result.cleanup }
         : {}),
@@ -1259,8 +1334,7 @@ export function createBashTool(
           tmpDir,
           unboundMainCheckout,
           yolo,
-        },
-        effectiveEgressPolicyFactory
+        }
       );
     }
     // bashMode="readonly" derives cwdReadonly:true for the fence + env.
@@ -1401,8 +1475,8 @@ interface BackgroundSpawnInput {
  *   - `unboundMainCheckout` is the UNBOUND_FENCE entry-frozen value
  *     (foreground/background set-equal on this axis, G3 discipline);
  *   - `fsMode` / `homeRoot` are ADR-0092 Round 2's mode surface;
- *   - `egressPolicy` is ADR-0097 / T7's per-call policy (derived via the
- *     caller-injected `effectiveEgressPolicyFactory`).
+ *   - `egressPolicy` is ADR-0097 / T7's per-call policy, read from the
+ *     caller's factory WITHOUT the interactive gate (see below).
  *
  * The parameters are already-destructured values (no holder / no cell):
  * this function re-reads no mutable state, matching `FenceSnapshot`'s D2
@@ -1418,7 +1492,7 @@ function buildBackgroundSpawnRequest(args: {
   readonly workspaceRoot: string;
   readonly unboundMainCheckout: string | undefined;
   readonly yolo: boolean;
-  readonly effectiveEgressPolicyFactory:
+  readonly backgroundEgressPolicyFactory:
     (() => EgressPolicyInput | undefined) | undefined;
 }): BackgroundSpawnRequest {
   const {
@@ -1431,7 +1505,7 @@ function buildBackgroundSpawnRequest(args: {
     workspaceRoot,
     unboundMainCheckout,
     yolo,
-    effectiveEgressPolicyFactory,
+    backgroundEgressPolicyFactory,
   } = args;
   return {
     command: input.finalCommand,
@@ -1462,16 +1536,18 @@ function buildBackgroundSpawnRequest(args: {
     // non-yolo, legacy request field set unchanged). manager skips the
     // egress session on it; the spawn factory emits bare argv from it.
     ...(yolo ? { yolo: true } : {}),
-    // ADR-0097: egress seam — policy injected by the caller (registry
-    // assembly, derived via `effectiveEgressPolicyFactory`, approvalGate
-    // already attached). manager.spawn starts the session during spawn
-    // assembly; absent = caller passed no policy = no seam (V1 baseline
-    // equivalent). The background path has no ask surface — even with a
-    // policy present, the filter records a `no-approval-inlet` violation
-    // for hosts not in `allowedDomains` (fail-closed for non-interactive
-    // entries).
-    ...(effectiveEgressPolicyFactory !== undefined
-      ? { egressPolicy: effectiveEgressPolicyFactory() }
+    // ADR-0097: egress seam — the caller's policy, WITHOUT the interactive
+    // approval gate. The background path has no ask surface: by the time the
+    // handler returned `task_id` nobody is waiting on the proxy, so a gate in
+    // this policy would raise a prompt nobody answers (or worse, one that is
+    // answered on a stream the caller has moved on from). With no gate the
+    // filter records `no-approval-inlet` and blocks — fail-closed. The
+    // foreground route keeps the gate; an explicit deny still wins here
+    // (deny precedence is decided inside the filter, before the gate arm).
+    // manager.spawn starts the session during spawn assembly; absent = caller
+    // passed no policy = no seam (V1 baseline equivalent).
+    ...(backgroundEgressPolicyFactory !== undefined
+      ? { egressPolicy: backgroundEgressPolicyFactory() }
       : {}),
     // UNBOUND_FENCE entry-frozen value forwarded to the background fence
     // (foreground/background set-equal on this axis, G3 discipline);
@@ -1533,12 +1609,7 @@ async function handleBackground(
     tmpDir,
     unboundMainCheckout,
     yolo,
-  }: FenceSnapshot,
-  /** ADR-0097: per-call egress policy — closure-derived, approvalGate
-   *  already injected. manager.spawn starts the session during assembly;
-   *  absent = no seam. */
-  effectiveEgressPolicyFactory?:
-    (() => EgressPolicyInput | undefined) | undefined
+  }: FenceSnapshot
 ): Promise<{
   task_id: string;
   log_path: string;
@@ -1564,7 +1635,11 @@ async function handleBackground(
       workspaceRoot,
       unboundMainCheckout,
       yolo,
-      effectiveEgressPolicyFactory,
+      // ADR-0097: the caller's raw policy factory, NOT the gate-carrying one —
+      // the background inlet is non-interactive, so an unknown domain must
+      // stay fail-closed (buildBackgroundSpawnRequest names why). Read here
+      // rather than threaded in: `opts` is already the settled options bag.
+      backgroundEgressPolicyFactory: opts.egressPolicyFactory,
     })
   );
   if (result.status === "spawn_error") {
@@ -1579,9 +1654,11 @@ async function handleBackground(
       "message" in result.error && result.error.message
         ? result.error.message
         : result.error.context;
-    throw new ToolExecutionError(
-      `bash: background spawn failed: ${result.error.kind}: ${detail}`
-    );
+    throw new BashBackgroundSpawnError({
+      kind: result.error.kind,
+      context: result.error.context,
+      detail,
+    });
   }
   // ADR-0119: under yolo the whole fence retires — the main checkout is never
   // ro-mounted, so the EROFS pre-disclosure would assert a physical state that

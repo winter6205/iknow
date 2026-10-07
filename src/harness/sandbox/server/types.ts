@@ -52,6 +52,13 @@ export interface ExecResponse {
   readonly stdout: string;
   readonly stderr: string;
   /**
+   * The signal that terminated the fence, when the child died by signal.
+   * `exitCode` alone folds every cause of signal N into the same 128+N, so the
+   * name travels with the response; absent means the child was not
+   * signal-terminated (a natural exit, including a non-zero one).
+   */
+  readonly signal?: string;
+  /**
    * Bounded-teardown evidence for the fence's process group, so a timeout or
    * an abort that could not confirm disappearance is visible to the caller
    * instead of being flattened into an exit code. Absent only when the fence

@@ -455,6 +455,12 @@ export interface SandboxRunResult {
   /** Already truncated to maxOutputCodePoints. */
   readonly stderr: string;
   /**
+   * Set only when the fence died by signal (the name, e.g. "SIGKILL").
+   * `exitCode` on such a run is 128 + signal number — a shell convention that
+   * hides the cause — so the two fields together are the whole story.
+   */
+  readonly signal?: string;
+  /**
    * Bounded-teardown evidence for the fence's process group. A timeout or an
    * abort that could not confirm disappearance reports `unconfirmed` here
    * instead of an exit code that reads like a clean finish. Absent only when
@@ -518,6 +524,7 @@ export async function runInSandbox(
     exitCode: result.exitCode,
     stdout: result.stdout,
     stderr: result.stderr,
+    ...(result.signal !== undefined ? { signal: result.signal } : {}),
     ...(result.cleanup !== undefined ? { cleanup: result.cleanup } : {}),
     ...(result.deadline_expired !== undefined
       ? { deadline_expired: result.deadline_expired }

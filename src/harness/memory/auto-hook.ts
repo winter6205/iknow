@@ -12,11 +12,11 @@
  * gate (24h since last success-or-skip ∧ 5 distinct sessions) persisted
  * under the memory root.
  *
- * ADR-0031 D5 amendment 2026-09-11 (specs/runtime-capability-memory-gate.md):
- * the dual-off case still gets a hook, but a mechanical-only one — the same
- * `completed` counter drives `memory_gc` + the capability sweep with zero LLM
- * calls, so old environment snapshots are actually soft-disabled instead of
- * surviving on disk forever because nobody opted into extraction.
+ * ADR-0031 D5 amendment 2026-10-07 (total memory OFF): dual-off is a total
+ * capability state, so the hook runs nothing — no extract, no Dream, no
+ * `memory_gc`, no capability sweep, not on the completed-turn gate and not on
+ * process exit. Hook presence stays `autoExtract || dream` (ADR-0033 D3), so a
+ * TUI session keeps its hook object and reads the flip live.
  *
  * Two contracts the hosts depend on:
  *
@@ -148,6 +148,9 @@ export function createAutoMemoryHook(
   const onTurnComplete = (turn: AutoMemoryTurn): void => {
     const { enabled, dream } = liveFlags(opts);
     if (turn.stopReason !== "completed") return;
+    // Total memory OFF (ADR-0031 amendment 2026-10-07): no counter movement,
+    // no queue entry, no pass — the hook runs nothing while both flags are off.
+    if (!enabled && !dream) return;
     const extractEligible = enabled && turn.transcript.trim().length > 0;
     // autoExtract implies dream (spec specs/auto-memory-layering.md
     // Assumptions 2-3): there is no "extract without dream" escape hatch.
@@ -168,15 +171,19 @@ export function createAutoMemoryHook(
     const skipExtract = turn.memorySaveSucceeded === true;
     chain = chain.then(async () => {
       // Live re-read inside the chain: a TUI flip before the queued pass runs
-      // is honored, so a dual-off flip spends no LLM call even on a gated turn
-      // (ADR-0031 D5 amendment: dual-off is mechanical-only).
+      // is honored, so a dual-off flip spends no LLM call even on a gated turn.
       const live = liveFlags(opts);
-      // Dream dual gate: evaluated when dream is on OR autoExtract is on —
+      // A flip to total OFF between queueing and the pass leaves the store
+      // untouched (EXIT: no dream cursor advance, no extract, no mechanical
+      // pass — ADR-0031 amendment 2026-10-07).
+      if (!live.enabled && !live.dream) return;
+      // Dream dual gate: the capability is on, so at least one flag is true —
       // autoExtract implies dream (no extract-without-dream hatch).
-      const dreamDue =
-        live.dream || live.enabled
-          ? await persistAndEvaluateDreamGate(opts, sessionKey, opts.onError)
-          : false;
+      const dreamDue = await persistAndEvaluateDreamGate(
+        opts,
+        sessionKey,
+        opts.onError
+      );
 
       const extractDue =
         gateDue && extractEligible && live.enabled && !skipExtract;
@@ -204,7 +211,16 @@ export function createAutoMemoryHook(
       // still get its chance. No link is expected to reject (every pass
       // swallows its own faults), so this is the second line of defense, not
       // the first. The exit pass deliberately does not touch `completedTurns`.
-      chain = chain.catch(() => undefined).then(() => runMechanicalPass(opts));
+      chain = chain
+        .catch(() => undefined)
+        .then(() => {
+          // Total memory OFF (ADR-0031 amendment 2026-10-07): no memory_gc and
+          // no capability sweep on exit (EXIT: best-effort by contract, so an
+          // OFF session simply skips the pass).
+          const live = liveFlags(opts);
+          if (!live.enabled && !live.dream) return;
+          return runMechanicalPass(opts);
+        });
       await chain;
     } catch (error) {
       // EXIT: log-and-continue — a process-exit fault must not become an

@@ -134,6 +134,7 @@ import {
   type PrefetchQueryOpts,
   type SystemResolver,
 } from "./memory/index.js";
+import { memoryCapabilityOn as memoryCapabilityOnFlags } from "./memory/memory-capability.js";
 import { createAdapterExtractLlm } from "./auto-memory-wire.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
@@ -934,6 +935,13 @@ export async function buildHarnessEngine(
     dream: dreamOn,
   };
   const tuiLive = surface === "tui" && memoryEnabled;
+  // Total memory OFF (ADR-0031 / ADR-0033 / ADR-0042 amendment 2026-10-07):
+  // one live predicate off the shared flags box, read by tool schemas, the
+  // memory_layer resolver, executor enforcement, the hook and the prefetch
+  // overlay — so a single toggle moves every channel together. Non-TUI hosts
+  // hold the same box, so their capability is simply the settings value.
+  const memoryCapabilityOn = (): boolean =>
+    memoryCapabilityOnFlags(memoryFlags);
   // Worktree isolation mode resolved right after settings load — the
   // subagentManager construction below passes `isolationOn` to
   // createSubAgentManager, whose buildWorkerPayload combines it with the
@@ -1508,7 +1516,7 @@ export async function buildHarnessEngine(
       // survives root switches); unwired hosts (ask / direct tests) → the
       // registry builds its own and the gate works as usual.
       ...lastReadLedgerOption(opts),
-      ...(memoryToolsEnabled ? { memoryDir } : undefined),
+      ...memoryRegistryOptions(memoryToolsEnabled, memoryDir, memoryCapabilityOn),
       skillCatalog,
       ...(subagentManager ? { subagentManager } : undefined),
       // Capacity holder → registry → tool factory (when
@@ -1680,7 +1688,7 @@ export async function buildHarnessEngine(
       // non-empty overwrite", consistent with fail-closed; read / bash still
       // run, they just aren't recorded).
       ...lastReadLedgerOption(opts),
-      ...(memoryToolsEnabled ? { memoryDir } : undefined),
+      ...memoryRegistryOptions(memoryToolsEnabled, memoryDir, memoryCapabilityOn),
       skillCatalog,
       ...(subagentManager ? { subagentManager } : undefined),
       ...(backgroundManager ? { backgroundManager } : {}),
@@ -2160,6 +2168,7 @@ export async function buildHarnessEngine(
         autoExtract: settings.memory?.autoExtract === true,
         flags: memoryFlags,
         flagsActive: tuiLive,
+        isEnabled: memoryCapabilityOn,
       })
     : undefined;
   const deps: LoopEngineDeps = {
@@ -2196,7 +2205,11 @@ export async function buildHarnessEngine(
     // advertises run_graph (its isEnabled gate rejects the call), keeping
     // promptTools byte-stable across turns so prefix caching is never broken
     // by graph toggling.
-    promptTools: reg.visibleSchemas,
+    // Total memory OFF differs on purpose: the memory pair stays *registered*
+    // (so a stale call is refused by the handler with a typed failure rather
+    // than an unknown-tool error) but its schemas leave the model request. The
+    // filter is live and reads the same flags box, so ON is byte-identical.
+    promptTools: memoryPromptTools(reg.visibleSchemas, memoryCapabilityOn),
     // Per-turn system assembly: identity/soul/user_profile/bootstrap +
     // memory_layer via deps.system (loop-engine calls deps.system?.() each
     // turn and passes it through as adapter.step request.system). Two-layer
@@ -2361,15 +2374,14 @@ export async function buildHarnessEngine(
   // surface. Either failing → hook absent, zero host calls, zero LLM, zero
   // disk writes. Read-path prefetch follows autoExtract only (dream-only must
   // not inject user messages). (autoExtractOn / dreamOn / memoryFlags /
-  // tuiLive are defined at the settings load point.) When extract and dream
-  // (ADR-0031)
-  // are both off the hook still exists: the mechanical pass (memory_gc +
-  // capability sweep) must run on the completed gate, otherwise stale
-  // capability entries never get soft-archived. Zero-LLM is guaranteed inside
-  // the hook (dual-off enters only runMechanicalPass) and extract is still
-  // gated by the live `enabled` flag.
+  // tuiLive are defined at the settings load point.)
+  // Total memory OFF (ADR-0031 amendment 2026-10-07) assembles no hook on a
+  // host surface: dual-off settings mean no extract, no Dream, no memory_gc
+  // and no capability sweep. `tuiLive` keeps the hook object alive on the TUI
+  // because its flags flip mid-session; the hook itself reads the live
+  // capability and runs nothing while both flags are off.
   const autoMemory =
-    memoryEnabled && surface !== "ask"
+    memoryEnabled && surface !== "ask" && (autoExtractOn || dreamOn || tuiLive)
       ? createAutoMemoryHook({
           memoryDir,
           llm: createAdapterExtractLlm(adapter),
@@ -2392,12 +2404,20 @@ export async function buildHarnessEngine(
         })
       : undefined;
   const overlayMemoryPrefetch =
-    memoryEnabled && surface !== "ask" && (autoExtractOn || tuiLive)
+    surfaceOverlaysMemoryPrefetch({
+      memoryEnabled,
+      surface,
+      anyMemoryFlagOn: autoExtractOn || tuiLive,
+      tuiLive,
+    })
       ? async (
           query: string,
           prefetchOpts?: PrefetchQueryOpts
         ): Promise<string> => {
-          if (memoryFlags.autoExtract !== true) return "";
+          // Total memory OFF first, then the read-path autoExtract gate:
+          // dream-only sessions stay memory-capable but still inject nothing.
+          if (!memoryPrefetchAllowed(memoryCapabilityOn, memoryFlags))
+            return "";
           try {
             return await buildMemoryPrefetchOverlay({
               memoryDir,
@@ -2898,6 +2918,79 @@ function createDynamicExecutorRegistry(
 }
 
 /**
+ * Tool schemas the memory capability gate controls: OFF removes them from the
+ * model request while the pair stays registered (the handler refuses a stale
+ * call with a typed failure).
+ */
+const MEMORY_CAPABILITY_TOOL_NAMES: ReadonlySet<string> = new Set([
+  "memory_recall",
+  "memory_save",
+]);
+
+/**
+ * Total memory OFF (ADR-0031 amendment 2026-10-07) as a live `promptTools`
+ * filter: capability on returns the registry's own array unchanged (byte-stable
+ * prefix), capability off drops the memory pair from the next model request.
+ */
+/**
+ * The registry's memory slot, or nothing when the surface carries no memory.
+ *
+ * Both registry construction sites need the same conditional spread; keeping it
+ * in one helper keeps `buildHarnessEngine` readable and holds its measured
+ * complexity at its baseline instead of one branch per call site.
+ */
+function memoryRegistryOptions(
+  memoryToolsEnabled: boolean,
+  memoryDir: string | undefined,
+  memoryCapability: () => boolean
+): { memoryDir?: string; memoryCapability?: () => boolean } | undefined {
+  return memoryToolsEnabled ? { memoryDir, memoryCapability } : undefined;
+}
+
+/**
+ * Whether a surface gets the memory prefetch overlay at all. `ask` never
+ * carries a memory layer; the TUI surface gets it because its live flags can
+ * turn memory on mid-session, even when both persisted flags are off.
+ */
+function surfaceOverlaysMemoryPrefetch(args: {
+  readonly memoryEnabled: boolean;
+  readonly surface: string;
+  readonly anyMemoryFlagOn: boolean;
+  readonly tuiLive: boolean;
+}): boolean {
+  return (
+    args.memoryEnabled &&
+    args.surface !== "ask" &&
+    (args.anyMemoryFlagOn || args.tuiLive)
+  );
+}
+
+/**
+ * The read-path prefetch gate: the capability must be on, and `autoExtract`
+ * must be the flag that is on. Dream-only sessions stay memory-capable but
+ * still inject nothing.
+ */
+function memoryPrefetchAllowed(
+  capabilityOn: () => boolean,
+  flags: { readonly autoExtract?: boolean }
+): boolean {
+  return capabilityOn() && flags.autoExtract === true;
+}
+
+function memoryPromptTools<T extends { readonly name: string }>(
+  visible: () => ReadonlyArray<T>,
+  isEnabled: () => boolean
+): () => ReadonlyArray<T> {
+  return () => {
+    const tools = visible();
+    // EXIT: capability ON returns the registry's own array unchanged, so the
+    // prefix stays byte-stable across turns.
+    if (isEnabled()) return tools;
+    return tools.filter((tool) => !MEMORY_CAPABILITY_TOOL_NAMES.has(tool.name));
+  };
+}
+
+/**
  * memory-toggle-live: consolidation of the memory_layer system resolver
  * construction (extracted from an inline tri-state expression in
  * `buildHarnessEngine` for the S5 complexity ratchet).
@@ -2921,6 +3014,12 @@ function buildMemorySystemResolver(args: {
   readonly flags?: MemoryLiveFlags;
   /** Only the TUI surface activates live flags (ignored elsewhere). */
   readonly flagsActive?: boolean;
+  /**
+   * Live memory-capability gate (ADR-0042 amendment 2026-10-07): absent =
+   * always on. False resolves the memory_layer slot to nothing — no existence
+   * pointer, no catalog — without consuming a snapshot slot.
+   */
+  readonly isEnabled?: () => boolean;
 }): SystemResolver {
   const ctx = {
     projectIdentityRoot: args.projectIdentityRoot,
@@ -2930,8 +3029,11 @@ function buildMemorySystemResolver(args: {
     ...(args.autoExtract ? { autoExtract: true } : {}),
   };
   return args.flagsActive && args.flags
-    ? createSystemResolver(ctx, { flags: args.flags })
-    : createSystemResolver(ctx);
+    ? createSystemResolver(ctx, {
+        flags: args.flags,
+        isEnabled: args.isEnabled,
+      })
+    : createSystemResolver(ctx, { isEnabled: args.isEnabled });
 }
 
 /**

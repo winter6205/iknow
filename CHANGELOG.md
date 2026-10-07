@@ -8,6 +8,33 @@ is a curated snapshot; the complete development history lives in the git log.
 
 ### Breaking
 
+- **The TUI `/memory` "Automatic memory" row is now the total memory capability switch, so a default install has no memory capability until it is turned on (ADR-0031 / ADR-0033 / ADR-0042 amendment, 2026-10-07)**:
+  dual-off is a total capability OFF rather than a mechanical-only one, so the
+  2026-09-11 carve-out that kept a zero-LLM `memory_gc` + capability sweep
+  running while both flags were off is withdrawn. The row's OFF transition
+  persists `dream: false`, which is exactly that dual-off state, so a default
+  install (`autoExtract` and `dream` both absent) now has no memory capability on
+  chat / serve / TUI until the user turns the switch on. From the next model
+  request on, no hook is assembled at all: no extraction, no Dream, no
+  `memory_gc`, no capability memory sweep, and no other memory background job
+  or write; the request carries no memory tool schemas, no memory existence
+  pointer, no catalog and no prefetch content. `memory_recall` / `memory_save`
+  stay registered and refuse at execution time with a typed `MemoryDisabled`
+  before any store read or write, so a stale call replayed from older
+  conversation history is rejected rather than silently served (the
+  model-facing message tells the model not to retry). Tool availability, system
+  assembly, executor checks and cache state move together on the one toggle, and
+  the on-disk store is untouched during an OFF period and available again after
+  re-enabling. OFF removes what the MEMORY LIBRARY contributes — existence
+  pointer, catalog, prefetch, memory tools — while `memory_layer`'s static
+  instruction / identity layer (AGENTS.md plus the rules manifest) is not a
+  memory input and stays assembled. ON restores today's behavior including
+  ADR-0033's Dream schedule (24h ∧ 5 distinct sessions, `autoExtract === true`
+  still implies Dream when the gate is due), and `ask` keeps its existing memory
+  opt-out. ADR-0086's runtime-capability persist gate is unchanged. The direct
+  consequence of the OFF state is that mechanical cleanup is deferred too:
+  expired / superseded entries and already-stored capability observations are
+  not soft-disabled until the switch is turned on again.
 - **Model output budgets moved to per-route `models[].maxTokens`; `IKNOW_LLM_MAX_OUTPUT_TOKENS` is retired (spec `model-output-truncation`, ADR-0126, 2026-09-27)**:
   the global `maxOutputTokens` ladder (2048 → 8192 → 16384, logged below) is replaced
   by a per-model-route budget. Any non-empty `IKNOW_LLM_MAX_OUTPUT_TOKENS` — process

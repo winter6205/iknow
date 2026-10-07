@@ -29,6 +29,32 @@ interface BashStopInput {
 }
 
 /**
+ * A stop-route refusal carrying the manager's discriminated failure, matching
+ * the read route's typed error: `kind` / `context` / `cause` survive on the
+ * owning interface while the message stays the text existing consumers match.
+ */
+export class BashStopTaskError extends ToolExecutionError {
+  override readonly name: string = "BashStopTaskError";
+  /** The manager's discriminated refusal kind, verbatim. */
+  readonly kind: string;
+  /** The manager's context for that kind, verbatim. */
+  readonly context: string;
+  /** The union's `cause` when this kind carries one, else undefined. */
+  readonly cause: string | undefined;
+  constructor(args: {
+    readonly kind: string;
+    readonly context: string;
+    readonly cause: string | undefined;
+    readonly message: string;
+  }) {
+    super(args.message);
+    this.kind = args.kind;
+    this.context = args.context;
+    this.cause = args.cause;
+  }
+}
+
+/**
  * Factory: createBashStopTool(deps) — the bash_stop tool.
  *
  * The returned AciToolDef satisfies:
@@ -59,10 +85,19 @@ export function createBashStopTool(
       // renderTaskError as `${kind}: ${context}` — never [object Object].
       // The manager throws plain objects (the BackgroundTaskError
       // discriminated union), not Error instances, so renderTaskError is
-      // the contract path.
-      throw new ToolExecutionError(
-        `bash_stop: ${renderTaskError(err as BackgroundTaskError)}`
-      );
+      // the contract path. The rendered text is unchanged; the kind /
+      // context / cause ride on the typed error so a caller can branch
+      // without parsing prose.
+      const taskError = err as Partial<BackgroundTaskError> & { kind: string };
+      throw new BashStopTaskError({
+        kind: taskError.kind,
+        context: taskError.context ?? "",
+        cause:
+          "cause" in taskError && typeof taskError.cause === "string"
+            ? taskError.cause
+            : undefined,
+        message: `bash_stop: ${renderTaskError(err as BackgroundTaskError)}`,
+      });
     }
     return JSON.stringify({ task_id: parsed.task_id, status: "stopped" });
   };

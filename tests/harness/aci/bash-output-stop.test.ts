@@ -37,7 +37,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -52,8 +52,14 @@ vi.mock("../../../src/harness/sandbox/runner.js", async (importOriginal) => {
 });
 
 import { ToolExecutionError } from "../../../src/harness/errors.js";
-import { createBashOutputTool } from "../../../src/harness/aci/tools/bash-output.js";
-import { createBashStopTool } from "../../../src/harness/aci/tools/bash-stop.js";
+import {
+  BashOutputTaskError,
+  createBashOutputTool,
+} from "../../../src/harness/aci/tools/bash-output.js";
+import {
+  BashStopTaskError,
+  createBashStopTool,
+} from "../../../src/harness/aci/tools/bash-stop.js";
 import {
   createDefaultAciRegistry,
   ACI_TOOLSET_NAMES,
@@ -462,6 +468,43 @@ describe("bash_output 真实物理截断（real manager）", () => {
   });
 });
 
+// ── 4b. a failed stderr append is task evidence, not an empty channel ─────────
+
+describe("bash_output 对写失败的 stderr 通道（real manager）", () => {
+  it("sidecar 写失败 → BashOutputTaskError(kind=io_failure)，不是静默的空 stderr", async () => {
+    const { manager, spawned } = await makeRealManager();
+    const receipt = await manager.spawn({ command: "warn", cwd: "." });
+    assert.equal(receipt.status, "ok");
+    const { task_id, log_path } = receipt as {
+      task_id: string;
+      log_path: string;
+    };
+    // Park a directory where the sidecar belongs so the append fails (EISDIR),
+    // then remove it before the read: the sidecar is then absent, so a reader
+    // that ignored the write failure would land on ENOENT → "" — the very
+    // "wrote nothing" answer the stderr tail must never hand back.
+    const sidecar = `${log_path}.stderr`;
+    await mkdir(sidecar, { recursive: true });
+    await new Promise<void>((resolve) => {
+      spawned[0]!.stderr.write("warn\n", () => resolve());
+    });
+    spawned[0]!.emit("exit", 0, null);
+    await rm(sidecar, { recursive: true, force: true });
+
+    const tool = createBashOutputTool({ backgroundManager: manager });
+    const caught = await tool.handler({ task_id }).then(
+      (ok) => {
+        assert.fail(`expected an io_failure, got ${String(ok)}`);
+      },
+      (err: unknown) => err
+    );
+    assert.ok(caught instanceof BashOutputTaskError, "typed error, not [object Object]");
+    assert.equal(caught.kind, "io_failure");
+    assert.equal(caught.context, `output stderr ${task_id}`);
+    assert.match(String(caught.cause), /EISDIR/);
+  });
+});
+
 // ── 5. assembly consistency (registry + conditional gating) ──────────────────
 
 describe("装配一致性（bash_output / bash_stop 条件化装配）", () => {
@@ -529,5 +572,117 @@ describe("bash_output / bash_stop permission shape", () => {
     });
     assert.equal(st.decision, "ask");
     assert.ok(st.reason.includes("ask user"));
+  });
+});
+
+// ── 2b. typed identity + the stderr channel are model-discoverable ────────────
+
+describe("bash_output keeps the manager's typed identity on the thrown error", () => {
+  it("task_not_found → named typed error carrying kind + context, same message", async () => {
+    const { manager, output } = makeFakeManager();
+    output.mockRejectedValue({ kind: "task_not_found", context: "bg-abc" });
+    const tool = createBashOutputTool({ backgroundManager: manager });
+
+    let thrown: unknown;
+    try {
+      await tool.handler({ task_id: "bg-abc" });
+      thrown = undefined;
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BashOutputTaskError);
+    assert.ok(thrown instanceof ToolExecutionError);
+    assert.equal(thrown.kind, "task_not_found");
+    assert.equal(thrown.context, "bg-abc");
+    // The model-visible text is unchanged: existing consumers match on it.
+    assert.equal(thrown.message, "bash_output: task_not_found: bg-abc");
+  });
+
+  it("io_failure keeps the underlying cause, not just the rendered string", async () => {
+    const { manager, output } = makeFakeManager();
+    output.mockRejectedValue({
+      kind: "io_failure",
+      context: "output bg-abc",
+      cause: "EACCES: permission denied",
+    });
+    const tool = createBashOutputTool({ backgroundManager: manager });
+
+    let thrown: unknown;
+    try {
+      await tool.handler({ task_id: "bg-abc" });
+      thrown = undefined;
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BashOutputTaskError);
+    assert.equal(thrown.kind, "io_failure");
+    assert.equal(thrown.cause, "EACCES: permission denied");
+  });
+
+  it("the description tells the model the envelope carries stderr", () => {
+    const { manager } = makeFakeManager();
+    const tool = createBashOutputTool({ backgroundManager: manager });
+    // A model cannot use a field it was never told about.
+    assert.match(tool.description, /stderr/);
+  });
+
+  it("the ok envelope carries the stderr channel through to the model", async () => {
+    const { manager, output } = makeFakeManager();
+    output.mockResolvedValue({
+      text: "ready\nTypeError: boom\n",
+      stderr: "TypeError: boom\n",
+      status: "exited",
+      exit_code: 1,
+      task_id: "bg-abc",
+    });
+    const tool = createBashOutputTool({ backgroundManager: manager });
+    const payload = JSON.parse(
+      (await tool.handler({ task_id: "bg-abc" })) as string
+    ) as { stderr: string; text: string };
+    assert.equal(payload.stderr, "TypeError: boom\n");
+    assert.equal(payload.text, "ready\nTypeError: boom\n");
+  });
+});
+
+describe("bash_stop keeps the manager's typed identity on the thrown error", () => {
+  it("task_not_found → named typed error carrying kind + context, same message", async () => {
+    const { manager, stop } = makeFakeManager();
+    stop.mockRejectedValue({ kind: "task_not_found", context: "bg-abc" });
+    const tool = createBashStopTool({ backgroundManager: manager });
+
+    let thrown: unknown;
+    try {
+      await tool.handler({ task_id: "bg-abc" });
+      thrown = undefined;
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BashStopTaskError);
+    assert.ok(thrown instanceof ToolExecutionError);
+    assert.equal(thrown.kind, "task_not_found");
+    assert.equal(thrown.context, "bg-abc");
+    // The model-visible text is unchanged: existing consumers match on it.
+    assert.equal(thrown.message, "bash_stop: task_not_found: bg-abc");
+  });
+
+  it("a refusal carrying a cause keeps the cause, not just the rendered string", async () => {
+    const { manager, stop } = makeFakeManager();
+    stop.mockRejectedValue({
+      kind: "io_failure",
+      context: "stop bg-abc",
+      cause: "EPERM: operation not permitted",
+    });
+    const tool = createBashStopTool({ backgroundManager: manager });
+
+    let thrown: unknown;
+    try {
+      await tool.handler({ task_id: "bg-abc" });
+      thrown = undefined;
+    } catch (err) {
+      thrown = err;
+    }
+    assert.ok(thrown instanceof BashStopTaskError);
+    assert.equal(thrown.kind, "io_failure");
+    assert.equal(thrown.cause, "EPERM: operation not permitted");
   });
 });
