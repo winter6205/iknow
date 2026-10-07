@@ -25,6 +25,18 @@ import { createReadImageTool } from "../../../src/harness/aci/tools/read-image.t
 import type { AnthropicContentBlock } from "../../../src/harness/model-adapter/types.ts";
 import type { ToolDef } from "../../../src/harness/tools/types.ts";
 
+/**
+ * First content block's text. The executor's model-facing payload is a content
+ * block array; these cases all assert on the text block, so the narrowing is
+ * explicit here rather than repeated (and silently wrong) at each call site.
+ */
+function payloadText(payload: ReadonlyArray<AnthropicContentBlock>): string {
+  const first = payload[0];
+  assert.ok(first !== undefined, "payload carries at least one block");
+  assert.equal(first.type, "text", "the first block is the text block");
+  return first.text;
+}
+
 const echo: ToolDef = {
   name: "echo",
   description: "echo",
@@ -621,12 +633,12 @@ describe("createExecutor (T3 JSON whitelist + 20000 cap)", () => {
       { id: "c1", name: "good-mix", input: {} },
     ]);
     assert.equal(results[0]!.kind, "ok");
-    const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
+    const text = payloadText(results[0]!.payload);
     assert.equal(typeof text, "string");
-    assert.ok(text!.includes('"n":null'));
-    assert.ok(text!.includes('"num":3.14'));
-    assert.ok(text!.includes('"bool":false'));
-    assert.ok(text!.includes('"s":"hi"'));
+    assert.ok(text.includes('"n":null'));
+    assert.ok(text.includes('"num":3.14'));
+    assert.ok(text.includes('"bool":false'));
+    assert.ok(text.includes('"s":"hi"'));
   });
 
   // ---- T3 Part B: 20000 cap (ADR-0006 contract X) ----
@@ -644,7 +656,7 @@ describe("createExecutor (T3 JSON whitelist + 20000 cap)", () => {
       { id: "c1", name: "long", input: {} },
     ]);
     assert.equal(results[0]!.kind, "ok");
-    const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
+    const text = payloadText(results[0]!.payload);
     assert.ok(text !== undefined);
     assert.ok(text!.length <= 20000, `text length ${text!.length} > 20000`);
     // Marker required fields per ADR-0006 + T1-1.
@@ -675,7 +687,7 @@ describe("createExecutor (T3 JSON whitelist + 20000 cap)", () => {
       { id: "c1", name: "exact", input: {} },
     ]);
     assert.equal(results[0]!.kind, "ok");
-    const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
+    const text = payloadText(results[0]!.payload);
     assert.equal(text, exact);
   });
 
@@ -701,7 +713,7 @@ describe("createExecutor (T3 JSON whitelist + 20000 cap)", () => {
       { id: "c1", name: "liar", input: {} },
     ]);
     assert.equal(results[0]!.kind, "ok");
-    const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
+    const text = payloadText(results[0]!.payload);
     assert.ok(text !== undefined);
     assert.ok(text!.length <= 20000, `length ${text!.length} > 20000`);
     // The serialized length exceeds 20000 (JSON.stringify of 19950 'z' is
@@ -725,7 +737,7 @@ describe("createExecutor (T3 JSON whitelist + 20000 cap)", () => {
       { id: "c1", name: "huge-obj", input: {} },
     ]);
     assert.equal(results[0]!.kind, "ok");
-    const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
+    const text = payloadText(results[0]!.payload);
     assert.ok(text !== undefined);
     assert.ok(text!.length <= 20000, `length ${text!.length} > 20000`);
     assert.ok(/\[executor: 输出超长已截断/.test(text!), "marker present");
@@ -948,7 +960,7 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
       { id: "c1", name: "liar-truncated-false", input: {} },
     ]);
     assert.equal(results[0]!.kind, "ok");
-    const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
+    const text = payloadText(results[0]!.payload);
     assert.ok(text !== undefined);
     // Executor hard-caps by char count to OUTPUT_HARD_CAP; the object's truncated:false is not trusted.
     assert.ok(text!.length <= 20000, `text length ${text!.length} > 20000`);
@@ -990,9 +1002,10 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
       { type: "text", text: "[edit_file] replaced 1 occurrence(s) in a.ts" },
     ]);
     // Decisive counter-check: no fragment of meta leaks into the model-facing payload serialization text.
-    assert.ok(!payload[0]!.text.includes("oldContent"));
-    assert.ok(!payload[0]!.text.includes("newContent"));
-    assert.ok(!payload[0]!.text.includes("const a = 1"));
+    const payloadTextBody = payloadText(payload);
+    assert.ok(!payloadTextBody.includes("oldContent"));
+    assert.ok(!payloadTextBody.includes("newContent"));
+    assert.ok(!payloadTextBody.includes("const a = 1"));
   });
 
   // Same envelope through toAnthropicToolResults — tool_result content
@@ -1046,7 +1059,7 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     // Not an envelope → no meta side-channel is produced (undefined, not promoted).
     assert.equal(r.meta, undefined);
     // The whole object goes through generic JSON.stringify (not the envelope path that extracts only output).
-    const text = r.payload[0]!.text;
+    const text = payloadText(r.payload);
     assert.equal(
       text,
       JSON.stringify({ output: "plain text", meta: { oldContent: 123 } })
@@ -1071,7 +1084,7 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     const r = results[0];
     if (r.kind !== "ok") throw new Error("expected ok");
     assert.equal(r.meta, undefined);
-    const text = r.payload[0]!.text;
+    const text = payloadText(r.payload);
     assert.equal(text, JSON.stringify({ output: "plain text", meta: [1, 2] }));
   });
 
@@ -1093,7 +1106,7 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
     const r = results[0];
     if (r.kind !== "ok") throw new Error("expected ok");
     assert.equal(r.meta, undefined);
-    const text = r.payload[0]!.text;
+    const text = payloadText(r.payload);
     assert.equal(
       text,
       JSON.stringify({ output: "plain text", meta: { newContent: 99 } })
@@ -1115,7 +1128,7 @@ describe("createExecutor (#224 W5: 契约 X / Y1 反例锁)", () => {
       { id: "c1", name: "bash_like", input: {} },
     ]);
     assert.equal(results[0]!.kind, "ok");
-    const text = results[0]!.kind === "ok" && results[0]!.payload[0]!.text;
+    const text = payloadText(results[0]!.payload);
     // Generic serialization path: plain-string protocol, no structured semantics.
     assert.equal(text, JSON.stringify({ code: 0, stdout: "hi", stderr: "" }));
   });

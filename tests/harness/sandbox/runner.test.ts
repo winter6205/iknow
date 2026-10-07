@@ -44,6 +44,8 @@ function shFence(command: string): BwrapFence {
   return Object.freeze({
     argv: Object.freeze(["sh", "-c", command]),
     sealed: true as const,
+    // the fixture emits no boundary block, so it names no mask.
+    exactFileMaskPaths: Object.freeze([]),
   });
 }
 
@@ -60,7 +62,12 @@ describe("signalExitCode", () => {
   });
 
   it("returns 1 for unmapped signals", () => {
-    assert.equal(signalExitCode("SIGRTMIN"), 1);
+    // SIGRTMIN is deliberately outside the mapped set: the contract is that
+    // unmapped signals fall through to 1 rather than throwing.
+    assert.equal(
+      signalExitCode("SIGRTMIN" as Parameters<typeof signalExitCode>[0]),
+      1
+    );
   });
 
   it("SIGNAL_EXIT_CODES is frozen (immutable contract)", () => {

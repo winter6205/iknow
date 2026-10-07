@@ -151,7 +151,13 @@ describe("drainPreimageRefs", () => {
   it("string content is skipped, not thrown on (some adapters send plain strings)", () => {
     const ledger = createPreimageLedger();
     ledger.set("c1", "A", ref("shaA"));
-    const plain = { role: "user", content: "raw" } as AnthropicNativeMessage;
+    // Deliberately malformed on purpose: plain-string content is not a valid
+    // `AnthropicNativeMessage`, and the ledger must skip it rather than throw —
+    // `unknown` is the honest bridge for a value that violates the contract.
+    const plain = {
+      role: "user",
+      content: "raw",
+    } as unknown as AnthropicNativeMessage;
     assert.equal(drainPreimageRefs(ledger, "c1", [plain]), undefined);
   });
 

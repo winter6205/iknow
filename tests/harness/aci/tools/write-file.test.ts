@@ -161,7 +161,7 @@ describe("write_file — rejection and containment", () => {
     const tool = createWriteFileTool(root);
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           path: "missing/parent/file.txt",
           content: "content\n",
@@ -182,7 +182,8 @@ describe("write_file — rejection and containment", () => {
     const tool = createWriteFileTool(root);
 
     await assert.rejects(
-      () => tool.handler({ path: "escape/created.txt", content: "nope\n" }),
+      async () =>
+        tool.handler({ path: "escape/created.txt", content: "nope\n" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("outside workspace")
@@ -202,7 +203,7 @@ describe("write_file — SC4/SC5 可写合同 (specs/mutate-write-contract.md)",
     const tool = createWriteFileTool(root);
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           path: "/tmp/write-file-sc4-not-a-delivery.txt",
           content: "nope\n",
@@ -241,7 +242,7 @@ describe("write_file — SC4/SC5 可写合同 (specs/mutate-write-contract.md)",
     const tool = createWriteFileTool(root);
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           path: "missing/parent/file.txt",
           content: "x\n",
@@ -305,7 +306,7 @@ describe("write_file — no patch-level lint (W4: whole-file content written ver
     const tool = createWriteFileTool(root);
 
     await assert.doesNotReject(
-      () =>
+      async () =>
         tool.handler({
           path: "x.ts",
           content: "if (true) {\n  console.log('hi');\n}\n",
@@ -321,11 +322,11 @@ describe("write_file — handler input validation", () => {
     const tool = createWriteFileTool(root);
 
     await assert.rejects(
-      () => tool.handler({ path: "x.txt" }),
+      async () => tool.handler({ path: "x.txt" }),
       ToolExecutionError
     );
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           path: "x.txt",
           content: "ok\n",

@@ -28,10 +28,7 @@ import type {
   SubAgentDefinition,
   SubAgentManager,
 } from "../../src/harness/subagent/manager.ts";
-import type {
-  SubAgentEnvelope,
-  WorkerEnvelope,
-} from "../../src/harness/subagent/envelope.ts";
+import type { WorkerEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { runWorkerOnce } from "../../src/harness/subagent/worker.ts";
 import type { WorkerTranscriptIOFactory } from "../../src/harness/subagent/worker.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
@@ -63,7 +60,11 @@ function managerCapturingPayload(setup: {
   readonly projectDir?: string;
 }): {
   manager: SubAgentManager;
-  payloads: Array<{ def: SubAgentDefinition; taskId: string; payload: WorkerEnvelope }>;
+  payloads: Array<{
+    def: SubAgentDefinition;
+    taskId: string;
+    payload: WorkerEnvelope;
+  }>;
 } {
   const payloads: Array<{
     def: SubAgentDefinition;
@@ -81,10 +82,6 @@ function managerCapturingPayload(setup: {
     ...(setup.projectDir !== undefined ? { projectDir: setup.projectDir } : {}),
   });
   return { manager, payloads };
-}
-
-function okEnvelope(result = "ok"): SubAgentEnvelope {
-  return { status: "ok", summary: result, result };
 }
 
 // ── minimal stub deps (same shape as graceful-timeout.test.ts) ──────────────
@@ -159,7 +156,10 @@ describe("ADR-0102 T3 — manager payload 的 transcriptPath（与 trace 分家�
     assert.equal(payloads.length, 1);
     const { payload } = payloads[0]!;
     assert.equal(payload.taskId, taskId);
-    assert.equal(payload.transcriptPath, join(subagentsDir, taskId, `${taskId}.jsonl`));
+    assert.equal(
+      payload.transcriptPath,
+      join(subagentsDir, taskId, `${taskId}.jsonl`)
+    );
     assert.equal(
       payload.traceFilePath,
       join(subagentsDir, taskId, `agent-${taskId}.jsonl`)
@@ -297,7 +297,10 @@ describe("ADR-0102 T3 — runWorkerOnce 边跑边 append 工人账", () => {
       deps: makeDeps(scriptedAdapter("reply-1")),
       transcriptIo: io,
     });
-    const afterFirst = await loadWorkerTranscript({ transcriptPath, taskId: "t4" });
+    const afterFirst = await loadWorkerTranscript({
+      transcriptPath,
+      taskId: "t4",
+    });
     assert.equal(afterFirst.messages.length, 2); // user(task) + assistant
 
     await runWorkerOnce({
@@ -310,7 +313,10 @@ describe("ADR-0102 T3 — runWorkerOnce 边跑边 append 工人账", () => {
       deps: makeDeps(scriptedAdapter("reply-2")),
       transcriptIo: io,
     });
-    const afterSecond = await loadWorkerTranscript({ transcriptPath, taskId: "t4" });
+    const afterSecond = await loadWorkerTranscript({
+      transcriptPath,
+      taskId: "t4",
+    });
     // The prior ledger stays a byte-exact prefix + one new user turn + one new assistant round.
     assert.equal(afterSecond.messages.length, 4);
     const texts = afterSecond.messages.flatMap((m) =>

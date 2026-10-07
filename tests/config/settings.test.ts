@@ -423,8 +423,10 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
       { llm: { maxTurns: 3 } }
     );
     const s = loadIknowSettings({ home, cwd });
-    assert.deepEqual(s, { llm: { maxTurns: 5 } });
+    // Read the absent-field assertions BEFORE deepEqual: node types narrow
+    // `actual` to the expected literal, which would hide the sibling keys.
     assert.equal(s.llm?.model, undefined);
+    assert.deepEqual(s, { llm: { maxTurns: 5 } });
   });
 
   it("返回对象深 frozen 含 model 字段", async () => {
@@ -484,8 +486,8 @@ describe("loadIknowSettings — settings 文件机制 (#353)", () => {
   it("llm.fallback 缺失 → 不产出 fallback 字段", async () => {
     const { home, cwd } = await makeSettings({ llm: { model: "m3" } }, {});
     const s = loadIknowSettings({ home, cwd });
-    assert.deepEqual(s, { llm: { model: "m3" } });
     assert.equal(s.llm?.fallback, undefined);
+    assert.deepEqual(s, { llm: { model: "m3" } });
   });
 
   it("llm.fallback 空数组 → 丢弃（不产出 fallback 字段）", async () => {
@@ -626,8 +628,8 @@ describe("loadIknowSettings — llm.timeoutMs (#358 settings 双字段)", () => 
   it("timeoutMs 缺失 → 不产出 timeoutMs 字段", async () => {
     const { home, cwd } = await makeSettings({ llm: { maxTurns: 5 } }, {});
     const s = loadIknowSettings({ home, cwd });
-    assert.deepEqual(s, { llm: { maxTurns: 5 } });
     assert.equal(s.llm?.timeoutMs, undefined);
+    assert.deepEqual(s, { llm: { maxTurns: 5 } });
   });
 
   it("返回对象深 frozen 含 timeoutMs", async () => {
@@ -764,8 +766,8 @@ describe("loadIknowSettings — subagent 段 (#358 settings 双字段)", () => {
   it("taskTimeoutMs 缺失 → 不产出 subagent 段", async () => {
     const { home, cwd } = await makeSettings({ llm: { maxTurns: 5 } }, {});
     const s = loadIknowSettings({ home, cwd });
-    assert.deepEqual(s, { llm: { maxTurns: 5 } });
     assert.equal(s.subagent, undefined);
+    assert.deepEqual(s, { llm: { maxTurns: 5 } });
   });
 
   it("taskTimeoutMs 全部非法 → 不产出 subagent 段", async () => {
@@ -982,8 +984,8 @@ describe("loadIknowSettings — verify 段 (#128 自动修正闭环)", () => {
   it("未配置 verify → verify undefined（透明关闭）", async () => {
     const { home, cwd } = await makeSettings({ llm: { maxTurns: 5 } }, {});
     const s = loadIknowSettings({ home, cwd });
-    assert.deepEqual(s, { llm: { maxTurns: 5 } });
     assert.equal(s.verify, undefined);
+    assert.deepEqual(s, { llm: { maxTurns: 5 } });
   });
 
   it("完整合法 verify 段 → 逐字段解析（command/rerunTemplate/countRegex/timeoutSec/onExhausted/maxRounds）", async () => {
@@ -1018,10 +1020,12 @@ describe("loadIknowSettings — verify 段 (#128 自动修正闭环)", () => {
       {}
     );
     const s = loadIknowSettings({ home, cwd });
+    // Capture before deepEqual narrows `s` to `{verify: {command}}`.
+    const verify = s.verify;
     assert.deepEqual(s, { verify: { command: "npm test" } });
-    assert.equal(s.verify?.timeoutSec, undefined);
-    assert.equal(s.verify?.onExhausted, undefined);
-    assert.equal(s.verify?.maxRounds, undefined);
+    assert.equal(verify?.timeoutSec, undefined);
+    assert.equal(verify?.onExhausted, undefined);
+    assert.equal(verify?.maxRounds, undefined);
   });
 
   it("非法值降级：负数 timeoutSec / 空 command / 未知 onExhausted → 该字段被丢弃", async () => {
@@ -1337,8 +1341,8 @@ describe("loadIknowSettings — secrets 段 (#126 hook-system T4)", () => {
   it("secrets 缺失 → 不产出 secrets 字段", async () => {
     const { home, cwd } = await makeSettings({ llm: { model: "m3" } }, {});
     const s = loadIknowSettings({ home, cwd });
-    assert.deepEqual(s, { llm: { model: "m3" } });
     assert.equal(s.secrets, undefined);
+    assert.deepEqual(s, { llm: { model: "m3" } });
   });
 
   it("secrets.patterns 空数组 → 丢弃（不产出 patterns）", async () => {

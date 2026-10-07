@@ -32,7 +32,6 @@ import {
   type ClassifierEnvelope,
   type RunClassifierFn,
   type RunOutcome,
-  type RunVerifyFn,
   type VerifyLoopOptions,
   type VerifyLoopOutcome,
 } from "../../../src/harness/verify/verify-loop.ts";
@@ -92,8 +91,6 @@ const EMPTY_TRACE: LoopTrace = Object.freeze({
 
 const FAIL_LINE = "tests/auth.test.ts:login rejects bad token";
 const FAIL_OUTPUT = `FAIL  ${FAIL_LINE}\n`;
-const FIXED_INSTRUCTION =
-  "Fix the failures above. Do not claim completion until validation passes.";
 
 let gateSeq = 0;
 /**
@@ -305,6 +302,24 @@ function makeCapturingTrace(): {
       async recordVerification(record) {
         records.push(record);
         return record.id;
+      },
+      async recordViolation() {
+        return undefined;
+      },
+      async recordGoal() {
+        return undefined;
+      },
+      async recordSubagentSpawn() {
+        return undefined;
+      },
+      async recordSubagentStop() {
+        return undefined;
+      },
+      async recordSubagentStateChange() {
+        return undefined;
+      },
+      async recordSubagentStep() {
+        return undefined;
       },
     },
     records: () => records,

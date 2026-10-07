@@ -198,7 +198,7 @@ describe("get_record ACI tool", () => {
     // pair, otherwise a thin-face slip goes unguarded. This out-of-range call goes through
     // the handler (the layer before the executor), so the message shape is the core's `validation`.
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           conversation_id: "c1",
           record_id: "llm-target",
@@ -304,7 +304,8 @@ describe("get_record ACI tool", () => {
     const tool = createGetRecordTool(makeRecordDir());
 
     await assert.rejects(
-      () => tool.handler({ conversation_id: "a/b", record_id: "llm-target" }),
+      async () =>
+        tool.handler({ conversation_id: "a/b", record_id: "llm-target" }),
       (error: unknown) =>
         error instanceof GetRecordValidationError &&
         error instanceof ToolExecutionError &&
@@ -319,7 +320,7 @@ describe("get_record ACI tool", () => {
     const tool = createGetRecordTool(makeRecordDir());
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           conversation_id: "c1",
           record_id: "llm-target",
@@ -356,7 +357,8 @@ describe("get_record ACI tool", () => {
     const tool = createGetRecordTool(makeRecordDir());
 
     await assert.rejects(
-      () => tool.handler({ conversation_id: "c1", record_id: "not-present" }),
+      async () =>
+        tool.handler({ conversation_id: "c1", record_id: "not-present" }),
       (error: unknown) =>
         error instanceof GetRecordNotFoundError &&
         error instanceof ToolExecutionError &&
@@ -374,7 +376,7 @@ describe("get_record ACI tool", () => {
     const tool = createGetRecordTool(makeRecordDir());
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           conversation_id: "no-such-session",
           record_id: "llm-target",
@@ -394,7 +396,8 @@ describe("get_record ACI tool", () => {
     const tool = createGetRecordTool(makeScanCapDir());
 
     await assert.rejects(
-      () => tool.handler({ conversation_id: "c1", record_id: "past-scan-cap" }),
+      async () =>
+        tool.handler({ conversation_id: "c1", record_id: "past-scan-cap" }),
       (error: unknown) =>
         error instanceof GetRecordScanError &&
         error instanceof ToolExecutionError &&
@@ -433,7 +436,8 @@ describe("get_record ACI tool", () => {
     const tool = createGetRecordTool({ traceDir: dir });
 
     await assert.rejects(
-      () => tool.handler({ conversation_id: "c1", record_id: "llm-target" }),
+      async () =>
+        tool.handler({ conversation_id: "c1", record_id: "llm-target" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         // This kind deliberately reuses the base class: IO failure is not a parameter
@@ -491,7 +495,7 @@ describe("get_record ACI tool", () => {
           return error.message;
         }
       );
-      const faceMessage = await face.handler(input).then(
+      const faceMessage = await Promise.resolve(face.handler(input)).then(
         () => {
           throw new Error(
             `expected the face to reject ${JSON.stringify(input)}`

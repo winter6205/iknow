@@ -16,7 +16,7 @@
  * `dist/`, so the test observes the sources under review and needs no build
  * step (same child-spawn discipline as register-shutdown.test.ts).
  */
-import { describe, it, beforeAll, afterAll, expect } from "vitest";
+import { describe, it, beforeAll, expect } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { statSync } from "node:fs";
@@ -41,7 +41,14 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 function resolveTsxEsm(): string {
   let dir = repoRoot;
   for (;;) {
-    const candidate = join(dir, "node_modules", "tsx", "dist", "esm", "index.mjs");
+    const candidate = join(
+      dir,
+      "node_modules",
+      "tsx",
+      "dist",
+      "esm",
+      "index.mjs"
+    );
     try {
       if (statSync(candidate).isFile()) return candidate;
     } catch {
@@ -152,7 +159,8 @@ async function runAsk(
     }
 
     const files = readdirSync(traceDir).filter((f) => f.endsWith(".jsonl"));
-    const traceFile = files[0] === undefined ? undefined : join(traceDir, files[0]);
+    const traceFile =
+      files[0] === undefined ? undefined : join(traceDir, files[0]);
     const rows =
       traceFile === undefined
         ? []

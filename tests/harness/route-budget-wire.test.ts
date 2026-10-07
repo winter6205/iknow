@@ -302,6 +302,8 @@ describe("main-session requests carry the effective route's budget", () => {
       },
       executor: {} as LoopEngineDeps["executor"],
       registry: {} as LoopEngineDeps["registry"],
+      // required by the deps contract; this case only exercises the adapter
+      maxTurns: undefined,
     };
     const overridden = withThinkingOverride({
       deps: base,

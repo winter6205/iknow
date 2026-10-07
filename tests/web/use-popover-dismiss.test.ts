@@ -92,13 +92,15 @@ describe("usePopoverDismiss — Esc / outside-click / focus-return", () => {
   });
 
   it("open=true + document keydown Escape → onClose called once + focus returns to trigger", async () => {
-    const { trigger, cleanup } = mountHarness();
+    const { trigger, popover, cleanup } = mountHarness();
     try {
       const { result } = renderHook(() => useHarness(true, onClose));
       // Wire the harness refs to the DOM nodes (useRef inside the harness) —
       // React never auto-inserts DOM for this test component, so assign manually.
       result.current.triggerRef.current = trigger;
-      result.current.popoverRef.current = trigger.parentElement;
+      // `popover` is the div the harness appends the trigger into — the same
+      // node as `trigger.parentElement`, but typed HTMLDivElement.
+      result.current.popoverRef.current = popover;
 
       // The trigger must already hold focus to check whether activeElement returns
       // to it after Esc. Simulate the Esc keypress.
@@ -122,11 +124,13 @@ describe("usePopoverDismiss — Esc / outside-click / focus-return", () => {
   });
 
   it("open=true + document mousedown on outside body → onClose called once + focus returns to trigger", async () => {
-    const { trigger, cleanup } = mountHarness();
+    const { trigger, popover, cleanup } = mountHarness();
     try {
       const { result } = renderHook(() => useHarness(true, onClose));
       result.current.triggerRef.current = trigger;
-      result.current.popoverRef.current = trigger.parentElement;
+      // `popover` is the div the harness appends the trigger into — the same
+      // node as `trigger.parentElement`, but typed HTMLDivElement.
+      result.current.popoverRef.current = popover;
 
       // mousedown outside the popover — use a standalone body node.
       const outside = document.createElement("div");
@@ -153,11 +157,13 @@ describe("usePopoverDismiss — Esc / outside-click / focus-return", () => {
   });
 
   it("open=true + mousedown on trigger (inside popover wrapper) → onClose NOT called", async () => {
-    const { trigger, cleanup } = mountHarness();
+    const { trigger, popover, cleanup } = mountHarness();
     try {
       const { result } = renderHook(() => useHarness(true, onClose));
       result.current.triggerRef.current = trigger;
-      result.current.popoverRef.current = trigger.parentElement;
+      // `popover` is the div the harness appends the trigger into — the same
+      // node as `trigger.parentElement`, but typed HTMLDivElement.
+      result.current.popoverRef.current = popover;
 
       await act(async () => {
         const ev = new MouseEvent("mousedown", {

@@ -31,7 +31,10 @@ import {
   type TuiExtensions,
 } from "../../src/tui/deps.js";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
-import { createMcpManager } from "../../src/harness/mcp/manager.js";
+import {
+  createMcpManager,
+  type McpManagerOptions,
+} from "../../src/harness/mcp/manager.js";
 import type { RuntimeBundle } from "../../src/cli/runtime.js";
 import type { IknowEnv } from "../../src/config/env.js";
 
@@ -40,7 +43,7 @@ import type { IknowEnv } from "../../src/config/env.js";
 // affecting existing assertions (skill catalog / reload / listMcpTools still
 // go through the real manager). This avoids mock.module triggering the bun
 // 1.3.14 require deadlock (see the createMcpManager seam comment in deps.ts).
-const capturedMcpManagerOpts: Array<Record<string, unknown>> = [];
+const capturedMcpManagerOpts: McpManagerOptions[] = [];
 
 /** Minimal valid RuntimeBundle — buildTuiDeps reads only the env field; the rest are stubs. */
 function makeBundle(): RuntimeBundle {
@@ -64,6 +67,10 @@ function makeBundle(): RuntimeBundle {
     mcp: { connectTimeoutMs: 60_000 },
     // subagent config arm (build-engine reads taskTimeoutMs).
     subagent: { taskTimeoutMs: undefined },
+    // ADR-0019 root anchors: unset in the fixture (loadIknowEnv maps an empty
+    // IKNOW_WORKSPACE_ROOT / IKNOW_PRODUCT_ROOT to undefined).
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
   return { env } as unknown as RuntimeBundle;
 }
@@ -216,7 +223,7 @@ describe("buildTuiDeps — #378 根因 B timeoutMsOverride 透传", () => {
       userHome: join(root, "home"),
       cwd: root,
       createMcpManager: (opts) => {
-        capturedMcpManagerOpts.push(opts as Record<string, unknown>);
+        capturedMcpManagerOpts.push(opts);
         return createMcpManager(opts);
       },
     });
@@ -236,7 +243,7 @@ describe("buildTuiDeps — #378 根因 B timeoutMsOverride 透传", () => {
       userHome: join(root, "home"),
       cwd: root,
       createMcpManager: (opts) => {
-        capturedMcpManagerOpts.push(opts as Record<string, unknown>);
+        capturedMcpManagerOpts.push(opts);
         return createMcpManager(opts);
       },
     });
@@ -303,7 +310,7 @@ describe("T6 — buildTuiDeps stable productRoot threading", () => {
       "utf8"
     );
 
-    const captured: Array<Record<string, unknown>> = [];
+    const captured: McpManagerOptions[] = [];
     let capturedExt: TuiExtensions | undefined;
     const built = await buildTuiDeps(makeBundle(), {
       askUser: createNoAskUser(),
@@ -312,7 +319,7 @@ describe("T6 — buildTuiDeps stable productRoot threading", () => {
       workspaceRoot,
       productRoot,
       createMcpManager: (opts) => {
-        captured.push(opts as Record<string, unknown>);
+        captured.push(opts);
         return createMcpManager(opts);
       },
       createMcpClient: () => ({
@@ -332,7 +339,7 @@ describe("T6 — buildTuiDeps stable productRoot threading", () => {
 
     expect(captured).toHaveLength(1);
     expect(captured[0]!.workspaceRoot).toBe(workspaceRoot);
-    const cfg = captured[0]!.config as Array<{ name: string }>;
+    const cfg = captured[0]!.config.map((s) => ({ name: s.name }));
     expect(cfg.map((s) => s.name)).toContain("from-product");
     expect(cfg.map((s) => s.name)).not.toContain("from-task");
 

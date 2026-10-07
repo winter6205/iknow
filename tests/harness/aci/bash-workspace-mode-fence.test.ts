@@ -531,7 +531,7 @@ describe("工作区档围栏真实行为 — S2 negative：白名单外 home 子
         tmpDir: sessionTmp,
       });
       await assert.rejects(
-        () => bash.handler({ command: `printf deny > ${authorized}` }),
+        async () => bash.handler({ command: `printf deny > ${authorized}` }),
         (error: unknown) =>
           error instanceof ToolExecutionError &&
           error.name === "ToolExecutionError",
@@ -710,8 +710,12 @@ describe("工作区档围栏真实行为 — S2 concurrent：两个身份并行"
         tmpDir: tmpB,
       });
       const [resA, resB] = await Promise.all([
-        bashA.handler({ command: `printf a > ${shared}` }).then(parseBash),
-        bashB.handler({ command: `printf b > ${shared}` }).then(parseBash),
+        Promise.resolve(
+          bashA.handler({ command: `printf a > ${shared}` })
+        ).then(parseBash),
+        Promise.resolve(
+          bashB.handler({ command: `printf b > ${shared}` })
+        ).then(parseBash),
       ]);
       assert.notEqual(resA.code, 0, `identity A must fail; ${resA.stderr}`);
       assert.notEqual(resB.code, 0, `identity B must fail; ${resB.stderr}`);
@@ -751,12 +755,12 @@ describe("工作区档围栏真实行为 — S2 concurrent：两个身份并行"
         tmpDir: tmpB,
       });
       const [resA, resB] = await Promise.all([
-        bashA
-          .handler({ command: `printf ok > ${allowedPath}` })
-          .then(parseBash),
-        bashB
-          .handler({ command: `printf deny > ${forbiddenPath}` })
-          .then(parseBash),
+        Promise.resolve(
+          bashA.handler({ command: `printf ok > ${allowedPath}` })
+        ).then(parseBash),
+        Promise.resolve(
+          bashB.handler({ command: `printf deny > ${forbiddenPath}` })
+        ).then(parseBash),
       ]);
       assert.equal(resA.code, 0, resA.stderr);
       assert.equal(readFileSync(allowedPath, "utf8"), "ok");
@@ -798,7 +802,7 @@ describe("工作区档围栏真实行为 — S2 exception：装配后白名单�
       rmSync(taskRoot, { recursive: true, force: true });
       const forbidden = join(homeRoot, "must-not-exist.txt");
       await assert.rejects(
-        () => bash.handler({ command: `printf deny > ${forbidden}` }),
+        async () => bash.handler({ command: `printf deny > ${forbidden}` }),
         (error: unknown) => {
           const typed = error as { kind?: string };
           return (

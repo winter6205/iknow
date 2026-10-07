@@ -33,7 +33,7 @@ describe("ACI permission gate — caller abort", () => {
     });
     const registry = createRegistry([tool]);
     const catalog: AciCatalog = Object.freeze({
-      get: (name) => (name === tool.name ? tool : undefined),
+      get: (name: string) => (name === tool.name ? tool : undefined),
       all: () => Object.freeze([tool]),
     });
 
@@ -119,7 +119,7 @@ describe("ACI permission gate — caller abort", () => {
     });
     const registry = createRegistry([tool]);
     const catalog: AciCatalog = Object.freeze({
-      get: (name) => (name === tool.name ? tool : undefined),
+      get: (name: string) => (name === tool.name ? tool : undefined),
       all: () => Object.freeze([tool]),
     });
 
@@ -183,7 +183,7 @@ describe("ACI permission gate — caller abort", () => {
     });
     const registry = createRegistry([tool]);
     const catalog: AciCatalog = Object.freeze({
-      get: (name) => (name === tool.name ? tool : undefined),
+      get: (name: string) => (name === tool.name ? tool : undefined),
       all: () => Object.freeze([tool]),
     });
     const aciExecutor = createAciExecutor({

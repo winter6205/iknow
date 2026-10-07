@@ -215,7 +215,7 @@ describe("isolation.credentials — 非法处置（丢条目 + 警告，不抛�
         },
       },
     });
-    const { settings, warnings } = loadWithWarnings(home, cwd);
+    const { warnings } = loadWithWarnings(home, cwd);
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /extract/);
   });
@@ -234,7 +234,7 @@ describe("isolation.credentials — 非法处置（丢条目 + 警告，不抛�
         },
       },
     });
-    const { settings, warnings } = loadWithWarnings(home, cwd);
+    const { warnings } = loadWithWarnings(home, cwd);
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /extract/);
   });
@@ -272,7 +272,7 @@ describe("isolation.credentials — 非法处置（丢条目 + 警告，不抛�
         },
       },
     });
-    const { settings, warnings } = loadWithWarnings(home, cwd);
+    const { warnings } = loadWithWarnings(home, cwd);
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]!, /decode/);
   });
@@ -288,7 +288,7 @@ describe("isolation.credentials — 非法处置（丢条目 + 警告，不抛�
         },
       },
     });
-    const { settings, warnings } = loadWithWarnings(home, cwd);
+    const { warnings } = loadWithWarnings(home, cwd);
     assert.equal(warnings.length, 2);
   });
 
@@ -300,7 +300,7 @@ describe("isolation.credentials — 非法处置（丢条目 + 警告，不抛�
         },
       },
     });
-    const { settings, warnings } = loadWithWarnings(home, cwd);
+    const { warnings } = loadWithWarnings(home, cwd);
     assert.equal(warnings.length, 3);
   });
 });

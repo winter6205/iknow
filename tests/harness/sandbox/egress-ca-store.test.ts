@@ -137,7 +137,8 @@ describe("ensurePersistentCa", () => {
     "refuses and regenerates when the CA directory mode is too broad",
     { timeout: 60_000 },
     () => {
-      const first = ensurePersistentCa({ caDir });
+      // the first call materializes the CA at the secure mode
+      ensurePersistentCa({ caDir });
       chmodSync(caDir, 0o755);
 
       const second = ensurePersistentCa({ caDir });

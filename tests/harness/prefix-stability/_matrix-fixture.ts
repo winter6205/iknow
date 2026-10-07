@@ -45,6 +45,10 @@ export function makeMatrixEnv(): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env
+    // side keeps its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

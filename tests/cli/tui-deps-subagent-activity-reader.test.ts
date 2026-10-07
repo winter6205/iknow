@@ -60,14 +60,13 @@ function makeBundle(apiKey: string): RuntimeBundle {
     },
     subagent: { taskTimeoutMs: 60_000 },
     mcp: { connectTimeoutMs: 60_000 },
-    secrets: { mode: "roundtrip" },
-    sandbox: { enabled: false },
-    verify: { enabled: false },
+    workspaceRoot: undefined,
+    productRoot: undefined,
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
   };
-  return { env, settings: {} as RuntimeBundle["settings"] };
+  return { env, session: {} };
 }
 
 let fixtureRoot: string;

@@ -168,6 +168,7 @@ function withoutDegradationNotice(
     handler: async (input, ctx) => {
       const output = await tool.handler(input, ctx);
       if (output === DEGRADED_ENGINE_NOTICE) return "";
+      if (typeof output !== "string") return output;
       return output.endsWith(suffix) ? output.slice(0, -suffix.length) : output;
     },
   };
@@ -209,7 +210,11 @@ describe("createGrepTool — schema/aci shape", () => {
     const registry = createAciRegistry([tool]);
     const executor = createExecutor(registry.inner);
     const [failure] = await executor.executeAll([
-      { name: "grep", input: { pattern: "needle", limit: 10 } },
+      {
+        id: "call-retired-limit",
+        name: "grep",
+        input: { pattern: "needle", limit: 10 },
+      },
     ]);
     assert.ok(failure !== undefined, "有回执");
     assert.equal(failure.kind, "execution_failed");
@@ -670,7 +675,7 @@ describe("grep — D3 分页（head_limit）", () => {
 
     const tool = createGrepTool(root);
     await assert.rejects(
-      () => tool.handler({ pattern: "hit", limit: 200 }),
+      async () => tool.handler({ pattern: "hit", limit: 200 }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /head_limit/.test(error.message) &&
@@ -684,7 +689,7 @@ describe("grep — D3 分页（head_limit）", () => {
 
     for (const head_limit of [0, -1, 1.5]) {
       await assert.rejects(
-        () => tool.handler({ pattern: "hit", head_limit }),
+        async () => tool.handler({ pattern: "hit", head_limit }),
         (error: unknown) =>
           error instanceof ToolExecutionError &&
           /head_limit/.test(error.message)
@@ -769,7 +774,8 @@ describe("grep — D4 glob / type 收窄", () => {
       await writeFile(join(root, "a.ts"), "hit\n", "utf8");
 
       await assert.rejects(
-        () => makeTool(root).handler({ pattern: "hit", type: "nosuchtype" }),
+        async () =>
+          makeTool(root).handler({ pattern: "hit", type: "nosuchtype" }),
         (error: unknown) =>
           error instanceof ToolExecutionError &&
           /type/.test(error.message) &&
@@ -787,7 +793,7 @@ describe("grep — D4 glob / type 收窄", () => {
     await writeFile(join(root, "a.ts"), "hit\n", "utf8");
 
     await assert.rejects(
-      () => toolFor(root, "node").handler({ pattern: "(unclosed" }),
+      async () => toolFor(root, "node").handler({ pattern: "(unclosed" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /pattern/.test(error.message) &&
@@ -804,7 +810,7 @@ describe("grep — D4 glob / type 收窄", () => {
     await writeFile(join(root, "a.ts"), "hit\n", "utf8");
 
     await assert.rejects(
-      () => toolFor(root, "rg").handler({ pattern: "(unclosed" }),
+      async () => toolFor(root, "rg").handler({ pattern: "(unclosed" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /search engine rejected the query/.test(error.message) &&
@@ -972,7 +978,7 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
     await writeFile(join(root, "a.txt"), "abc ABC\n", "utf8");
 
     await assert.rejects(
-      () => toolFor(root, "node").handler({ pattern: "(?P<n>abc)" }),
+      async () => toolFor(root, "node").handler({ pattern: "(?P<n>abc)" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /invalid pattern/.test(error.message) &&
@@ -986,7 +992,7 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
     await writeFile(join(root, "a.txt"), "alpha\nbeta\n", "utf8");
 
     await assert.rejects(
-      () => toolFor(root, "rg").handler({ pattern: "\\n" }),
+      async () => toolFor(root, "rg").handler({ pattern: "\\n" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /search engine rejected the query/.test(error.message) &&
@@ -1043,7 +1049,7 @@ describe("grep — ADR-0089 接受集差异（handler 级）", () => {
     await writeFile(join(root, "a.txt"), "hit x\nhit y\n", "utf8");
 
     await assert.rejects(
-      () =>
+      async () =>
         toolFor(root, "rg").handler({
           pattern: "hit(?= y)",
           output: "content",
@@ -1765,7 +1771,7 @@ describe("grep — 大小写与正则语义", () => {
     await writeFile(join(root, "a.ts"), "hit x\nhit y\n", "utf8");
 
     await assert.rejects(
-      () =>
+      async () =>
         toolFor(root, "rg").handler({
           pattern: "hit(?= y)",
           output: "content",
@@ -1907,7 +1913,7 @@ describe("grep — 空 / 非法输入", () => {
 
     for (const input of [{}, { pattern: "" }, { pattern: 42 }, null, "nope"]) {
       await assert.rejects(
-        () => tool.handler(input),
+        async () => tool.handler(input),
         (error: unknown) =>
           error instanceof ToolExecutionError &&
           /pattern|object/.test(error.message)
@@ -1948,7 +1954,7 @@ describe("grep — 空 / 非法输入", () => {
     const tool = createGrepTool(root);
 
     await assert.rejects(
-      () => tool.handler({ pattern: "a", output: "lines" }),
+      async () => tool.handler({ pattern: "a", output: "lines" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /output/.test(error.message) &&
@@ -1964,7 +1970,7 @@ describe("grep — 空 / 非法输入", () => {
 
     for (const field of ["also", "glob", "type"]) {
       await assert.rejects(
-        () => tool.handler({ pattern: "a", [field]: "" }),
+        async () => tool.handler({ pattern: "a", [field]: "" }),
         (error: unknown) =>
           error instanceof ToolExecutionError &&
           new RegExp(field).test(error.message)
@@ -2006,7 +2012,8 @@ describe("grep — search root reach (ADR-0128 host reach)", () => {
 
     const tool = createGrepTool(root);
     await assert.rejects(
-      () => tool.handler({ pattern: "SSHNEEDLE", path: "../sibling/.ssh" }),
+      async () =>
+        tool.handler({ pattern: "SSHNEEDLE", path: "../sibling/.ssh" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /protected-path roster/.test(error.message) &&
@@ -2041,7 +2048,7 @@ describe("grep — abort", () => {
     controller.abort();
 
     await assert.rejects(
-      () => tool.handler({ pattern: "a" }, { signal: controller.signal }),
+      async () => tool.handler({ pattern: "a" }, { signal: controller.signal }),
       (error: unknown) =>
         error instanceof ToolExecutionError && /aborted/i.test(error.message)
     );
@@ -2116,7 +2123,7 @@ describe("grep — SC5 大仓范围闸", () => {
     for (const engine of ENGINES) {
       const tool = toolFor(root, engine.name, { scopeFileLimit: SMALL_LIMIT });
       await assert.rejects(
-        () => tool.handler({ pattern: "needle" }),
+        async () => tool.handler({ pattern: "needle" }),
         (error: unknown) =>
           error instanceof ToolExecutionError &&
           /too large/.test(error.message) &&
@@ -2145,7 +2152,7 @@ describe("grep — SC5 大仓范围闸", () => {
       },
     });
     await assert.rejects(
-      () => tool.handler({ pattern: "needle" }),
+      async () => tool.handler({ pattern: "needle" }),
       (error: unknown) => error instanceof ToolExecutionError
     );
     assert.equal(spawnCalls, 0, "范围闸必须在引擎之前拒绝");
@@ -2177,7 +2184,7 @@ describe("grep — SC5 大仓范围闸", () => {
     for (const engine of ENGINES) {
       const tool = toolFor(root, engine.name, { scopeFileLimit: SMALL_LIMIT });
       await assert.rejects(
-        () => tool.handler({ pattern: "needle", glob: "!f1.txt" }),
+        async () => tool.handler({ pattern: "needle", glob: "!f1.txt" }),
         (error: unknown) =>
           error instanceof ToolExecutionError && /too large/.test(error.message)
       );
@@ -2189,7 +2196,8 @@ describe("grep — SC5 大仓范围闸", () => {
     for (const engine of ENGINES) {
       const tool = toolFor(root, engine.name, { scopeFileLimit: SMALL_LIMIT });
       await assert.rejects(
-        () => tool.handler({ pattern: "needle", head_limit: 1, offset: 0 }),
+        async () =>
+          tool.handler({ pattern: "needle", head_limit: 1, offset: 0 }),
         (error: unknown) =>
           error instanceof ToolExecutionError && /too large/.test(error.message)
       );
@@ -2227,7 +2235,7 @@ describe("grep — SC5 大仓范围闸", () => {
     const tool = toolFor(root, "node", { scopeFileLimit: SMALL_LIMIT });
     for (let i = 0; i < 2; i += 1) {
       await assert.rejects(
-        () => tool.handler({ pattern: "needle" }),
+        async () => tool.handler({ pattern: "needle" }),
         (error: unknown) =>
           error instanceof ToolExecutionError && /too large/.test(error.message)
       );
@@ -2283,7 +2291,7 @@ describe("grep — protected-path policy enforcement (both engines)", () => {
         "alias.txt",
       ]) {
         await assert.rejects(
-          () => tool.handler({ pattern: "needle", path }),
+          async () => tool.handler({ pattern: "needle", path }),
           (error: unknown) =>
             error instanceof ToolExecutionError &&
             /protected-path roster/.test(error.message) &&
@@ -2353,7 +2361,7 @@ describe("grep — protected-path policy enforcement (both engines)", () => {
         );
       }
       await assert.rejects(
-        () =>
+        async () =>
           tool.handler({
             pattern: "SSHSECRET",
             path: join(outside, ".ssh", "id_rsa"),

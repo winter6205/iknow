@@ -62,7 +62,7 @@ test("19 版设计均实现 ThinkingDesign 契约且 id 唯一", () => {
 test("15 版设计各渲染出一帧且含标志字符", async () => {
   for (const sig of SIGNATURE) {
     const d = THINKING_DESIGNS.find((x) => x.meta.id === sig.id);
-    expect(d).toBeDefined();
+    if (d === undefined) throw new Error(`unknown design: ${sig.id}`);
     const setup = await testRender(
       <d.render model={{ ...DEFAULT_PICKER_MODEL, open: true }} cols={60} />,
       { width: 64, height: 24 }

@@ -21,7 +21,6 @@
  */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
-  chmodSync,
   existsSync,
   mkdtempSync,
   readFileSync,

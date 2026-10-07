@@ -350,6 +350,24 @@ describe("T4 criterion 11/14: recordLlmCall returns undefined", () => {
       ): Promise<string | undefined> {
         return _record.id;
       },
+      async recordViolation() {
+        return undefined;
+      },
+      async recordGoal() {
+        return undefined;
+      },
+      async recordSubagentSpawn() {
+        return undefined;
+      },
+      async recordSubagentStop() {
+        return undefined;
+      },
+      async recordSubagentStateChange() {
+        return undefined;
+      },
+      async recordSubagentStep() {
+        return undefined;
+      },
     };
     const { result } = await run("go", {
       adapter: model,

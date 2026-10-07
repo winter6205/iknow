@@ -9,10 +9,7 @@ import {
   getAutoCompactThreshold,
 } from "../../../src/harness/compress/index.ts";
 import { TOKEN_ESTIMATION_PADDING } from "../../../src/harness/compress/constant.ts";
-import type {
-  AnthropicNativeMessage,
-  AnthropicContentBlock,
-} from "../../../src/harness/model-adapter/types.ts";
+import type { AnthropicNativeMessage } from "../../../src/harness/model-adapter/types.ts";
 
 describe("estimateTokens", () => {
   it("空串 → 0", () => assert.equal(estimateTokens(""), 0));

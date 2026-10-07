@@ -52,6 +52,7 @@ function fakeInner() {
       return batch.map((): ToolExecutionResult => ({
         kind: "ok",
         toolUseId: "x",
+        payload: [{ type: "text", text: "ok" }],
       }));
     },
   };
@@ -201,7 +202,10 @@ describe("gateBlockNotice — 门禁接渲染点（pending → catch 路径）",
     });
     const out = await gate.executeAll([writeCall()]);
     expect(out[0]!.kind).toBe("execution_failed");
-    const message = out[0]!.message!;
+    if (out[0]?.kind !== "execution_failed") {
+      throw new Error(`expected execution_failed, got ${out[0]?.kind}`);
+    }
+    const message = out[0].message;
     expect(message.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(true);
     expect(message).toContain("kind=not_a_git_repo");
     expect(message).toContain("Retry will not help");

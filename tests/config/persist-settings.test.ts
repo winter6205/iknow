@@ -482,9 +482,11 @@ describe("mergeMemoryPatch（纯函数）", () => {
   });
 
   test("非法 boolean → TypeError", () => {
-    expect(() => mergeMemoryPatch({}, { autoExtract: "yes" as never })).toThrow(
-      TypeError
-    );
+    // Deliberately invalid input: `autoExtract` is a string, not a boolean.
+    // `dream` stays valid so the failing field is unambiguously autoExtract.
+    expect(() =>
+      mergeMemoryPatch({}, { autoExtract: "yes" as never, dream: false })
+    ).toThrow(TypeError);
   });
 });
 

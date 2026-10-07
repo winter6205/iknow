@@ -96,7 +96,10 @@ describe("bash — last-read 入账", () => {
 
     await assert.rejects(
       async () => {
-        await bash.handler({ command: "grep needle a.ts" }, { conversationId: "conv-a" });
+        await bash.handler(
+          { command: "grep needle a.ts" },
+          { conversationId: "conv-a" }
+        );
       },
       (error: unknown) =>
         error instanceof ToolExecutionError &&
@@ -234,7 +237,7 @@ describe("bash — last-read 入账", () => {
     assert.equal(ledger.ledgerFor("conv-a")?.size(), 0);
 
     await assert.rejects(
-      () =>
+      async () =>
         writer.handler(
           { path: "cfg.ts", content: "rewritten\n" },
           { conversationId: "conv-a" }
@@ -305,7 +308,7 @@ describe("bash — last-read 入账", () => {
     );
 
     await assert.rejects(
-      () =>
+      async () =>
         writer.handler(
           { path: "f.ts", content: "clobbered\n" },
           { conversationId: "conv-a" }
@@ -363,7 +366,7 @@ describe("bash — last-read 入账", () => {
     );
 
     await assert.rejects(
-      () =>
+      async () =>
         writer.handler(
           { path: "a.txt", content: "CLOBBERED\n" },
           { conversationId: "conv-a" }
@@ -442,7 +445,7 @@ describe("bash — last-read 入账", () => {
     // All refused: the following write_file in the same conversation
     // must be refused, bytes unchanged.
     await assert.rejects(
-      () =>
+      async () =>
         writer.handler(
           { path: "a.txt", content: "CLOBBERED\n" },
           { conversationId: "conv-a" }

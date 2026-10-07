@@ -196,9 +196,13 @@ function realisticSessionFile(traceDir: string, index: number): string {
   return conversationId;
 }
 
+/** Mirrors the list_sessions core response shape (ListSessionsPage SSOT): the
+ *  effective pagination coordinates are echoed back, which is what lets a
+ *  caller derive the resume coordinate and the end-of-data signal. */
 interface Page {
   sessions: Array<Record<string, unknown>>;
-  [key: string]: unknown;
+  limit: number;
+  offset: number;
 }
 
 async function pageOf(
@@ -389,7 +393,7 @@ describe("list_sessions core — paging", () => {
     const tail = await pageOf(core, { limit: head.limit, offset: resume });
     assert.deepEqual(conversationIds(tail), ["oldest"]);
     assert.ok(
-      tail.sessions.length < tail.limit!,
+      tail.sessions.length < tail.limit,
       "a page shorter than the echoed limit is the end-of-data signal"
     );
   });

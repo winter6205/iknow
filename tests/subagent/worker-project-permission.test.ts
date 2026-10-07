@@ -79,7 +79,7 @@ async function workerAt(projectIdentityRoot: string, sandboxRoot: string) {
     model: createStubModel({ responses: [] }),
     skillCatalog: createSkillCatalog([]),
     trace: createNoopTraceService(),
-    system: () => undefined,
+    system: async () => undefined,
     role: "general-purpose",
   });
 }

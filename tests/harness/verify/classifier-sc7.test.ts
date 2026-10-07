@@ -342,7 +342,7 @@ describe("SC9: command 缺失 + 分类器 seam → 闭环接管, 非 SC7 透明�
     // closes transparently).
     const userText = "implement goal";
     const text = "implemented the requested feature";
-    const { runFn: bareRunFn, bare } = makeBare(text, userText);
+    const { runFn: bareRunFn } = makeBare(text, userText);
     const bareOut = await runVerifyLoop({
       runFn: bareRunFn,
       userText,

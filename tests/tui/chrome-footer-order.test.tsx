@@ -69,6 +69,11 @@ function fakeBridge(subagents: ReadonlyArray<SubagentInfo>): TuiBridge {
     },
     listSessions: async () => [],
     loadSessionFile: async () => file,
+    openSession: async () => {
+      throw new Error("unused: no session is opened here");
+    },
+    abortSubagentTask: () => false,
+    abortSessionForegroundWork: () => [],
     compactSession: async () => ({
       compacted: false,
       reason: "below_token_threshold" as const,
@@ -97,7 +102,6 @@ describe("TuiApp chrome footer 顺序（ContextBar 紧贴输入框之下）", ()
         toolEventSink={createToolEventSink()}
         cwd="/tmp/proj"
         dataDir="/tmp/proj"
-        model="claude-test-model"
         permissionMode={createPermissionModeContext("default")}
         sessionGrants={createSessionGrants()}
       />,

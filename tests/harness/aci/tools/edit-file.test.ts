@@ -195,7 +195,8 @@ describe("createEditFileTool — exact rejection messages", () => {
     await writeFile(file, "hello world\n", "utf8");
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({ path: file, old_str: "missing", new_str: "ok" }),
+      async () =>
+        tool.handler({ path: file, old_str: "missing", new_str: "ok" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message === `[edit_file] old_str not found: ${file}`
@@ -207,7 +208,8 @@ describe("createEditFileTool — exact rejection messages", () => {
     await writeFile(file, "x = 1\nx = 1\n", "utf8");
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({ path: file, old_str: "x = 1", new_str: "x = 2" }),
+      async () =>
+        tool.handler({ path: file, old_str: "x = 1", new_str: "x = 2" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message ===
@@ -220,7 +222,7 @@ describe("createEditFileTool — exact rejection messages", () => {
     await writeFile(file, "a a a a a a", "utf8");
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({ path: file, old_str: "a", new_str: "b" }),
+      async () => tool.handler({ path: file, old_str: "a", new_str: "b" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message ===
@@ -234,7 +236,8 @@ describe("createEditFileTool — exact rejection messages", () => {
     await writeFile(file, original, "utf8");
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({ path: file, old_str: "x = 1", new_str: "x = 2" }),
+      async () =>
+        tool.handler({ path: file, old_str: "x = 1", new_str: "x = 2" }),
       ToolExecutionError
     );
     assert.equal(await readFile(file, "utf8"), original);
@@ -248,11 +251,12 @@ describe("createEditFileTool — poka-yoke linter integration", () => {
     await writeFile(file, original, "utf8");
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({
-        path: file,
-        old_str: "const x = 1;",
-        new_str: "const x = (1;",
-      }),
+      async () =>
+        tool.handler({
+          path: file,
+          old_str: "const x = 1;",
+          new_str: "const x = (1;",
+        }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.startsWith("[edit_file] lint rejected:")
@@ -277,11 +281,12 @@ describe("createEditFileTool — path / file errors", () => {
   it("rejects when the file does not exist", async () => {
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({
-        path: join(scratch, "missing.ts"),
-        old_str: "x",
-        new_str: "y",
-      }),
+      async () =>
+        tool.handler({
+          path: join(scratch, "missing.ts"),
+          old_str: "x",
+          new_str: "y",
+        }),
       ToolExecutionError
     );
   });
@@ -289,11 +294,12 @@ describe("createEditFileTool — path / file errors", () => {
   it("rejects a path that escapes the root via parent traversal", async () => {
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({
-        path: join(scratch, "..", "outside.ts"),
-        old_str: "x",
-        new_str: "y",
-      }),
+      async () =>
+        tool.handler({
+          path: join(scratch, "..", "outside.ts"),
+          old_str: "x",
+          new_str: "y",
+        }),
       ToolExecutionError
     );
   });
@@ -304,11 +310,12 @@ describe("createEditFileTool — path / file errors", () => {
     await symlink(outside, join(scratch, "escape"), "dir");
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({
-        path: join(scratch, "escape", "victim.ts"),
-        old_str: "x",
-        new_str: "y",
-      }),
+      async () =>
+        tool.handler({
+          path: join(scratch, "escape", "victim.ts"),
+          old_str: "x",
+          new_str: "y",
+        }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("outside workspace")
@@ -319,11 +326,12 @@ describe("createEditFileTool — path / file errors", () => {
     // write_file and edit_file share resolveWithinRoot, so the same rejection message lands on both faces.
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({
-        path: "/tmp/edit-file-sc4-not-a-delivery.txt",
-        old_str: "x",
-        new_str: "y",
-      }),
+      async () =>
+        tool.handler({
+          path: "/tmp/edit-file-sc4-not-a-delivery.txt",
+          old_str: "x",
+          new_str: "y",
+        }),
       (error: unknown) => {
         if (!(error instanceof ToolExecutionError)) return false;
         return (
@@ -345,7 +353,7 @@ describe("createEditFileTool — input validation", () => {
     await writeFile(file, "hello\n", "utf8");
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({ path: file, old_str: "", new_str: "X" }),
+      async () => tool.handler({ path: file, old_str: "", new_str: "X" }),
       (error: unknown) =>
         error instanceof ToolExecutionError && error.message.includes("old_str")
     );
@@ -354,7 +362,7 @@ describe("createEditFileTool — input validation", () => {
   it("rejects when path is missing", async () => {
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({ old_str: "x", new_str: "y" }),
+      async () => tool.handler({ old_str: "x", new_str: "y" }),
       ToolExecutionError
     );
   });
@@ -364,7 +372,7 @@ describe("createEditFileTool — input validation", () => {
     await writeFile(file, "x\n", "utf8");
     const tool = createEditFileTool(scratch);
     await assert.rejects(
-      tool.handler({ path: file, old_str: "x" }),
+      async () => tool.handler({ path: file, old_str: "x" }),
       ToolExecutionError
     );
   });
@@ -375,12 +383,13 @@ describe("createEditFileTool — input validation", () => {
     const tool = createEditFileTool(scratch);
     // Bypass type system on purpose: handler must still reject noise.
     await assert.rejects(
-      tool.handler({
-        path: file,
-        old_str: "x",
-        new_str: "y",
-        evil: true,
-      } as unknown as Parameters<typeof tool.handler>[0]),
+      async () =>
+        tool.handler({
+          path: file,
+          old_str: "x",
+          new_str: "y",
+          evil: true,
+        } as unknown as Parameters<typeof tool.handler>[0]),
       ToolExecutionError
     );
   });
@@ -446,7 +455,8 @@ describe("createEditFileTool — onEdit seam", () => {
       },
     });
     await assert.rejects(
-      tool.handler({ path: file, old_str: "x = 1", new_str: "x = 2" }),
+      async () =>
+        tool.handler({ path: file, old_str: "x = 1", new_str: "x = 2" }),
       (err: unknown) =>
         err instanceof ToolExecutionError || err instanceof Error
     );

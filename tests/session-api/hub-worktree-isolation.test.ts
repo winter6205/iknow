@@ -22,7 +22,6 @@
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { execFileSync } from "node:child_process";
 import {
   existsSync,
   mkdirSync,
@@ -213,7 +212,10 @@ async function runRead(
 
 /** Extract the text payload of an `ok` tool result (ACI tool success). */
 function resultText(result: ToolExecutionResult): string {
-  if (result.kind !== "ok") return result.message ?? "";
+  if (result.kind !== "ok") {
+    // validation_failed / execution_failed carry a message; tool_not_found does not.
+    return "message" in result ? result.message : "";
+  }
   const payload = (result as { payload?: unknown }).payload;
   if (typeof payload === "string") return payload;
   if (Array.isArray(payload)) {
@@ -226,6 +228,37 @@ function resultText(result: ToolExecutionResult): string {
       .join("");
   }
   return "";
+}
+
+/**
+ * `ToolExecutionResult` is a discriminated union and `expect(x.kind).toBe(...)`
+ * does not narrow it, so the kind assertion and the narrowed member are carried
+ * together here. Both helpers assert exactly what the inline
+ * `expect(result.kind).toBe(...)` did before — no assertion is relaxed.
+ */
+function expectFailure(
+  result: ToolExecutionResult
+): Extract<ToolExecutionResult, { readonly kind: "execution_failed" }> {
+  expect(result.kind).toBe("execution_failed");
+  if (result.kind !== "execution_failed") {
+    throw new Error(`expected execution_failed, got ${result.kind}`);
+  }
+  return result;
+}
+
+function expectOk(
+  result: ToolExecutionResult
+): Extract<ToolExecutionResult, { readonly kind: "ok" }> {
+  expect(result.kind).toBe("ok");
+  if (result.kind !== "ok") {
+    throw new Error(`expected ok, got ${result.kind}`);
+  }
+  return result;
+}
+
+/** Failure summary when the result carries one; undefined for ok / tool_not_found. */
+function messageOf(result: ToolExecutionResult): string | undefined {
+  return "message" in result ? result.message : undefined;
 }
 
 async function persistDirtyRoot(
@@ -267,11 +300,11 @@ describe("worktree isolation wiring (switch ON)", () => {
     const result = await runMutate(deps, conversationId);
 
     // visible, non-empty failure exit — the write never reached the tool
-    expect(result.kind).toBe("execution_failed");
-    expect(result.message).toMatch(/^\[worktree_isolation\] /);
-    expect(result.message).toContain("create-worktree ACI tool");
-    expect(result.message).not.toContain("end the turn");
-    expect(result.message!.length).toBeGreaterThan(20);
+    const failure = expectFailure(result);
+    expect(failure.message).toMatch(/^\[worktree_isolation\] /);
+    expect(failure.message).toContain("create-worktree ACI tool");
+    expect(failure.message).not.toContain("end the turn");
+    expect(failure.message.length).toBeGreaterThan(20);
 
     // physical proof that the gate never provisioned: no `git worktree add`
     // ran anywhere on the execution path — no worktree registered, no tree
@@ -387,7 +420,6 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
     const { hub, conversationId: c1 } = await makeHubWithSession(repo);
     const { conversationId: c2 } = await makeHubWithSession(repo);
 
-    const deps = await ensure(hub, repo);
     // c1's model calls the create-worktree tool → wt1 + rebind
     const wt1 = await hub.provisionWorktree({ conversationId: c1, root: repo });
     await persistDirtyRoot(hub, c1);
@@ -437,9 +469,9 @@ describe("worktree isolation wiring (T4 — passthrough)", () => {
 
     // T3: a non-task-worktree root is never provisioned by the gate — the
     // first mutate is blocked with the ACI-tool notice (no git call)
-    expect(result.kind).toBe("execution_failed");
-    expect(result.message).toContain("[worktree_isolation]");
-    expect(result.message).toContain("create-worktree ACI tool");
+    const failure = expectFailure(result);
+    expect(failure.message).toContain("[worktree_isolation]");
+    expect(failure.message).toContain("create-worktree ACI tool");
     expect(readdirSync(manualWt).filter((n) => n !== ".iknow")).toEqual(before); // zero pollution of the foreign checkout
     expect(git(repo, "status", "--porcelain")).toBe("");
 
@@ -463,10 +495,10 @@ describe("worktree isolation wiring (switch OFF)", () => {
     const deps = await ensure(hub, repo);
     const result = await runMutate(deps, conversationId);
 
-    expect(result.message ?? "").not.toContain("[worktree_isolation]");
+    expect(messageOf(result) ?? "").not.toContain("[worktree_isolation]");
     expect(existsSync(join(repo, ".iknow", "worktrees"))).toBe(false);
     // the write went through the normal pipeline (noAskUser → allowed)
-    expect(result.kind).toBe("ok");
+    expectOk(result);
     expect(existsSync(join(repo, "hello.txt"))).toBe(true);
 
     const file = await store.load(conversationId);
@@ -491,8 +523,8 @@ describe("worktree isolation wiring (switch OFF)", () => {
     const deps = await ensure(hub, manualWt);
     const result = await runMutate(deps, conversationId);
 
-    expect(result.message ?? "").not.toContain("[worktree_isolation]");
-    expect(result.kind).toBe("ok");
+    expect(messageOf(result) ?? "").not.toContain("[worktree_isolation]");
+    expectOk(result);
     expect(existsSync(join(manualWt, "hello.txt"))).toBe(true);
   });
 });
@@ -529,9 +561,9 @@ describe("review High-2 — hub reuses the startup settings object across rebind
     // auto-provision (the gate never creates)
     const deps = await ensure(hub, repo);
     const result = await runMutate(deps, c1);
-    expect(result.kind).toBe("execution_failed");
-    expect(result.message).toContain("[worktree_isolation]");
-    expect(result.message).toContain("create-worktree ACI tool");
+    const failure = expectFailure(result);
+    expect(failure.message).toContain("[worktree_isolation]");
+    expect(failure.message).toContain("create-worktree ACI tool");
     expect(existsSync(join(repo, "hello.txt"))).toBe(false);
     expect(existsSync(join(repo, ".iknow", "worktrees"))).toBe(false);
 
@@ -547,8 +579,8 @@ describe("review High-2 — hub reuses the startup settings object across rebind
     const { conversationId: c2 } = await makeHubWithSession(repo);
     const wtDeps = await ensure(hub, wt1);
     const result2 = await runMutate(wtDeps, c2);
-    expect(result2.kind).toBe("execution_failed");
-    expect(result2.message).toContain("kind=foreign_worktree");
+    const failure2 = expectFailure(result2);
+    expect(failure2.message).toContain("kind=foreign_worktree");
     expect(existsSync(join(wt1, "hello.txt"))).toBe(false);
   });
 });
@@ -758,6 +790,8 @@ function makeTrackingManager(name: string): McpManager & {
   ];
   return {
     start: async () => {},
+    // observer-only seam: no reconnect listener is registered by these fakes.
+    onManualReconnect: () => {},
     reload: async () => {
       reloadCalls += 1;
       await wait;
@@ -774,7 +808,7 @@ function makeTrackingManager(name: string): McpManager & {
         shutDown ? { ...s, state: "failed" as const } : { ...s }
       ),
     listResources: async () => ({ resources: [], perServer: [] }),
-    readResource: async () => ({ contents: [] }),
+    readResource: async (server, uri) => ({ server, uri, contents: [] }),
     shutDown: () => shutDown,
     reloadCalls: () => reloadCalls,
     reloadGate: {
@@ -910,6 +944,7 @@ describe("T7 — hub active-root MCP reload transaction", () => {
 
     const mgr: McpManager = {
       start: async () => {},
+      onManualReconnect: () => {},
       reload: async () => {
         reloadStarted += 1;
         inFlight += 1;
@@ -922,7 +957,7 @@ describe("T7 — hub active-root MCP reload transaction", () => {
       shutdown: async () => {},
       status: () => [{ name: "s", state: "connected", source: "project" }],
       listResources: async () => ({ resources: [], perServer: [] }),
-      readResource: async () => ({ contents: [] }),
+      readResource: async (server, uri) => ({ server, uri, contents: [] }),
     };
 
     const hub = new SessionHub({
@@ -968,13 +1003,14 @@ describe("T7 — hub active-root MCP reload transaction", () => {
     const productRoot = makeGitRepo();
     const mgr: McpManager = {
       start: async () => {},
+      onManualReconnect: () => {},
       reload: async () => {
         throw new Error("boom mid reload");
       },
       shutdown: async () => {},
       status: () => [{ name: "only", state: "connected", source: "project" }],
       listResources: async () => ({ resources: [], perServer: [] }),
-      readResource: async () => ({ contents: [] }),
+      readResource: async (server, uri) => ({ server, uri, contents: [] }),
     };
 
     const hub = new SessionHub({
@@ -1040,6 +1076,7 @@ describe("T7 — hub active-root MCP reload transaction", () => {
     let seenConfigRoot: string | undefined;
     const mgr: McpManager = {
       start: async () => {},
+      onManualReconnect: () => {},
       reload: async (servers) => {
         // Capture that reload received product-level server, not task-root junk.
         expect(servers.map((s) => s.name)).toContain("from-product");
@@ -1049,7 +1086,7 @@ describe("T7 — hub active-root MCP reload transaction", () => {
         { name: "from-product", state: "connected", source: "project" },
       ],
       listResources: async () => ({ resources: [], perServer: [] }),
-      readResource: async () => ({ contents: [] }),
+      readResource: async (server, uri) => ({ server, uri, contents: [] }),
     };
 
     // Spy via monkey-patching load path is heavy; instead assert active roots
@@ -1455,8 +1492,7 @@ describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
     });
     const deps = await ensure(hub, repo);
 
-    const result = await runTool(deps, conversationId);
-    expect(result.kind).toBe("ok");
+    const result = expectOk(await runTool(deps, conversationId));
     const reboundRoot = join(repo, ".iknow", "worktrees", conversationId);
     const resultText = (result.payload as Array<{ text?: string }>)
       .map((b) => b.text ?? "")
@@ -1478,12 +1514,11 @@ describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
     const deps = await ensure(hub, repo);
     // gate blocks the first mutate and points at the tool
     const blocked = await runMutate(deps, conversationId);
-    expect(blocked.kind).toBe("execution_failed");
-    expect(blocked.message).toContain("create-worktree ACI tool");
+    const blockedFailure = expectFailure(blocked);
+    expect(blockedFailure.message).toContain("create-worktree ACI tool");
 
     // the model calls the ACI tool through the same executor
-    const result = await runTool(deps, conversationId);
-    expect(result.kind).toBe("ok");
+    const result = expectOk(await runTool(deps, conversationId));
     const reboundRoot = join(repo, ".iknow", "worktrees", conversationId);
     const resultText = (result.payload as Array<{ text?: string }>)
       .map((b) => b.text ?? "")
@@ -1520,8 +1555,10 @@ describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
     // the read receipt admits it — the isolation property is unchanged.
     const nextDeps = await ensure(hub, reboundRoot);
     const refused = await runMutate(nextDeps, conversationId);
-    expect(refused.kind).toBe("execution_failed");
-    expect(refused.message).toContain("refusing to overwrite a non-empty file");
+    const refusedFailure = expectFailure(refused);
+    expect(refusedFailure.message).toContain(
+      "refusing to overwrite a non-empty file"
+    );
     expect(await runRead(nextDeps, conversationId, "hello.txt")).toMatchObject({
       kind: "ok",
     });
@@ -1586,10 +1623,13 @@ describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
     // a leftover branch with the deterministic task name
     git(repo, "branch", `iknow/task-${conversationId}`);
 
-    const result = await runTool(deps, conversationId);
-    expect(result.kind).toBe("execution_failed");
-    expect(result.message).toContain("kind=branch_exists");
-    expect(result.message).toContain(`iknow/task-${conversationId}`);
+    const branchExistsFailure = expectFailure(
+      await runTool(deps, conversationId)
+    );
+    expect(branchExistsFailure.message).toContain("kind=branch_exists");
+    expect(branchExistsFailure.message).toContain(
+      `iknow/task-${conversationId}`
+    );
 
     // no tree, no overwrite, no rebind, main repo zero-write
     expect(existsSync(join(repo, ".iknow", "worktrees"))).toBe(false);
@@ -1611,9 +1651,10 @@ describe("worktree isolation wiring (T4 — create-worktree ACI tool)", () => {
     mkdirSync(leftover, { recursive: true });
     writeFileSync(join(leftover, "sentinel.txt"), "leftover", "utf8");
 
-    const result = await runTool(deps, conversationId);
-    expect(result.kind).toBe("execution_failed");
-    expect(result.message).toContain("kind=worktree_exists");
+    const treeExistsFailure = expectFailure(
+      await runTool(deps, conversationId)
+    );
+    expect(treeExistsFailure.message).toContain("kind=worktree_exists");
 
     // the leftover tree is untouched, no branch created, no rebind
     expect(readFileSync(join(leftover, "sentinel.txt"), "utf8")).toBe(
@@ -1715,9 +1756,9 @@ describe("worktree isolation wiring (T7 - enter-worktree)", () => {
     const foreignDeps = await ensure(hub2, wtA);
     const result = await runMutate(foreignDeps, convB);
 
-    expect(result.kind).toBe("execution_failed");
-    expect(result.message).toContain("[worktree_isolation]");
-    expect(result.message).toContain("kind=foreign_worktree");
+    const failure = expectFailure(result);
+    expect(failure.message).toContain("[worktree_isolation]");
+    expect(failure.message).toContain("kind=foreign_worktree");
     // foreign tree untouched
     expect(existsSync(join(wtA, "hello.txt"))).toBe(false);
   });
@@ -1751,10 +1792,10 @@ describe("worktree isolation wiring (T7 - enter-worktree)", () => {
     const foreignDeps = await ensure(hub2, wtA);
     const result = await runMutate(foreignDeps, convB);
 
-    expect(result.kind).toBe("execution_failed");
-    expect(result.message).toContain("[worktree_isolation]");
-    expect(result.message).toContain("kind=foreign_worktree");
-    expect(result.message).toContain(convA);
+    const failure = expectFailure(result);
+    expect(failure.message).toContain("[worktree_isolation]");
+    expect(failure.message).toContain("kind=foreign_worktree");
+    expect(failure.message).toContain(convA);
     expect(existsSync(join(wtA, "hello.txt"))).toBe(false);
     expect(git(repo, "status", "--porcelain")).toBe("");
   });
@@ -1779,8 +1820,8 @@ describe("worktree isolation wiring (T7 - enter-worktree)", () => {
       convB
     );
 
-    expect(enterResult.kind).toBe("execution_failed");
-    expect(enterResult.message).toContain("kind=worktree_not_found");
+    const entered = expectFailure(enterResult);
+    expect(entered.message).toContain("kind=worktree_not_found");
     expect((await store.load(convB)).workspaceRoot).toBe(repo);
   });
 });
@@ -1937,8 +1978,8 @@ describe("worktree isolation wiring (T8 - exit-worktree)", () => {
     // wording, which only fires for never-bound sessions.
     const mainDeps = await ensure(hub, repo);
     const mutateResult = await runMutate(mainDeps, convB);
-    expect(mutateResult.kind).toBe("execution_failed");
-    expect(mutateResult.message).toMatch(/^\[worktree_isolation\] kind=/);
+    const mutateFailure = expectFailure(mutateResult);
+    expect(mutateFailure.message).toMatch(/^\[worktree_isolation\] kind=/);
 
     // the tree is preserved: same worktree registration (no `worktree remove`)
     expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
@@ -1963,8 +2004,8 @@ describe("worktree isolation wiring (T8 - exit-worktree)", () => {
       convB
     );
 
-    expect(exitResult.kind).toBe("execution_failed");
-    expect(exitResult.message).toContain("kind=rebind_failed");
+    const exited = expectFailure(exitResult);
+    expect(exited.message).toContain("kind=rebind_failed");
     expect((await store.load(convB)).workspaceRoot).toBe(repo);
   });
 });

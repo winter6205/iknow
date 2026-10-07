@@ -105,17 +105,22 @@ describe("serveStaticRequest stripPrefix", () => {
 describe("serveStaticRequest stripPrefix — traversal defense-in-depth", () => {
   it("stripped path 解析出 webRoot → 403 且不泄漏细节（直调，不经 URL 归一化）", () => {
     const writes: Array<{ status: number; body: string }> = [];
-    const res = {
+    // Named self-reference instead of `this`: the `as unknown as ServerResponse`
+    // assertion strips the contextual `this` type, so `this.status` does not
+    // resolve. Behaviour is identical — the methods run after the literal is
+    // fully assigned.
+    const fake = {
       status: 0,
       writeHead(status: number) {
-        this.status = status;
-        return this;
+        fake.status = status;
+        return fake;
       },
       end(payload?: string) {
-        writes.push({ status: this.status, body: payload ?? "" });
-        return this;
+        writes.push({ status: fake.status, body: payload ?? "" });
+        return fake;
       },
-    } as unknown as http.ServerResponse;
+    };
+    const res = fake as unknown as http.ServerResponse;
     const handled = serveStaticRequest({
       res,
       webRoot,

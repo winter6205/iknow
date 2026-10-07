@@ -35,7 +35,6 @@
  * real HTTP CONNECT proxy, no host socat, no real egress.
  */
 
-import { spawn as realSpawn } from "node:child_process";
 import { createServer } from "node:http";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -52,7 +51,6 @@ import {
   type EgressSession,
   type EgressSessionOptions,
 } from "../../../src/harness/sandbox/egress/session.js";
-import { createHttpProxyServer as createHttpProxyServerOrig } from "../../../src/harness/sandbox/egress/upstream.js";
 import type { IknowSettings } from "../../../src/config/settings.js";
 
 const FIX_CWD = mkdtempSync(join(tmpdir(), "t3-approval-cwd-"));
@@ -84,18 +82,6 @@ function cleanPolicyFactory(
   });
 }
 
-function fakeSocatProc(pid: number) {
-  const proc = realSpawn("/bin/true", ["--version"], { stdio: "ignore" });
-  try {
-    proc.kill("SIGKILL");
-  } catch {
-    /* best-effort */
-  }
-  return Object.assign(proc, { pid });
-}
-
-let fakePidCounter = 20000;
-
 interface CapturedCall {
   readonly filter: (port: number, host: string) => Promise<boolean>;
   readonly policy: EgressPolicyInput;
@@ -104,8 +90,8 @@ interface CapturedCall {
 
 /**
  * Bash-side wrapper of the filter-driving injection seam: real
- * `createEgressSession` over an all-fake assembly (probeSocat always true /
- * fake spawn / on-disk socket file / captured filter).
+ * `createEgressSession` over an all-fake assembly (on-disk socket file /
+ * captured filter).
  * `driveOutboundOnAssembly` = drive the filter once against an off-profile
  * domain during assembly (fire-and-await-microtask), so the denial violation
  * lands in the sink deterministically before the handler drains.
@@ -121,9 +107,6 @@ function makeSessionCaptureSeam(driveOutboundOnAssembly = false): {
     const captured: { filter?: CapturedCall["filter"] } = {};
     const session = await createEgressSession({
       ...opts,
-      probeSocat: () => true,
-      spawn: (() =>
-        fakeSocatProc(fakePidCounter++)) as unknown as typeof realSpawn,
       socketPathFactory: (id) => {
         const p = join(scratchDir(), `t3-${id}.sock`);
         // Write a plain placeholder file: the fence's socket bind only needs

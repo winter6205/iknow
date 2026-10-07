@@ -27,17 +27,10 @@ import {
   TRANSPORT_MAX_ATTEMPTS,
   withTransportRetry,
 } from "../../src/harness/model-adapter/with-transport-retry.ts";
-import type {
-  AnthropicNativeMessage,
-} from "../../src/harness/model-adapter/types.ts";
 import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
-
-function makeNative(role: "user" | "assistant", text: string) {
-  return { role, content: [{ type: "text", text }] } as AnthropicNativeMessage;
-}
 
 function harness() {
   const registry = createRegistry([

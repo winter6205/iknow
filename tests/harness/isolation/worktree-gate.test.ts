@@ -21,10 +21,10 @@
  * The git layer (`createTaskWorktree`) is unchanged and stays covered with
  * real git — it serves the session-api provisioner and the create-worktree ACI tool.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { mkdtemp, rm, readdir, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 
@@ -112,8 +112,12 @@ afterAll(() => {
   for (const r of roots) rmSync(r, { recursive: true, force: true });
 });
 
-/** Fake inner executor: records executeAll invocations; optional canned results. */
-function fakeInner(result?: Partial<ToolExecutionResult>) {
+/**
+ * Fake inner executor: records executeAll invocations and answers every call
+ * with a well-typed `ok` result. The gate only forwards these receipts, so no
+ * test here inspects the payload body.
+ */
+function fakeInner() {
   const invocations: {
     calls: ReadonlyArray<ToolCall>;
     args: unknown[];
@@ -135,14 +139,26 @@ function fakeInner(result?: Partial<ToolExecutionResult>) {
       const out: ToolExecutionResult[] = batch.map((c) => ({
         kind: "ok",
         toolUseId: c.id,
-        payload: { wrote: true },
-        ...(result ?? {}),
+        payload: [{ type: "text", text: "ok" }],
       }));
       for (const [i, r] of out.entries()) await onSettled?.(r, i);
       return out;
     },
   };
   return { inner, calls: invocations };
+}
+
+/**
+ * Narrow a receipt to its `execution_failed` variant and return the
+ * model-visible failure label. Keeps the `kind` assertion every one of these
+ * tests already made — TypeScript cannot narrow through `expect().toBe()`.
+ */
+function failureMessage(result: ToolExecutionResult | undefined): string {
+  expect(result?.kind).toBe("execution_failed");
+  if (result?.kind !== "execution_failed") {
+    throw new Error(`expected an execution_failed result, got ${result?.kind}`);
+  }
+  return result.message;
 }
 
 const writeCall = (id = "c1"): ToolCall => ({
@@ -949,15 +965,13 @@ describe("createWorktreeIsolationExecutor", () => {
     });
 
     const first = await gate.executeAll([writeCall()]);
-    expect(first[0]!.kind).toBe("execution_failed");
-    expect(first[0]!.message!.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(
-      true
-    );
+    const firstMessage = failureMessage(first[0]);
+    expect(firstMessage.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(true);
     // the message points the model at the create-worktree ACI tool, NOT at an
     // auto-provision "end the turn and retry" protocol
-    expect(first[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
-    expect(first[0]!.message).not.toContain("end the turn");
-    expect(first[0]!.message!.length).toBeGreaterThan(20);
+    expect(firstMessage).toContain(CREATE_WORKTREE_TOOL_HINT);
+    expect(firstMessage).not.toContain("end the turn");
+    expect(firstMessage.length).toBeGreaterThan(20);
     // the gate NEVER provisions on the blocked path: no provision() call means
     // no `git worktree add` anywhere on the execution path; inner never
     // reached → main repo zero-write
@@ -966,8 +980,7 @@ describe("createWorktreeIsolationExecutor", () => {
 
     // subsequent mutates keep blocking with zero side effects (still fail-closed)
     const second = await gate.executeAll([writeCall("c2")]);
-    expect(second[0]!.kind).toBe("execution_failed");
-    expect(second[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
+    expect(failureMessage(second[0])).toContain(CREATE_WORKTREE_TOOL_HINT);
     expect(provisioned).toBe(0);
     expect(calls).toHaveLength(0);
   });
@@ -1011,7 +1024,7 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(seen[0]!.input).toEqual({ path: "hello.txt", content: "hi" });
     // the notified text is exactly the model-visible receipt text
     expect(seen[0]!.message).toBe(unboundMutateNotice());
-    expect(seen[0]!.message).toBe(out[0]!.message);
+    expect(seen[0]!.message).toBe(failureMessage(out[0]));
   });
 
   it("T3 forensic seam — spawn_subagent toolName reaches the host unmodified under the injected classifier", async () => {
@@ -1085,8 +1098,7 @@ describe("createWorktreeIsolationExecutor", () => {
       onUnboundBlockedCall: notify,
     });
     const reboundOut = await rebound.executeAll([writeCall()]);
-    expect(reboundOut[0]!.kind).toBe("execution_failed");
-    expect(reboundOut[0]!.message).toContain("/other-wt");
+    expect(failureMessage(reboundOut[0])).toContain("/other-wt");
     expect(fired).toBe(0);
 
     const failed = createWorktreeIsolationExecutor({
@@ -1159,8 +1171,7 @@ describe("createWorktreeIsolationExecutor", () => {
     // notice, zero provisioning, inner never reached for them
     const before = calls.length;
     const blocked = await gate.executeAll([writeCall("m1")]);
-    expect(blocked[0]!.kind).toBe("execution_failed");
-    expect(blocked[0]!.message).toBe(unboundMutateNotice());
+    expect(failureMessage(blocked[0])).toBe(unboundMutateNotice());
     expect(provisioned).toBe(0);
     expect(calls).toHaveLength(before); // the write_file call never reached inner
   });
@@ -1245,8 +1256,7 @@ describe("createWorktreeIsolationExecutor", () => {
       inner,
     });
     const out = await gate.executeAll([writeCall()]);
-    expect(out[0]!.kind).toBe("execution_failed");
-    expect(out[0]!.message).toContain("/other-wt");
+    expect(failureMessage(out[0])).toContain("/other-wt");
     expect(calls).toHaveLength(0);
   });
 
@@ -1259,7 +1269,9 @@ describe("createWorktreeIsolationExecutor", () => {
       liveTaskRoot: createLiveTaskRoot("/repo/.iknow/worktrees/conv-1"),
       provision: async () => {
         provisioned += 1;
-        await new Promise<void>((r) => (resolveProvision = r));
+        await new Promise<void>((r) => {
+          resolveProvision = () => r();
+        });
         return "/wt";
       },
       inner,
@@ -1274,8 +1286,7 @@ describe("createWorktreeIsolationExecutor", () => {
     expect(provisioned).toBe(1); // one adjudication, one tree
     expect(calls).toHaveLength(0);
     for (const batch of [r1, r2]) {
-      expect(batch[0]!.kind).toBe("execution_failed");
-      expect(batch[0]!.message).toContain("/wt"); // both bound to the same tree
+      expect(failureMessage(batch[0])).toContain("/wt"); // both bound to the same tree
     }
   });
 
@@ -1297,8 +1308,8 @@ describe("createWorktreeIsolationExecutor", () => {
       gate.executeAll([writeCall("b")], undefined, undefined, "conv-2"),
     ]);
     expect(provisionedFor.sort()).toEqual(["conv-1", "conv-2"]);
-    expect(r1[0]!.message).toContain("/wt-conv-1");
-    expect(r2[0]!.message).toContain("/wt-conv-2");
+    expect(failureMessage(r1[0])).toContain("/wt-conv-1");
+    expect(failureMessage(r2[0])).toContain("/wt-conv-2");
     expect(calls).toHaveLength(0);
   });
 
@@ -1321,10 +1332,10 @@ describe("createWorktreeIsolationExecutor", () => {
     });
 
     const out = await gate.executeAll([writeCall()]);
-    expect(out[0]!.kind).toBe("execution_failed");
-    expect(out[0]!.message).toContain("kind=not_a_git_repo");
-    expect(out[0]!.message).toContain("not a git repository");
-    expect(out[0]!.message!.length).toBeGreaterThan(20);
+    const outMessage = failureMessage(out[0]);
+    expect(outMessage).toContain("kind=not_a_git_repo");
+    expect(outMessage).toContain("not a git repository");
+    expect(outMessage.length).toBeGreaterThan(20);
     expect(calls).toHaveLength(0); // zero main-repo write on failure
     expect(observed).toHaveLength(1);
     expect(observed[0]!.kind).toBe("not_a_git_repo");
@@ -1347,8 +1358,9 @@ describe("createWorktreeIsolationExecutor", () => {
       inner,
     });
     const out = await gate.executeAll([writeCall()]);
-    expect(out[0]!.message).toContain("kind=rebind_failed");
-    expect(out[0]!.message).toContain("boom");
+    const outMessage = failureMessage(out[0]);
+    expect(outMessage).toContain("kind=rebind_failed");
+    expect(outMessage).toContain("boom");
   });
 
   it("forwards executor args (signal/timeout/conversationId/turnId/onStream/onSettled) to inner on passthrough", async () => {
@@ -1367,7 +1379,9 @@ describe("createWorktreeIsolationExecutor", () => {
       controller.signal,
       1234,
       "conv-7",
-      (r, i) => settled.push([r, i]),
+      (r, i) => {
+        settled.push([r, i]);
+      },
       "turn-9",
       () => {}
     );
@@ -1439,8 +1453,7 @@ describe("createWorktreeIsolationExecutor — live switch holder", () => {
     holder.set(true); // the /config panel flip
 
     const after = await gate.executeAll([writeCall("c1")]);
-    expect(after[0]!.kind).toBe("execution_failed");
-    expect(after[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
+    expect(failureMessage(after[0])).toContain(CREATE_WORKTREE_TOOL_HINT);
     // never auto-provision (ADR-0037 preserved): no provision(), no write
     expect(provisioned).toBe(0);
     expect(calls).toHaveLength(1);

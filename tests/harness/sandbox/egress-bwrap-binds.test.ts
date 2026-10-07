@@ -84,6 +84,8 @@ describe("createBwrapFence — 凭据 bind 段落位（invariant 9 / SC7 后半�
       sandboxLocalPort: 3128,
       env: { HTTP_PROXY: "http://127.0.0.1:3128" },
       binds: binds(),
+      innerBridgeScript: "",
+      relayAssetsDir: "",
     });
     const masked = findRoBind(argv, FAKE_FILE, REAL_HOSTS);
     const store = findRoBind(argv, STORE_DIR, STORE_DIR);
@@ -122,11 +124,15 @@ describe("createBwrapFence — 凭据 bind 段落位（invariant 9 / SC7 后半�
       sandboxLocalPort: 3128,
       env: {},
       binds: binds(),
+      innerBridgeScript: "",
+      relayAssetsDir: "",
     });
     const without = fenceArgv({
       unixSocketPath: SOCKET,
       sandboxLocalPort: 3128,
       env: {},
+      innerBridgeScript: "",
+      relayAssetsDir: "",
     });
     assert.ok(without.includes("--bind"));
     assert.equal(without.includes(FAKE_FILE), false);

@@ -42,7 +42,8 @@ import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 async function untilFrame(
   setup: TestRendererSetup,
   pred: (frame: string) => boolean,
-  ms = 8000
+  ms = 8000,
+  label = ""
 ): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < ms) {
@@ -51,7 +52,9 @@ async function untilFrame(
     const frame = setup.captureCharFrame();
     if (pred(frame)) return frame;
   }
-  throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
+  throw new Error(
+    `untilFrame timeout (${label}):\n${setup.captureCharFrame()}`
+  );
 }
 
 interface FakeBridgeOptions {
@@ -132,7 +135,11 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     },
     listSessions: async () => [],
     loadSessionFile: async () => file,
-    compactSession: async () => ({ compacted: false }),
+    compactSession: async () => ({
+      compacted: false,
+      // stub never compacts: the no-compaction arm of CompactReason.
+      reason: "below_token_threshold" as const,
+    }),
     continueSession: async () => {
       throw new Error("continueSession unused in interrupt-notice tests");
     },
@@ -144,9 +151,14 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
-    getCapacity: () => 15,
     listSubagents: () => [],
     abortSessionForegroundWork: () => [],
+    abortSubagentTask: () => false,
+    openSession: async () => {
+      throw new Error("unused: no session is opened here");
+    },
+    subscribeSubagentTerminal: () => () => undefined,
+    wakeFromSubagent: async () => undefined,
   };
   return bridge;
 }

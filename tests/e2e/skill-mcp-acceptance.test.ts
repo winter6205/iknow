@@ -47,6 +47,10 @@ function makeEnv(apiKey: string): IknowEnv {
     mcp: { connectTimeoutMs: 60_000 },
     // Subagent config arm (build-engine reads taskTimeoutMs).
     subagent: { taskTimeoutMs: undefined },
+    // ADR-0019 roots: unset here, so the resolver falls back to cwd (each case
+    // plants its fixture inside its own temp root).
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

@@ -29,19 +29,40 @@ import {
   SessionStore,
   CURRENT_SCHEMA_VERSION,
 } from "../../src/session-api/store/index.ts";
-import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
+import type {
+  SessionFileV1,
+  SessionListEntry,
+} from "../../src/session-api/store/index.ts";
 import { createTaskWorktreeProvisioner } from "../../src/session-api/worktree-rebind.ts";
 import {
   createTaskWorktree,
   mainCheckoutOf,
   taskWorktreeBranch,
   taskWorktreeOwnerOf,
-  WorktreeIsolationError,
 } from "../../src/harness/isolation/worktree-gate.ts";
 
 // -- helpers -----------------------------------------------------------------
 
 const roots: string[] = [];
+
+/**
+ * One full `SessionListEntry`. The occupancy check reads only
+ * `conversation_id` + `workspaceRoot`; the remaining fields are filled with
+ * neutral values so the fakes stay honest records rather than partial casts.
+ */
+function listEntry(
+  conversationId: string,
+  workspaceRoot: string | undefined
+): SessionListEntry {
+  return {
+    conversation_id: conversationId,
+    updatedAt: "1970-01-01T00:00:00.000Z",
+    lastFinalText: "",
+    title: conversationId,
+    bindingStatus: "unbound",
+    ...(workspaceRoot === undefined ? {} : { workspaceRoot }),
+  };
+}
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync("git", args, { cwd, encoding: "utf8" });
@@ -654,7 +675,9 @@ describe("createTaskWorktreeProvisioner", () => {
       conversationId: "conv-unpublished",
       root: repo,
     });
-    const defaultRemoval = await prov.provision({
+    // Provisioned only so the default-branch removal below has a registered
+    // tree — the provision call is the registration; its path is not read.
+    await prov.provision({
       conversationId: "conv-default",
       root: repo,
     });
@@ -1512,18 +1535,9 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
       listCalled += 1;
       // Mix in three shapes: missing field, empty string, valid unbound entry.
       return [
-        { conversation_id: "ghost-1", workspaceRoot: undefined } as {
-          conversation_id: string;
-          workspaceRoot?: string;
-        },
-        { conversation_id: "ghost-2", workspaceRoot: "" } as {
-          conversation_id: string;
-          workspaceRoot?: string;
-        },
-        {
-          conversation_id: "ghost-3",
-          workspaceRoot: "/some/other/path",
-        } as { conversation_id: string; workspaceRoot?: string },
+        listEntry("ghost-1", undefined),
+        listEntry("ghost-2", ""),
+        listEntry("ghost-3", "/some/other/path"),
       ];
     };
 
@@ -1554,9 +1568,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     const ownerProv = createTaskWorktreeProvisioner({});
     await ownerProv.provision({ conversationId: "conv-a", root: repo });
 
-    const listSessions = async (): Promise<
-      ReadonlyArray<{ conversation_id: string; workspaceRoot?: string }>
-    > => {
+    const listSessions = async (): Promise<ReadonlyArray<SessionListEntry>> => {
       throw {
         kind: "io_error",
         conversation_id: "",
@@ -1591,9 +1603,7 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
 
     // Pretend an external record wrote the workspaceRoot with a trailing
     // separator. path.resolve() normalizes both sides — must compare equal.
-    const listSessions = async () => [
-      { conversation_id: "conv-a", workspaceRoot: `${tree}/` },
-    ];
+    const listSessions = async () => [listEntry("conv-a", `${tree}/`)];
 
     const guestProv = createTaskWorktreeProvisioner({
       worktreeExclusive: true,
@@ -1715,17 +1725,11 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     // 50 unrelated entries + 1 real claim at the end. Verdict must hit the
     // right one without short-circuiting on the long list.
     const listSessions = async () => {
-      const entries: Array<{
-        conversation_id: string;
-        workspaceRoot?: string;
-      }> = [];
+      const entries: SessionListEntry[] = [];
       for (let i = 0; i < 50; i += 1) {
-        entries.push({
-          conversation_id: `noise-${i}`,
-          workspaceRoot: `/elsewhere/worktree-${i}`,
-        });
+        entries.push(listEntry(`noise-${i}`, `/elsewhere/worktree-${i}`));
       }
-      entries.push({ conversation_id: "conv-claimant", workspaceRoot: tree });
+      entries.push(listEntry("conv-claimant", tree));
       return entries;
     };
 

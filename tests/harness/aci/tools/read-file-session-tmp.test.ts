@@ -30,17 +30,6 @@ async function makeScratch(prefix: string): Promise<string> {
   return path;
 }
 
-async function doesNotExist(path: string): Promise<boolean> {
-  try {
-    await readFile(path);
-    return false;
-  } catch (error) {
-    const code = (error as NodeJS.ErrnoException).code;
-    if (code === "ENOENT" || code === "ENAMETOOLONG") return true;
-    throw error;
-  }
-}
-
 afterEach(async () => {
   await Promise.all(
     scratchPaths
@@ -96,7 +85,7 @@ describe("read_file — session tmp pad as first-class read root", () => {
     assert.equal(result, "     1\tparent only");
     // No aliasing: a bare name still anchors at the live root, never the pad.
     await assert.rejects(
-      () => workerTool.handler({ path: "private.txt" }),
+      async () => workerTool.handler({ path: "private.txt" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /file not found/.test(error.message)
@@ -116,7 +105,7 @@ describe("read_file — session tmp pad as first-class read root", () => {
     // ADR-0128: the literal /tmp path is decided on its own canonical form —
     // missing means typed not-found, never a silent redirect to the pad's ok.txt.
     await assert.rejects(
-      () => tool.handler({ path: guestPath }),
+      async () => tool.handler({ path: guestPath }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /file not found/.test(error.message) &&

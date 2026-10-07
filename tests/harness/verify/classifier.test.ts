@@ -10,8 +10,8 @@ import { describe, it, expect } from "vitest";
 import {
   parseClassifierResult,
   truncateClassifierOutput,
-  type ClassifierResult,
 } from "../../../src/harness/verify/classifier.ts";
+import type { ClassifierResult } from "../../../src/harness/verify/types.ts";
 
 const VALID_PASS: ClassifierResult = {
   kind: "pass",

@@ -69,6 +69,10 @@ describe("#196 T12 E2E: bootstrap 文件驱动隐式完成", () => {
     const firstSystem =
       (await assembleIdentityContext({
         cwd: fakeHome,
+        // ADR-0037: the "Project path" segment renders from
+        // projectIdentityRoot, not cwd — pin it to the same fake home so the
+        // assembled text stays identical to the pre-ADR-0037 behaviour.
+        projectIdentityRoot: fakeHome,
         userHome: fakeHome,
         bootstrapActive: true,
         memoryEnabled: false,
@@ -93,6 +97,10 @@ describe("#196 T12 E2E: bootstrap 文件驱动隐式完成", () => {
     const secondSystem =
       (await assembleIdentityContext({
         cwd: fakeHome,
+        // ADR-0037: the "Project path" segment renders from
+        // projectIdentityRoot, not cwd — pin it to the same fake home so the
+        // assembled text stays identical to the pre-ADR-0037 behaviour.
+        projectIdentityRoot: fakeHome,
         userHome: fakeHome,
         bootstrapActive: true,
         memoryEnabled: false,
@@ -116,6 +124,10 @@ describe("#196 T12 E2E: bootstrap 文件驱动隐式完成", () => {
     const askSystem =
       (await assembleIdentityContext({
         cwd: fakeHome,
+        // ADR-0037: the "Project path" segment renders from
+        // projectIdentityRoot, not cwd — pin it to the same fake home so the
+        // assembled text stays identical to the pre-ADR-0037 behaviour.
+        projectIdentityRoot: fakeHome,
         userHome: fakeHome,
         bootstrapActive: false,
         memoryEnabled: false,

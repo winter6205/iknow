@@ -147,7 +147,8 @@ describe("bash — permission gates", () => {
     // `echo rm -rf /` anymore. The target does not exist, so a wall that
     // stopped rejecting could still not destroy anything from this scratch dir.
     await assert.rejects(
-      tool.handler({ command: "rm -rf ./bash-dangerous-nonexistent" }),
+      async () =>
+        tool.handler({ command: "rm -rf ./bash-dangerous-nonexistent" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("bash: dangerous command rejected")

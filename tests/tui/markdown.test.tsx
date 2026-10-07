@@ -282,7 +282,6 @@ test("代码块 c4：无边框字符 ┌┐└┘", async () => {
 /** c4 has no title: the language tag never sits on a border line (c4 does not render lang on the frame). */
 test("代码块 c4：无语言标签出现在边框行", async () => {
   const setup = await renderMd("```ts\nconst x = 1;\n```");
-  const frame = setup.captureCharFrame();
   // Border line = single-line box `─` + title pattern (c4 has no border → no `─ ts` line is possible).
   const titleLine = frameLines(setup).find(
     (l) => l.includes("─") && l.includes("ts")

@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";

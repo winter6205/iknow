@@ -81,6 +81,7 @@ function installFenceSpy(): void {
       return {
         argv: ["bwrap", "--", "bash", "-c", "echo hi"],
         sealed: true as const,
+        exactFileMaskPaths: [],
       };
     });
   vi.mocked(
@@ -113,7 +114,7 @@ function hermeticOpts(
     sandboxRoot: "/tmp/sb-bash-mode",
     model: createStubModel({ responses: [] }),
     skillCatalog: createSkillCatalog([]),
-    system: () => undefined,
+    system: async () => undefined,
     trace: createNoopTraceService(),
     ...extra,
   };
@@ -125,7 +126,7 @@ describe("bash.ts: bashMode 双闸 (#562 T6)", () => {
   it("bashMode='readonly' + 'env' → 抛 ReadonlyViolationError", async () => {
     const tool = createBashTool("/tmp/sb", { bashMode: "readonly" });
     await assert.rejects(
-      () => tool.handler({ command: "env" }),
+      async () => tool.handler({ command: "env" }),
       (err: unknown) =>
         err instanceof ReadonlyViolationError && /'env'/.test(err.message)
     );
@@ -134,7 +135,7 @@ describe("bash.ts: bashMode 双闸 (#562 T6)", () => {
   it("bashMode='readonly' + 'rm file' → 抛 ReadonlyViolationError (deny-by-default)", async () => {
     const tool = createBashTool("/tmp/sb", { bashMode: "readonly" });
     await assert.rejects(
-      () => tool.handler({ command: "rm file" }),
+      async () => tool.handler({ command: "rm file" }),
       (err: unknown) =>
         err instanceof ReadonlyViolationError && /'rm'/.test(err.message)
     );
@@ -196,7 +197,7 @@ describe("registry.ts: createDefaultAciRegistry bashMode 透传 (#562 T6)", () =
     const bash = reg.inner.get("bash");
     assert.ok(bash, "bash tool 必须出现在 registry");
     await assert.rejects(
-      () => bash!.handler({ command: "env" }),
+      async () => bash!.handler({ command: "env" }),
       (err: unknown) => err instanceof ReadonlyViolationError
     );
   });
@@ -232,7 +233,7 @@ describe("worker.ts: createWorkerDeps bashMode from role (#562 T6)", () => {
     const bash = deps.registry.get("bash");
     assert.ok(bash, "registry 必须含 bash");
     await assert.rejects(
-      () => bash!.handler({ command: "env" }),
+      async () => bash!.handler({ command: "env" }),
       (err: unknown) =>
         err instanceof ReadonlyViolationError && /'env'/.test(err.message)
     );

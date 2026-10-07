@@ -52,6 +52,7 @@ function makeEntry(
     lastFinalText,
     title,
     runningBg,
+    bindingStatus: "unbound",
   };
 }
 

@@ -77,7 +77,7 @@ describe("rebound task roots can read the stable project identity root", () => {
       ),
       /identity guidance/
     );
-    await assert.rejects(() =>
+    await assert.rejects(async () =>
       write.handler({
         path: join(repo, "AGENTS.md"),
         content: "must stay read-only\n",
@@ -135,7 +135,7 @@ describe("rebound task roots can read the stable project identity root", () => {
     // Relative identity names fall back to the identity root only once the
     // live root is a task worktree: pre-flip the extras arm is closed, so
     // the name resolves against `repo` (where it does not exist).
-    await assert.rejects(() => read.handler({ path: "AGENTS.md" }));
+    await assert.rejects(async () => read.handler({ path: "AGENTS.md" }));
     const preGrep = String(
       await grep.handler({ pattern: "identity", path: "AGENTS.md" })
     );

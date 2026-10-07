@@ -667,14 +667,20 @@ describe("MCP resources integration — tool handlers wire format end-to-end", (
       },
     ]);
     expect(results).toHaveLength(1);
-    expect(results[0]!.kind).toBe("ok");
-    const blocks = results[0]!.payload as Array<{
-      type: string;
-      text?: string;
-    }>;
-    expect(blocks).toHaveLength(1);
-    expect(blocks[0]!.type).toBe("text");
-    const text = blocks[0]!.text ?? "";
+    const first = results[0]!;
+    expect(first.kind).toBe("ok");
+    // Discriminated-union narrowing: `expect(x).toBe("ok")` does not narrow,
+    // so pin the kind before reading `payload` (which exists only on the ok arm).
+    if (first.kind !== "ok") {
+      throw new Error(`expected kind=ok, got ${first.kind}`);
+    }
+    expect(first.payload).toHaveLength(1);
+    const block = first.payload[0]!;
+    expect(block.type).toBe("text");
+    if (block.type !== "text") {
+      throw new Error(`expected a text content block, got ${block.type}`);
+    }
+    const text = block.text;
     // Truncation cap: OUTPUT_HARD_CAP = 20000 (executor.ts SSOT)
     expect(text.length).toBeLessThanOrEqual(20_000);
     // Truncation marker: the diagnosable shape of contract X

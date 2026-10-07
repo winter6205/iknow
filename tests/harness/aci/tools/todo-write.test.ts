@@ -301,7 +301,8 @@ describe("createTodoWriteTool — mode=update", () => {
     const tool = await seed();
     const before = await readFile(join(todoDir, "todos.md"), "utf8");
     await assert.rejects(
-      tool.handler({ mode: "update", id: "t99", status: "completed" }),
+      async () =>
+        tool.handler({ mode: "update", id: "t99", status: "completed" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /\[todo_write\] unknown id: t99/);
@@ -316,7 +317,7 @@ describe("createTodoWriteTool — mode=update", () => {
     const tool = await seed();
     const before = await readFile(join(todoDir, "todos.md"), "utf8");
     await assert.rejects(
-      tool.handler({ mode: "update", id: "t42", delete: true }),
+      async () => tool.handler({ mode: "update", id: "t42", delete: true }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /unknown id: t42/);
@@ -329,7 +330,7 @@ describe("createTodoWriteTool — mode=update", () => {
   it("update with no change field → typed error", async () => {
     const tool = await seed();
     await assert.rejects(
-      tool.handler({ mode: "update", id: "t1" }),
+      async () => tool.handler({ mode: "update", id: "t1" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -344,7 +345,7 @@ describe("createTodoWriteTool — mode=update", () => {
   it("update without id → typed error", async () => {
     const tool = await seed();
     await assert.rejects(
-      tool.handler({ mode: "update", status: "completed" }),
+      async () => tool.handler({ mode: "update", status: "completed" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /id must be a string/);
@@ -356,12 +357,13 @@ describe("createTodoWriteTool — mode=update", () => {
   it("delete:true combined with another change field → typed error", async () => {
     const tool = await seed();
     await assert.rejects(
-      tool.handler({
-        mode: "update",
-        id: "t1",
-        status: "completed",
-        delete: true,
-      }),
+      async () =>
+        tool.handler({
+          mode: "update",
+          id: "t1",
+          status: "completed",
+          delete: true,
+        }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /delete:true on its own/);
@@ -373,7 +375,8 @@ describe("createTodoWriteTool — mode=update", () => {
   it("invalid status value → typed error naming the enum", async () => {
     const tool = await seed();
     await assert.rejects(
-      tool.handler({ mode: "update", id: "t1", status: "done" as never }),
+      async () =>
+        tool.handler({ mode: "update", id: "t1", status: "done" as never }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -389,7 +392,7 @@ describe("createTodoWriteTool — mode=update", () => {
     const tool = await seed();
     const before = await readFile(join(todoDir, "todos.md"), "utf8");
     await assert.rejects(
-      tool.handler({ mode: "update", id: "t1", delete: false }),
+      async () => tool.handler({ mode: "update", id: "t1", delete: false }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         return true;
@@ -576,9 +579,10 @@ describe("createTodoWriteTool — mode=replace", () => {
   it("replace 带 `item` 字段 → typed error(per-mode 字段互斥)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "replace", items: ["x"], item: "y" } as never, {
-        conversationId: "conv-replace-mixed",
-      }),
+      async () =>
+        tool.handler({ mode: "replace", items: ["x"], item: "y" } as never, {
+          conversationId: "conv-replace-mixed",
+        }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -593,10 +597,11 @@ describe("createTodoWriteTool — mode=replace", () => {
   it("replace 不带 items → typed error", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler(
-        { mode: "replace" },
-        { conversationId: "conv-replace-no-items" }
-      ),
+      async () =>
+        tool.handler(
+          { mode: "replace" },
+          { conversationId: "conv-replace-no-items" }
+        ),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -611,10 +616,11 @@ describe("createTodoWriteTool — mode=replace", () => {
   it("replace items 含空字符串 → typed error(per-item 非空)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler(
-        { mode: "replace", items: ["ok", ""] },
-        { conversationId: "conv-replace-empty-item" }
-      ),
+      async () =>
+        tool.handler(
+          { mode: "replace", items: ["ok", ""] },
+          { conversationId: "conv-replace-empty-item" }
+        ),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -643,7 +649,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     const tool = createTodoWriteTool({ todoDir });
     const big = "z".repeat(MAX_ITEM_CODEPOINTS + 1);
     await assert.rejects(
-      tool.handler({ mode: "replace", items: ["ok", big] }, ctx),
+      async () => tool.handler({ mode: "replace", items: ["ok", big] }, ctx),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -684,7 +690,7 @@ describe("createTodoWriteTool — mode=replace", () => {
 
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "replace", items }, ctx),
+      async () => tool.handler({ mode: "replace", items }, ctx),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /file would exceed 65536 bytes/);
@@ -702,9 +708,10 @@ describe("createTodoWriteTool — mode=replace", () => {
   it("add 同时带 item 与 items → typed error(字段二选一)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "add", item: "x", items: ["y"] } as never, {
-        conversationId: "conv-add-both",
-      }),
+      async () =>
+        tool.handler({ mode: "add", item: "x", items: ["y"] } as never, {
+          conversationId: "conv-add-both",
+        }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -719,9 +726,10 @@ describe("createTodoWriteTool — mode=replace", () => {
   it("update 带 `items` 字段 → typed error(per-mode 字段互斥)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "update", items: ["x"], id: "t1" } as never, {
-        conversationId: "conv-update-items",
-      }),
+      async () =>
+        tool.handler({ mode: "update", items: ["x"], id: "t1" } as never, {
+          conversationId: "conv-update-items",
+        }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -736,9 +744,10 @@ describe("createTodoWriteTool — mode=replace", () => {
   it("read 带 `item` 字段 → typed error(per-mode 字段互斥)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "read", item: "x" } as never, {
-        conversationId: "conv-read-item",
-      }),
+      async () =>
+        tool.handler({ mode: "read", item: "x" } as never, {
+          conversationId: "conv-read-item",
+        }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /mode read does not accept item/);
@@ -812,7 +821,8 @@ describe("createTodoWriteTool — mode=replace", () => {
         randomBytes: deterministicRandom,
       });
       await assert.rejects(
-        tool.handler({ mode: "replace", items: ["new-1", "new-2"] }, ctx),
+        async () =>
+          tool.handler({ mode: "replace", items: ["new-1", "new-2"] }, ctx),
         (err: unknown) => {
           assert.ok(err instanceof ToolExecutionError);
           assert.match((err as Error).message, /atomic write failed/);
@@ -876,7 +886,7 @@ describe("createTodoWriteTool — mode=replace", () => {
     try {
       const tool = createTodoWriteTool({ todoDir });
       await assert.rejects(
-        tool.handler({ mode: "replace", items: ["new"] }, ctx),
+        async () => tool.handler({ mode: "replace", items: ["new"] }, ctx),
         (err: unknown) => {
           assert.ok(err instanceof ToolExecutionError);
           assert.match(
@@ -925,7 +935,7 @@ describe("createTodoWriteTool — mode=replace", () => {
 
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "replace", items: ["new"] }, ctx),
+      async () => tool.handler({ mode: "replace", items: ["new"] }, ctx),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /read failed/);
@@ -952,7 +962,7 @@ describe("createTodoWriteTool — typed-error catch", () => {
   it("unknown mode → ToolExecutionError naming the new enum", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "purge" as never }),
+      async () => tool.handler({ mode: "purge" as never }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -967,7 +977,7 @@ describe("createTodoWriteTool — typed-error catch", () => {
   it("removed mode `list` → typed error (the enum is the new four)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "list" as never }),
+      async () => tool.handler({ mode: "list" as never }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /mode must be one of/);
@@ -979,7 +989,7 @@ describe("createTodoWriteTool — typed-error catch", () => {
   it("removed mode `check` → typed error (check folded into update)", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "check", item: "x" } as never),
+      async () => tool.handler({ mode: "check", item: "x" } as never),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /mode must be one of/);
@@ -990,20 +1000,23 @@ describe("createTodoWriteTool — typed-error catch", () => {
 
   it("add without item → ToolExecutionError (SC11: empty add typed)", async () => {
     const tool = createTodoWriteTool({ todoDir });
-    await assert.rejects(tool.handler({ mode: "add" }), (err: unknown) => {
-      assert.ok(err instanceof ToolExecutionError);
-      assert.match(
-        (err as Error).message,
-        /item must be a non-empty string ≤ 500 codepoints/
-      );
-      return true;
-    });
+    await assert.rejects(
+      async () => tool.handler({ mode: "add" }),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match(
+          (err as Error).message,
+          /item must be a non-empty string ≤ 500 codepoints/
+        );
+        return true;
+      }
+    );
   });
 
   it("add with empty item → ToolExecutionError", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "add", item: "" }),
+      async () => tool.handler({ mode: "add", item: "" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -1018,7 +1031,7 @@ describe("createTodoWriteTool — typed-error catch", () => {
   it("unknown field in input → ToolExecutionError", async () => {
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "read", evil: "x" as never }),
+      async () => tool.handler({ mode: "read", evil: "x" as never }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /unknown field: evil/);
@@ -1029,11 +1042,14 @@ describe("createTodoWriteTool — typed-error catch", () => {
 
   it("input is not an object → ToolExecutionError", async () => {
     const tool = createTodoWriteTool({ todoDir });
-    await assert.rejects(tool.handler("nope" as never), (err: unknown) => {
-      assert.ok(err instanceof ToolExecutionError);
-      assert.match((err as Error).message, /input must be an object/);
-      return true;
-    });
+    await assert.rejects(
+      async () => tool.handler("nope" as never),
+      (err: unknown) => {
+        assert.ok(err instanceof ToolExecutionError);
+        assert.match((err as Error).message, /input must be an object/);
+        return true;
+      }
+    );
   });
 });
 
@@ -1052,7 +1068,7 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
     const tool = createTodoWriteTool({ todoDir });
     const big = "x".repeat(MAX_ITEM_CODEPOINTS + 1);
     await assert.rejects(
-      tool.handler({ mode: "add", item: big }),
+      async () => tool.handler({ mode: "add", item: big }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -1077,7 +1093,8 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
     // Any element over the limit → the whole add fails typed, no partial write.
     const before = await readFile(join(todoDir, "todos.md"), "utf8");
     await assert.rejects(
-      tool.handler({ mode: "add", items: ["fine", "中".repeat(501)] }),
+      async () =>
+        tool.handler({ mode: "add", items: ["fine", "中".repeat(501)] }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match(
@@ -1111,7 +1128,7 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
     // passes parseInput. The file-size limit triggers in the handler.
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "add", item: item400 }),
+      async () => tool.handler({ mode: "add", item: item400 }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /file would exceed 65536 bytes/);
@@ -1174,7 +1191,7 @@ describe("createTodoWriteTool — #440 T3 governance + atomic write", () => {
     try {
       const tool = createTodoWriteTool({ todoDir });
       await assert.rejects(
-        tool.handler({ mode: "add", item: "should fail" }),
+        async () => tool.handler({ mode: "add", item: "should fail" }),
         (err: unknown) => {
           assert.ok(err instanceof ToolExecutionError);
           // Failure surface: mkdir fails (EACCES) or rename fails.
@@ -1221,7 +1238,7 @@ describe("SC11 — empty / overflow typed failure leaves the ledger byte-identic
     const before = await seed();
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "add", items: [] }),
+      async () => tool.handler({ mode: "add", items: [] }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /at least one subject/);
@@ -1235,7 +1252,7 @@ describe("SC11 — empty / overflow typed failure leaves the ledger byte-identic
     const before = await seed();
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "add", item: "" }),
+      async () => tool.handler({ mode: "add", item: "" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /non-empty string/);
@@ -1249,7 +1266,7 @@ describe("SC11 — empty / overflow typed failure leaves the ledger byte-identic
     const before = await seed();
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "add", items: ["ok", ""] }),
+      async () => tool.handler({ mode: "add", items: ["ok", ""] }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         return true;
@@ -1262,7 +1279,7 @@ describe("SC11 — empty / overflow typed failure leaves the ledger byte-identic
     const before = await seed();
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "update", id: "t1", subject: "" }),
+      async () => tool.handler({ mode: "update", id: "t1", subject: "" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /non-empty string/);
@@ -1276,7 +1293,8 @@ describe("SC11 — empty / overflow typed failure leaves the ledger byte-identic
     const before = await seed();
     const tool = createTodoWriteTool({ todoDir });
     await assert.rejects(
-      tool.handler({ mode: "add", items: ["ok", "中".repeat(501)] }),
+      async () =>
+        tool.handler({ mode: "add", items: ["ok", "中".repeat(501)] }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /≤ 500 codepoints/);
@@ -1297,7 +1315,7 @@ describe("SC11 — empty / overflow typed failure leaves the ledger byte-identic
     const before = await readFile(file, "utf8");
 
     await assert.rejects(
-      tool.handler({ mode: "add", items: [big, big] }),
+      async () => tool.handler({ mode: "add", items: [big, big] }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /file would exceed 65536 bytes/);
@@ -1317,11 +1335,12 @@ describe("SC11 — empty / overflow typed failure leaves the ledger byte-identic
     const before = await readFile(file, "utf8");
 
     await assert.rejects(
-      tool.handler({
-        mode: "update",
-        id: "t1",
-        subject: "中".repeat(MAX_ITEM_CODEPOINTS),
-      }),
+      async () =>
+        tool.handler({
+          mode: "update",
+          id: "t1",
+          subject: "中".repeat(MAX_ITEM_CODEPOINTS),
+        }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError);
         assert.match((err as Error).message, /file would exceed 65536 bytes/);
@@ -1469,7 +1488,7 @@ describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
       actor: { conversationId: "conv-parent", canAdd: false },
     });
     await assert.rejects(
-      tool.handler({ mode: "add", item: "worker must not add" }),
+      async () => tool.handler({ mode: "add", item: "worker must not add" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolExecutionError, "typed error 形态");
         const message = (err as Error).message;
@@ -1488,7 +1507,7 @@ describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
       todoDir,
       actor: { conversationId: "conv-parent", canAdd: false },
     });
-    await assert.rejects(tool.handler({ mode: "add", item: "x" }));
+    await assert.rejects(async () => tool.handler({ mode: "add", item: "x" }));
     await assert.rejects(
       readFile(
         resolveConversationTodoPath({
@@ -1546,12 +1565,12 @@ describe("createTodoWriteTool — ADR-0085 SC9 actor capability", () => {
       todoDir,
       actor: { conversationId: "conv-from-deps", canAdd: false },
     });
-    await tool
-      .handler(
+    await Promise.resolve(
+      tool.handler(
         { mode: "update", id: "t1", status: "completed" },
         { conversationId: "conv-from-ctx" }
       )
-      .catch(() => undefined);
+    ).catch(() => undefined);
     // The ctx path has no file → unknown id; the deps file must be absent.
     await assert.rejects(
       readFile(
@@ -1925,7 +1944,7 @@ describe("todo_write — executor classification of validation vs execution fail
   it("parseInput rejections are ToolInputValidationError and remain ToolExecutionError instances", async () => {
     const { tool } = executorFor();
     await assert.rejects(
-      tool.handler({ mode: "read", item: "x" }),
+      async () => tool.handler({ mode: "read", item: "x" }),
       (err: unknown) => {
         assert.ok(err instanceof ToolInputValidationError);
         assert.ok(err instanceof ToolExecutionError);

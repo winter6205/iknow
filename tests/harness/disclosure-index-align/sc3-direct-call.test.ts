@@ -147,9 +147,11 @@ describe("T3 SC3 — 未 discover 的 mcp__ 工具直呼:hydrate + 执行", () =
     const [result] = await realExecutor.executeAll([call]);
     assert.equal(result.kind, "ok");
     if (result.kind === "ok") {
-      const text = result.payload[0];
-      expect(text?.type).toBe("text");
-      expect(text?.text).toBe("ok:hello");
+      const block = result.payload[0];
+      expect(block?.type).toBe("text");
+      if (block?.type === "text") {
+        expect(block.text).toBe("ok:hello");
+      }
     }
 
     // Side effect: discover was triggered -> registry.isDiscovered(name) === true.

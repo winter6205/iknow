@@ -8,7 +8,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   initializeIknowWorkspace,
-  readIknowState,
   writeIknowState,
   BOOTSTRAP_TEMPLATE,
 } from "../../../src/harness/identity/index.ts";

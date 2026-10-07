@@ -30,27 +30,32 @@ export interface StderrCapture {
   restore(): string[];
 }
 
-export function captureStderr(
-  opts: CaptureStderrOptions = {}
-): StderrCapture {
+export function captureStderr(opts: CaptureStderrOptions = {}): StderrCapture {
   const lines: string[] = [];
   const original = process.stderr.write.bind(process.stderr);
-  (process.stderr as unknown as {
-    write: (chunk: string | Uint8Array, ...rest: unknown[]) => boolean;
-  }).write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+  // Node's `write` is an overloaded stream method (buffer+cb / str+encoding+cb),
+  // so assign straight onto `process.stderr.write` and keep Node's own
+  // signature instead of erasing it to a narrower local type. The trailing args
+  // (encoding / callback) are forwarded generically, and a binary chunk is
+  // decoded through Buffer — a bare `Uint8Array.toString()` takes no encoding.
+  process.stderr.write = (
+    chunk: string | Uint8Array,
+    ...rest: unknown[]
+  ): boolean => {
     lines.push(
-      typeof chunk === "string" ? chunk : chunk.toString("utf8")
+      typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8")
     );
     if (opts.passthrough) {
-      return original(chunk as never, ...(rest as never[]));
+      // The bound original keeps Node's overloads; the seam forwards whatever
+      // the caller passed, so erase them only at this call.
+      return (original as (...args: unknown[]) => boolean)(chunk, ...rest);
     }
     return true;
-  }) as typeof original;
+  };
   return {
     lines,
     restore: (): string[] => {
-      (process.stderr as unknown as { write: typeof original }).write =
-        original;
+      process.stderr.write = original;
       return lines;
     },
   };

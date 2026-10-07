@@ -283,7 +283,7 @@ describe("bash.readonly 双闸 (real spawn)", () => {
         cwdReadonly: true,
       });
       await assert.rejects(
-        () => tool.handler({ command: "echo hi > out.txt" }),
+        async () => tool.handler({ command: "echo hi > out.txt" }),
         (error: unknown) => error instanceof ReadonlyViolationError
       );
       assert.equal(existsSync(join(cwd, "out.txt")), false);

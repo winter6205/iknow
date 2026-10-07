@@ -70,7 +70,7 @@ vi.mock("vscode-jsonrpc/node", async (importOriginal) => {
   return {
     ...actual,
     createMessageConnection: (...args: unknown[]) =>
-      mockCreateConnection(...args),
+      mockCreateConnection(...(args as [])),
   };
 });
 

@@ -28,7 +28,6 @@ import {
   createTuiBridge,
 } from "../../src/tui/hub-bridge.js";
 import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
-import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import type { PermissionModeContext } from "../../src/harness/permission/modes.js";

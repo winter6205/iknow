@@ -173,11 +173,12 @@ describe("listRulesFiles", () => {
     const original = process.stderr.write.bind(process.stderr);
     const captured: string[] = [];
     (process.stderr as unknown as { write: typeof original }).write = ((
-      chunk: string | Uint8Array,
-      ...rest: unknown[]
+      chunk: string | Uint8Array
     ) => {
-      captured.push(typeof chunk === "string" ? chunk : chunk.toString("utf8"));
-      return original(chunk as never, ...(rest as never[]));
+      captured.push(
+        typeof chunk === "string" ? chunk : Buffer.from(chunk).toString("utf8")
+      );
+      return (original as unknown as (...args: unknown[]) => boolean)(chunk);
     }) as typeof original;
     try {
       const out = await listRulesFiles(cwd, "project");

@@ -48,6 +48,7 @@ function baseCtx(cwd: string): AssemblyContext {
     projectIdentityRoot: cwd,
     userHome: workDir,
     bootstrapActive: false,
+    memoryEnabled: false,
   };
 }
 
@@ -75,6 +76,7 @@ describe("identity assembly — project path additive segment", () => {
       projectIdentityRoot: fakePath,
       userHome: workDir,
       surface: "ask",
+      memoryEnabled: false,
     });
     const out = await resolver();
     expect(out).toBeDefined();
@@ -88,6 +90,7 @@ describe("identity assembly — project path additive segment", () => {
       projectIdentityRoot: process.cwd(),
       userHome: workDir,
       surface: "ask",
+      memoryEnabled: false,
     });
     const out = await resolver();
     expect(out).toContain("## Project path");
@@ -105,12 +108,14 @@ describe("identity assembly — project path additive segment", () => {
       projectIdentityRoot: stableRoot,
       userHome: workDir,
       bootstrapActive: false,
+      memoryEnabled: false,
     });
     const afterRebind = await assembleIdentityContext({
       cwd: "/active/worktree-after",
       projectIdentityRoot: stableRoot,
       userHome: workDir,
       bootstrapActive: false,
+      memoryEnabled: false,
     });
 
     expect(beforeRebind).toBeDefined();

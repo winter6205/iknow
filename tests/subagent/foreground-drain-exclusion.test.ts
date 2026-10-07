@@ -25,10 +25,8 @@ import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
 
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
-import type {
-  SubAgentManager,
-  SubAgentTerminalNotice,
-} from "../../src/harness/subagent/manager.ts";
+import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
+import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.ts";
 import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import {
   drainPendingSubagents,
@@ -36,22 +34,36 @@ import {
   SUBAGENT_DRAIN_PREFIX,
 } from "../../src/harness/subagent/host-drain.ts";
 
+/**
+ * Fake child paired with the writable end of its stdout. `ChildProcess.stdout`
+ * is typed `Readable | null`, so the envelope writer is fed through the
+ * `PassThrough` directly instead of reaching through the process handle.
+ */
+interface FakeChild {
+  readonly child: ChildProcess;
+  readonly stdout: PassThrough;
+}
+
 /** Minimal fake child: stdout can write one envelope line; stdin/stderr present (same as mailbox.test.ts). */
-function makeFakeChild(): ChildProcess {
-  return Object.assign(new EventEmitter(), {
-    stdin: new PassThrough(),
-    stdout: new PassThrough(),
-    stderr: new PassThrough(),
-    exitCode: null as number | null,
-    signalCode: null as NodeJS.Signals | null,
-    kill: vi.fn(() => true),
-  }) as unknown as ChildProcess;
+function makeFakeChild(): FakeChild {
+  const stdout = new PassThrough();
+  return {
+    stdout,
+    child: Object.assign(new EventEmitter(), {
+      stdin: new PassThrough(),
+      stdout,
+      stderr: new PassThrough(),
+      exitCode: null as number | null,
+      signalCode: null as NodeJS.Signals | null,
+      kill: vi.fn(() => true),
+    }) as unknown as ChildProcess,
+  };
 }
 
 interface Rig {
   readonly manager: SubAgentManager;
   readonly tool: ReturnType<typeof createSpawnSubAgentTool>;
-  readonly children: ChildProcess[];
+  readonly children: FakeChild[];
   /**
    * The subscriber registers **afterwards** (`subscribeNow()`) — mailbox
    * replays already-published notices to new subscribers (late-subscriber
@@ -66,12 +78,12 @@ interface Rig {
 
 /** Real manager + real handler; the spawn factory yields fake children in call order. */
 function makeRig(): Rig {
-  const children: ChildProcess[] = [];
+  const children: FakeChild[] = [];
   const manager = createSubAgentManager({
     spawn: () => {
-      const child = makeFakeChild();
-      children.push(child);
-      return child;
+      const fake = makeFakeChild();
+      children.push(fake);
+      return fake.child;
     },
   });
   const notices: SubAgentTerminalNotice[] = [];
@@ -87,8 +99,8 @@ function makeRig(): Rig {
 }
 
 /** Write back one legal terminal envelope (manager stdout newline-JSON protocol). */
-function emitEnvelope(child: ChildProcess, summary: string): void {
-  child.stdout!.write(
+function emitEnvelope(stdout: PassThrough, summary: string): void {
+  stdout.write(
     `${JSON.stringify({ status: "ok", summary, result: `${summary} result` })}\n`
   );
 }
@@ -104,7 +116,7 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
     );
     // The handler has spawned and is parked on waitFor (fake child never exits; only the stdout envelope ends it).
     await vi.waitFor(() => expect(rig.children).toHaveLength(1));
-    emitEnvelope(rig.children[0]!, "fg done");
+    emitEnvelope(rig.children[0]!.stdout, "fg done");
 
     const result = (await pending) as { status: string; summary: string };
     // Delivery surface 1: this hop's tool_result receives the envelope.
@@ -138,7 +150,7 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
     const { task_id: bgTaskId } = JSON.parse(raw as string) as {
       task_id: string;
     };
-    emitEnvelope(rig.children[0]!, "bg done");
+    emitEnvelope(rig.children[0]!.stdout, "bg done");
 
     await vi.waitFor(() =>
       expect(rig.manager.drainCompleted(CONVERSATION)).toHaveLength(1)
@@ -177,13 +189,13 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
       { conversationId: CONVERSATION }
     );
     await vi.waitFor(() => expect(rig.children).toHaveLength(1));
-    emitEnvelope(rig.children[0]!, "fg done");
+    emitEnvelope(rig.children[0]!.stdout, "fg done");
     await pending;
     await rig.tool.handler(
       { title: "sample title", task: "bg", wait: false },
       { conversationId: CONVERSATION }
     );
-    emitEnvelope(rig.children[1]!, "bg done");
+    emitEnvelope(rig.children[1]!.stdout, "bg done");
 
     const infos = rig.manager.listSubagents(CONVERSATION);
     // def.task is the only projection anchor (taskPreview doesn't truncate short tasks; see truncateTaskPreview).

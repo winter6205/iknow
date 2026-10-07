@@ -17,6 +17,7 @@
  * Driving style: real spawn (node runtime = process.execPath) plus node:net fake
  * proxies, all loopback — never leaves the machine.
  */
+import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createServer, type Socket } from "node:net";
 import { fileURLToPath } from "node:url";
@@ -86,6 +87,10 @@ function runChild(port: number, holdStdin: boolean): Promise<ChildResult> {
     );
     let stdout = "";
     let stderr = "";
+    // stdio is piped above, so both streams are present; assert it rather
+    // than silence the nullable type.
+    assert.ok(child.stdout !== null, "child.stdout is piped");
+    assert.ok(child.stderr !== null, "child.stderr is piped");
     child.stdout.setEncoding("latin1");
     child.stderr.setEncoding("latin1");
     child.stdout.on("data", (c: string) => (stdout += c));

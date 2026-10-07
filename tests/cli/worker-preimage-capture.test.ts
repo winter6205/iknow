@@ -36,6 +36,7 @@ import {
   codeSnapshotSha,
 } from "../../src/session-api/store/code-snapshot-store.ts";
 import type { PreimageCaptureInput } from "../../src/harness/aci/preimage-port.ts";
+import type { PreimageRef } from "../../src/session-api/store/jsonl.ts";
 
 let root: string; // worker sandbox root
 let baseDir: string; // session pool base
@@ -75,11 +76,18 @@ const exists = (p: string) =>
     () => false
   );
 
-async function readEventRecords(path: string) {
+/**
+ * Reads the transcript's message records. `codePreimage` is typed as
+ * `PreimageRef | undefined` (the stamp shape the store writes) so the
+ * assertions can read its fields without casting at each site.
+ */
+async function readEventRecords(
+  path: string
+): Promise<Array<{ type: string; codePreimage?: PreimageRef }>> {
   const { readFile } = await import("node:fs/promises");
   const lines = (await readFile(path, "utf8")).trim().split("\n");
   return lines
-    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .map((l) => JSON.parse(l) as { type: string; codePreimage?: PreimageRef })
     .filter((r) => r.type === "message");
 }
 

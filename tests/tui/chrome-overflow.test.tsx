@@ -79,6 +79,11 @@ function fakeBridge(subagents: ReadonlyArray<SubagentInfo>): TuiBridge {
     },
     listSessions: async () => [],
     loadSessionFile: async () => file,
+    openSession: async () => {
+      throw new Error("unused: no session is opened here");
+    },
+    abortSubagentTask: () => false,
+    abortSessionForegroundWork: () => [],
     compactSession: async () => ({
       compacted: false,
       reason: "below_token_threshold" as const,

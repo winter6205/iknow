@@ -26,9 +26,8 @@ import {
   type LiveToolRun,
   type LiveToolStatus,
 } from "../../src/tui/live-tool-state.js";
-import { deriveSlot, isLiveNoise } from "../../src/tui/tool-settled.js";
-// deriveSlot import kept for this file's existing call sites; fold checks
-// below route through isLiveNoise as the single live-signal entry.
+import { isLiveNoise } from "../../src/tui/tool-settled.js";
+// fold checks below route through isLiveNoise as the single live-signal entry.
 import { toolResultStatusMap } from "../../src/tui/tool-summary.js";
 
 // ── data builders (aligned with tests/tui/turn-activity.test.ts) ────

@@ -21,7 +21,7 @@
  * consume) — no private-field probing, otherwise tests would stay green even
  * when "hot" is invisible on the API.
  */
-import { afterAll, beforeAll, describe, expect, it } from "vitest";
+import { afterAll, beforeAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -356,7 +356,12 @@ describe("SC8 — 只吞 typed rescan 失败，编程错误继续上抛", () => 
       const rescanner: SkillRescanner = {
         rescan: async () => {
           throw new SkillRescanError([
-            { kind: "root_unreadable", path: skillRoot, cause: "boom" },
+            {
+              kind: "root_unreadable",
+              path: skillRoot,
+              code: "EACCES",
+              cause: "boom",
+            },
           ]);
         },
         setPluginSkillDirs: () => {},

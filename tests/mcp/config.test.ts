@@ -237,8 +237,9 @@ describe("loadMcpConfig — 两级 union", () => {
     expect(byName.get("beta")?.source).toBe<McpServerSource>("project");
     expect(byName.get("delta")?.source).toBe<McpServerSource>("project");
     expect(byName.get("gamma")?.source).toBe<McpServerSource>("user");
-    if (byName.get("beta")?.kind !== "stdio") throw new Error("stdio");
-    expect(byName.get("beta")?.entry.command).toBe("p-beta");
+    const beta = byName.get("beta");
+    if (beta?.kind !== "stdio") throw new Error("stdio");
+    expect(beta.entry.command).toBe("p-beta");
   });
 });
 

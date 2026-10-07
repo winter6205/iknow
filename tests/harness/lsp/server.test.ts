@@ -256,7 +256,7 @@ describe("resolveServer", () => {
 
 describe("SERVERS overflow / find semantics", () => {
   it("find over empty array returns undefined (不 throw)", () => {
-    const empty: typeof SERVERS = [];
+    const empty = [] as unknown as typeof SERVERS;
     const result = empty.find((s) => s.extensions.includes(".ts"));
     assert.equal(result, undefined);
   });

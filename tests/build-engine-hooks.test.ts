@@ -40,6 +40,9 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     // MCP connection timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // ADR-0019 roots: unset in these tests, so the resolver falls back to cwd.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

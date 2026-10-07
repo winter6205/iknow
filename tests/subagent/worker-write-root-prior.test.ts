@@ -44,7 +44,6 @@ import type {
 } from "../../src/harness/subagent/envelope.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import { writeRootSegment } from "../../src/harness/skill/body.ts";
-import type { WriteSituation } from "../../src/harness/session-roots.ts";
 
 /** encodeUserText passthrough — priorMessagesFromEnvelope calls it directly. */
 function passthroughEncodeUserText(
@@ -60,7 +59,6 @@ describe("priorMessagesFromEnvelope — worker write-root prior (T3 ADR-0037 §4
   // segment. This section keeps the original shapes but passes an explicit
   // writeSituation through the two-arg form — matching the current assembly
   // path (manager.buildWorkerPayload).
-  const TREE_ROOT = "/repo/.iknow/worktrees/conv1234";
   const MAIN_ROOT = "/home/u/projects/iknow-tasks/task-abc";
 
   it("envelope.sandboxRoot + writeSituation = writable_tree → prior 段含 'current write root' 标识", () => {

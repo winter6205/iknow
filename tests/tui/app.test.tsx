@@ -48,7 +48,8 @@ import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 async function untilFrame(
   setup: TestRendererSetup,
   pred: (frame: string) => boolean,
-  ms = 8000
+  ms = 8000,
+  label = ""
 ): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < ms) {
@@ -57,7 +58,9 @@ async function untilFrame(
     const frame = setup.captureCharFrame();
     if (pred(frame)) return frame;
   }
-  throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
+  throw new Error(
+    `untilFrame timeout (${label}):\n${setup.captureCharFrame()}`
+  );
 }
 
 /** Condition wait (returns no frame). */
@@ -549,7 +552,7 @@ describe("/thinking 打开 thinking-picker（design-25 开关面板）", () => {
   }, 30_000);
 
   test("onPersistThinking: /thinking Esc commit → prop 被调（payload = { thinking }）", async () => {
-    const calls: ReadonlyArray<{ thinking: "off" | "adaptive" }> = [];
+    const calls: Array<{ thinking: "off" | "adaptive" }> = [];
     const app = await mountAppAsync([], undefined, (patch) => {
       calls.push(patch);
       return Promise.resolve({ ok: true as const });

@@ -368,8 +368,18 @@ describe("SC8 提交期竞态 — 快速键入/粘贴后立刻 Enter", () => {
 describe("formatSkillRescanFailure — typed-error catch 契约", () => {
   test("SkillRescanError → 文案带 faults 的 kind/path/code", () => {
     const err = new SkillRescanError([
-      { kind: "root_unreadable", path: "/x/skills", code: "EACCES" },
-      { kind: "file_unreadable", path: "/y/SKILL.md", code: undefined },
+      {
+        kind: "root_unreadable",
+        path: "/x/skills",
+        code: "EACCES",
+        cause: "permission denied",
+      },
+      {
+        kind: "file_unreadable",
+        path: "/y/SKILL.md",
+        code: undefined,
+        cause: "no such file",
+      },
     ]);
     const text = formatSkillRescanFailure(err);
     expect(text).toContain("技能重扫失败");

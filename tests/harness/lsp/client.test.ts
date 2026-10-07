@@ -22,7 +22,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { PassThrough } from "node:stream";
 import { EventEmitter } from "node:events";
 
-import type { LspServerInfo } from "../../../src/harness/lsp/types.ts";
+import type {
+  LspCtx,
+  LspServerHandle,
+  LspServerInfo,
+} from "../../../src/harness/lsp/types.ts";
 import { mkdtempSync, writeFileSync, rmSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -67,7 +71,7 @@ vi.mock("vscode-jsonrpc/node", async (importOriginal) => {
   return {
     ...actual,
     createMessageConnection: (...args: unknown[]) =>
-      mockCreateConnection(...args),
+      mockCreateConnection(...(args as [])),
   };
 });
 
@@ -104,7 +108,7 @@ function makeFakeChildProcess(pid = 12345) {
 
 interface FakeServerOpts {
   /** spawn factory: by default returns an ok handle; set `undefined` to simulate spawn failure. */
-  spawn?: (root: string) => Promise<unknown>;
+  spawn?: (root: string) => Promise<LspServerHandle | undefined>;
   /** shared root resolver (default fixed "/root", so all files under one id share the key). */
   root?: (file: string) => Promise<string | undefined>;
 }
@@ -118,7 +122,7 @@ function makeFakeServer(
     id,
     root: opts.root ?? (async () => "/root"),
     extensions: [".ts"],
-    spawn: async (_root, _ctx) => {
+    spawn: async (_root: string, _ctx: LspCtx) => {
       calls.spawn += 1;
       if (opts.spawn) return opts.spawn(_root);
       const child = makeFakeChildProcess();
@@ -218,7 +222,8 @@ describe("getClient broken memory", () => {
 
 describe("getClient inflight dedup", () => {
   it("dedupes concurrent first-call spawn into a single promise", async () => {
-    let resolveSpawn: ((value: unknown) => void) | undefined;
+    let resolveSpawn:
+      ((value: LspServerHandle | undefined) => void) | undefined;
     const { server, calls } = makeFakeServer("inflight", {
       spawn: () =>
         new Promise((resolve) => {
@@ -236,7 +241,7 @@ describe("getClient inflight dedup", () => {
 
     const child = makeFakeChildProcess();
     resolveSpawn?.({
-      process: child,
+      process: child as unknown as import("node:child_process").ChildProcess,
       initialization: { tsserver: { path: "/tsserver.js" } },
     });
 
@@ -568,7 +573,8 @@ describe("getClient child with undefined stderr (negative)", () => {
 
 describe("getClient 1000 concurrent same key (overflow)", () => {
   it("dedupes 1000 concurrent first-call spawns into a single shared client", async () => {
-    let resolveSpawn: ((value: unknown) => void) | undefined;
+    let resolveSpawn:
+      ((value: LspServerHandle | undefined) => void) | undefined;
     const { server, calls } = makeFakeServer("conc-1000", {
       spawn: () =>
         new Promise((resolve) => {
@@ -585,7 +591,7 @@ describe("getClient 1000 concurrent same key (overflow)", () => {
 
     const child = makeFakeChildProcess();
     resolveSpawn?.({
-      process: child,
+      process: child as unknown as import("node:child_process").ChildProcess,
       initialization: { tsserver: { path: "/tsserver.js" } },
     });
 
@@ -607,7 +613,7 @@ describe("dispose isolation across keys (concurrent)", () => {
     const { server } = makeFakeServer("dispose-a", {
       root: async () => "/rootA",
     });
-    const { server: serverB } = makeFakeServer("dispose-b", {
+    makeFakeServer("dispose-b", {
       root: async () => "/rootB",
     });
 
@@ -1348,7 +1354,7 @@ describe("getClient dispatch by extension (spec 302)", () => {
   // cross-test cache-hit pollution on the three-piece cache. spawn is intercepted via
   // vi.spyOn → the real binaries are never touched.
   function fakeSpawnFor() {
-    const impl = async () => {
+    const impl: LspServerInfo["spawn"] = async () => {
       const child = makeFakeChildProcess(
         9000 + Math.floor(Math.random() * 100)
       );
@@ -1481,7 +1487,8 @@ describe("getClient dispatch by extension (spec 302)", () => {
     const dir = mkdtempSync(join(tmpdir(), "iknow-lsp-dispatch-conc-"));
     writeFileSync(join(dir, "pyproject.toml"), "\n", "utf8");
     const file = join(dir, "app.py");
-    let resolveSpawn: ((value: unknown) => void) | undefined;
+    let resolveSpawn:
+      ((value: LspServerHandle | undefined) => void) | undefined;
     const spawnStub = fakeSpawnFor();
     spawnStub.mockImplementation(
       () =>
@@ -1497,7 +1504,7 @@ describe("getClient dispatch by extension (spec 302)", () => {
       await vi.waitFor(() => expect(spawnStub).toHaveBeenCalledTimes(1));
       const child = makeFakeChildProcess();
       resolveSpawn?.({
-        process: child,
+        process: child as unknown as import("node:child_process").ChildProcess,
         initialization: { pythonPath: undefined },
       });
       const [c1, c2] = await Promise.all([p1, p2]);

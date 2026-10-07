@@ -302,7 +302,7 @@ describe("bash handler — readonly mode wiring", () => {
     const cwd = await makeScratch("bash-ro-reject-");
     const tool = createBashTool(cwd, { bashMode: "readonly" });
     await assert.rejects(
-      tool.handler({ command: "touch newfile.txt" }),
+      async () => tool.handler({ command: "touch newfile.txt" }),
       (error: unknown) =>
         error instanceof ReadonlyViolationError &&
         error.message.includes("not in the readonly command policy")
@@ -313,7 +313,7 @@ describe("bash handler — readonly mode wiring", () => {
     const cwd = await makeScratch("bash-ro-env-");
     const tool = createBashTool(cwd, { bashMode: "readonly" });
     await assert.rejects(
-      tool.handler({ command: "env" }),
+      async () => tool.handler({ command: "env" }),
       (error: unknown) =>
         error instanceof ReadonlyViolationError &&
         error.message.includes("execution agent")
@@ -328,7 +328,8 @@ describe("bash handler — readonly mode wiring", () => {
     const tool = createBashTool(cwd, { bashMode: "readonly" });
     for (const terminator of ["+", "\\;"]) {
       await assert.rejects(
-        tool.handler({ command: `find . -exec rm {} ${terminator}` }),
+        async () =>
+          tool.handler({ command: `find . -exec rm {} ${terminator}` }),
         (error: unknown) =>
           error instanceof ReadonlyViolationError &&
           error.message.includes("find flag")
@@ -340,7 +341,7 @@ describe("bash handler — readonly mode wiring", () => {
     const cwd = await makeScratch("bash-ro-redirect-");
     const tool = createBashTool(cwd, { bashMode: "readonly" });
     await assert.rejects(
-      tool.handler({ command: "ls > file.txt" }),
+      async () => tool.handler({ command: "ls > file.txt" }),
       (error: unknown) =>
         error instanceof ReadonlyViolationError &&
         error.message.includes("redirection")
@@ -402,7 +403,7 @@ describe("bash handler — readonly mode wiring", () => {
 import { parseForSecurity } from "../../../../src/harness/permission/shell-parse.ts";
 
 describe("validateReadonlyCommand — SC-S4-1 parse-facts pins (T23)", () => {
-  it("allows find . -name \"-delete\" (quote-bearing operand matches as today)", () => {
+  it('allows find . -name "-delete" (quote-bearing operand matches as today)', () => {
     // The old whitespace tokenizer saw the raw token `"-delete"` (quotes
     // included) and it missed FIND_DENIED_FLAGS; WordFact.text carries the
     // same raw spelling, so the answer must stay allow (spec SC-S4-1 rule 3).
@@ -424,7 +425,10 @@ describe("validateReadonlyCommand — SC-S4-1 parse-facts pins (T23)", () => {
     // allows. Non-`ok` verdicts keep today's answer, add no throw
     // (docs/shell-parse-non-ok-consumer-contracts.md).
     const parsed = parseForSecurity("ls &&");
-    assert.ok(parsed.kind !== "ok", `expected non-ok for "ls &&", got ${parsed.kind}`);
+    assert.ok(
+      parsed.kind !== "ok",
+      `expected non-ok for "ls &&", got ${parsed.kind}`
+    );
     expectAllow("ls &&");
   });
 

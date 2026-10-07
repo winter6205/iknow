@@ -26,7 +26,13 @@
 import { describe, it, expect } from "vitest";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
-import { statSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  statSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtempSync, rmSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { tmpdir } from "node:os";
@@ -41,7 +47,14 @@ const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
 function resolveTsxEsm(): string {
   let dir = repoRoot;
   for (;;) {
-    const candidate = join(dir, "node_modules", "tsx", "dist", "esm", "index.mjs");
+    const candidate = join(
+      dir,
+      "node_modules",
+      "tsx",
+      "dist",
+      "esm",
+      "index.mjs"
+    );
     try {
       if (statSync(candidate).isFile()) return candidate;
     } catch {
@@ -194,7 +207,8 @@ async function runAsk(
  * is the artifact SC12 makes the contract.
  */
 function readRows(traceDir: string): ToolCallRow[] {
-  const { readdirSync, readFileSync } = require("node:fs") as typeof import("node:fs");
+  const { readdirSync, readFileSync } =
+    require("node:fs") as typeof import("node:fs");
   const files = readdirSync(traceDir).filter((f) => f.endsWith(".jsonl"));
   if (files.length === 0) return [];
   const lines = readFileSync(join(traceDir, files[0]!), "utf8")
@@ -203,7 +217,9 @@ function readRows(traceDir: string): ToolCallRow[] {
     .filter((l) => l.trim().length > 0)
     .map((l) => JSON.parse(l) as Record<string, unknown>);
   return lines
-    .filter((r) => r["record_type"] === "tool_call" && r["tool_name"] === "bash")
+    .filter(
+      (r) => r["record_type"] === "tool_call" && r["tool_name"] === "bash"
+    )
     .map((r) => {
       const error = r["error"] as { message?: string } | undefined;
       return {
@@ -261,7 +277,12 @@ describe("ask route — SC4: the identity-scratch exception is live", () => {
   it("full_auto: `rm -f $TMPDIR/a.cjs` is admitted and REALLY deletes the file", async () => {
     const { rows, marker } = await runAsk(
       [
-        { tool: { name: "bash", input: { command: "echo seed > $TMPDIR/a.cjs" } } },
+        {
+          tool: {
+            name: "bash",
+            input: { command: "echo seed > $TMPDIR/a.cjs" },
+          },
+        },
         { tool: { name: "bash", input: { command: "rm -f $TMPDIR/a.cjs" } } },
         {
           tool: {
@@ -283,17 +304,24 @@ describe("ask route — SC4: the identity-scratch exception is live", () => {
     // Seed first: a deletion of a file that was never there would satisfy the
     // `rm` arm of the story without ever proving the exception admitted it.
     const seed = call(rows, 0);
-    expect(deniedByHardWall(seed), `seeding must not hit the wall: ${seed.error}`).toBe(false);
-    expect(seed.status).toBe("ok", seed.error ?? "");
+    expect(
+      deniedByHardWall(seed),
+      `seeding must not hit the wall: ${seed.error}`
+    ).toBe(false);
+    expect(
+      seed.status,
+      `seeding must actually execute: ${seed.error ?? ""}`
+    ).toBe("ok");
 
     const rm = call(rows, 1);
     expect(
       deniedByHardWall(rm),
       `ask must not hard-wall-deny its own scratch cleanup: ${rm.error ?? rm.status}`
     ).toBe(false);
-    expect(rm.status, `the admitted cleanup must actually execute: ${rm.error ?? ""}`).toBe(
-      "ok"
-    );
+    expect(
+      rm.status,
+      `the admitted cleanup must actually execute: ${rm.error ?? ""}`
+    ).toBe("ok");
 
     // The strongest form: the file the run itself seeded is gone, observed by
     // the run itself through the same `$TMPDIR` both calls used.
@@ -323,7 +351,8 @@ describe("ask route — SC4: the identity-scratch exception is live", () => {
           tool: {
             name: "bash",
             input: {
-              command: "echo seed > $TMPDIR/a.cjs && printf 'IKNOW_SCRATCH=%s\\n' \"$TMPDIR\"",
+              command:
+                "echo seed > $TMPDIR/a.cjs && printf 'IKNOW_SCRATCH=%s\\n' \"$TMPDIR\"",
             },
           },
         },
@@ -349,8 +378,14 @@ describe("ask route — SC4: the identity-scratch exception is live", () => {
     );
 
     const seed = call(rows, 0);
-    expect(deniedByHardWall(seed), `seeding must not hit the wall: ${seed.error}`).toBe(false);
-    expect(seed.status).toBe("ok", seed.error ?? "");
+    expect(
+      deniedByHardWall(seed),
+      `seeding must not hit the wall: ${seed.error}`
+    ).toBe(false);
+    expect(
+      seed.status,
+      `seeding must actually execute: ${seed.error ?? ""}`
+    ).toBe("ok");
 
     // The rm was named by an absolute path this fixture did not choose; if the
     // two gates resolve different directories, this is where it shows.
@@ -361,9 +396,10 @@ describe("ask route — SC4: the identity-scratch exception is live", () => {
         rm.error ?? rm.status
       } (command: ${rm.command})`
     ).toBe(false);
-    expect(rm.status, `the admitted cleanup must actually execute: ${rm.error ?? ""}`).toBe(
-      "ok"
-    );
+    expect(
+      rm.status,
+      `the admitted cleanup must actually execute: ${rm.error ?? ""}`
+    ).toBe("ok");
 
     expect(marker).toContain("GONE");
     expect(marker).not.toContain("STILL_THERE");
@@ -372,7 +408,12 @@ describe("ask route — SC4: the identity-scratch exception is live", () => {
   it("default: the wall stays silent and the ordinary ask gate answers", async () => {
     const { rows } = await runAsk(
       [
-        { tool: { name: "bash", input: { command: "echo seed > $TMPDIR/a.cjs" } } },
+        {
+          tool: {
+            name: "bash",
+            input: { command: "echo seed > $TMPDIR/a.cjs" },
+          },
+        },
         { tool: { name: "bash", input: { command: "rm -f $TMPDIR/a.cjs" } } },
         { text: "done" },
       ],
@@ -413,7 +454,12 @@ describe("ask route — SC4: the wiring widened nothing", () => {
     it(`still denies: ${why}`, async () => {
       const { rows } = await runAsk(
         [
-          { tool: { name: "bash", input: { command: "echo seed > $TMPDIR/a.cjs" } } },
+          {
+            tool: {
+              name: "bash",
+              input: { command: "echo seed > $TMPDIR/a.cjs" },
+            },
+          },
           { tool: { name: "bash", input: { command } } },
           { text: "done" },
         ],

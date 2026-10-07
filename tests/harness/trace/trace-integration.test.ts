@@ -16,7 +16,7 @@
 
 import { describe, it, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { run } from "../../../src/harness/loop-engine.ts";

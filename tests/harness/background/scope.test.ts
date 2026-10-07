@@ -238,7 +238,8 @@ describe("conversation scope 工具层透传（bash_output / bash_stop handler�
 
     const tool = createBashOutputTool({ backgroundManager: manager });
     await assert.rejects(
-      tool.handler({ task_id: res.task_id }, { conversationId: "conv-B" }),
+      async () =>
+        tool.handler({ task_id: res.task_id }, { conversationId: "conv-B" }),
       (err: unknown) =>
         err instanceof ToolExecutionError &&
         err.message.includes("task_not_in_scope")
@@ -257,7 +258,8 @@ describe("conversation scope 工具层透传（bash_output / bash_stop handler�
 
     const tool = createBashStopTool({ backgroundManager: manager });
     await assert.rejects(
-      tool.handler({ task_id: res.task_id }, { conversationId: "conv-B" }),
+      async () =>
+        tool.handler({ task_id: res.task_id }, { conversationId: "conv-B" }),
       (err: unknown) =>
         err instanceof ToolExecutionError &&
         err.message.includes("task_not_in_scope")

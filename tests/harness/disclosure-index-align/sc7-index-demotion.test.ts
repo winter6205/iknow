@@ -420,6 +420,10 @@ function makeEnv(apiKey: string): IknowEnv {
     compress: { contextWindow: 20_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env side keeps
+    // its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 
@@ -700,9 +704,11 @@ describe("T5 SC7 — build-engine wire:索引降档", () => {
 
     const callsAfterAssembly = calls;
     const system1 = await built.deps.system?.();
-    const tools1 = built.deps.promptTools();
+    const promptTools = built.deps.promptTools;
+    assert.ok(promptTools !== undefined, "assembly arms promptTools");
+    const tools1 = promptTools();
     const system2 = await built.deps.system?.();
-    const tools2 = built.deps.promptTools();
+    const tools2 = promptTools();
     assert.deepEqual(system2, system1);
     assert.deepEqual(tools2, tools1);
     // No re-measuring after assembly (one shot at first turn).

@@ -13,16 +13,19 @@
  *
  * No LLM, no external server — fixture subprocess + real SDK Client/Transport only.
  */
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createAciRegistry } from "../../src/harness/aci/aci-registry.js";
+import {
+  createAciRegistry,
+  type AciRegistry,
+} from "../../src/harness/aci/aci-registry.js";
 import { createToolSearchTool } from "../../src/harness/aci/tools/tool-search.js";
-import type { AciRegistry, AciToolDef } from "../../src/harness/aci/types.js";
+import type { AciToolDef } from "../../src/harness/aci/types.js";
 import { RegistryConstructionError } from "../../src/harness/errors.js";
 
 import {
@@ -173,21 +176,6 @@ async function waitForToolRegistered(
   }
   throw new Error(
     `waitForToolRegistered: ${toolName} not in registry after ${timeoutMs}ms`
-  );
-}
-
-async function waitForToolCallable(
-  registry: AciRegistry,
-  toolName: string,
-  timeoutMs = 5_000
-): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    if (registry.catalog.get(toolName)) return;
-    await new Promise((r) => setTimeout(r, 50));
-  }
-  throw new Error(
-    `waitForToolCallable: ${toolName} not in catalog after ${timeoutMs}ms`
   );
 }
 
@@ -522,6 +510,5 @@ describe("MCP integration — tool_search discovery feeds real call", () => {
 // ---------------------------------------------------------------------------
 
 // Backstop: after all tests, sweep any leftover tmp dir/flag file (failure-scenario safety net)
-const scratchDirs = new Set<string>();
 const _origSpawnFixture = spawnFixture;
 void _origSpawnFixture;

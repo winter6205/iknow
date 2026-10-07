@@ -136,9 +136,11 @@ describe("T5③ secrets guard（mode:block）—— 含假值的工具参数不�
     }
   });
 
-  it("阳性对照：ghp_ 形态 fixture 被拦（guard 活着，非空规则假绿）", () => {
+  it("阳性对照：ghp_ 形态 fixture 被拦（guard 活着，非空规则假绿）", async () => {
     const hook = createSecretsGuardHook();
-    const verdict = hook({
+    // hooks may be async; the contract requires awaiting before reading the
+    // verdict (an un-awaited Promise is always truthy).
+    const verdict = await hook({
       tool: "bash",
       input: { command: "export X=ghp_" + "a".repeat(36) },
     });

@@ -86,6 +86,10 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env
+    // side keeps its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 
@@ -485,7 +489,7 @@ describe("T12 — trace double-track (test.md 纪律)", () => {
       // normalizing those per-run paths out — every other byte must match.
       const normalize = (r: typeof resultA): typeof resultA =>
         JSON.parse(
-          JSON.stringify(r, (key, value) =>
+          JSON.stringify(r, (_key, value) =>
             typeof value === "string"
               ? value
                   .replaceAll(/\/tmp\/iknow-t12-e2e-[^/]*\//g, "<ROOT>/")

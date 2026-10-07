@@ -178,9 +178,14 @@ async function mount(opts: {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
-    getCapacity: () => 15,
     listSubagents: () => [],
     abortSessionForegroundWork: () => [],
+    abortSubagentTask: () => false,
+    openSession: async () => {
+      throw new Error("unused: no session is opened here");
+    },
+    subscribeSubagentTerminal: () => () => undefined,
+    wakeFromSubagent: async () => undefined,
   };
   const askBridge = createTuiAskUserBridge();
   const toolEventSink = createToolEventSink();

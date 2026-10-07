@@ -59,6 +59,7 @@ vi.mock(
 
 import * as sandboxRunner from "../../../src/harness/sandbox/runner.ts";
 import * as egressSessionModule from "../../../src/harness/sandbox/egress/session.ts";
+import { createEgressViolationSink } from "../../../src/harness/sandbox/egress/violations.js";
 import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts";
 import {
   createYoloContext,
@@ -102,10 +103,12 @@ beforeEach(() => {
           unixSocketPath: "/tmp/iknow-yolo-verify-test.sock",
           sandboxLocalPort: 18080,
           env: { HTTP_PROXY: "http://127.0.0.1:18080" },
+          innerBridgeScript: "",
+          relayAssetsDir: "",
         },
-        violationSink: { drain: () => [] },
+        violationSink: createEgressViolationSink(),
         dispose: async () => undefined,
-      } as Awaited<ReturnType<typeof egressSessionModule.createEgressSession>>;
+      };
     });
 });
 

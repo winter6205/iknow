@@ -91,13 +91,18 @@ const TEST_ENV: IknowEnv = {
     maxOutputTokens: 1024,
     temperature: 0,
     stream: "off",
-    thinking: { type: "disabled" },
+    thinking: "off",
+    thinkingEffort: "",
     maxTurns: undefined,
-    timeoutMs: undefined,
+    timeoutMs: 300_000,
   },
   web: { proxy: undefined, searchUrl: undefined },
   compress: { contextWindow: 200000, thresholdTokens: undefined },
-  chat: { showThinking: false, quiet: false },
+  chat: { showThinking: false },
+  mcp: { connectTimeoutMs: 60_000 },
+  subagent: { taskTimeoutMs: undefined, maxConcurrentWorkers: 15 },
+  workspaceRoot: undefined,
+  productRoot: undefined,
 };
 
 /**
@@ -189,7 +194,7 @@ function assertSurface(
   kept: readonly string[]
 ): void {
   const innerNames = deps.registry.list().map((t) => t.name);
-  const promptNames = deps.promptTools().map((t) => t.name);
+  const promptNames = promptToolNames(deps);
   for (const name of denied) {
     assert.ok(
       !innerNames.includes(name),
@@ -206,6 +211,18 @@ function assertSurface(
   }
 }
 
+/**
+ * `LoopEngineDeps.promptTools` is optional on the interface, but the worker
+ * assembly always fills it (buildWorkerToolSurface feeds both faces). Narrow
+ * with an assertion rather than a bare `!`, so a regression fails here instead
+ * of as "cannot invoke undefined" further down.
+ */
+function promptToolNames(deps: LoopEngineDeps): string[] {
+  const { promptTools } = deps;
+  assert.ok(promptTools !== undefined, "worker assembly must fill promptTools");
+  return promptTools().map((t) => t.name);
+}
+
 /** Hermetic assembly seam: stub-model + empty skill catalog + noop trace + stub system. */
 function hermeticOpts(
   extra?: Partial<CreateWorkerDepsOptions>
@@ -215,7 +232,7 @@ function hermeticOpts(
     sandboxRoot: "/tmp/sb",
     model: createStubModel({ responses: [] }),
     skillCatalog: createSkillCatalog([]),
-    system: () => undefined,
+    system: async () => undefined,
     trace: createNoopTraceService(),
     ...extra,
   };
@@ -245,10 +262,7 @@ describe("worker tool surface: 正常路径 — declared deny-list 全生效", (
       deps.registry.list().map((t) => t.name),
       [...expected]
     );
-    assert.deepEqual(
-      deps.promptTools().map((t) => t.name),
-      [...expected]
-    );
+    assert.deepEqual(promptToolNames(deps), [...expected]);
   });
 });
 
@@ -274,7 +288,7 @@ describe("worker tool surface: 失败路径 — 未知名宽容忽略（lenient�
       })
     );
     const innerNames = deps.registry.list().map((t) => t.name);
-    const promptNames = deps.promptTools().map((t) => t.name);
+    const promptNames = promptToolNames(deps);
     assert.deepEqual(innerNames, [...WORKER_BASE_SURFACE]);
     assert.deepEqual(promptNames, [...WORKER_BASE_SURFACE]);
   });
@@ -291,10 +305,7 @@ describe("worker tool surface: 边界 — undefined / 空 / deny-all", () => {
       deps.registry.list().map((t) => t.name),
       [...WORKER_BASE_SURFACE]
     );
-    assert.deepEqual(
-      deps.promptTools().map((t) => t.name),
-      [...WORKER_BASE_SURFACE]
-    );
+    assert.deepEqual(promptToolNames(deps), [...WORKER_BASE_SURFACE]);
   });
 
   // T2 / spec Layer 3 item 10 (input-contract row: nested spawn from worker
@@ -306,7 +317,7 @@ describe("worker tool surface: 边界 — undefined / 空 / deny-all", () => {
   it("worker 双面都不含 spawn_subagent / subagent_result（嵌套派发结构性不可达）", async () => {
     const deps = await createWorkerDeps(hermeticOpts());
     const inner = deps.registry.list().map((t) => t.name);
-    const prompt = deps.promptTools().map((t) => t.name);
+    const prompt = promptToolNames(deps);
     assert.equal(inner.includes("spawn_subagent"), false);
     assert.equal(prompt.includes("spawn_subagent"), false);
     assert.equal(inner.includes("subagent_result"), false);
@@ -319,10 +330,7 @@ describe("worker tool surface: 边界 — undefined / 空 / deny-all", () => {
       deps.registry.list().map((t) => t.name),
       [...WORKER_BASE_SURFACE]
     );
-    assert.deepEqual(
-      deps.promptTools().map((t) => t.name),
-      [...WORKER_BASE_SURFACE]
-    );
+    assert.deepEqual(promptToolNames(deps), [...WORKER_BASE_SURFACE]);
   });
 
   it("deny 全量实际工具 → inner+promptTools 双面为空, createWorkerDeps 不 crash", async () => {
@@ -333,7 +341,7 @@ describe("worker tool surface: 边界 — undefined / 空 / deny-all", () => {
       hermeticOpts({ disallowedTools: [...WORKER_BASE_SURFACE] })
     );
     assert.equal(deps.registry.list().length, 0);
-    assert.equal(deps.promptTools().length, 0);
+    assert.equal(promptToolNames(deps).length, 0);
   });
 });
 
@@ -351,7 +359,7 @@ describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", 
       hermeticOpts({ disallowedTools: [...JUDGE_DENY] })
     );
     const innerNames = deps.registry.list().map((t) => t.name);
-    const promptNames = deps.promptTools().map((t) => t.name);
+    const promptNames = promptToolNames(deps);
     assert.deepEqual(innerNames, [...JUDGE_ALLOWED_BASELINE]);
     assert.deepEqual(promptNames, [...JUDGE_ALLOWED_BASELINE]);
   });
@@ -361,7 +369,7 @@ describe("worker tool surface: 权限 — 判官只读（allow-list 推导）", 
       hermeticOpts({ disallowedTools: [...JUDGE_DENY] })
     );
     const innerNames = deps.registry.list().map((t) => t.name);
-    const promptNames = deps.promptTools().map((t) => t.name);
+    const promptNames = promptToolNames(deps);
     for (const denied of JUDGE_DENY) {
       assert.ok(
         !innerNames.includes(denied),
@@ -531,10 +539,7 @@ describe("worker tool surface: 向后兼容 — 旧 wire 无 disallowedTools 字
       deps.registry.list().map((t) => t.name),
       [...WORKER_BASE_SURFACE]
     );
-    assert.deepEqual(
-      deps.promptTools().map((t) => t.name),
-      [...WORKER_BASE_SURFACE]
-    );
+    assert.deepEqual(promptToolNames(deps), [...WORKER_BASE_SURFACE]);
   });
 });
 
@@ -668,7 +673,7 @@ describe("worker tool surface: ADR-0085 SC9 — worker 共用父会话账本", (
       assert.ok(tool);
 
       await assert.rejects(
-        tool.handler({ mode: "add", item: "worker addition" }),
+        async () => tool.handler({ mode: "add", item: "worker addition" }),
         (err: unknown) => {
           assert.ok(
             err instanceof ToolExecutionError,
@@ -796,6 +801,8 @@ function workerBaseOpts(
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
   return {
     env,

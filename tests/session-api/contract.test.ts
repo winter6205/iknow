@@ -262,6 +262,7 @@ describe("HealthResponse — contextWindow", () => {
       service: "iknow-session-api",
       version: "0.1.0",
       contextWindow: 200000,
+      traceWriteFailures: 0,
     };
     assert.equal(health.ok, true);
     assert.equal(health.contextWindow, 200000);

@@ -904,8 +904,6 @@ describe("boundary: exception — tool timeout persists execution_failed", () =>
 
 describe("boundary: concurrent — same-id serialization", () => {
   it("Promise.all on same id serializes execution", async () => {
-    const callOrder: number[] = [];
-    let callCount = 0;
     const tool = createStubTool({ name: "noop", next: () => ({}) });
     const registry = createRegistry([tool]);
     const executor = createExecutor(registry);

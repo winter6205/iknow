@@ -35,7 +35,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, it } from "vitest";
 
 import {
   createSandboxServer,
@@ -65,6 +65,8 @@ function shFence(command: string): BwrapFence {
   return Object.freeze({
     argv: Object.freeze(["sh", "-c", command]),
     sealed: true as const,
+    // the fixture emits no boundary block, so it names no mask.
+    exactFileMaskPaths: Object.freeze([]),
   });
 }
 
@@ -240,6 +242,8 @@ describe("sandbox server — IPC boundary 4 fault classes (ADR-0045 §4)", () =>
         fence: Object.freeze({
           argv: Object.freeze([]),
           sealed: true as const,
+          // the fixture emits no boundary block, so it names no mask.
+          exactFileMaskPaths: Object.freeze([]),
         }),
         cwd: tmpdir(),
         env: process.env,
@@ -344,6 +348,8 @@ describe("sandbox server — IPC boundary 4 fault classes (ADR-0045 §4)", () =>
             "--nope",
           ]),
           sealed: true as const,
+          // the fixture emits no boundary block, so it names no mask.
+          exactFileMaskPaths: Object.freeze([]),
         }),
         cwd: tmpdir(),
         env: process.env,
@@ -373,6 +379,8 @@ describe("sandbox server — IPC boundary 4 fault classes (ADR-0045 §4)", () =>
           "--nope",
         ]),
         sealed: true as const,
+        // the fixture emits no boundary block, so it names no mask.
+        exactFileMaskPaths: Object.freeze([]),
       }),
       cwd,
       env: process.env,

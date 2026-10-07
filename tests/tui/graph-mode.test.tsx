@@ -67,6 +67,10 @@ function makeTuiBundle(): RuntimeBundle {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // ADR-0019 root anchors: unset in the fixture (loadIknowEnv maps an empty
+    // IKNOW_WORKSPACE_ROOT / IKNOW_PRODUCT_ROOT to undefined).
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
   return { env } as unknown as RuntimeBundle;
 }

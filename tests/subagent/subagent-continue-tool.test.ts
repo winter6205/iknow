@@ -236,9 +236,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
   });
 
   it("终态但无工人 transcript → 拒（切片前的旧工人）", async () => {
-    const { manager, invocations } = makeManagerHarness();
+    const harness = makeManagerHarness();
+    const { manager, invocations } = harness;
     const tool = createSubAgentContinueTool({ manager });
-    const taskId = await spawnCompleted({ manager, invocations }, {
+    const taskId = await spawnCompleted(harness, {
       task: "legacy",
       conversationId: "c1",
     } as SubAgentDefinition);
@@ -260,9 +261,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
   });
 
   it("per-agent trace 在场不算账 —— 不从 trace 倒灌（锁句 6）", async () => {
-    const { manager, invocations, subagentsDir } = makeManagerHarness();
+    const harness = makeManagerHarness();
+    const { manager, subagentsDir } = harness;
     const tool = createSubAgentContinueTool({ manager });
-    const taskId = await spawnCompleted({ manager, invocations }, {
+    const taskId = await spawnCompleted(harness, {
       task: "traced",
       conversationId: "c1",
     } as SubAgentDefinition);
@@ -290,9 +292,10 @@ describe("subagent_continue — 拒绝分支（锁句 4：闸 = 进程已死 + �
   });
 
   it("跨会话拒 —— 所有权判定先于任何再拉起", async () => {
-    const { manager, invocations, writeTranscript } = makeManagerHarness();
+    const harness = makeManagerHarness();
+    const { manager, writeTranscript, invocations } = harness;
     const tool = createSubAgentContinueTool({ manager });
-    const taskId = await spawnCompleted({ manager, invocations }, {
+    const taskId = await spawnCompleted(harness, {
       task: "owned",
       conversationId: "conv-owner",
     } as SubAgentDefinition);

@@ -298,9 +298,12 @@ describe("registerShutdown (#365 T5)", () => {
     // unhandled rejection → stub that too. Real signal exit codes (130/143)
     // are only verified via the child spawn cases below.
     vi.spyOn(process, "kill").mockImplementation(() => true);
-    vi.spyOn(process, "exit").mockImplementation(() => {
+    // process.exit is typed `never`-returning; this stub deliberately does not
+    // exit, so the implementation is cast rather than annotated `never` (a
+    // `never`-returning body with a reachable end point does not compile).
+    vi.spyOn(process, "exit").mockImplementation((() => {
       // no-op: intercept the reKilled guard's forced-exit path so it cannot pollute the vitest worker.
-    });
+    }) as (code?: string | number | null) => never);
   });
 
   afterEach(() => {
@@ -314,6 +317,14 @@ describe("registerShutdown (#365 T5)", () => {
     const built: BuiltEngine = {
       deps: {} as unknown as LoopEngineDeps,
       engine: createLoopEngine({} as unknown as LoopEngineDeps),
+      // BuiltEngine.sessionRoots is required; these cases only exercise the
+      // shutdown wiring, so one placeholder triple-root is enough.
+      sessionRoots: {
+        productRoot: process.cwd(),
+        taskRoot: process.cwd(),
+        installRoot: process.cwd(),
+        projectIdentityRoot: process.cwd(),
+      },
       shutdown: async () => {
         callCount += 1;
       },
@@ -347,6 +358,14 @@ describe("registerShutdown (#365 T5)", () => {
     const built: BuiltEngine = {
       deps: {} as unknown as LoopEngineDeps,
       engine: createLoopEngine({} as unknown as LoopEngineDeps),
+      // BuiltEngine.sessionRoots is required; these cases only exercise the
+      // shutdown wiring, so one placeholder triple-root is enough.
+      sessionRoots: {
+        productRoot: process.cwd(),
+        taskRoot: process.cwd(),
+        installRoot: process.cwd(),
+        projectIdentityRoot: process.cwd(),
+      },
       // shutdown field absent (contract: on the ask surface the manager was never created → absent).
     };
 
@@ -364,6 +383,14 @@ describe("registerShutdown (#365 T5)", () => {
     const built: BuiltEngine = {
       deps: {} as unknown as LoopEngineDeps,
       engine: createLoopEngine({} as unknown as LoopEngineDeps),
+      // BuiltEngine.sessionRoots is required; these cases only exercise the
+      // shutdown wiring, so one placeholder triple-root is enough.
+      sessionRoots: {
+        productRoot: process.cwd(),
+        taskRoot: process.cwd(),
+        installRoot: process.cwd(),
+        projectIdentityRoot: process.cwd(),
+      },
       shutdown: async () => {
         callCount += 1;
       },
@@ -380,7 +407,10 @@ describe("registerShutdown (#365 T5)", () => {
     // shuttingDown single guard → the first dispose runs shutdown once, later
     // signals are no-op (measured: counter === 1, not one per signal).
     for (const sig of SIGNALS) {
-      process.emit(sig);
+      // @types/node types `emit("beforeExit")` as taking an exit code; the
+      // registered listeners here ignore it, so the "beforeExit" arm passes 0.
+      if (sig === "beforeExit") process.emit("beforeExit", 0);
+      else process.emit(sig);
       await new Promise((r) => setImmediate(r));
     }
     expect(callCount).toBe(1);

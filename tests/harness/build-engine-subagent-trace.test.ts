@@ -156,6 +156,7 @@ function makeEnv(apiKey: string): IknowEnv {
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
     workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

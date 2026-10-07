@@ -71,6 +71,8 @@ function makeFakeManager() {
     // ADR-0096: the spawn_subagent description getter reads capacity.
     // Degraded path: this fake wires no holder -> falls back to manager.getCapacity().
     getCapacity: () => 15,
+    // T3 terminal-notification subscription: this fake registers no subscriber.
+    subscribe: () => () => {},
   };
   return { manager, spawn };
 }
@@ -162,13 +164,18 @@ const TEST_ENV: IknowEnv = {
     maxOutputTokens: 1024,
     temperature: 0,
     stream: "off",
-    thinking: { type: "disabled" },
+    thinking: "off",
+    thinkingEffort: "",
     maxTurns: undefined,
-    timeoutMs: undefined,
+    timeoutMs: 300_000,
   },
   web: { proxy: undefined, searchUrl: undefined },
   compress: { contextWindow: 200000, thresholdTokens: undefined },
-  chat: { showThinking: false, quiet: false },
+  chat: { showThinking: false },
+  mcp: { connectTimeoutMs: 60_000 },
+  subagent: { taskTimeoutMs: undefined, maxConcurrentWorkers: 15 },
+  workspaceRoot: undefined,
+  productRoot: undefined,
 };
 
 function hermeticOpts(
@@ -179,7 +186,7 @@ function hermeticOpts(
     sandboxRoot: "/tmp/sb",
     model: createStubModel({ responses: [] }),
     skillCatalog: createSkillCatalog([]),
-    system: () => undefined,
+    system: async () => undefined,
     trace: createNoopTraceService(),
     ...extra,
   } as Parameters<typeof createWorkerDeps>[0];

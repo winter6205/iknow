@@ -20,9 +20,8 @@ import {
   rmSync,
   existsSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { fileURLToPath } from "node:url";
 import { afterEach, describe, it } from "vitest";
 import assert from "node:assert/strict";
 
@@ -31,12 +30,6 @@ import {
   createQueryTraceCore,
   type QueryTraceCoreHandler,
 } from "../../src/traceserver/query-trace-core.ts";
-
-const FIXTURE_PATH = join(
-  dirname(fileURLToPath(import.meta.url)),
-  "_fixtures",
-  "full-mode-baseline.trace.jsonl"
-);
 
 const traceDirs: string[] = [];
 const TEST_PROJECT_SLUG = "test-project-blob-baseline";
@@ -126,7 +119,11 @@ describe("L-sc15 — same-content full-vs-blob projection deepEqual", () => {
       startedAt: "2026-09-08T00:00:00.000Z",
       endedAt: "2026-09-08T00:00:01.000Z",
       durationMs: 1000,
-      supplierStop: "tool_use",
+      // supplier_stop is the *supplier* stop verdict (success|truncation|
+      // refusal|other) — the old "tool_use" value is no longer in the domain.
+      // A live ok call records "success" (loop-engine fills it that way); the
+      // tool-use signal now lives in the separate tool_call record below.
+      supplierStop: "success",
       stream: false,
       messagesCaptured: true,
       messages: [systemMsg, userTextMsg],
@@ -135,7 +132,7 @@ describe("L-sc15 — same-content full-vs-blob projection deepEqual", () => {
       outputTokens: 30,
     });
     const tool1 = await trace.recordToolCall({
-      parentLlmCallId: llm1 ?? null,
+      parentLlmCallId: llm1,
       toolName: "bash",
       toolKind: "ok",
       startedAt: "2026-09-08T00:00:01.500Z",
@@ -252,7 +249,7 @@ describe("L-sc15 — same-content full-vs-blob projection deepEqual", () => {
     );
     assert.ok(!("last_assistant_preview" in llm1Row));
     assert.ok(!("tool_result_previews" in llm1Row));
-    assert.equal(llm1Row["supplier_stop"], "tool_use");
+    assert.equal(llm1Row["supplier_stop"], "success");
     assert.equal(llm1Row["status"], "ok");
 
     assert.equal(

@@ -207,7 +207,7 @@ describe("read_file T6: D9 — root + extraReadRoots share the same wave snapsho
     // the previous result is still A's "stable" — proof that handler
     // internal state does not leak (the second call uses the new root).
     await assert.rejects(
-      () => tool.handler({ path: "p.txt" }),
+      async () => tool.handler({ path: "p.txt" }),
       (error: unknown) =>
         error instanceof Error && error.message.includes("file not found")
     );
@@ -256,7 +256,7 @@ describe("read_file T6: same-vintage snapshot under the widened host reach", () 
 
     writeLiveTaskRoot(cell, rootB);
     await assert.rejects(
-      () => tool.handler({ path: join(outside, ".ssh", "id_rsa") }),
+      async () => tool.handler({ path: join(outside, ".ssh", "id_rsa") }),
       (error: unknown) =>
         error instanceof Error &&
         /protected-path roster/.test(error.message) &&
@@ -277,7 +277,7 @@ describe("read_file T6: same-vintage snapshot under the widened host reach", () 
     // containment roots of rootB — widening does not resurrect rootA's tree
     // under a relative name (same root+extras vintage as the D9 pins).
     await assert.rejects(
-      () => tool.handler({ path: "only-in-A.txt" }),
+      async () => tool.handler({ path: "only-in-A.txt" }),
       (error: unknown) =>
         error instanceof Error &&
         error.message.includes("file not found") &&

@@ -60,6 +60,8 @@ function egressSpec(): EgressFenceSpec {
       HTTPS_PROXY: "http://127.0.0.1:18080",
       NO_PROXY: "127.0.0.1,localhost",
     },
+    innerBridgeScript: "",
+    relayAssetsDir: "",
   };
 }
 

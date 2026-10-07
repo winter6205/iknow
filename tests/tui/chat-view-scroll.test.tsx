@@ -141,11 +141,7 @@ function Harness(props: HarnessProps): ReturnType<typeof ChatView> {
   );
 }
 
-function msg(
-  id: string,
-  role: "user" | "assistant",
-  text: string
-): AnthropicNativeMessage {
+function msg(role: "user" | "assistant", text: string): AnthropicNativeMessage {
   return { role, content: [{ type: "text", text }] };
 }
 
@@ -158,7 +154,7 @@ function makeMessages(n: number, offset = 0): AnthropicNativeMessage[] {
       role === "user"
         ? `msg-${String(k).padStart(3, "0")} 用户提问`
         : `reply-${String(k).padStart(3, "0")} 第一段\n\nreply-${String(k).padStart(3, "0")} 第二段\n\nreply-${String(k).padStart(3, "0")} 第三段`;
-    return msg(`m-${k}`, role, text);
+    return msg(role, text);
   });
 }
 
@@ -177,6 +173,9 @@ function sessionWith(
     turnCount: msgs.filter((m) => m.role === "assistant").length,
     updatedAt: "2026-08-10T00:00:00.000Z",
     jsonMode: false,
+    title: "test",
+    cwd: "/tmp",
+    sanitized_at: "2026-08-10T00:00:00.000Z",
     ...(thinkingMs !== undefined ? { thinkingMs } : {}),
   };
   return attachSession(file);
@@ -257,8 +256,10 @@ test("sticky 贴底：追加消息自动滚底（ref 直查 scrollTop === max）
   expect(handle.scrollbox!.scrollTop).toBe(0);
   // Append past one screen: stickyScroll auto-pins to bottom.
   for (const m of makeMessages(6, 2)) {
-    if (m.role === "user") api.appendUser(m.content[0]!.text);
-    else api.appendAssistant(m.content[0]!.text);
+    const first = m.content[0]!;
+    const text = first.type === "text" ? first.text : "";
+    if (m.role === "user") api.appendUser(text);
+    else api.appendAssistant(text);
     await setup.waitForVisualIdle();
   }
   const sb = handle.scrollbox!;
@@ -786,7 +787,7 @@ test("session 状态渲染：tool_use 摘要行 + statusMap 状态染色", async
   // settled its title line stays on screen (rendering consumes the slot only),
   // and it is not counted in the fold.
   const initial = sessionWith([
-    msg("m-1", "user", "帮我写一个文件"),
+    msg("user", "帮我写一个文件"),
     {
       role: "assistant",
       content: [
@@ -840,7 +841,7 @@ test("thinking 折叠态：无秒数不画 [思考]，展开时显示全文", as
   // consistency through ChatView — fold/expand is controlled by
   // setThinkingExpanded (ChatView accepts the thinkingExpanded prop here, default false).
   const initial = sessionWith([
-    msg("m-1", "user", "复杂问题"),
+    msg("user", "复杂问题"),
     {
       role: "assistant",
       content: [
@@ -873,7 +874,7 @@ test("thinking 留存：session.thinkingMs 末位索引传给末条 assistant �
   // SessionFileV1.thinkingMs); last assistant (index 1) thinkingMs = 4000ms.
   const initial = sessionWith(
     [
-      msg("m-1", "user", "复杂问题"),
+      msg("user", "复杂问题"),
       {
         role: "assistant",
         content: [
@@ -959,7 +960,7 @@ test("thinking 留存：session.thinkingMs 只在末位索引有值时渲染", a
   // in the old lastThinkingSeconds).
   const initial = sessionWith(
     [
-      msg("m-1", "user", "旧问题"),
+      msg("user", "旧问题"),
       {
         role: "assistant",
         content: [
@@ -967,7 +968,7 @@ test("thinking 留存：session.thinkingMs 只在末位索引有值时渲染", a
           { type: "text", text: "旧回答" },
         ],
       },
-      msg("m-2", "user", "新问题"),
+      msg("user", "新问题"),
       {
         role: "assistant",
         content: [
@@ -1002,7 +1003,7 @@ test("crunchedSeconds prop → 流末尾渲染 `Crunched for 3m 46s`", async () 
   // renders at the stream tail: a dim retention line after the last message
   // and before the live tail (formatRunDuration pure formatting).
   const initial = sessionWith([
-    msg("m-1", "user", "复杂问题"),
+    msg("user", "复杂问题"),
     {
       role: "assistant",
       content: [{ type: "text", text: "正式回答" }],
@@ -1069,7 +1070,7 @@ test("#589 ChatView tail：20 条 read_file ok + 1 running 不含完成读行", 
   const setup = await testRender(
     <ChatView
       session={{
-        ...sessionWith([msg("u", "user", "请读一批文件")]),
+        ...sessionWith([msg("user", "请读一批文件")]),
         runState: "running-fg",
       }}
       cols={80}
@@ -1127,7 +1128,6 @@ test("#589 ChatView tail：20 条 read_file ok + 1 failed grep + 1 running 不�
     kind: "tool_call_start",
     id: "cv-failed-grep",
     name: "grep",
-    input: { pattern: "GREP_FAIL_MARKER" },
   });
   runs = liveToolReduce(runs, {
     kind: "post_tool_use",
@@ -1145,7 +1145,7 @@ test("#589 ChatView tail：20 条 read_file ok + 1 failed grep + 1 running 不�
   const setup = await testRender(
     <ChatView
       session={{
-        ...sessionWith([msg("u", "user", "请读一批文件")]),
+        ...sessionWith([msg("user", "请读一批文件")]),
         runState: "running-fg",
       }}
       cols={80}
@@ -1173,7 +1173,7 @@ test("#589 ChatView tail：20 条 read_file ok + 1 failed grep + 1 running 不�
 
 test("running：流式草稿排在 live write 预览之前（代码块不得插到回复前面）", async () => {
   const session: TuiSessionState = {
-    ...sessionWith([msg("m-1", "user", "写个页面")]),
+    ...sessionWith([msg("user", "写个页面")]),
     runState: "running-fg",
   };
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
@@ -1217,7 +1217,7 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   // previously itemized tool area must not leave large blank space — at most
   // 1 line of message gap between the fold line and the final text.
   const finalMessages: AnthropicNativeMessage[] = [
-    msg("m-1", "user", "搜索今天的AI新闻"),
+    msg("user", "搜索今天的AI新闻"),
     {
       role: "assistant",
       content: [
@@ -1277,7 +1277,7 @@ test("running→idle 折叠：纯工具/纯 tool_result 消息不留幻影空位
   }
   function LifecycleHarness(props: { register: (api: LifecycleApi) => void }) {
     const [session, setSession] = useState<TuiSessionState>(() => ({
-      ...sessionWith([msg("m-1", "user", "搜索今天的AI新闻")]),
+      ...sessionWith([msg("user", "搜索今天的AI新闻")]),
       runState: "running-fg" as const,
     }));
     const [runs, setRuns] = useState<ReadonlyArray<LiveToolRun>>([
@@ -1382,7 +1382,7 @@ test("running：先于草稿的工具（无 draftEpoch 标记）显示在流式�
   // longer occupy the tail — this test uses a keep-class tool (bash) to
   // check insertion order around the draft.
   const session: TuiSessionState = {
-    ...sessionWith([msg("m-1", "user", "搜索今天的AI新闻")]),
+    ...sessionWith([msg("user", "搜索今天的AI新闻")]),
     runState: "running-fg",
   };
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
@@ -1425,7 +1425,7 @@ test("running：draftEpoch 混排 —— 草稿前工具在上、草稿后工具
   // tool's keep title is before the draft, the epoch-1 tool's keep title is
   // after it (never pushed above by the draft).
   const session: TuiSessionState = {
-    ...sessionWith([msg("m-1", "user", "搜索并写入")]),
+    ...sessionWith([msg("user", "搜索并写入")]),
     runState: "running-fg",
   };
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
@@ -1481,7 +1481,7 @@ test("running：第二段草稿画在后续工具之下（tool→text→tool→t
   // lands between the two drafts by draftEpoch (never pushed above by the
   // second draft).
   const session: TuiSessionState = {
-    ...sessionWith([msg("m-1", "user", "搜完再写")]),
+    ...sessionWith([msg("user", "搜完再写")]),
     runState: "running-fg",
   };
   const liveToolRuns: ReadonlyArray<LiveToolRun> = [
@@ -1543,7 +1543,7 @@ test("idle：当前 turn bash keep 标题逐条留，零条收无计数行", asy
   // text is its own line.
   const session = sessionWith(
     [
-      msg("m-1", "user", "写个页面"),
+      msg("user", "写个页面"),
       {
         role: "assistant",
         content: [

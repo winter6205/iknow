@@ -53,7 +53,8 @@ import { createStubModel } from "../../src/harness/stubs/stub-model.js";
 async function untilFrame(
   setup: TestRendererSetup,
   pred: (frame: string) => boolean,
-  ms = 8000
+  ms = 8000,
+  label = ""
 ): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < ms) {
@@ -62,7 +63,9 @@ async function untilFrame(
     const frame = setup.captureCharFrame();
     if (pred(frame)) return frame;
   }
-  throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
+  throw new Error(
+    `untilFrame timeout (${label}):\n${setup.captureCharFrame()}`
+  );
 }
 
 async function until(

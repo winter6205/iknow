@@ -155,7 +155,6 @@ describe("createPermissionExecutor — 5-step chain order", () => {
     const post: PostToolUseHook = (result) => {
       capturedMeta = result.meta;
     };
-    const { executor: inner } = makeInnerSpy();
     // inner returns an ok result carrying meta (mirrors the executor filling it from the handler envelope).
     const innerWithMeta: Executor = Object.freeze({
       executeAll: async (

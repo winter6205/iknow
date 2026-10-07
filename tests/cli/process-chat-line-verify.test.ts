@@ -35,7 +35,6 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -248,7 +247,14 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
         spawnedDefs.push({ task: def.task });
         return { taskId: "judge-1" };
       },
-      queryBuffer: () => ({ status: "completed" }),
+      // A completed worker reads back as its terminal envelope — queryBuffer's
+      // completed arm IS SubAgentEnvelope (there is no "completed" status).
+      queryBuffer: () =>
+        ({
+          status: "ok",
+          summary: "judge done",
+          result: "",
+        }) satisfies SubAgentEnvelope,
       waitFor: async () =>
         ({
           status: "ok",
@@ -266,6 +272,8 @@ describe("processChatLine — verify-loop 装配 (T8)", () => {
       // The interface gained read-only enumeration members — the fake completes them to stay structurally compatible.
       getCapacity: () => 15,
       listSubagents: () => [],
+      // Required by the interface; returns the unsubscribe seam and never fires.
+      subscribe: () => () => {},
     };
 
     const ctx = makeCtx({

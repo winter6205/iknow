@@ -166,20 +166,6 @@ describe("M3 worker 默认可见 — buildWorkerToolSurface 宽容裁剪", () =>
 // =========================================================================
 
 describe("M5 evidence-checker 零联动 — read_mcp_resource tool_use 形态不变", () => {
-  function makeBashToolUseMessage(command: string): AnthropicNativeMessage {
-    return {
-      role: "assistant",
-      content: [
-        {
-          type: "tool_use",
-          id: "toolu_bash_1",
-          name: "bash",
-          input: { command },
-        },
-      ],
-    };
-  }
-
   function makeReadMcpResourceToolUseMessage(
     server: string,
     uri: string
@@ -317,10 +303,13 @@ describe("M5 判官 allow-list 基线 — JUDGE_ALLOWED_TOOLS 字面 byte-identi
       env,
       sandboxRoot: "/tmp/judge-deny-guard",
       skillCatalog: {
-        available: () => [],
-        disabled: () => false,
+        search: () => [],
         get: () => undefined,
-        invalidate: () => undefined,
+        all: () => [],
+        available: () => [],
+        getBodyPath: () => undefined,
+        modelIndex: () => [],
+        loadable: () => [],
       },
       disallowedTools: [...JUDGE_DENY],
     });
@@ -358,12 +347,19 @@ function makeMinimalEnv() {
       maxOutputTokens: 1024,
       temperature: 0,
       stream: "off" as const,
-      thinking: { type: "disabled" as const },
+      thinking: "off" as const,
+      thinkingEffort: "" as const,
       maxTurns: undefined,
-      timeoutMs: undefined,
+      timeoutMs: 60_000,
     },
     web: { proxy: undefined, searchUrl: undefined },
     compress: { contextWindow: 200000, thresholdTokens: undefined },
-    chat: { showThinking: false, quiet: false },
+    chat: { showThinking: false },
+    mcp: { connectTimeoutMs: 60_000 },
+    subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to createWorkerDeps; the env side keeps
+    // its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }

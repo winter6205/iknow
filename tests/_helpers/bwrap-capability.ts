@@ -91,7 +91,7 @@ export function canRunBwrapFence(
     // ETIMEDOUT / EAGAIN / ENOMEM / anything else: the probe could not get a
     // verdict, so it must not report "cannot run".
     throw new Error(
-      `bwrap capability probe failed unexpectedly (${r.error.code ?? r.error.message}); ` +
+      `bwrap capability probe failed unexpectedly (${(r.error as NodeJS.ErrnoException).code ?? r.error.message}); ` +
         `this is an environment fault, not an absent sandbox capability.`
     );
   }

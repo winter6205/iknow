@@ -90,7 +90,7 @@ describe("createListMcpResourcesTool — normal path", () => {
     });
     const tool = createListMcpResourcesTool({ getManager: () => mgr });
 
-    const out = await tool.handler({}, undefined);
+    const out = String(await tool.handler({}, undefined));
 
     expect(capturedOpts).toEqual({ signal: undefined });
     const lines = out.split("\n");
@@ -189,7 +189,7 @@ describe("createListMcpResourcesTool — empty input", () => {
     }));
     const tool = createListMcpResourcesTool({ getManager: () => mgr });
 
-    const out = await tool.handler({}, undefined);
+    const out = String(await tool.handler({}, undefined));
     expect(out).toBe("(no resources)");
   });
 
@@ -203,7 +203,7 @@ describe("createListMcpResourcesTool — empty input", () => {
     }));
     const tool = createListMcpResourcesTool({ getManager: () => mgr });
 
-    const out = await tool.handler({}, undefined);
+    const out = String(await tool.handler({}, undefined));
     // perServer info survives: with zero resources the perServer status is still shown
     expect(out).toContain("--- perServer ---");
     expect(out).toContain("alpha");
@@ -225,7 +225,7 @@ describe("createListMcpResourcesTool — empty input", () => {
     }));
     const tool = createListMcpResourcesTool({ getManager: () => mgr });
 
-    const out = await tool.handler({}, undefined);
+    const out = String(await tool.handler({}, undefined));
     const firstLine = out.split("\n")[0]!;
     const parsed = JSON.parse(firstLine);
     expect(parsed).not.toHaveProperty("description");
@@ -332,7 +332,7 @@ describe("createListMcpResourcesTool — overflow / boundaries", () => {
       ],
     }));
     const tool = createListMcpResourcesTool({ getManager: () => mgr });
-    const out = await tool.handler({}, undefined);
+    const out = String(await tool.handler({}, undefined));
     const all = out.split("\n");
     const idx = all.indexOf("--- perServer ---");
     expect(idx).toBe(501); // 500 resource lines + empty-line separator at idx 500

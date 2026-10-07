@@ -12,6 +12,7 @@
  *     use the injectable `exec` seam; skip cleanly if neither git nor the
  *     seam can produce data.
  */
+import assert from "node:assert/strict";
 import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -75,8 +76,8 @@ describe("createGitSnapshotProvider — provider shape", () => {
     if (!gitOnPath()) return; // skip — tests below need git
     const provider = createGitSnapshotProvider({ cwd: repoDir });
     const snap = provider();
-    expect(snap).toBeDefined();
-    expect(snap!.branch).toBe("master"); // default branch on this git version
+    assert.ok(snap !== undefined, "a git repo yields a snapshot");
+    expect(snap.branch).toBe("master"); // default branch on this git version
     expect(snap.recentCommits.length).toBeGreaterThan(0);
   });
 

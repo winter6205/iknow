@@ -143,7 +143,11 @@ describe("todo_write per-conversation isolation (handler reads ctx.conversationI
     assert.match(a, /- \[x\] \[t1\] task x/);
     // conv-b never saw the item → the same id is unknown there: typed error.
     await assert.rejects(
-      tool.handler({ mode: "update", id, status: "completed" }, { ...CALL_B }),
+      async () =>
+        tool.handler(
+          { mode: "update", id, status: "completed" },
+          { ...CALL_B }
+        ),
       /unknown id/
     );
   });

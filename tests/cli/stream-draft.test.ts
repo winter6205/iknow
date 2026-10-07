@@ -1,7 +1,6 @@
 import { describe, it, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import { createStreamDraft } from "../../src/cli/stream-draft.js";
-import type { HarnessStreamEvent } from "../../src/harness/stream.js";
 
 /**
  * Unit tests for the stream-draft shared layer.

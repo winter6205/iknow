@@ -61,6 +61,10 @@ function makeEnv(apiKey: string): IknowEnv {
     mcp: { connectTimeoutMs: 60_000 },
     // subagent config arm (build-engine reads taskTimeoutMs).
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env
+    // side keeps its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

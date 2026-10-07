@@ -81,14 +81,16 @@ interface ForegroundRig {
 
 function makeSessionFile(dataDir: string): SessionFileV1 {
   return {
-    id: CONVERSATION_ID,
+    schemaVersion: 1,
+    conversation_id: CONVERSATION_ID,
     workspaceRoot: dataDir,
     messages: [],
-    createdAt: "2026-09-17T00:00:00.000Z",
     updatedAt: "2026-09-17T00:00:00.000Z",
     turnCount: 0,
     jsonMode: false,
-    lastUsage: null,
+    title: CONVERSATION_ID,
+    cwd: dataDir,
+    sanitized_at: "2026-09-17T00:00:00.000Z",
   };
 }
 
@@ -134,9 +136,11 @@ async function mountApp(opts: MountOptions): Promise<ForegroundRig> {
     },
     rewindSession: async () => ({ file }),
     listRewindTargets: async () => [],
+    openSession: async () => {
+      throw new Error("unused: no session is opened here");
+    },
     inflight: createInflightRegistry(),
     contextWindow: 200_000,
-    getCapacity: () => 15,
     listSubagents: () => opts.subagents ?? [],
     abortSubagentTask: () => true,
     abortSessionForegroundWork: (conversationId) => {
@@ -146,6 +150,7 @@ async function mountApp(opts: MountOptions): Promise<ForegroundRig> {
     subscribeSubagentTerminal: () => () => undefined,
     wakeFromSubagent: async (conversationId) => {
       wakeCalls.push(conversationId);
+      return undefined;
     },
   };
   const stderr = captureStderr();

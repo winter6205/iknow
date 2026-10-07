@@ -120,7 +120,7 @@ describe("formatNodeError — typed-error catch 契约", () => {
     // condensed result on the handler path.
     settle(
       children[0]!,
-      fail("canned") // plain envelope error
+      fail("crashed") // plain envelope error
     );
     const out = parse(await pending);
     expect(out.nodes[0]).toMatchObject({ id: "z", status: "failed" });

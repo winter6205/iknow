@@ -501,9 +501,13 @@ describe("subagentCardLinesMap — 逐卡 map（key = toolUseId）", () => {
         inFlightTool: "read_file",
       }),
     ];
-    expect(subagentCardLinesMap(subs, 30).get("toolu_src")).toEqual(
-      projectSubagentCardLines(subs, "toolu_src", 30)
-    );
+    const projected = projectSubagentCardLines(subs, "toolu_src", 30);
+    // Guard, not a cast: the single-card projection returns `null` on a miss
+    // while Map#get returns `undefined`, so the pair must be pinned explicitly
+    // before the two shapes can be compared.
+    if (projected === null)
+      throw new Error("expected a projected card line pair");
+    expect(subagentCardLinesMap(subs, 30).get("toolu_src")).toEqual(projected);
   });
 
   test("exception：非法 startedAt / 缺终态字段不影响判定", () => {

@@ -1,0 +1,31 @@
+{
+  // tests/tui/ runs under `bun test`, not vitest — see the D2 ruling in
+  // vitest.config.ts (`exclude: ["tests/tui/**"]`) and the `test` script in
+  // package.json. Its files import `"bun:test"`, a virtual module the bun
+  // runtime provides; its types come from the separate `bun-types` package.
+  //
+  // bun-types declares global overrides (notably
+  // `interface ProcessEnv extends Bun.Env {}` in overrides.d.ts, and a
+  // bun-specific `fetch.preconnect`). Loading them into the whole test program
+  // leaked bun's globals over src/** and over the vitest suites, producing
+  // errors in code that never runs under bun — e.g. TS2559 on
+  // `process.env` vs `TraceMcpEnvironment` in src/trace-mcp/. Scoping the
+  // types to the only program that actually runs under bun keeps both honest.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "allowImportingTsExtensions": true,
+    "types": ["node", "bun-types"]
+  },
+  // Only the TUI slice is listed. src/** is reached transitively through the
+  // tests' own imports, so this program typechecks what tests/tui actually
+  // exercises. Blanket-including src/**/*.ts would drag unrelated modules
+  // (e.g. src/trace-mcp/) in under bun's globals and re-create the exact
+  // cross-program contamination this split exists to prevent.
+  "include": ["tests/tui/**/*.ts", "tests/tui/**/*.tsx"],
+  "exclude": ["node_modules", "dist", "archive", "web"]
+}

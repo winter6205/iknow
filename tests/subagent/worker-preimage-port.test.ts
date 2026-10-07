@@ -68,7 +68,7 @@ function hermeticOpts(
     userHome,
     model: createStubModel({ responses: [] }),
     skillCatalog: createSkillCatalog([]),
-    system: () => undefined,
+    system: async () => undefined,
     trace: createNoopTraceService(),
     ...extra,
   };
@@ -127,12 +127,12 @@ describe("worker registry ← preimageCapture port (Gate B, harness side)", () =
     const tool = deps.registry.get("write_file");
     assert.ok(tool);
     await assert.rejects(
-      () =>
+      async () =>
         tool!.handler({ path: "protected.ts", content: "OVERWRITE\n" }, ctx),
       /capture refused/
     );
     await assert.rejects(
-      () => stat(join(root, "protected.ts")),
+      async () => stat(join(root, "protected.ts")),
       (err: unknown) => (err as NodeJS.ErrnoException).code === "ENOENT"
     );
   });

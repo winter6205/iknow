@@ -84,7 +84,7 @@ afterAll(() => {
 function readerFor(mode: () => FsIsolationMode): FsBoundaryReader {
   return (target) => {
     const snapshot = fsBoundarySnapshot(
-      { tmpDir: () => pad, mode: mode() },
+      { tmpRoot: () => pad, mode: mode() },
       { workspaceRoot: taskRoot, tmpRoot: pad }
     );
     if (!fsBoundaryIsActive(snapshot)) return true;

@@ -35,8 +35,10 @@ import { pathToFileURL } from "node:url";
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
 
 const { mockGetClient, mockGetClientDetailed } = vi.hoisted(() => ({
-  mockGetClient: vi.fn<() => Promise<unknown>>(),
-  mockGetClientDetailed: vi.fn<() => Promise<unknown>>(),
+  // Rest-arg signatures: the real getClient takes options, and the assertions
+  // below read the recorded call args, so the mock must accept them.
+  mockGetClient: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
+  mockGetClientDetailed: vi.fn<(...args: unknown[]) => Promise<unknown>>(),
 }));
 
 // The dynamic imports must run after the mock is installed (as in client.test.ts).
@@ -78,7 +80,6 @@ import {
 } from "../../../src/harness/aci/tools/symbol-mutate.ts";
 import { classifyProbeResult } from "../../../scripts/lsp-probe.ts";
 import type { AciToolDef } from "../../../src/harness/aci/types.ts";
-import { ToolExecutionError } from "../../../src/harness/errors.ts";
 
 function makeFakeClient(
   responder: (method: string, params: unknown) => unknown,
@@ -562,9 +563,11 @@ describe("lsp_diagnostics", () => {
     ).getDiagnosticsEntry = () => ({ items });
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
-    const out = await byName(tools, "lsp_diagnostics").handler({
-      file: "/work/src/a.ts",
-    });
+    const out = String(
+      await byName(tools, "lsp_diagnostics").handler({
+        file: "/work/src/a.ts",
+      })
+    );
     expect(out).toContain("...(");
     expect(out).toContain("total 25");
     const shownCount = (out.match(/^error/gm) ?? []).length;
@@ -664,7 +667,11 @@ describe("handler cancel token wiring", () => {
         _file: string,
         fn: () => Promise<T>
       ): Promise<T> => fn(),
-      sendRequest: async (method: string, params: unknown, token?: unknown) => {
+      sendRequest: async (
+        method: string,
+        _params: unknown,
+        token?: unknown
+      ) => {
         gotMethod.push(method);
         sentArgs.push(token);
         return [];
@@ -768,9 +775,11 @@ describe("lsp_diagnostics cap at exactly 20 (overflow)", () => {
     ).getDiagnosticsEntry = () => ({ items });
     mockGetClient.mockResolvedValue(client);
     const tools = createLspToolSet(ctx);
-    const out = await byName(tools, "lsp_diagnostics").handler({
-      file: "/work/src/a.ts",
-    });
+    const out = String(
+      await byName(tools, "lsp_diagnostics").handler({
+        file: "/work/src/a.ts",
+      })
+    );
     const shown = (out.match(/^error/gm) ?? []).length;
     expect(shown).toBe(20); // capped at 20 entries
     expect(out).toContain("total 30");
@@ -2929,7 +2938,8 @@ describe("read policy on document open — concurrent calls on one shared client
     mockGetClient.mockResolvedValue(client);
     const tools = createSymbolQueryToolSetForTest();
     const overview = byName(tools, "get_symbols_overview");
-    const call = (file: string): Promise<unknown> => overview.handler({ file });
+    const call = (file: string): Promise<unknown> =>
+      Promise.resolve(overview.handler({ file }));
 
     // Single-threaded baselines first.
     const seqOrdinary = await call(ordinaryA);
@@ -2982,7 +2992,8 @@ describe("read policy on document open — concurrent calls on one shared client
     mockGetClient.mockResolvedValue(client);
     const tools = createSymbolQueryToolSet({ ...ctx, directory: work });
     const overview = byName(tools, "get_symbols_overview");
-    const call = (file: string): Promise<unknown> => overview.handler({ file });
+    const call = (file: string): Promise<unknown> =>
+      Promise.resolve(overview.handler({ file }));
 
     const seqIn = await call(inRoot);
     const seqOut = await call(outsideOrdinary);

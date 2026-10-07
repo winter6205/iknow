@@ -423,7 +423,7 @@ describe("axis2 skeptic findings — regression guards", () => {
     const cwd = "/tmp";
     const tool = createBashTool(cwd);
     await assert.rejects(
-      tool.handler({ command: "echo a >> /etc/shadow" }),
+      async () => tool.handler({ command: "echo a >> /etc/shadow" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("sensitive path")

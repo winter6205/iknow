@@ -87,7 +87,11 @@ function fakeBridge(): TuiBridge {
     },
     listSessions: async () => [],
     loadSessionFile: async () => file,
-    compactSession: async () => ({ compacted: false }),
+    compactSession: async () => ({
+      compacted: false,
+      // stub never compacts: the no-compaction arm of CompactReason.
+      reason: "below_token_threshold" as const,
+    }),
     continueSession: async () => {
       throw new Error("continueSession unused in degrade-notice tests");
     },
@@ -95,9 +99,14 @@ function fakeBridge(): TuiBridge {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
-    getCapacity: () => 15,
     listSubagents: () => [],
     abortSessionForegroundWork: () => [],
+    abortSubagentTask: () => false,
+    openSession: async () => {
+      throw new Error("unused: no session is opened here");
+    },
+    subscribeSubagentTerminal: () => () => undefined,
+    wakeFromSubagent: async () => undefined,
   };
 }
 

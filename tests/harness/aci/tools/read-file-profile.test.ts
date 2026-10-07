@@ -124,7 +124,7 @@ describe("read_file — ~/.iknow profile read allowed by default (isolated HOME)
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: join(outside, "id_rsa") }),
+      async () => tool.handler({ path: join(outside, "id_rsa") }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /protected-path roster/.test(error.message) &&

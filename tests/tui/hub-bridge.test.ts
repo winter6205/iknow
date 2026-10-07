@@ -1303,11 +1303,15 @@ describe("hub-bridge openSession 扫本会话 worker（ADR-0136 §4 / SC16-17）
     const { recovery } = await open(id);
 
     expect(recovery.status).toEqual({ status: "recovered" });
-    expect(recovery.operationFacts?.workers[0]?.needsHandling).toBe(false);
-    expect(recovery.operationFacts?.workers[0]?.stopEvidence).toEqual({
-      state: "confirmed_stopped",
-      pid: recovery.operationFacts?.workers[0]?.process?.pid,
-    });
+    const worker = recovery.operationFacts?.workers[0];
+    expect(worker?.needsHandling).toBe(false);
+    const pid = worker?.process?.pid;
+    // Guard, not a cast: `confirmed_stopped` evidence always carries a pid, so
+    // a missing worker/pid must fail loudly rather than compare `undefined`.
+    if (worker === undefined || pid === undefined) {
+      throw new Error("expected a swept worker carrying a process pid");
+    }
+    expect(worker.stopEvidence).toEqual({ state: "confirmed_stopped", pid });
   });
 
   test("扫不到的 worker → 报告 needs handling，绝不谎称已停", async () => {

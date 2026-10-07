@@ -42,6 +42,7 @@ import {
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { FINAL_TEXT_PAD_NAME } from "../../src/harness/subagent/envelope.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
+import type { AciToolDef } from "../../src/harness/aci/types.ts";
 import { workerFenceTmpPath } from "../../src/harness/sandbox/fence-tmp.ts";
 
 /** fake manager: queryBuffer maps taskId to one of four states; other members are stubs. */
@@ -100,7 +101,25 @@ function makeFakeManager(): SubAgentManager {
     // interface gained a read-only enumeration surface — fake fills it in for structural compatibility.
     getCapacity: () => 15,
     listSubagents: () => [],
+    // T3 terminal-notification subscription: this fake registers no subscriber.
+    subscribe: () => () => {},
   };
+}
+
+/**
+ * `ToolHandler` is typed `unknown` (a handler may return any JSON value), but
+ * subagent_result always serializes to a JSON string. Narrow at the call site
+ * with a runtime guard instead of a cast, so a future shape change fails the
+ * test rather than silently type-checking.
+ */
+function pollJson(tool: AciToolDef, input: unknown): string {
+  const out = tool.handler(input);
+  if (typeof out !== "string") {
+    throw new Error(
+      `subagent_result handler returned ${typeof out}, expected a JSON string`
+    );
+  }
+  return out;
 }
 
 describe("subagent_result — 正常路径", () => {
@@ -118,8 +137,10 @@ describe("subagent_result — 正常路径", () => {
 
   it("completed → JSON 含 status:'ok' + summary + result,fileRefs/usage 透传", () => {
     const tool = createSubAgentResultTool({ manager: makeFakeManager() });
-    const out = tool.handler({ task_id: "ok" });
-    const parsed = JSON.parse(out) as Record<string, unknown>;
+    const parsed = JSON.parse(pollJson(tool, { task_id: "ok" })) as Record<
+      string,
+      unknown
+    >;
     expect(parsed.status).toBe("ok");
     expect(parsed.summary).toBe("found the answer");
     expect(parsed.result).not.toBe("42");
@@ -144,7 +165,7 @@ describe("subagent_result — 正常路径", () => {
   it("failed maxTurnsExceeded → reason 一致", () => {
     const tool = createSubAgentResultTool({ manager: makeFakeManager() });
     const parsed = JSON.parse(
-      tool.handler({ task_id: "maxTurnsExceeded" })
+      pollJson(tool, { task_id: "maxTurnsExceeded" })
     ) as Record<string, unknown>;
     expect(parsed.status).toBe("failed");
     expect(parsed.reason).toBe("maxTurnsExceeded");
@@ -153,7 +174,7 @@ describe("subagent_result — 正常路径", () => {
 
   it("failed timeout → reason 一致", () => {
     const tool = createSubAgentResultTool({ manager: makeFakeManager() });
-    const parsed = JSON.parse(tool.handler({ task_id: "timeout" })) as Record<
+    const parsed = JSON.parse(pollJson(tool, { task_id: "timeout" })) as Record<
       string,
       unknown
     >;
@@ -165,7 +186,7 @@ describe("subagent_result — 正常路径", () => {
   it("failed protocolError → reason 一致", () => {
     const tool = createSubAgentResultTool({ manager: makeFakeManager() });
     const parsed = JSON.parse(
-      tool.handler({ task_id: "protocolError" })
+      pollJson(tool, { task_id: "protocolError" })
     ) as Record<string, unknown>;
     expect(parsed.status).toBe("failed");
     expect(parsed.reason).toBe("protocolError");
@@ -335,7 +356,7 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
     // host-written final.md; the invariant stays "valid task_id + no worker artifact
     // → not an error", with the name list derived from the SSOT constant, no hardcoded literal.
     const { tool, taskId } = await spawnSettled();
-    const parsed = JSON.parse(tool.handler({ task_id: taskId })) as {
+    const parsed = JSON.parse(pollJson(tool, { task_id: taskId })) as {
       status: string;
       tmp_names?: unknown;
     };
@@ -349,7 +370,7 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
       name: "z",
       body: "worker-pad-body",
     });
-    const parsed = JSON.parse(tool.handler({ task_id: taskId })) as {
+    const parsed = JSON.parse(pollJson(tool, { task_id: taskId })) as {
       tmp_names?: string[];
     };
     expect(parsed.tmp_names).toContain("z");
@@ -361,7 +382,7 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
       body: "worker-pad-body\n",
     });
     const parsed = JSON.parse(
-      tool.handler({ task_id: taskId, tmp_path: "z" })
+      pollJson(tool, { task_id: taskId, tmp_path: "z" })
     ) as { status: string; content?: string; truncated?: boolean };
     expect(parsed.status).toBe("ok");
     expect(parsed.content).toMatch(/worker-pad-body/);
@@ -387,7 +408,7 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
       body: "inside",
     });
     const escaped = JSON.parse(
-      tool.handler({ task_id: taskId, tmp_path: "../secret.txt" })
+      pollJson(tool, { task_id: taskId, tmp_path: "../secret.txt" })
     ) as { status: string; reason?: string; content?: string };
     expect(escaped.status).toBe("rejected");
     expect(escaped.reason).toBe("path_escape");
@@ -395,13 +416,13 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
     expect(readFileSync(secret, "utf8")).toBe("SESSION-SECRET");
 
     const dotted = JSON.parse(
-      tool.handler({ task_id: taskId, tmp_path: "z/../../secret.txt" })
+      pollJson(tool, { task_id: taskId, tmp_path: "z/../../secret.txt" })
     ) as { status: string; reason?: string };
     expect(dotted.status).toBe("rejected");
     expect(dotted.reason).toBe("path_escape");
 
     const abs = JSON.parse(
-      tool.handler({ task_id: taskId, tmp_path: secret })
+      pollJson(tool, { task_id: taskId, tmp_path: secret })
     ) as { status: string; reason?: string };
     expect(abs.status).toBe("rejected");
     expect(abs.reason).toBe("path_escape");
@@ -416,7 +437,7 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
       body: `${lines.join("\n")}\n`,
     });
     const parsed = JSON.parse(
-      tool.handler({ task_id: taskId, tmp_path: "big.txt" })
+      pollJson(tool, { task_id: taskId, tmp_path: "big.txt" })
     ) as { content?: string; truncated?: boolean };
     expect(parsed.truncated).toBe(true);
     expect(parsed.content).toMatch(/L200/);

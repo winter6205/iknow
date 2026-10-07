@@ -47,11 +47,12 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
+  LoopAdapter,
   LoopEngineDeps,
   LoopState,
-  ModelAdapter,
 } from "../../src/harness/index.js";
 import type { ToolExecutionResult } from "../../src/harness/tools/types.js";
+import { toAnthropicToolResults } from "../../src/harness/tools/tool-result.js";
 import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
 import { createStreamDraft } from "../../src/cli/stream-draft.js";
 
@@ -75,7 +76,7 @@ function abortableDelay(ms: number, signal?: AbortSignal): Promise<void> {
 }
 
 /** Assemble LoopEngineDeps with an inline adapter + a noop tool (consumed by createTuiBridge). */
-function buildToolDeps(adapter: ModelAdapter): LoopEngineDeps {
+function buildToolDeps(adapter: LoopAdapter): LoopEngineDeps {
   const tool = createStubTool({ name: "noop", next: () => ({}) });
   const registry = createRegistry([tool]);
   const executor = createExecutor(registry);
@@ -85,7 +86,8 @@ function buildToolDeps(adapter: ModelAdapter): LoopEngineDeps {
 async function untilFrame(
   setup: TestRendererSetup,
   pred: (frame: string) => boolean,
-  ms = 8000
+  ms = 8000,
+  label = ""
 ): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < ms) {
@@ -94,7 +96,9 @@ async function untilFrame(
     const frame = setup.captureCharFrame();
     if (pred(frame)) return frame;
   }
-  throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
+  throw new Error(
+    `untilFrame timeout (${label}):\n${setup.captureCharFrame()}`
+  );
 }
 
 async function until(
@@ -254,7 +258,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     // Inline adapter: emit thinking_delta, then await 3000ms before returning →
     // ≥1s elapses after thinkingStartedAt, so thinkingSeconds() > 0 at the
     // finally snapshot.
-    const thinkingAdapter: ModelAdapter = {
+    const thinkingAdapter: LoopAdapter = {
       async step(
         _state: LoopState,
         request: { onStream?: (e: HarnessStreamEvent) => void },
@@ -287,12 +291,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       encodeToolResults(
         results: ReadonlyArray<ToolExecutionResult>
       ): AnthropicContentBlock[] {
-        return results.map((r) => ({
-          type: "tool_result",
-          tool_use_id: r.toolUseId,
-          content: r.output,
-          is_error: r.isError,
-        }));
+        return toAnthropicToolResults(results);
       },
     };
     const app = await mountAppAsync(
@@ -330,7 +329,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     // turn ≈ 1 (pure thinking, excluding the 2.6s wait; the old turn-start
     // stamping would give ≥4). The 1500ms window is wider than the 1000ms floor
     // boundary for slack against CI clock jitter.
-    const thinkingAdapter: ModelAdapter = {
+    const thinkingAdapter: LoopAdapter = {
       async step(
         _state: LoopState,
         request: { onStream?: (e: HarnessStreamEvent) => void },
@@ -366,12 +365,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       encodeToolResults(
         results: ReadonlyArray<ToolExecutionResult>
       ): AnthropicContentBlock[] {
-        return results.map((r) => ({
-          type: "tool_result",
-          tool_use_id: r.toolUseId,
-          content: r.output,
-          is_error: r.isError,
-        }));
+        return toAnthropicToolResults(results);
       },
     };
     const app = await mountAppAsync(
@@ -421,7 +415,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     // running window is too short to catch. The inline adapter here awaits
     // 3000ms after tool_call_start before returning, manufacturing a stable
     // "tool running, turn unfinished" window.
-    const toolAdapter: ModelAdapter = {
+    const toolAdapter: LoopAdapter = {
       async step(
         _state: LoopState,
         request: { onStream?: (e: HarnessStreamEvent) => void },
@@ -448,12 +442,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       encodeToolResults(
         results: ReadonlyArray<ToolExecutionResult>
       ): AnthropicContentBlock[] {
-        return results.map((r) => ({
-          type: "tool_result",
-          tool_use_id: r.toolUseId,
-          content: r.output,
-          is_error: r.isError,
-        }));
+        return toAnthropicToolResults(results);
       },
     };
     const app = await mountAppAsync(
@@ -492,7 +481,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     // Inline adapter: emit tool_call_start + tool_input_delta×N, then await
     // 3000ms before returning → the partial digest should appear within the
     // stable "tool running, turn unfinished" window.
-    const toolAdapter: ModelAdapter = {
+    const toolAdapter: LoopAdapter = {
       async step(
         _state: LoopState,
         request: { onStream?: (e: HarnessStreamEvent) => void },
@@ -529,12 +518,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       encodeToolResults(
         results: ReadonlyArray<ToolExecutionResult>
       ): AnthropicContentBlock[] {
-        return results.map((r) => ({
-          type: "tool_result",
-          tool_use_id: r.toolUseId,
-          content: r.output,
-          is_error: r.isError,
-        }));
+        return toAnthropicToolResults(results);
       },
     };
     const app = await mountAppAsync(
@@ -575,7 +559,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     // checks both routes:
     //  (a) web_search enters the unanchored block (block title + preview slot `web_search · Search ?`);
     //  (b) keep bash's process line and the draft segment share epoch order (tool first, then draft).
-    const toolAdapter: ModelAdapter = {
+    const toolAdapter: LoopAdapter = {
       async step(
         _state: LoopState,
         request: { onStream?: (e: HarnessStreamEvent) => void },
@@ -607,12 +591,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       encodeToolResults(
         results: ReadonlyArray<ToolExecutionResult>
       ): AnthropicContentBlock[] {
-        return results.map((r) => ({
-          type: "tool_result",
-          tool_use_id: r.toolUseId,
-          content: r.output,
-          is_error: r.isError,
-        }));
+        return toAnthropicToolResults(results);
       },
     };
     const app = await mountAppAsync(
@@ -664,7 +643,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
     // epoch 0 puts it in the same epoch as the first segment — the tools-first
     // path). This test uses the default epoch (late bash stays epoch 0) and
     // asserts the tail order is stable within the tail.
-    const toolAdapter: ModelAdapter = {
+    const toolAdapter: LoopAdapter = {
       async step(
         _state: LoopState,
         request: { onStream?: (e: HarnessStreamEvent) => void },
@@ -697,12 +676,7 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
       encodeToolResults(
         results: ReadonlyArray<ToolExecutionResult>
       ): AnthropicContentBlock[] {
-        return results.map((r) => ({
-          type: "tool_result",
-          tool_use_id: r.toolUseId,
-          content: r.output,
-          is_error: r.isError,
-        }));
+        return toAnthropicToolResults(results);
       },
     };
     const app = await mountAppAsync(

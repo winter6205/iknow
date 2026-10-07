@@ -93,7 +93,7 @@ describe("git work — worker does not inject the parent discipline", () => {
 
   it("explore bash git commit is typed-rejected", async () => {
     const deps = await createWorkerDeps(
-      hermeticOpts({ system: () => undefined, role: "explore" })
+      hermeticOpts({ system: async () => undefined, role: "explore" })
     );
     const bash = deps.registry.get("bash");
     expect(bash).toBeDefined();
@@ -104,7 +104,7 @@ describe("git work — worker does not inject the parent discipline", () => {
 
   it("explore bash git push is typed-rejected", async () => {
     const deps = await createWorkerDeps(
-      hermeticOpts({ system: () => undefined, role: "explore" })
+      hermeticOpts({ system: async () => undefined, role: "explore" })
     );
     const bash = deps.registry.get("bash");
     expect(bash).toBeDefined();
@@ -115,10 +115,12 @@ describe("git work — worker does not inject the parent discipline", () => {
 
   it("worker registry has no create-worktree (inner + promptTools)", async () => {
     const deps = await createWorkerDeps(
-      hermeticOpts({ system: () => undefined })
+      hermeticOpts({ system: async () => undefined })
     );
     const inner = deps.registry.list().map((t) => t.name);
-    const prompt = deps.promptTools().map((t) => t.name);
+    const { promptTools } = deps;
+    expect(promptTools).toBeDefined();
+    const prompt = promptTools!().map((t) => t.name);
     for (const name of WORKTREE_TOOLS) {
       expect(inner).not.toContain(name);
       expect(prompt).not.toContain(name);

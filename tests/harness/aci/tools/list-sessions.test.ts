@@ -194,7 +194,7 @@ describe("list_sessions ACI tool", () => {
     const tool = createListSessionsTool(makeTraceDir());
 
     await assert.rejects(
-      () => tool.handler({ limit: 0 }),
+      async () => tool.handler({ limit: 0 }),
       (error: unknown) =>
         error instanceof ListSessionsValidationError &&
         error instanceof ToolExecutionError &&
@@ -216,7 +216,7 @@ describe("list_sessions ACI tool", () => {
     const tool = createListSessionsTool({ traceDir: asFile });
 
     await assert.rejects(
-      () => tool.handler({}),
+      async () => tool.handler({}),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         !(error instanceof ListSessionsValidationError) &&

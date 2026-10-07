@@ -151,22 +151,27 @@ describe("interactive chat subagent wake", () => {
     ]);
     let stepCalls = 0;
     const baseAdapter = deps.adapter;
-    deps.adapter = {
-      ...baseAdapter,
-      step: async () => {
-        stepCalls += 1;
-        if (stepCalls === 1) {
-          firstStepStarted.resolve();
-          return releaseFirstStep.promise;
-        }
-        return assistantResult("silent wake answer");
+    // LoopEngineDeps.adapter is readonly; the wrapped adapter is a new deps
+    // object handed to runChatSession below, not a mutation of `deps`.
+    const wakeDeps = {
+      ...deps,
+      adapter: {
+        ...baseAdapter,
+        step: async () => {
+          stepCalls += 1;
+          if (stepCalls === 1) {
+            firstStepStarted.resolve();
+            return releaseFirstStep.promise;
+          }
+          return assistantResult("silent wake answer");
+        },
       },
     };
 
     const { runChatSession } = await import("../../src/cli/chat-session.ts");
     const conversationId = randomUUID();
     const sessionPromise = runChatSession({
-      deps,
+      deps: wakeDeps,
       session: {},
       jsonMode: false,
       subagentManager: managerFixture.manager,

@@ -141,6 +141,8 @@ function makeFakeManager() {
     // Test fake without holder → falls back to manager.getCapacity(); static 15
     // here shares its source with DEFAULT, keeping description assertions aligned.
     getCapacity: () => DEFAULT_SUBAGENT_MAX_CONCURRENT_WORKERS,
+    // T3 terminal-notification subscription: this fake registers no subscriber.
+    subscribe: () => () => {},
   };
   return { manager, spawn, waitFor };
 }
@@ -1060,8 +1062,9 @@ describe("spawn_subagent — capacity reject reaches the model as a typed tool e
     });
     const tool = createSpawnSubAgentTool({ manager });
 
-    const error: unknown = await tool
-      .handler({ title: "sample title", task: "t", wait: false })
+    const error: unknown = await Promise.resolve(
+      tool.handler({ title: "sample title", task: "t", wait: false })
+    )
       .then(() => undefined)
       .catch((err: unknown) => err);
     expect(error).toBeInstanceOf(ToolExecutionError);

@@ -26,7 +26,6 @@ import {
 } from "../../src/tui/mcp-view.js";
 import { tuiPalette } from "../../src/tui/theme.js";
 import type { McpServerStatus } from "../../src/harness/mcp/manager.js";
-import type { AciToolDef } from "../../src/harness/aci/types.js";
 
 /** Polling frame waiter (mockInput bytes parse asynchronously through stdin; same as the list-view tests). */
 async function untilFrame(
@@ -64,8 +63,17 @@ function makeTool(
       name: `mcp__${server}__${toolName}`,
       description,
       inputSchema: { type: "object", properties: {} },
+      // Mirrors toAciToolDef (src/harness/mcp/adapter.ts): MCP tools are
+      // lazy, not concurrency-safe, write-category.
+      aci: {
+        category: "write" as const,
+        lazy: true,
+        isConcurrencySafe: false,
+        interruptBehavior: "cancel" as const,
+        timeoutTier: "long" as const,
+      },
       handler: async () => "ok",
-    }) as AciToolDef,
+    }),
   };
 }
 
@@ -288,7 +296,6 @@ test("详情：工具超视口末尾 `… N more tools` 提示行", async () => 
   await setup.renderer.destroy();
 });
 
-
 test("列表行：#378 failed + error 渲染 error 首行（connect timeout 可见）", async () => {
   const setup = await renderMcp({
     statuses: [makeStatus("db", "failed", "user", "connect timeout")],
@@ -331,7 +338,14 @@ test("列表行：#378 connected / pending / disabled → 不显 error 区", asy
 
 test("详情：#378 failed + error 多行按 \n 拆行渲染", async () => {
   const setup = await renderMcp({
-    statuses: [makeStatus("db", "failed", "user", "connect timeout\nconnection closed by server")],
+    statuses: [
+      makeStatus(
+        "db",
+        "failed",
+        "user",
+        "connect timeout\nconnection closed by server"
+      ),
+    ],
     tools: [],
   });
   await setup.renderOnce();
@@ -349,8 +363,9 @@ test("详情：#378 connected → 无 error 区", async () => {
   });
   await setup.renderOnce();
   setup.mockInput.pressEnter();
-  const frame = await untilFrame(setup, (f) => f.includes("fileserver · connected"));
+  const frame = await untilFrame(setup, (f) =>
+    f.includes("fileserver · connected")
+  );
   expect(frame).not.toContain("stale error");
   await setup.renderer.destroy();
 });
-

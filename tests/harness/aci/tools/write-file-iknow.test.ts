@@ -46,7 +46,7 @@ describe("write_file — ~/.iknow stays cwd-scoped (regression guard)", () => {
     const tool = createWriteFileTool(root);
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           path: target,
           content: "tampered\n",

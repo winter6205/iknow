@@ -63,7 +63,6 @@ vi.mock("../../src/harness/sandbox/runner.js", async (importOriginal) => {
 
 let baseDir: string;
 let listening: ListeningServer | undefined;
-let hub: SessionHub | undefined;
 let settingsSource: ReturnType<typeof installTestSettingsSource>;
 
 beforeAll(() => {
@@ -78,7 +77,6 @@ afterEach(async () => {
   if (listening) await listening.close();
   if (baseDir) await rm(baseDir, { recursive: true, force: true });
   listening = undefined;
-  hub = undefined;
 });
 
 afterAll(() => {
@@ -98,7 +96,6 @@ async function start(opts: ServeOptions = {}): Promise<{
     dataDir: baseDir,
   });
   listening = out.listening;
-  hub = out.hub;
   return out;
 }
 

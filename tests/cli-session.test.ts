@@ -26,7 +26,10 @@ import {
 import { isInteractive } from "../src/cli/session-io.ts";
 import { getVersion, usageText } from "../src/cli/usage.ts";
 import { applySlashCommand } from "../src/cli/slash.ts";
-import type { AnthropicNativeMessage } from "../src/harness/index.ts";
+import type {
+  AnthropicContentBlock,
+  AnthropicNativeMessage,
+} from "../src/harness/index.ts";
 import {
   MEMORY_ADVISORY_PREFIX,
   MEMORY_PREFETCH_END,
@@ -482,7 +485,9 @@ describe("processChatLine (pipe simulation)", () => {
         role: "user",
         content: [{ type: "text", text: t }],
       }),
-      encodeToolResults: () => [] as AnthropicNativeMessage["content"],
+      // LoopAdapter SSOT returns the *mutable* AnthropicContentBlock[] (not
+      // the readonly AnthropicNativeMessage["content"]).
+      encodeToolResults: (): AnthropicContentBlock[] => [],
       step: async () => {
         throw new Error("boom-agent");
       },

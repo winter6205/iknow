@@ -227,8 +227,10 @@ describe("<available_skills> additive segment", () => {
   it("createIknowSystemResolver threads opts.skills through to the available_skills segment", async () => {
     const resolver = createIknowSystemResolver({
       cwd: process.cwd(),
+      projectIdentityRoot: process.cwd(),
       userHome: workDir,
       surface: "ask",
+      memoryEnabled: false,
       skills: () => [{ name: "alpha", description: "first" }],
     });
     const out = await resolver();

@@ -56,6 +56,7 @@ afterAll(async () => {
 function baseCtx(extra?: Partial<AssemblyContext>): AssemblyContext {
   return {
     cwd: workDir,
+    projectIdentityRoot: workDir,
     userHome: workDir,
     bootstrapActive: false,
     memoryEnabled: false,
@@ -72,6 +73,7 @@ describe("T2 ① agent-status read rule — gated additive segment", () => {
   it("bar-active resolver (agentStatusReadRule: true) → system contains the read-rule sentence verbatim, exactly once", async () => {
     const resolver = createIknowSystemResolver({
       cwd: workDir,
+      projectIdentityRoot: workDir,
       userHome: workDir,
       surface: "chat",
       memoryEnabled: false,
@@ -91,6 +93,7 @@ describe("T2 ① agent-status read rule — gated additive segment", () => {
     // that never appears is permanent noise, so those surfaces skip injection.
     const resolver = createIknowSystemResolver({
       cwd: workDir,
+      projectIdentityRoot: workDir,
       userHome: workDir,
       surface: "ask",
       memoryEnabled: false,
@@ -181,10 +184,14 @@ function makeEnv(apiKey: string): IknowEnv {
       stream: "on",
     },
     chat: { showThinking: false },
-    web: { searchUrl: undefined },
+    web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env
+    // side keeps its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

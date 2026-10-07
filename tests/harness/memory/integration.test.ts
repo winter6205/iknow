@@ -452,9 +452,10 @@ describe("save → recall → recordRecall → eligibleForPromote (ADR-0044)", (
       importance: 4,
     });
     assert.equal(typeof out, "string");
+    const outText = String(out);
 
     // Extract the slug the save tool returned.
-    const slugMatch = /persisted as ([a-f0-9]+)\.md/.exec(out);
+    const slugMatch = /persisted as ([a-f0-9]+)\.md/.exec(outText);
     assert.ok(slugMatch !== null, "save must return a slug line");
     const slug = slugMatch![1]!;
     assert.equal(
@@ -467,13 +468,18 @@ describe("save → recall → recordRecall → eligibleForPromote (ADR-0044)", (
     const recall = createMemoryRecallTool({ memoryDir: p.memoryDir });
     const hit = await recall.handler({ query: "bar rendering" });
     assert.equal(typeof hit, "string");
-    assert.ok(hit.includes("Use bar()"), "recall must surface the saved title");
+    const hitText = String(hit);
+    assert.equal(typeof hit, "string");
+    assert.ok(
+      hitText.includes("Use bar()"),
+      "recall must surface the saved title"
+    );
 
     // (3) recordRecall — track ≥2 distinct session_ids.
     await recordRecall(p.memoryDir, slug, "session-A");
     await recordRecall(p.memoryDir, slug, "session-B");
     // Re-recall from session-B's perspective — recall surface unchanged.
-    const hit2 = await recall.handler({ query: "bar" });
+    const hit2 = String(await recall.handler({ query: "bar" }));
     assert.ok(hit2.includes("Use bar()"));
 
     // (4) eligibleForPromote → listPromotableEntries surfaces the entry.
@@ -516,7 +522,8 @@ describe("save → recall → recordRecall → eligibleForPromote (ADR-0044)", (
       body: "Calling qux() is the supported audit path.",
       importance: 5,
     });
-    const slugMatch = /persisted as ([a-f0-9]+)\.md/.exec(out);
+    assert.equal(typeof out, "string");
+    const slugMatch = /persisted as ([a-f0-9]+)\.md/.exec(String(out));
     assert.ok(slugMatch !== null);
     const slug = slugMatch![1]!;
 

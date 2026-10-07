@@ -40,12 +40,13 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
-  CountTokensInput,
   LoopEngineDeps,
   LoopState,
-  ModelAdapter,
+  LoopAdapter,
   TokenUsage,
 } from "../../src/harness/index.js";
+// CountTokensInput is declared here but not re-exported by the harness barrel.
+import type { CountTokensInput } from "../../src/harness/model-adapter/types.js";
 import type { ToolExecutionResult } from "../../src/harness/tools/types.js";
 import type { HarnessStreamEvent } from "../../src/harness/stream.ts";
 
@@ -56,7 +57,7 @@ function delay(ms: number): Promise<void> {
 /** Scripted adapter: call #1 asks for the slow tool and carries usage #1;
  *  call #2 answers with usage #2. countTokens reports a distinct measured
  *  pre-call number per beat so the pre_call events are real readings. */
-function callBeatAdapter(): ModelAdapter {
+function callBeatAdapter(): LoopAdapter {
   let beat = 0;
   return {
     async step(
@@ -103,7 +104,7 @@ function callBeatAdapter(): ModelAdapter {
   };
 }
 
-function slowToolDeps(adapter: ModelAdapter): LoopEngineDeps {
+function slowToolDeps(adapter: LoopAdapter): LoopEngineDeps {
   // The tool handler holds the tool loop open for 3s — the observation
   // window in which call #1's post_call must already be on the bar.
   const tool = createStubTool({
@@ -199,7 +200,7 @@ describe("context_usage call-beat → ContextBar（#1079 T4）", () => {
 /** Scripted 3-beat adapter: calls #1/#2 demand the slow tool and carry
  *  distinct usage; call #3 closes the turn. Each post_call reading must
  *  reach the bar before the next call is issued (call-beat, #1079 T6). */
-function threeCallAdapter(): ModelAdapter {
+function threeCallAdapter(): LoopAdapter {
   const beat1 = {
     inputTokens: 12800,
     outputTokens: 7,

@@ -75,8 +75,6 @@ describe("TuiApp 右键复制（多坐标点位）", () => {
       await setup.waitForVisualIdle();
 
       const frame = setup.captureCharFrame();
-      const sel = (setup.renderer as unknown as { currentSelection: unknown })
-        .currentSelection;
       // Expected: the selection is cleared by handleMouseUp (by design),
       // and the frame shows `已复制` ("copied") or `已写入` ("written").
       expect(frame).toMatch(/已复制|已写入/);

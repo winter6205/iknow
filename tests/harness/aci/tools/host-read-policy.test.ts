@@ -918,32 +918,39 @@ function globTool(root: string, mode: ReadPolicyFsMode, deps?: GlobToolDeps) {
   });
 }
 
+// `ToolDef.handler` is typed `Promise<unknown> | unknown` (sync handlers stay
+// legal), so a bare `() => tool.handler(...)` is not a `() => Promise<unknown>`.
+// The async wrapper keeps the rejection semantics assert.rejects needs while
+// accepting the real handler signature.
 async function assertRefusedByRoster(
-  call: () => Promise<unknown>
+  call: () => Promise<unknown> | unknown
 ): Promise<void> {
-  await assert.rejects(call, (error: unknown) => {
-    assert.ok(
-      error instanceof ToolExecutionError,
-      `expected ToolExecutionError, got ${String(error)}`
-    );
-    const message = (error as Error).message;
-    assert.match(
-      message,
-      /protected-path roster/,
-      `refusal must name the protected-path rule: ${message}`
-    );
-    // Refusal-never-masking: a protected denial never wears a mode-restriction
-    // or file-absence costume, and never carries the secret bytes.
-    assert.doesNotMatch(
-      message,
-      /file not found|not a file|is a directory|outside workspace|mode/
-    );
-    assert.ok(
-      !message.includes(SECRET_BYTES),
-      "denied read must leak no bytes"
-    );
-    return true;
-  });
+  await assert.rejects(
+    async () => call(),
+    (error: unknown) => {
+      assert.ok(
+        error instanceof ToolExecutionError,
+        `expected ToolExecutionError, got ${String(error)}`
+      );
+      const message = (error as Error).message;
+      assert.match(
+        message,
+        /protected-path roster/,
+        `refusal must name the protected-path rule: ${message}`
+      );
+      // Refusal-never-masking: a protected denial never wears a mode-restriction
+      // or file-absence costume, and never carries the secret bytes.
+      assert.doesNotMatch(
+        message,
+        /file not found|not a file|is a directory|outside workspace|mode/
+      );
+      assert.ok(
+        !message.includes(SECRET_BYTES),
+        "denied read must leak no bytes"
+      );
+      return true;
+    }
+  );
 }
 
 describe("SC2 tool half — read_file refuses the roster under an otherwise-allowed root, both modes", () => {
@@ -1129,7 +1136,8 @@ describe("protection is positive and refusal is never masking — deny reasons s
     await symlink(gone, join(tree.root, "alias.bin"));
     await unlink(gone);
     await assert.rejects(
-      () => readFileTool(tree.root, "global").handler({ path: "alias.bin" }),
+      async () =>
+        readFileTool(tree.root, "global").handler({ path: "alias.bin" }),
       (error: unknown) => {
         const message = (error as Error).message;
         assert.ok(error instanceof ToolExecutionError);
@@ -1142,7 +1150,7 @@ describe("protection is positive and refusal is never masking — deny reasons s
       }
     );
     await assert.rejects(
-      () => readFileTool(tree.root, "global").handler({ path: "   " }),
+      async () => readFileTool(tree.root, "global").handler({ path: "   " }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /resolution failure/i.test(error.message)
@@ -1152,7 +1160,8 @@ describe("protection is positive and refusal is never masking — deny reasons s
   it("an ordinary missing file keeps the untouched file-not-found answer (refusal never masks, and protection never impersonates)", async () => {
     const tree = await makeToolTree("hrp-tool-notfound-");
     await assert.rejects(
-      () => readFileTool(tree.root, "global").handler({ path: "nope.txt" }),
+      async () =>
+        readFileTool(tree.root, "global").handler({ path: "nope.txt" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("file not found") &&

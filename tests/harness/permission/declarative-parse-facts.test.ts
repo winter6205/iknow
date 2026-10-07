@@ -91,14 +91,14 @@ function corpusCommands(): string[] {
     dirname(fileURLToPath(import.meta.url)),
     "..",
     "..",
-    "..",
+    ".."
   );
   const fixture = join(
     repoRoot,
     "tests",
     "fixtures",
     "shell-divergence",
-    "stage2-differential.jsonl",
+    "stage2-differential.jsonl"
   );
   const seen = new Set<string>();
   for (const line of readFileSync(fixture, "utf8").split("\n")) {
@@ -109,12 +109,7 @@ function corpusCommands(): string[] {
 }
 
 function population(): string[] {
-  return [
-    ...new Set([
-      ...corpusCommands(),
-      ...DECLARATIVE_COMMAND_LITERALS,
-    ]),
-  ];
+  return [...new Set([...corpusCommands(), ...DECLARATIVE_COMMAND_LITERALS])];
 }
 
 /** The population shapes that carry no `ok` payload — the degrade census. */
@@ -243,7 +238,7 @@ function okRows(): { command: string; ok: SecurityParseOk }[] {
     } else {
       expect(
         NON_OK_ROWS.get(command),
-        `non-ok row must be in the pinned census: ${JSON.stringify(command)}`,
+        `non-ok row must be in the pinned census: ${JSON.stringify(command)}`
       ).toBe(result.kind);
     }
   }
@@ -257,7 +252,7 @@ describe("replica fidelity: the offset-slice arm is the verbatim scan", () => {
     for (const command of population()) {
       expect(
         sliceAtCuts(command, scanCutOffsets(command)),
-        JSON.stringify(command),
+        JSON.stringify(command)
       ).toEqual(oldScanSegments(command));
     }
   });
@@ -276,17 +271,21 @@ describe("shipped derivation vs the old char scan (SC-S4-3 move)", () => {
       for (const b of factsBoundaries(ok)) shippedCuts.add(b.start);
       if (shippedCuts.size > oldCuts.size) widened += 1;
       else if (shippedCuts.size < oldCuts.size) dropped += 1;
-      expect(
-        shippedSegments(ok, command),
-        JSON.stringify(command),
-      ).toEqual(oldScanSegments(command));
+      expect(shippedSegments(ok, command), JSON.stringify(command)).toEqual(
+        oldScanSegments(command)
+      );
       if (shippedCuts.size === oldCuts.size) same += 1;
     }
     // Every facts boundary is also a literal scan cut, so the union can
     // neither widen nor drop a boundary: no shape can flip a rule MATCH in
     // either direction. Non-ok rows (the 5 census entries) degrade to the
     // scan verbatim inside production `splitCommandSegments`.
-    expect({ okRows: rows.length, same, widenedBoundaries: widened, droppedBoundaries: dropped }).toEqual({
+    expect({
+      okRows: rows.length,
+      same,
+      widenedBoundaries: widened,
+      droppedBoundaries: dropped,
+    }).toEqual({
       okRows: 447,
       same: 447,
       widenedBoundaries: 0,
@@ -363,7 +362,7 @@ describe("pure-facts arm vs the old scan — T26 measurement", () => {
       const cuts = scanCutOffsets(command);
       for (const b of factsBoundaries(ok)) {
         expect(cuts.has(b.start), `${JSON.stringify(command)}@${b.start}`).toBe(
-          true,
+          true
         );
       }
     }
@@ -375,14 +374,14 @@ describe("pure-facts arm vs the old scan — T26 measurement", () => {
     for (const { command, ok } of okRows()) {
       const starts = new Set(factsBoundaries(ok).map((b) => b.start));
       const missing = [...scanCutOffsets(command)].filter(
-        (o) => !starts.has(o),
+        (o) => !starts.has(o)
       );
       if (missing.length === 0) continue;
       for (const offset of missing) {
         const secondOperatorChar = starts.has(offset - 1);
         expect(
           protectedAt(ok, offset) || secondOperatorChar,
-          `${JSON.stringify(command)}@${offset}`,
+          `${JSON.stringify(command)}@${offset}`
         ).toBe(true);
       }
       if (
@@ -394,13 +393,11 @@ describe("pure-facts arm vs the old scan — T26 measurement", () => {
         segShape.add(command);
       }
     }
-    expect([...segShape].sort()).toEqual(
-      [...SEG_SHAPE_DIVERGENCE].sort(),
-      "segment-shape divergences",
-    );
+    // segment-shape divergences
+    expect([...segShape].sort()).toEqual([...SEG_SHAPE_DIVERGENCE].sort());
+    // boundary-only divergences
     expect([...boundaryOnly].sort()).toEqual(
-      [...BOUNDARY_ONLY_DIVERGENCE].sort(),
-      "boundary-only divergences",
+      [...BOUNDARY_ONLY_DIVERGENCE].sort()
     );
   });
 
@@ -429,7 +426,7 @@ describe("production rule matching through the real API", () => {
   function bashRule(specifier: string) {
     const rules = compileDeclarativePermissions(
       { allow: [`Bash(${specifier})`] },
-      { workRoot: "/w" },
+      { workRoot: "/w" }
     );
     return (command: string) =>
       rules[0]!.match({ tool: "bash", input: { command } });

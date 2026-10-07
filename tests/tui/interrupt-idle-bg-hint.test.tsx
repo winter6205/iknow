@@ -68,13 +68,15 @@ interface Rig {
 function makeSessionFile(dataDir: string): SessionFileV1 {
   return {
     conversation_id: CONV,
+    schemaVersion: 1,
     workspaceRoot: dataDir,
     messages: [],
-    createdAt: "2026-09-19T00:00:00.000Z",
     updatedAt: "2026-09-19T00:00:00.000Z",
     turnCount: 0,
     jsonMode: false,
-    lastUsage: null,
+    title: CONV,
+    cwd: dataDir,
+    sanitized_at: "2026-09-19T00:00:00.000Z",
   };
 }
 
@@ -144,9 +146,11 @@ async function mountApp(initialTasks: SubagentInfo[]): Promise<Rig> {
     },
     rewindSession: async () => ({ file }),
     listRewindTargets: async () => [],
+    openSession: async () => {
+      throw new Error("unused: no session is opened here");
+    },
     inflight: createInflightRegistry(),
     contextWindow: 200_000,
-    getCapacity: () => 15,
     // Fresh array per call, like the real projection: the app's 1Hz poll feeds
     // React state and a stable reference would bail out the re-render.
     listSubagents: () => [...tasks],
@@ -404,7 +408,7 @@ describe("1081 T3: mailbox wake survives the interrupt", () => {
       app.publishNotice({
         taskId: "bg1",
         conversationId: CONV,
-        status: "completed",
+        status: "ok",
         summary: "done",
         result: "ok",
       });

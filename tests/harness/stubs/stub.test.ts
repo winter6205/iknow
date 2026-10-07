@@ -134,7 +134,7 @@ describe("createStubSignalTool (017 S17)", () => {
     const controller = new AbortController();
     controller.abort();
     await assert.rejects(
-      () => tool.handler({}, { signal: controller.signal }),
+      async () => tool.handler({}, { signal: controller.signal }),
       (e: unknown) => e instanceof DOMException && e.name === "AbortError"
     );
   });
@@ -142,7 +142,11 @@ describe("createStubSignalTool (017 S17)", () => {
   it("handler rejects with AbortError when aborted while waiting", async () => {
     const tool = createStubSignalTool({ delayMs: 200 });
     const controller = new AbortController();
-    const pending = tool.handler({}, { signal: controller.signal });
+    // the handler is async; `Promise.resolve` keeps the invocation ordering
+    // (started, then aborted) while giving assert.rejects a real promise.
+    const pending = Promise.resolve(
+      tool.handler({}, { signal: controller.signal })
+    );
     controller.abort();
     await assert.rejects(
       pending,

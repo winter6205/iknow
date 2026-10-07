@@ -11,15 +11,13 @@
  * countTokens call counts); the judge function is unit-tested in
  * `tool-overflow-judge.test.ts`.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  buildHarnessEngine,
-  type BuiltEngine,
-} from "../../src/harness/build-engine.ts";
+import { buildHarnessEngine } from "../../src/harness/build-engine.ts";
 import { MCP_TOOL_SHORT_DESCRIPTION_MAX } from "../../src/harness/identity/index.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import {
@@ -29,7 +27,6 @@ import {
 } from "../_helpers/token-measurement-seam.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 import type { McpClientHandle } from "../../src/harness/mcp/manager.js";
-import type { McpManager } from "../../src/harness/mcp/manager.js";
 import type { Tool as McpTool } from "@modelcontextprotocol/client";
 
 function makeEnv(apiKey: string): IknowEnv {
@@ -53,6 +50,10 @@ function makeEnv(apiKey: string): IknowEnv {
     compress: { contextWindow: 20_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env
+    // side keeps its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 
@@ -135,7 +136,9 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     // countTokens called at least once (first-round judgement)
     expect(callCount).toBeGreaterThanOrEqual(1);
     // every visible set still contains the deferrables query_trace / list_sessions etc.
-    const visibleNames = built.deps.promptTools().map((t) => t.name);
+    const promptTools = built.deps.promptTools;
+    assert.ok(promptTools !== undefined, "assembly arms promptTools");
+    const visibleNames = promptTools().map((t) => t.name);
     expect(visibleNames).toContain("query_trace");
     expect(visibleNames).toContain("list_sessions");
     expect(visibleNames).toContain("get_record");
@@ -238,7 +241,9 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
 
     // All 5 retire (down to ≤ threshold); call 7 = the index-demotion gate's first measurement (below threshold → inert).
     expect(callIdx).toBe(7); // 1 initial + 5 re-measurements + 1 index-gate measurement
-    const visibleNames = built.deps.promptTools().map((t) => t.name);
+    const promptTools = built.deps.promptTools;
+    assert.ok(promptTools !== undefined, "assembly arms promptTools");
+    const visibleNames = promptTools().map((t) => t.name);
     // none of the 5 deferrable built-ins remains visible
     for (const retired of [
       "query_trace",
@@ -331,7 +336,9 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
     });
 
     // all deferrable built-ins stay resident
-    const visibleNames = built.deps.promptTools().map((t) => t.name);
+    const promptTools = built.deps.promptTools;
+    assert.ok(promptTools !== undefined, "assembly arms promptTools");
+    const visibleNames = promptTools().map((t) => t.name);
     expect(visibleNames).toContain("query_trace");
     expect(visibleNames).toContain("web_fetch");
     // no retirement segment in system text
@@ -372,7 +379,9 @@ describe("buildHarnessEngine — B6 溢出治理 wire", () => {
       if (built.shutdown) await built.shutdown();
     });
     // Skipped (by either path): deferrables stay resident
-    const visibleNames = built.deps.promptTools().map((t) => t.name);
+    const promptTools = built.deps.promptTools;
+    assert.ok(promptTools !== undefined, "assembly arms promptTools");
+    const visibleNames = promptTools().map((t) => t.name);
     expect(visibleNames).toContain("query_trace");
     expect(visibleNames).toContain("web_fetch");
     // no retirement segment in system text

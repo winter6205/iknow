@@ -202,8 +202,9 @@ function assertNestedError(opts: {
   const b = body as { error?: { kind?: string; message?: string } };
   assert.ok(b.error, "body must have top-level `error` object");
   assert.equal(b.error!.kind, kind);
-  assert.equal(typeof b.error!.message, "string");
-  assert.ok(b.error!.message.length > 0, "message must be non-empty");
+  const message = b.error!.message;
+  assert.equal(typeof message, "string");
+  assert.ok((message ?? "").length > 0, "message must be non-empty");
 }
 
 describe("GET /api/v1/workspaces/browse — HTTP route", () => {

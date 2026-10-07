@@ -59,24 +59,32 @@ const STUB_RELAY: EgressRelayPaths = {
   connectScriptPath: "/test-root/vendor/egress-relay/egress-http-connect.mjs",
 };
 
+/** The proxy-server options the injected fake factory receives. */
+type ProxyServerOptions = Parameters<typeof createHttpProxyServerOrig>[0];
+
 /**
  * Capture the filter callback during session assembly by intercepting through the
  * injected fake `createHttpProxyServer`.
  */
 interface CapturedFilter {
+  /**
+   * The session installs its own 2-arg decision closure through this seam (see
+   * `createFilterCallback` in session.ts). The proxy-server option type is the
+   * wider contract that also carries the socket / CONNECT-command arguments,
+   * which the closure ignores — these cases drive the closure directly, so the
+   * capture is narrowed back to the 2-arg form the session actually installs.
+   */
   readonly filter: (port: number, host: string) => Promise<boolean> | boolean;
 }
 function captureFilter(): {
   createHttpProxyServer: NonNullable<
     Parameters<typeof createEgressSession>[0]["createHttpProxyServer"]
   >;
-  captured: CapturedFilter | undefined;
+  captured: { value?: CapturedFilter };
 } {
   const captured: { value?: CapturedFilter } = {};
-  const createHttpProxyServer = (
-    opts: Parameters<typeof createHttpProxyServerOrig>[0]
-  ) => {
-    captured.value = { filter: opts.filter };
+  const createHttpProxyServer = (opts: ProxyServerOptions) => {
+    captured.value = { filter: opts.filter as CapturedFilter["filter"] };
     // minimal server shape so the session's later listenOnUnixSocket completes
     // (a plain http server listening on a unix socket suffices).
     return createServer();

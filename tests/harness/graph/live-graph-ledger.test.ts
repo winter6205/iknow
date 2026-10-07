@@ -79,8 +79,8 @@ describe("LiveGraphLedger: freeze 收/拒（spec Glossary：done/failed 冻，sk
     ledger.freeze("r", "running");
     // @ts-expect-error pending is not in SettleStatus
     ledger.freeze("p", "pending");
-    // @ts-expect-error bogus value: even bypassing the type, the ledger must not freeze.
-    ledger.freeze("x", "bogus" as "done");
+    // bogus value: even bypassing the type, the ledger must not freeze.
+    ledger.freeze("x", "bogus" as unknown as "done");
     expect(ledger.isFrozen("r")).toBe(false);
     expect(ledger.isFrozen("p")).toBe(false);
     expect(ledger.isFrozen("x")).toBe(false);

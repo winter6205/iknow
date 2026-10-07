@@ -101,7 +101,7 @@ describe("read_image — SC10 不入 last-read ledger", () => {
     // Overwriting the image path is still rejected: read_image registered
     // nothing, so the non-empty-overwrite gate fails closed.
     await assert.rejects(
-      () =>
+      async () =>
         writer.handler(
           { path: "pic.png", content: "not a png\n" },
           { conversationId: "conv-a" }

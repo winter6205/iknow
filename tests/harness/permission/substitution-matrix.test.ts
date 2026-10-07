@@ -857,7 +857,7 @@ describe("SC20 — the routed hard-deny outcomes deny at the wall surface", () =
 
     // Teardown is asserted, not assumed: the next case must measure the real
     // parse again, so the seam module is provably the production one.
-    injectedLoader(null);
+    injectedLoader?.(null);
     injectedLoader = null;
     vi.doUnmock(SHELL_PARSE_MODULE);
     vi.resetModules();

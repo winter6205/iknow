@@ -93,6 +93,10 @@ function makeEngineEnv(): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env side keeps
+    // its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 
@@ -106,13 +110,20 @@ function makeWorkerEnv(): IknowEnv {
       maxOutputTokens: 1024,
       temperature: 0,
       stream: "off",
-      thinking: { type: "disabled" },
+      thinking: "off",
+      thinkingEffort: "",
       maxTurns: undefined,
-      timeoutMs: undefined,
+      timeoutMs: 60_000,
     },
     web: { proxy: undefined, searchUrl: undefined },
     compress: { contextWindow: 200000, thresholdTokens: undefined },
-    chat: { showThinking: false, quiet: false },
+    chat: { showThinking: false },
+    mcp: { connectTimeoutMs: 60_000 },
+    subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env side keeps
+    // its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 
@@ -138,7 +149,7 @@ async function buildWorker(root: string) {
     sandboxRoot: root,
     model: createStubModel({ responses: [] }),
     skillCatalog: createSkillCatalog([]),
-    system: () => undefined,
+    system: async () => undefined,
     trace: createNoopTraceService(),
     role: "general-purpose",
   });

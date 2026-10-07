@@ -133,7 +133,11 @@ describe("T4 SC4 — schema 退场内建件直呼:hydrate + 执行", () => {
     );
     assert.equal(result.kind, "ok");
     if (result.kind === "ok") {
-      expect(result.payload[0]?.text).toBe("traced:c-1");
+      const block = result.payload[0];
+      assert.equal(block?.type, "text");
+      if (block?.type === "text") {
+        assert.equal(block.text, "traced:c-1");
+      }
     }
   });
 

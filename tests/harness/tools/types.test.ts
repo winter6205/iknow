@@ -60,7 +60,7 @@ describe("ToolExecutionResult meta? envelope (T2)", () => {
       kind: "ok",
       toolUseId: "toolu_4",
       payload: [{ type: "text", text: "executor-shaped" }],
-    } as ToolExecutionResult;
-    assert.equal(fromExecutor.meta, undefined);
+    };
+    assert.equal(fromExecutor.kind === "ok" ? fromExecutor.meta : 1, undefined);
   });
 });

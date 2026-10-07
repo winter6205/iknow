@@ -14,12 +14,9 @@
  * subprocesses to assert the signal.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 
-import type {
-  CallToolResult,
-  Tool as McpTool,
-} from "@modelcontextprotocol/client";
+import type { Tool as McpTool } from "@modelcontextprotocol/client";
 import type { AciToolDef } from "../../src/harness/aci/types.ts";
 import { createAciRegistry } from "../../src/harness/aci/aci-registry.ts";
 
@@ -30,6 +27,7 @@ import { join } from "node:path";
 import {
   createMcpManager,
   createRealClient,
+  type McpCallResult,
   type McpClientHandle,
   type McpManager,
 } from "../../src/harness/mcp/manager.ts";
@@ -56,9 +54,9 @@ interface StubClientOptions {
   callToolDelayMs?: number;
   /** callTool rejects; contrast for shutdown-cancel against a real business error. */
   rejectCallTool?: boolean;
-  /** mock handles. */
-  listChangedHandlers: Array<(tools: McpTool[]) => void>;
-  closeHandlers: Array<() => void>;
+  /** mock handles — both defaulted to [] by makeStubClient, so optional here. */
+  listChangedHandlers?: Array<(tools: McpTool[]) => void>;
+  closeHandlers?: Array<() => void>;
 }
 
 /**
@@ -96,8 +94,12 @@ function makeStubClient(opts: StubClientOptions): McpClientHandle {
     callTool: async (
       _name: string,
       _args: unknown,
-      options?: { signal?: AbortSignal }
-    ): Promise<CallToolResult> => {
+      options?: {
+        readonly timeout?: number;
+        readonly signal?: AbortSignal;
+        readonly resetTimeoutOnProgress?: boolean;
+      }
+    ): Promise<McpCallResult> => {
       // check abort: shutdown/timeout passes a signal
       const signal = options?.signal;
       const d = handlers.callToolDelayMs ?? 0;
@@ -122,9 +124,10 @@ function makeStubClient(opts: StubClientOptions): McpClientHandle {
         throw Object.assign(new Error("aborted"), { name: "AbortError" });
       }
       if (handlers.rejectCallTool) throw new Error("stub: callTool rejected");
+      // McpCallResult wraps the SDK result: the content array is one level down.
       return {
-        content: [{ type: "text", text: "ok" }],
-      } satisfies CallToolResult;
+        result: { content: [{ type: "text", text: "ok" }] },
+      } satisfies McpCallResult;
     },
     close: async () => {
       connected = false;
@@ -135,6 +138,10 @@ function makeStubClient(opts: StubClientOptions): McpClientHandle {
     onClose: (cb) => {
       handlers.closeHandlers!.push(cb);
     },
+    // The resource channel is part of the handle contract; the tool-channel
+    // tests never read it, so empty results are the honest stub.
+    listResources: async () => ({ resources: [] }),
+    readResource: async () => ({ contents: [] }),
     // expose manual triggers
     ...({
       _triggerListChanged: (tools: McpTool[]) => {
@@ -170,16 +177,6 @@ function makeStdio(
     source: "user",
     status,
     entry: { command: "node", args: ["./fake-mcp.js"] },
-  };
-}
-
-function makeRemote(name: string): McpServerConfig {
-  return {
-    name,
-    kind: "remote",
-    source: "user",
-    status: "enabled",
-    entry: { url: "https://example.com/mcp" },
   };
 }
 
@@ -256,8 +253,6 @@ describe("MCP manager — state machine", () => {
       registerExternal: () => {},
       createClient: () => {
         const handle = makeStubClient({
-          // connect completes only on external signal (simulates a slow server)
-          connectDelayMs: null,
           listChangedHandlers: [],
           closeHandlers: [],
         });
@@ -758,7 +753,10 @@ describe("MCP manager — list_changed re-registration (SC15)", () => {
     await new Promise((r) => setTimeout(r, 30));
     // the in-flight callTool is not interrupted and resolves normally
     const result = await inflight;
-    expect(result.content[0]).toMatchObject({ type: "text", text: "ok" });
+    expect(result.result.content[0]).toMatchObject({
+      type: "text",
+      text: "ok",
+    });
 
     // registration count: 1 initial + one list_changed re-registering alpha/gamma
     await waitForRegister(() => registerCount, 2, 1000);
@@ -908,13 +906,17 @@ describe("MCP manager — shutdown (SC11 / SC16)", () => {
     const handle: McpClientHandle = {
       connect: async () => {},
       listTools: async () => [],
-      callTool: async () => ({ content: [{ type: "text", text: "x" }] }),
+      callTool: async () => ({
+        result: { content: [{ type: "text", text: "x" }] },
+      }),
       close: async () => {
         // key — SIGTERM the grandchild
         child.kill("SIGTERM");
       },
       onListChanged: () => {},
       onClose: () => {},
+      listResources: async () => ({ resources: [] }),
+      readResource: async () => ({ contents: [] }),
     };
 
     // borrow the manager but replace the createClient factory

@@ -35,6 +35,7 @@ import type {
   ToolUseBlock,
   TextBlock,
   ContentBlock,
+  Usage as SdkUsage,
 } from "@anthropic-ai/sdk/resources/messages/messages.js";
 import {
   createRealAnthropicAdapter,
@@ -50,6 +51,26 @@ import type {
   LoopState,
 } from "../../../src/harness/model-adapter/types.ts";
 import type { HarnessStreamEvent } from "../../../src/harness/stream.ts";
+/**
+ * A well-formed SDK `Usage`. The SDK type requires every field, but only the
+ * token counts carry meaning for these fixtures — the rest are pinned to their
+ * documented "absent" value.
+ */
+function sdkUsage(overrides: {
+  readonly input_tokens: number;
+  readonly output_tokens: number;
+}): SdkUsage {
+  return {
+    cache_creation: null,
+    cache_creation_input_tokens: null,
+    cache_read_input_tokens: null,
+    inference_geo: null,
+    output_tokens_details: null,
+    server_tool_use: null,
+    service_tier: null,
+    ...overrides,
+  };
+}
 
 // ─── Test fixtures ──────────────────────────────────────────────────────────
 
@@ -143,7 +164,7 @@ function makeFakeStream(opts: {
       content: [] as ContentBlock[],
       stop_reason: null,
       stop_sequence: null,
-      usage: { input_tokens: 0, output_tokens: 0 },
+      usage: sdkUsage({ input_tokens: 0, output_tokens: 0 }),
     } as SdkMessage);
 
   const handle: FakeStreamHandle = {
@@ -258,7 +279,8 @@ function toolUseStart(name: string, id: string, index = 0): unknown {
       id,
       name,
       input: {},
-    } satisfies ToolUseBlock as unknown as ToolUseBlock,
+      caller: { type: "direct" },
+    } satisfies ToolUseBlock,
   };
 }
 
@@ -275,7 +297,7 @@ function wellShapedFinal(opts: {
   readonly text?: string;
   readonly toolUse?: { id: string; name: string; input: unknown };
   readonly stop_reason: "end_turn" | "stop_sequence" | "max_tokens" | "refusal";
-  readonly usage?: { input_tokens: number; output_tokens: number };
+  readonly usage?: SdkUsage;
 }): SdkMessage {
   const blocks: ContentBlock[] = [];
   if (opts.text !== undefined)
@@ -286,6 +308,7 @@ function wellShapedFinal(opts: {
       id: opts.toolUse.id,
       name: opts.toolUse.name,
       input: opts.toolUse.input,
+      caller: { type: "direct" },
     } as ToolUseBlock);
   return {
     id: "msg_stream_ok",
@@ -295,7 +318,9 @@ function wellShapedFinal(opts: {
     content: blocks,
     stop_reason: opts.stop_reason,
     stop_sequence: null,
-    usage: opts.usage ?? { input_tokens: 1, output_tokens: 1 },
+    usage: opts.usage ?? sdkUsage({ input_tokens: 1, output_tokens: 1 }),
+    container: null,
+    stop_details: null,
   };
 }
 
@@ -307,7 +332,7 @@ describe("RealAnthropicAdapter — streaming arm normal flow (T3 #176, D1)", () 
       text: "Hello world",
       toolUse: { id: "toolu_1", name: "echo", input: { value: "x" } },
       stop_reason: "end_turn",
-      usage: { input_tokens: 42, output_tokens: 23 },
+      usage: sdkUsage({ input_tokens: 42, output_tokens: 23 }),
     });
     const events: HarnessStreamEvent[] = [];
     const captured: { params: unknown; reqOptions: unknown }[] = [];
@@ -361,7 +386,7 @@ describe("RealAnthropicAdapter — streaming arm normal flow (T3 #176, D1)", () 
     const final = wellShapedFinal({
       text: "ok",
       stop_reason: "end_turn",
-      usage: { input_tokens: 100, output_tokens: 17 },
+      usage: sdkUsage({ input_tokens: 100, output_tokens: 17 }),
     });
     const client = makeStreamingClientFactory({
       captured: [],
@@ -388,8 +413,13 @@ describe("RealAnthropicAdapter — streaming arm normal flow (T3 #176, D1)", () 
     )) as AssistantTurnResult;
     // Byte-identical to interpretMessage(final) — shape guard for the usage row.
     assert.deepEqual(result, interpretMessage(final));
-    // usage is still on the finalMessage object — no layer dropped or wrapped it.
-    assert.deepEqual(final.usage, { input_tokens: 100, output_tokens: 17 });
+    // usage is still on the finalMessage object — no layer dropped or wrapped
+    // it. Compared against the very fixture that was dispatched, so any layer
+    // that dropped, added to, or rewrote a usage field still fails here.
+    assert.deepEqual(
+      final.usage,
+      sdkUsage({ input_tokens: 100, output_tokens: 17 })
+    );
   });
 });
 
@@ -514,7 +544,7 @@ describe("RealAnthropicAdapter — stream=false / undefined branches (T3 #176, 0
     const final = wellShapedFinal({
       text: "ok",
       stop_reason: "end_turn",
-      usage: { input_tokens: 5, output_tokens: 7 },
+      usage: sdkUsage({ input_tokens: 5, output_tokens: 7 }),
     });
     const client = {
       messages: {
@@ -562,7 +592,9 @@ describe("RealAnthropicAdapter — streaming arm empty response (T3 #176, isEmpt
       content: [] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 1, output_tokens: 0 },
+      usage: sdkUsage({ input_tokens: 1, output_tokens: 0 }),
+      container: null,
+      stop_details: null,
     };
     const events: HarnessStreamEvent[] = [];
     const client = makeStreamingClientFactory({
@@ -672,7 +704,7 @@ describe("RealAnthropicAdapter — streaming arm overflow class (T3 #176, byte-i
     const final = wellShapedFinal({
       text: "partial answer",
       stop_reason: "max_tokens",
-      usage: { input_tokens: 5, output_tokens: 256 },
+      usage: sdkUsage({ input_tokens: 5, output_tokens: 256 }),
     });
     const client = makeStreamingClientFactory({
       captured: [],

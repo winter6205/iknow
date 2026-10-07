@@ -222,8 +222,12 @@ process.stdin.on("data", (chunk: Buffer) => {
     buffer = buffer.subarray(idx + 1);
     idx = buffer.indexOf("\n");
     if (line.trim().length === 0) continue;
+    // Hoisted out of the try: the catch below needs the parsed id to answer a
+    // request whose *handler* threw (a failed JSON.parse leaves it undefined,
+    // which is the notification-style no-id case).
+    let msg: Readonly<Record<string, unknown>> | undefined;
     try {
-      const msg = JSON.parse(line) as Readonly<Record<string, unknown>>;
+      msg = JSON.parse(line) as Readonly<Record<string, unknown>>;
       const response = handleRequest(msg);
       if (response !== null) {
         process.stdout.write(response);

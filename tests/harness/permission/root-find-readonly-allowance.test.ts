@@ -57,7 +57,11 @@ import {
   TIMEOUT_TIER_MS,
   type AciToolDef,
 } from "../../../src/harness/aci/types.js";
-import type { Executor, ToolCall } from "../../../src/harness/tools/types.js";
+import type {
+  Executor,
+  ToolCall,
+  ToolExecutionResult,
+} from "../../../src/harness/tools/types.js";
 
 function patternId(command: string): string | undefined {
   return findDangerousPattern(command)?.id;
@@ -421,16 +425,28 @@ describe("SC6 — the executor chain reaches spawn for a read-only root search",
     });
 
     const [readOnly] = await runtime.executor.executeAll([
-      { id: "sc6-readonly", name: "bash", input: { command: "find / -maxdepth 1" } },
+      {
+        id: "sc6-readonly",
+        name: "bash",
+        input: { command: "find / -maxdepth 1" },
+      },
     ]);
     assert.equal(calls.length, 1, "a read-only root search must reach inner");
     assert.equal(readOnly!.kind, "ok");
 
     // The mutating twin never reaches it, under the same runtime and mode.
     const [mutating] = await runtime.executor.executeAll([
-      { id: "sc6-mutating", name: "bash", input: { command: "find / -maxdepth 1 -delete" } },
+      {
+        id: "sc6-mutating",
+        name: "bash",
+        input: { command: "find / -maxdepth 1 -delete" },
+      },
     ]);
-    assert.equal(calls.length, 1, "a mutating root search must not reach inner");
+    assert.equal(
+      calls.length,
+      1,
+      "a mutating root search must not reach inner"
+    );
     assert.equal(mutating!.kind, "execution_failed");
     assert.match(
       (mutating as { message: string }).message,
@@ -456,8 +472,9 @@ describe("SC6 — a root search has no deadline of its own", () => {
 
   it("the tool's description offers one timeout input, not a root-search one", () => {
     const tool = createBashTool("/tmp");
-    assert.ok("timeout_ms" in tool.inputSchema.properties);
-    const named = Object.keys(tool.inputSchema.properties).filter((key) =>
+    const properties = tool.inputSchema.properties as Record<string, unknown>;
+    assert.ok("timeout_ms" in properties);
+    const named = Object.keys(properties).filter((key) =>
       /root|find|search|walk/i.test(key)
     );
     assert.deepEqual(named, [], "no root-search-specific input exists");

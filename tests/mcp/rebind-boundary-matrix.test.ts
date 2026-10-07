@@ -100,7 +100,12 @@ function makeStubClient(opts: {
   let connected = false;
   let resolveConnect: (() => void) | undefined;
 
-  const handle = {
+  // The handle satisfies McpClientHandle as written; the two test-only triggers
+  // are attached through a cast because they are not part of the manager contract.
+  const handle: McpClientHandle & {
+    _triggerListChanged: (tools: McpTool[]) => void;
+    _resolveConnect?: () => void;
+  } = {
     connect: async () => {
       if (opts.hangConnect) {
         await new Promise<void>((res) => {
@@ -116,14 +121,18 @@ function makeStubClient(opts: {
       if (!connected) throw new Error("stub: not connected");
       return opts.initialTools ?? [];
     },
-    callTool: async () => ({ content: [{ type: "text", text: "ok" }] }),
+    callTool: async () => ({
+      result: { content: [{ type: "text", text: "ok" }] },
+    }),
     close: async () => {
       connected = false;
     },
-    onListChanged: (cb: (tools: McpTool[]) => void) => {
+    onListChanged: (cb) => {
       listChangedHandlers.push(cb);
     },
     onClose: () => {},
+    listResources: async () => ({ resources: [] }),
+    readResource: async () => ({ contents: [] }),
     _triggerListChanged: (tools: McpTool[]) => {
       for (const cb of listChangedHandlers) cb(tools);
     },
@@ -131,10 +140,7 @@ function makeStubClient(opts: {
       return resolveConnect;
     },
   };
-  return handle as McpClientHandle & {
-    _triggerListChanged: (tools: McpTool[]) => void;
-    _resolveConnect?: () => void;
-  };
+  return handle;
 }
 
 async function waitForStatus(
@@ -533,7 +539,7 @@ describe("T8 matrix — concurrent", () => {
         return batch.map((c): ToolExecutionResult => ({
           kind: "ok",
           toolUseId: c.id,
-          payload: { wrote: true },
+          payload: [{ type: "text", text: "wrote" }],
         }));
       },
     };
@@ -572,8 +578,17 @@ describe("T8 matrix — concurrent", () => {
     expect(provisioned).toBe(1);
     expect(invocations).toHaveLength(0);
     for (const batch of [r1, r2]) {
-      expect(batch[0]!.kind).toBe("execution_failed");
-      expect(batch[0]!.message).toContain("/wt-coalesce");
+      const first = batch[0]!;
+      expect(first.kind).toBe("execution_failed");
+      // `message` only exists on the failure arms of ToolExecutionResult; narrow
+      // before reading it rather than casting.
+      if (
+        first.kind !== "execution_failed" &&
+        first.kind !== "validation_failed"
+      ) {
+        throw new Error(`unexpected kind: ${first.kind}`);
+      }
+      expect(first.message).toContain("/wt-coalesce");
     }
   });
 
@@ -732,8 +747,9 @@ describe("T8 matrix — hub reload seams (negative + exception)", () => {
         throw new Error("shutdown must not run on bad-root reject");
       },
       status: () => [{ name: "keep", state: "connected", source: "project" }],
+      onManualReconnect: () => {},
       listResources: async () => ({ resources: [], perServer: [] }),
-      readResource: async () => ({ contents: [] }),
+      readResource: async (server, uri) => ({ server, uri, contents: [] }),
     };
 
     const hub = new SessionHub({
@@ -794,8 +810,9 @@ describe("T8 matrix — hub reload seams (negative + exception)", () => {
       },
       shutdown: async () => {},
       status: () => [{ name: "only", state: "connected", source: "project" }],
+      onManualReconnect: () => {},
       listResources: async () => ({ resources: [], perServer: [] }),
-      readResource: async () => ({ contents: [] }),
+      readResource: async (server, uri) => ({ server, uri, contents: [] }),
     };
 
     const hub = new SessionHub({

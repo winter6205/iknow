@@ -20,6 +20,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type { CreateBackgroundTaskManagerOptions } from "../../src/harness/background/manager.js";
 
 const captured = vi.hoisted(() => ({ tasksDirs: [] as string[] }));
 
@@ -30,7 +31,7 @@ vi.mock("../../src/harness/background/manager.js", async (importOriginal) => {
     >();
   return {
     ...actual,
-    createBackgroundTaskManager: (opts: { tasksDir: string }) => {
+    createBackgroundTaskManager: (opts: CreateBackgroundTaskManagerOptions) => {
       captured.tasksDirs.push(opts.tasksDir);
       return actual.createBackgroundTaskManager(opts);
     },
@@ -64,6 +65,10 @@ function makeEnv(): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env
+    // side keeps its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

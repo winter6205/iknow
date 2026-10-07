@@ -226,38 +226,6 @@ interface RecordedCall {
   readonly lastUserText: string | undefined;
 }
 
-/** Scripted runFn stub: returns script text call by call and records the
- *  history shape (prior length, last user text) of each invocation. */
-function makeRecordingRunFn(
-  script: ReadonlyArray<string>,
-  opts: {
-    readonly stopReasonFor?: (call: number) => RunResult["stopReason"];
-  } = {}
-): {
-  readonly runFn: VerifyLoopOptions["runFn"];
-  readonly calls: () => ReadonlyArray<RecordedCall>;
-} {
-  const calls: RecordedCall[] = [];
-  const runFn: VerifyLoopOptions["runFn"] = async (userText, runOpts) => {
-    const prior = runOpts?.priorMessages ?? [];
-    const lastUserMsg = [...prior].reverse().find((m) => m.role === "user");
-    const lastUserText = lastUserMsg
-      ? lastUserMsg.content
-          .map((b) => (b.type === "text" ? b.text : ""))
-          .join("")
-      : undefined;
-    const call = calls.length;
-    calls.push({ userText, priorCount: prior.length, lastUserText });
-    const text = script[call];
-    if (text === undefined) {
-      throw new Error(`scripted runFn exhausted at call ${call}`);
-    }
-    const stopReason = opts.stopReasonFor?.(call) ?? "completed";
-    return stubRun({ text, stopReason, priorMessages: prior, userText });
-  };
-  return { runFn, calls: () => calls };
-}
-
 /** A single RunOutcome with fixed messages (suits the single-round verify-loop). */
 function makeSingleOutcome(
   messages: AnthropicNativeMessage[],
@@ -871,6 +839,24 @@ describe("evidence-aware judge input + record trace (#449b B6)", () => {
         async recordVerification(record) {
           records.push(record);
           return record.id;
+        },
+        async recordViolation() {
+          return undefined;
+        },
+        async recordGoal() {
+          return undefined;
+        },
+        async recordSubagentSpawn() {
+          return undefined;
+        },
+        async recordSubagentStop() {
+          return undefined;
+        },
+        async recordSubagentStateChange() {
+          return undefined;
+        },
+        async recordSubagentStep() {
+          return undefined;
         },
       },
       records: () => records,

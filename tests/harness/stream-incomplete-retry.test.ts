@@ -30,10 +30,14 @@ import { ModelStreamIncompleteError } from "../../src/harness/errors.ts";
 import { withTransportRetry } from "../../src/harness/model-adapter/with-transport-retry.ts";
 import { translateAnthropicTransportFault } from "../../src/harness/model-adapter/anthropic-adapter.ts";
 import type {
-  ModelAdapter,
+  AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
 } from "../../src/harness/model-adapter/types.ts";
+import type { LoopAdapter } from "../../src/harness/loop-engine.ts";
+import type { ModelAdapter } from "../../src/harness/model-adapter/types.ts";
+import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
+import { toAnthropicToolResults } from "../../src/harness/tools/tool-result.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
@@ -87,16 +91,27 @@ function retryStub(opts: {
 }
 
 function assemble(inner: RetryStub): {
-  readonly adapter: ModelAdapter;
+  readonly adapter: LoopAdapter;
   readonly delays: number[];
 } {
   const delays: number[] = [];
-  const adapter = withTransportRetry(inner, {
-    translate: translateAnthropicTransportFault,
-    sleep: async (ms) => {
-      delays.push(ms);
-    },
-  });
+  // `withTransportRetry` wraps only `step`; the loop engine needs the full
+  // adapter contract, so the encoding half is supplied alongside it.
+  const adapter: LoopAdapter = {
+    ...withTransportRetry(inner, {
+      translate: translateAnthropicTransportFault,
+      sleep: async (ms) => {
+        delays.push(ms);
+      },
+    }),
+    encodeUserText: (t: string): AnthropicNativeMessage => ({
+      role: "user",
+      content: [{ type: "text", text: t }],
+    }),
+    encodeToolResults: (
+      results: ReadonlyArray<ToolExecutionResult>
+    ): AnthropicContentBlock[] => toAnthropicToolResults(results),
+  };
   return { adapter, delays };
 }
 

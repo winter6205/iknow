@@ -88,19 +88,13 @@ describe("bash inputSchema: timeout_ms", () => {
     assert.equal(schema.properties.timeout_ms?.type, "integer");
     assert.equal(schema.properties.timeout_ms?.minimum, 1);
     assert.equal(schema.additionalProperties, false);
-    assert.match(
-      schema.properties.background?.description ?? "",
-      /timeout_ms/
-    );
+    assert.match(schema.properties.background?.description ?? "", /timeout_ms/);
   });
 
   it("工具描述不再声称后台进程『在 build-tier timeout 之外永续运行』，改为 timeout_ms 契约", async () => {
     const cwd = await makeScratch("bash-tmo-desc-");
     const tool = createBashTool(cwd);
-    assert.doesNotMatch(
-      tool.description,
-      /outside the build-tier timeout/
-    );
+    assert.doesNotMatch(tool.description, /outside the build-tier timeout/);
     assert.match(tool.description, /timeout_ms/);
   });
 });
@@ -172,11 +166,12 @@ describe("bash background timeout_ms 贯通", () => {
 
     for (const value of [0, -1, 1.5, "500", null, true]) {
       await assert.rejects(
-        tool.handler({
-          command: "sleep 300",
-          background: true,
-          timeout_ms: value,
-        }),
+        async () =>
+          tool.handler({
+            command: "sleep 300",
+            background: true,
+            timeout_ms: value,
+          }),
         (error: unknown) =>
           error instanceof ToolExecutionError &&
           /timeout_ms/.test(error.message)
@@ -187,7 +182,10 @@ describe("bash background timeout_ms 贯通", () => {
 
   it("真实 manager：非法 timeout_ms 不创建 registry 条目", async () => {
     const root = await makeScratch("bash-tmo-invalid-real-");
-    const tasksDir = resolveTasksDir({ dataDir: root, projectIdentityRoot: root });
+    const tasksDir = resolveTasksDir({
+      dataDir: root,
+      projectIdentityRoot: root,
+    });
     const manager = createBackgroundTaskManager({
       tasksDir,
       spawn: async () => makeFakeChild(31_000) as unknown as ChildProcess,
@@ -198,10 +196,14 @@ describe("bash background timeout_ms 贯通", () => {
     });
 
     await assert.rejects(
-      tool.handler({ command: "sleep 300", background: true, timeout_ms: 0 }),
+      async () =>
+        tool.handler({ command: "sleep 300", background: true, timeout_ms: 0 }),
       (error: unknown) => error instanceof ToolExecutionError
     );
-    assert.deepEqual(await fs.readdir(tasksDir).catch(() => [] as string[]), []);
+    assert.deepEqual(
+      await fs.readdir(tasksDir).catch(() => [] as string[]),
+      []
+    );
   });
 });
 

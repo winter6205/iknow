@@ -16,8 +16,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type {
+  BlobResourceContents as SdkBlobResourceContents,
   Resource as SdkResource,
   ResourceContents as SdkResourceContents,
+  TextResourceContents as SdkTextResourceContents,
 } from "@modelcontextprotocol/client";
 
 import {
@@ -173,11 +175,11 @@ function sampleResource(name: string, uri: string): SdkResource {
   };
 }
 
-function sampleText(uri: string, text: string): SdkResourceContents {
+function sampleText(uri: string, text: string): SdkTextResourceContents {
   return { uri, mimeType: "text/plain", text };
 }
 
-function sampleBlob(uri: string, b64: string): SdkResourceContents {
+function sampleBlob(uri: string, b64: string): SdkBlobResourceContents {
   return { uri, mimeType: "application/octet-stream", blob: b64 };
 }
 
@@ -539,7 +541,8 @@ describe("listResources / readResource — concurrent / exception", () => {
     expect(first.contents[0]?.text).toBe("first");
 
     // simulate server-side close → manager onClose → markFailed → state="failed"
-    (handles[0]!._triggerClose as () => void)();
+    const closeTrigger = handles[0] as unknown as { _triggerClose: () => void };
+    closeTrigger._triggerClose();
 
     // wait for the state transition
     await new Promise((r) => setTimeout(r, 30));

@@ -32,7 +32,7 @@ import { afterAll, describe, it } from "vitest";
 import { buildHarnessEngine } from "../../src/harness/build-engine.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
-import type { SubAgentTaskDef } from "../../src/harness/subagent/manager.ts";
+import type { SubAgentDefinition } from "../../src/harness/subagent/manager.ts";
 import { run } from "../../src/harness/loop-engine.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
@@ -66,6 +66,10 @@ function makeEnv(apiKey: string): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // ADR-0019 roots: unset in these tests, so the resolver falls back to cwd
+    // (each case runs inside its own temp root).
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 
@@ -86,16 +90,20 @@ const UPSTREAM_OUTPUT = "FACT-42";
  */
 function makeWorkerSpawn(
   tasks: string[]
-): (def: SubAgentTaskDef) => ReturnType<typeof spawn> {
-  return (def: SubAgentTaskDef) => {
-    tasks.push(def.task);
-    const isUpstream = def.task.startsWith("collect");
+): (def: SubAgentDefinition) => ReturnType<typeof spawn> {
+  return (def: SubAgentDefinition) => {
+    // def.task is optional on SubAgentDefinition (the spawn_subagent tool owns
+    // writing it); a missing task degrades to "" exactly like the manager's own
+    // buildWorkerPayload fallback.
+    const task = def.task ?? "";
+    tasks.push(task);
+    const isUpstream = task.startsWith("collect");
     const envelope = JSON.stringify({
       status: "ok",
       summary: isUpstream ? "collected" : "written",
       result: isUpstream
         ? UPSTREAM_OUTPUT
-        : `report cites ${def.task.includes(UPSTREAM_OUTPUT) ? UPSTREAM_OUTPUT : "nothing"}`,
+        : `report cites ${task.includes(UPSTREAM_OUTPUT) ? UPSTREAM_OUTPUT : "nothing"}`,
     });
     return spawn(
       process.execPath,

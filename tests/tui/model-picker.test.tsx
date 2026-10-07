@@ -24,6 +24,7 @@ import {
   type ModelPickerState,
 } from "../../src/tui/model-picker.js";
 import type { ModalKeyEvent } from "../../src/tui/modal.js";
+import { flushRendererFrame, setReactActEnvironment } from "./_fixtures.tsx";
 import { PICKER_WIDTH } from "../../src/tui/thinking-picker.js";
 
 const noKey = {
@@ -273,7 +274,7 @@ async function renderPickerText(
   state: ModelPickerState,
   cols = 80
 ): Promise<string> {
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  setReactActEnvironment(true);
   const stdin = new Readable({ read() {} }) as unknown as NodeJS.ReadStream;
   const stdout = new TestWriteStream(cols, 24) as unknown as NodeJS.WriteStream;
   const config: CliRendererConfig = {
@@ -292,13 +293,13 @@ async function renderPickerText(
     act(() => {
       root.render(<ModelPicker state={state} />);
     });
-    await renderer.loop();
+    await flushRendererFrame(renderer);
     const bytes = renderer.currentRenderBuffer.getRealCharBytes(true);
     return new TextDecoder().decode(bytes);
   } finally {
     act(() => root.unmount());
     renderer.destroy();
-    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    setReactActEnvironment(false);
   }
 }
 

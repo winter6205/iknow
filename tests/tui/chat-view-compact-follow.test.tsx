@@ -52,6 +52,9 @@ function sessionWith(
     turnCount: msgs.filter((m) => m.role === "assistant").length,
     updatedAt: "2026-08-10T00:00:00.000Z",
     jsonMode: false,
+    title: "test",
+    cwd: "/tmp",
+    sanitized_at: "2026-08-10T00:00:00.000Z",
   };
   return attachSession(file);
 }

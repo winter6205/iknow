@@ -92,7 +92,7 @@ function makeTool(opts: {
   } = opts;
   let sawAbort = false;
   const handler = async (
-    input: unknown,
+    _input: unknown,
     ctx?: { signal?: AbortSignal }
   ): Promise<unknown> => {
     sawAbort = false;
@@ -418,7 +418,9 @@ describe("SC17 — interruptBehavior routing", () => {
         ReadonlyArray<ToolExecutionResult> | undefined
       >([
         execution,
-        new Promise<undefined>((resolve) => setTimeout(resolve, 100)),
+        new Promise<ReadonlyArray<ToolExecutionResult> | undefined>((resolve) =>
+          setTimeout(() => resolve(undefined), 100)
+        ),
       ]);
       assert.notEqual(settledBeforeTier, undefined);
       assert.equal(handlerFinished, false);
@@ -453,7 +455,9 @@ describe("SC17 — interruptBehavior routing", () => {
       inputSchema: { type: "object", additionalProperties: false },
       handler: async (): Promise<unknown> => {
         resolveHandlerStarted();
-        await new Promise<never>((_resolve, reject) => {
+        // Returns a never-settling promise: the handler is still running when
+        // the caller aborts, which is exactly what this test pins.
+        return new Promise<never>((_resolve, reject) => {
           rejectHandler = reject;
         });
       },
@@ -490,7 +494,9 @@ describe("SC17 — interruptBehavior routing", () => {
       catalog: (globalThis as { __catalog?: ReturnType<typeof makeCatalog> })
         .__catalog!,
       timeoutMsOverride: 1_000,
-      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      onDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+      },
     });
     const caller = new AbortController();
     const execution = aciExec.executeAll(
@@ -531,7 +537,9 @@ describe("SC17 — interruptBehavior routing", () => {
       inputSchema: { type: "object", additionalProperties: false },
       handler: async (): Promise<unknown> => {
         resolveHandlerStarted();
-        await new Promise<never>((_resolve, reject) => {
+        // Returns a never-settling promise: the handler is still running when
+        // the caller aborts, which is exactly what this test pins.
+        return new Promise<never>((_resolve, reject) => {
           rejectHandler = reject;
         });
       },
@@ -568,7 +576,9 @@ describe("SC17 — interruptBehavior routing", () => {
       catalog: (globalThis as { __catalog?: ReturnType<typeof makeCatalog> })
         .__catalog!,
       timeoutMsOverride: 1_000,
-      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      onDiagnostic: (diagnostic) => {
+        diagnostics.push(diagnostic);
+      },
     });
     const caller = new AbortController();
     const execution = aciExec.executeAll(
@@ -1026,6 +1036,17 @@ describe("SC16 — computeToolStopFlags:回合 timeout 只认 signal 时钟标�
   });
 });
 
+/**
+ * `AnthropicContentBlock`'s tool_result arm declares `content: unknown` — the
+ * Adapter ships the vendor-facing array verbatim without structural typing.
+ * This narrows it to the text-block array the encoder actually emits here.
+ */
+function toolResultTexts(block: { readonly content: unknown }): ReadonlyArray<{
+  readonly text: string;
+}> {
+  return block.content as ReadonlyArray<{ readonly text: string }>;
+}
+
 describe("encodeToolResults — partial 输出编码", () => {
   it("execution_failed + partial.stdout/stderr 序列化为额外 text 块", () => {
     const blocks = encodeToolResults([
@@ -1042,21 +1063,12 @@ describe("encodeToolResults — partial 输出编码", () => {
     if (block.type === "tool_result") {
       assert.equal(block.tool_use_id, "u1");
       assert.equal(block.is_error, true);
-      const contents = block.content;
+      const contents = toolResultTexts(block);
       // three text blocks: error / partial stdout / partial stderr
       assert.equal(contents.length, 3);
-      assert.equal(
-        (contents[0] as { text: string }).text,
-        "[execution_failed] cancelled"
-      );
-      assert.equal(
-        (contents[1] as { text: string }).text,
-        "[partial stdout]\nline 1\nline 2\n"
-      );
-      assert.equal(
-        (contents[2] as { text: string }).text,
-        "[partial stderr]\nwarn!"
-      );
+      assert.equal(contents[0]?.text, "[execution_failed] cancelled");
+      assert.equal(contents[1]?.text, "[partial stdout]\nline 1\nline 2\n");
+      assert.equal(contents[2]?.text, "[partial stderr]\nwarn!");
     }
   });
 
@@ -1071,12 +1083,9 @@ describe("encodeToolResults — partial 输出编码", () => {
     assert.equal(blocks.length, 1);
     const block = blocks[0]!;
     if (block.type === "tool_result") {
-      const contents = block.content;
+      const contents = toolResultTexts(block);
       assert.equal(contents.length, 1);
-      assert.equal(
-        (contents[0] as { text: string }).text,
-        "[execution_failed] timeout"
-      );
+      assert.equal(contents[0]?.text, "[execution_failed] timeout");
     }
   });
 
@@ -1092,11 +1101,9 @@ describe("encodeToolResults — partial 输出编码", () => {
     assert.equal(blocks.length, 1);
     const block = blocks[0]!;
     if (block.type === "tool_result") {
-      assert.equal(block.content.length, 2);
-      assert.equal(
-        (block.content[1] as { text: string }).text,
-        "[partial stderr]\nx"
-      );
+      const contents = toolResultTexts(block);
+      assert.equal(contents.length, 2);
+      assert.equal(contents[1]?.text, "[partial stderr]\nx");
     }
   });
 });

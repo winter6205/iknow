@@ -12,7 +12,6 @@
 import {
   afterAll,
   afterEach,
-  beforeAll,
   beforeEach,
   describe,
   expect,
@@ -87,10 +86,7 @@ import type { EnvSnapshotSeam } from "../../src/harness/loop-engine.ts";
 import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { assessSubagentIsolation } from "../../src/harness/subagent/capability.ts";
 import { createWorktreeOnMutateHolder } from "../../src/harness/isolation/worktree-gate.ts";
-import {
-  FILE_WRITE_TOOL_NAMES,
-  SYMBOL_MUTATE_TOOL_NAMES,
-} from "../../src/harness/aci/tools/symbol-mutate.ts";
+import { SYMBOL_MUTATE_TOOL_NAMES } from "../../src/harness/aci/tools/symbol-mutate.ts";
 import type { ToolExecutionResult } from "../../src/harness/tools/types.ts";
 
 // Order is load-bearing: it must match the `aciTools` array in
@@ -333,6 +329,19 @@ const buildHarnessEngine: typeof rawBuildHarnessEngine = (async (opts) =>
     ...opts,
   })) as typeof rawBuildHarnessEngine;
 
+/**
+ * Narrow a receipt to its `execution_failed` variant and return the
+ * model-visible failure label. Keeps the `kind` assertion these tests already
+ * made — TypeScript cannot narrow through `expect().toBe()`.
+ */
+function failureMessage(result: ToolExecutionResult | undefined): string {
+  expect(result?.kind).toBe("execution_failed");
+  if (result?.kind !== "execution_failed") {
+    throw new Error(`expected an execution_failed result, got ${result?.kind}`);
+  }
+  return result.message;
+}
+
 /** Deterministic env: never read process.env / .env files (env.ts SSOT). */
 function makeEnv(apiKey: string | undefined): IknowEnv {
   return {
@@ -359,6 +368,10 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     mcp: { connectTimeoutMs: 60_000 },
     // Subagent config arm (build-engine reads taskTimeoutMs and threads it to the manager).
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env side keeps
+    // its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 
@@ -865,6 +878,10 @@ describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
       close: async () => {},
       onListChanged: () => {},
       onClose: () => {},
+      // Resource surface is never reached in this case (build returns before
+      // any MCP traffic); the stubs only satisfy the handle contract.
+      listResources: async () => ({ resources: [] }),
+      readResource: async () => ({ contents: [] }),
     };
 
     const start = Date.now();
@@ -907,7 +924,7 @@ describe("buildHarnessEngine — #337 T8 MCP manager 装配", () => {
         userHome: join(root, "home"),
         cwd: root,
         createMcpManager: (opts) => {
-          captured.push(opts as Record<string, unknown>);
+          captured.push(opts as unknown as Record<string, unknown>);
           return createMcpManager(opts);
         },
       });
@@ -1618,7 +1635,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       model: createStubModel({ responses: [] }),
       skillCatalog: createSkillCatalog([]),
       trace: createNoopTraceService(),
-      system: () => undefined,
+      system: async () => undefined,
       role: "explore",
     });
     const workerToolNames = workerDeps.registry.list().map((tool) => tool.name);
@@ -1707,8 +1724,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         wait: false,
       });
 
-      expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-worktree ACI tool");
+      expect(failureMessage(result)).toContain("create-worktree ACI tool");
       // no worker, no slot: the spawn factory never ran, the task tables stayed empty
       expect(spawnFactoryCalls).toBe(0);
       expect(provisioned).toBe(0);
@@ -1730,7 +1746,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
       expect(row.subagent_id).toBe(row.task_id);
       const err = row.error as { type: string; message: string };
       expect(err.type).toBe("execution_failed");
-      expect(err.message).toBe(result.message);
+      expect(err.message).toBe(failureMessage(result));
       await built.shutdown?.();
     } finally {
       await removeTmpTree(root);
@@ -1759,8 +1775,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         wait: false,
       });
 
-      expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-worktree ACI tool");
+      expect(failureMessage(result)).toContain("create-worktree ACI tool");
       expect(spawnedTasks).toEqual([]);
       await built.shutdown?.();
     } finally {
@@ -1791,8 +1806,7 @@ describe("buildHarnessEngine — T4 subagent isolation classifier", () => {
         wait: false,
       });
 
-      expect(result.kind).toBe("execution_failed");
-      expect(result.message).toContain("create-worktree ACI tool");
+      expect(failureMessage(result)).toContain("create-worktree ACI tool");
       expect(spawnedTasks).toEqual([]);
       await built.shutdown?.();
     } finally {
@@ -1932,7 +1946,7 @@ describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
         cwd: root,
         userHome: join(root, "home"),
         todoDir: join(root, "projects", "repo-deadbeef"),
-        isolation: { worktreeOnMutate: false },
+        settings: { isolation: { worktreeOnMutate: false } },
       });
 
       const result = await runSpawn(
@@ -1964,7 +1978,7 @@ describe("buildHarnessEngine — ADR-0085 SC9 worker 账本锚点", () => {
         surface: "chat",
         cwd: root,
         userHome: join(root, "home"),
-        isolation: { worktreeOnMutate: false },
+        settings: { isolation: { worktreeOnMutate: false } },
       });
 
       const result = await runSpawn(
@@ -2049,7 +2063,13 @@ describe("buildHarnessEngine — T4 live taskRoot wrap (zero behavior change)", 
         "conv-1"
       );
       expect(result.kind).toBe("ok");
-      expect(result.message ?? "").not.toContain("[worktree_isolation]");
+      // An `ok` receipt has no failure label at all, so the meaningful check is
+      // that its model-visible payload carries no isolation block text.
+      if (result.kind === "ok") {
+        expect(JSON.stringify(result.payload)).not.toContain(
+          "[worktree_isolation]"
+        );
+      }
       const { readFile } = await import("node:fs/promises");
       expect(await readFile(join(root, "slice-a.txt"), "utf8")).toBe(
         "gate is off"
@@ -2263,8 +2283,7 @@ describe("buildHarnessEngine — ADR-0096 T3 live worktree switch holder", () =>
         undefined,
         "conv-1"
       );
-      expect(blocked.kind).toBe("execution_failed");
-      expect(blocked.message ?? "").toContain("[worktree_isolation]");
+      expect(failureMessage(blocked)).toContain("[worktree_isolation]");
       await built.shutdown?.();
     } finally {
       await removeTmpTree(root);
@@ -2326,9 +2345,9 @@ describe("buildHarnessEngine — ADR-0096 T3 live worktree switch holder", () =>
         undefined,
         "conv-1"
       );
-      expect(after.kind).toBe("execution_failed");
-      expect(after.message ?? "").toContain("[worktree_isolation]");
-      expect(after.message ?? "").toContain("create-worktree");
+      const afterMessage = failureMessage(after);
+      expect(afterMessage).toContain("[worktree_isolation]");
+      expect(afterMessage).toContain("create-worktree");
       expect(provisionCalls).toBe(0);
 
       expect(built.isolationOn).toBe(true);
@@ -2497,9 +2516,7 @@ describe("buildHarnessEngine — ADR-0096 T3 live worktree switch holder", () =>
 describe("buildHarnessEngine — T9 display surface", () => {
   function makeEnv(name: string): IknowEnv {
     return {
-      anthropicApiKey: `sk-test-${name}`,
       llm: {
-        provider: "anthropic",
         baseUrl: "http://127.0.0.1:9999",
         model: "test-model",
         fallback: [],
@@ -2512,11 +2529,15 @@ describe("buildHarnessEngine — T9 display surface", () => {
         stream: "on",
       },
       chat: { showThinking: false },
-      web: { search: { provider: "none" } },
+      web: { searchUrl: undefined, proxy: undefined },
       compress: { contextWindow: 200_000, thresholdTokens: undefined },
       mcp: { connectTimeoutMs: 60_000 },
       subagent: { taskTimeoutMs: undefined },
-    } as IknowEnv;
+      // Roots are supplied explicitly to buildHarnessEngine below; the env
+      // side keeps its "unset" default.
+      workspaceRoot: undefined,
+      productRoot: undefined,
+    };
   }
 
   it("未 rebind 时 envSnapshot 注入 readCwd 活 reader,其初始值与今日 workspaceRoot 静态 cwd 的 readEnvSnapshot 输出逐字节相同", async () => {

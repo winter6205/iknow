@@ -15,15 +15,15 @@
  * inside tool_search.
  */
 import { describe, expect, it } from "vitest";
-import { createAciRegistry } from "../../../../src/harness/aci/aci-registry.js";
+import {
+  createAciRegistry,
+  type AciRegistry,
+} from "../../../../src/harness/aci/aci-registry.js";
 import {
   createToolSearchTool,
   NO_MATCHES,
 } from "../../../../src/harness/aci/tools/tool-search.js";
-import type {
-  AciRegistry,
-  AciToolDef,
-} from "../../../../src/harness/aci/types.js";
+import type { AciToolDef } from "../../../../src/harness/aci/types.js";
 
 /** Replicates the makeTool fixture from aci-registry.test.ts: a pure read-only stub. */
 function makeTool(name: string, description = `fixture ${name}`): AciToolDef {

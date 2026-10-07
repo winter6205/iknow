@@ -29,14 +29,7 @@ import {
   ProtocolError,
   PromptTooLongError,
 } from "../../../src/harness/errors.ts";
-import type {
-  AnthropicNativeMessage,
-  LoopState,
-} from "../../../src/harness/model-adapter/types.ts";
-
-function userMsg(text: string): AnthropicNativeMessage {
-  return { role: "user", content: [{ type: "text", text }] };
-}
+import type { LoopState } from "../../../src/harness/model-adapter/types.ts";
 
 const initState = (): LoopState => ({ messages: [], turnCount: 0 });
 

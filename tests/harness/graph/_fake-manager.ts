@@ -25,7 +25,10 @@ import {
   createSubAgentManager,
   type SubAgentManager,
 } from "../../../src/harness/subagent/manager.ts";
-import type { SubAgentEnvelope } from "../../../src/harness/subagent/envelope.ts";
+import type {
+  SubAgentEnvelope,
+  SubagentFailureReason,
+} from "../../../src/harness/subagent/envelope.ts";
 
 export interface FakeChild {
   readonly stdin: PassThrough;
@@ -91,11 +94,16 @@ export function ok(result: string): SubAgentEnvelope {
   return { status: "ok", summary: "done", result };
 }
 
-export function fail(error: string): SubAgentEnvelope {
+/**
+ * A failed settle envelope. `reason` is the frozen `SubagentFailureReason`
+ * enum; the free-text "boom" stays in `summary`, which is the field callers
+ * render to the model.
+ */
+export function fail(reason: SubagentFailureReason): SubAgentEnvelope {
   return {
     status: "failed",
     summary: "boom",
-    reason: error,
+    reason,
     result: "",
   };
 }

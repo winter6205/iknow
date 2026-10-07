@@ -97,6 +97,9 @@ function makeFullEnv(overrides: {
     web: { searchUrl: undefined, proxy: undefined },
     compress: { contextWindow: 200000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60000 },
+    subagent: { taskTimeoutMs: undefined },
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

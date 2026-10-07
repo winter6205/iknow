@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import React, { act, createElement, type ReactNode } from "react";
+import { act, createElement, type ReactNode } from "react";
 import Reconciler from "react-reconciler";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import * as api from "../../web/src/api/client.ts";
 import { SessionApiError } from "../../web/src/api/types.ts";
+import type { PostMessageResponse } from "../../web/src/api/types.ts";
 import { useSessionChat } from "../../web/src/hooks/useSessionChat.ts";
 import type { SessionChatApi } from "../../web/src/hooks/useSessionChat.ts";
 
@@ -269,7 +270,8 @@ describe("useSessionChat compact()", () => {
     vi.mocked(api.compactSession).mockRejectedValue(new Error("compact boom"));
 
     await act(async () => {
-      await assert.rejects(() => hook.getCurrent()?.compact(), /compact boom/);
+      // getCurrent() is non-null: the waitFor above already asserted phase=ready.
+      await assert.rejects(() => hook.getCurrent()!.compact(), /compact boom/);
     });
     // compact is a lightweight op: failure must not set the global error
     // StateBlock (App surfaces a local notice); session phase/messages stay intact.
@@ -304,7 +306,9 @@ describe("useSessionChat continue()", () => {
     return renderHook();
   }
 
-  const continueOk = {
+  // Annotated so `stopReason` is contextually typed as the StopReason union
+  // instead of widening to `string` (the bare literal is not a valid response).
+  const continueOk: PostMessageResponse = {
     session: {
       conversation_id: "c1",
       json_mode: false,
@@ -403,7 +407,7 @@ describe("useSessionChat continue()", () => {
 
     await act(async () => {
       await assert.rejects(
-        () => hook.getCurrent()?.continue(),
+        () => hook.getCurrent()!.continue(),
         /nothing_pending/
       );
     });

@@ -12,6 +12,7 @@
  */
 import { describe, expect, test } from "bun:test";
 import { useState } from "react";
+import type { ReactNode } from "react";
 import { act } from "react";
 import { testRender } from "@opentui/react/test-utils";
 import { MessageShell } from "../../src/tui/message-shell.js";
@@ -65,11 +66,11 @@ describe("MessageShell memo 浅比较（frozen tuiPalette + props）", () => {
     // render-count probe via useState inside children; while shell props are
     // unchanged the shallow compare hits, so children survive parent-driven rerenders.
     let childRenderCount = 0;
-    function CountingChild(props: { readonly payload: string }): JSX.Element {
+    function CountingChild(props: { readonly payload: string }): ReactNode {
       childRenderCount += 1;
       return <text>{props.payload}</text>;
     }
-    function Parent(): JSX.Element {
+    function Parent(): ReactNode {
       const [n, setN] = useState(0);
       return (
         <>

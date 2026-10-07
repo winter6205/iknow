@@ -1,0 +1,30 @@
+{
+  // tests/web/ imports ../../web/src/** directly, so those production web files
+  // enter the test program. web builds with Vite (`moduleResolution: bundler`,
+  // extensionless relative imports are correct there); the root tsconfig uses
+  // NodeNext, under which the same imports are TS2835. Rather than bending
+  // product web source to satisfy a test harness, tests/web gets the module
+  // resolution its subject actually uses.
+  //
+  // tsconfig.test.json excludes tests/web so the two programs stay disjoint.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": ".",
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false,
+    "allowImportingTsExtensions": true,
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["node"]
+  },
+  "include": [
+    "tests/web/**/*.ts",
+    "tests/web/**/*.tsx",
+    "web/src/**/*.ts",
+    "web/src/**/*.tsx"
+  ],
+  "exclude": ["node_modules", "dist", "archive"]
+}

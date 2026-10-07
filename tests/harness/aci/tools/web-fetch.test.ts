@@ -44,6 +44,19 @@ import type {
 const PUBLIC_IP = "93.184.216.34";
 const okLookup: GuardLookupFn = async () => [PUBLIC_IP];
 
+/**
+ * `vendorFetch` is typed `typeof globalThis.fetch`, which under the ambient
+ * bun-types globals also carries the non-standard `preconnect` member. The
+ * Exa backend only ever calls the function itself, so each stub supplies a
+ * no-op for the extra member rather than a cast that could hide a signature
+ * drift on the call side.
+ */
+function vendorFetchStub(
+  fn: (input: string | URL | Request, init?: unknown) => Promise<Response>
+): NonNullable<WebFetchToolDeps["vendorFetch"]> {
+  return Object.assign(fn, { preconnect: () => undefined });
+}
+
 function htmlDeps(
   body: string,
   contentType = "text/html; charset=utf-8"
@@ -124,7 +137,7 @@ describe("createWebFetchTool — success path", () => {
 
   it("reports the final URL after redirects", async () => {
     let first = true;
-    const fetch: GuardFetchFn = async (url) => {
+    const fetch: GuardFetchFn = async (_url) => {
       if (first) {
         first = false;
         return {
@@ -656,7 +669,7 @@ describe("ACI web backend — fetch engines (SC5–SC7)", () => {
       lookup: okLookup,
       backend: "exa",
       exaApiKey: "exa-test",
-      vendorFetch: async (input) => {
+      vendorFetch: vendorFetchStub(async (input) => {
         vendorUrls.push(String(input));
         return new Response(
           JSON.stringify({
@@ -666,7 +679,7 @@ describe("ACI web backend — fetch engines (SC5–SC7)", () => {
           }),
           { status: 200, headers: { "content-type": "application/json" } }
         );
-      },
+      }),
     });
     const out = (await tool.handler({
       url: "https://example.com/doc",
@@ -688,10 +701,10 @@ describe("ACI web backend — fetch engines (SC5–SC7)", () => {
       lookup: okLookup,
       backend: "exa",
       exaApiKey: "exa-test",
-      vendorFetch: async () => {
+      vendorFetch: vendorFetchStub(async () => {
         vendorHits += 1;
         return new Response("{}", { status: 200 });
-      },
+      }),
     });
     await expectToolError(
       () => Promise.resolve(tool.handler({ url: "http://127.0.0.1/" })),
@@ -710,7 +723,9 @@ describe("ACI web backend — fetch engines (SC5–SC7)", () => {
       lookup: okLookup,
       backend: "exa",
       exaApiKey: "exa-test",
-      vendorFetch: async () => new Response("nope", { status: 503 }),
+      vendorFetch: vendorFetchStub(
+        async () => new Response("nope", { status: 503 })
+      ),
     });
     await expectToolError(
       () => Promise.resolve(tool.handler({ url: "https://example.com/" })),
@@ -755,7 +770,7 @@ describe("ACI web backend — fetch engines (SC5–SC7)", () => {
       lookup: okLookup,
       backend: "exa",
       exaApiKey: "exa-test",
-      vendorFetch: async () => {
+      vendorFetch: vendorFetchStub(async () => {
         vendorHits += 1;
         return new Response(
           JSON.stringify({
@@ -763,7 +778,7 @@ describe("ACI web backend — fetch engines (SC5–SC7)", () => {
           }),
           { status: 200 }
         );
-      },
+      }),
     });
     const [a, b] = (await Promise.all([
       local.handler({ url: "https://example.com/a" }),
@@ -794,15 +809,17 @@ describe("ACI web backend — fetch engines (SC5–SC7)", () => {
       lookup: okLookup,
       backend: "exa",
       exaApiKey: "exa-test",
-      vendorFetch: async () =>
-        new Response(
-          JSON.stringify({
-            results: [
-              { url: "https://example.com/doc", text: "exa-fetch-body" },
-            ],
-          }),
-          { status: 200 }
-        ),
+      vendorFetch: vendorFetchStub(
+        async () =>
+          new Response(
+            JSON.stringify({
+              results: [
+                { url: "https://example.com/doc", text: "exa-fetch-body" },
+              ],
+            }),
+            { status: 200 }
+          )
+      ),
     });
     const [searchOut, fetchOut] = (await Promise.all([
       search.handler({ query: "parallel" }),

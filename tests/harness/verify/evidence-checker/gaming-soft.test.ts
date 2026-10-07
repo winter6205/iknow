@@ -5,7 +5,6 @@ import type {
 } from "../../../../src/harness/model-adapter/types.js";
 import { checkEvidence } from "../../../../src/harness/verify/evidence-checker.js";
 import {
-  greenTranscript,
   message,
   textBlock,
   toolResult,

@@ -139,6 +139,9 @@ async function mountApp(subagents: ReadonlyArray<SubagentInfo>): Promise<{
     postMessage: async () => reply,
     listSessions: async () => [],
     loadSessionFile: async () => file,
+    openSession: async () => {
+      throw new Error("unused: no session is opened here");
+    },
     compactSession: async () => ({
       compacted: false,
       reason: "below_token_threshold" as const,

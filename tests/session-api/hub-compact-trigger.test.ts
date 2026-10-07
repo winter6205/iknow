@@ -28,8 +28,8 @@ import type {
   AnthropicContentBlock,
   AnthropicNativeMessage,
   AssistantTurnResult,
-  LoopAdapter,
 } from "../../src/harness/model-adapter/types.ts";
+import type { LoopAdapter } from "../../src/harness/loop-engine.ts";
 
 const baseDirs: string[] = [];
 
@@ -175,7 +175,7 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
       // splitForCompaction → windowed branch (8 > 6 keepRecent → dropped=2, kept=6).
       deps: {
         ...makeCompactDeps({ adapter: makeOkAdapter("ok") }),
-        compress: { contextWindow: 200_000 },
+        compress: { contextWindow: 200_000, thresholdTokens: undefined },
       },
     });
     const beforeUpdatedAt = (await store.load(id)).updatedAt;
@@ -210,7 +210,7 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
         ...makeCompactDeps({
           adapter: makeThrowingAdapter("synthetic throw for windowed test"),
         }),
-        compress: { contextWindow: 200_000 },
+        compress: { contextWindow: 200_000, thresholdTokens: undefined },
       },
     });
     const res = await hub.compactSession(id);
@@ -248,7 +248,7 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
         ...makeCompactDeps({
           adapter: makeSummarizeAdapter({ summaryText: "sum-body" }),
         }),
-        compress: { contextWindow: 200_000 },
+        compress: { contextWindow: 200_000, thresholdTokens: undefined },
       },
     });
     const res = await hub.compactSession(id);

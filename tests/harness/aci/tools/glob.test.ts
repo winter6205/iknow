@@ -37,10 +37,8 @@ import { promisify } from "node:util";
 import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
-import type {
-  AciToolDef,
-  ToolExecutionContext,
-} from "../../../../src/harness/aci/types.ts";
+import type { AciToolDef } from "../../../../src/harness/aci/types.ts";
+import type { ToolExecutionContext } from "../../../../src/harness/tools/types.ts";
 import {
   createGlobTool,
   type GlobToolDeps,
@@ -525,7 +523,7 @@ describe("createGlobTool — input validation", () => {
 
     const tool = createGlobTool(root);
     await assert.rejects(
-      tool.handler({ pattern: "" }),
+      async () => tool.handler({ pattern: "" }),
       (error: unknown) =>
         error instanceof Error &&
         error.name === "ToolExecutionError" &&

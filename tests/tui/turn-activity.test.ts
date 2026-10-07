@@ -5,7 +5,10 @@
  * empty / negative / overflow / concurrent / exception.
  */
 import { describe, expect, test } from "bun:test";
-import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
+import type {
+  AnthropicContentBlock,
+  AnthropicNativeMessage,
+} from "../../src/harness/model-adapter/types.js";
 import {
   countNamedCalls,
   countToolUsesByName,
@@ -32,7 +35,9 @@ function assistantTools(
   names: ReadonlyArray<string>,
   text?: string
 ): AnthropicNativeMessage {
-  const content: AnthropicNativeMessage["content"] = names.map((name, i) => ({
+  // Built mutable then handed to the message: AnthropicNativeMessage["content"]
+  // is readonly, so the optional text block cannot be pushed onto it directly.
+  const content: Array<AnthropicContentBlock> = names.map((name, i) => ({
     type: "tool_use" as const,
     id: `tu-${name}-${String(i)}`,
     name,

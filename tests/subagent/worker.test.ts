@@ -73,13 +73,18 @@ const TEST_ENV: IknowEnv = {
     maxOutputTokens: 1024,
     temperature: 0,
     stream: "off",
-    thinking: { type: "disabled" },
+    thinking: "off",
+    thinkingEffort: "",
     maxTurns: undefined,
-    timeoutMs: undefined,
+    timeoutMs: 300_000,
   },
   web: { proxy: undefined, searchUrl: undefined },
   compress: { contextWindow: 200000, thresholdTokens: undefined },
-  chat: { showThinking: false, quiet: false },
+  chat: { showThinking: false },
+  mcp: { connectTimeoutMs: 60_000 },
+  subagent: { taskTimeoutMs: undefined, maxConcurrentWorkers: 15 },
+  workspaceRoot: undefined,
+  productRoot: undefined,
 };
 
 /** Build stub-model + LoopEngineDeps. registry/executor are placeholders (the run path needs list/get);
@@ -433,11 +438,10 @@ describe("subagent worker: runWorkerOnce protocolError 收口 apiError 分流 (A
 
 describe("subagent worker: runEscapeEnvelope (ADR-0111 不变式 (b) run 阶段派生 SSOT)", () => {
   it("分类: ModelStreamIncompleteError→modelTransient / MaxTurnsExceeded→maxTurnsExceeded / ProtocolError→protocolError / 其他→crashed", async () => {
-    const { runEscapeEnvelope } = (await import(
-      "../../src/harness/subagent/worker.ts"
-    )) as unknown as {
-      runEscapeEnvelope: (err: unknown) => SubAgentEnvelope;
-    };
+    const { runEscapeEnvelope } =
+      (await import("../../src/harness/subagent/worker.ts")) as unknown as {
+        runEscapeEnvelope: (err: unknown) => SubAgentEnvelope;
+      };
     assert.equal(
       runEscapeEnvelope(new ModelStreamIncompleteError(true, "x")).reason,
       "modelTransient"
@@ -455,11 +459,10 @@ describe("subagent worker: runEscapeEnvelope (ADR-0111 不变式 (b) run 阶段�
   });
 
   it("plain-object typed error 渲染不塌缩成 [object Object] (code-quality typed-error catch 契约)", async () => {
-    const { runEscapeEnvelope } = (await import(
-      "../../src/harness/subagent/worker.ts"
-    )) as unknown as {
-      runEscapeEnvelope: (err: unknown) => SubAgentEnvelope;
-    };
+    const { runEscapeEnvelope } =
+      (await import("../../src/harness/subagent/worker.ts")) as unknown as {
+        runEscapeEnvelope: (err: unknown) => SubAgentEnvelope;
+      };
     const env = runEscapeEnvelope({
       kind: "llm_provider_config",
       providerId: "acme",
@@ -489,10 +492,16 @@ describe("subagent worker: applyEnvelopeOverrides (D8 per-call 隔离, SC5)", ()
     const deps = makeDeps(
       createStubModel({ responses: [assistantResult({ texts: ["ok"] })] })
     );
-    const out = applyEnvelopeOverrides(
-      { ...baseEnvelope, maxTurns: 7, timeoutMs: 999_999 },
-      deps
-    );
+    // timeoutMs is deliberately outside applyEnvelopeOverrides' declared
+    // `Pick<WorkerEnvelope, "maxTurns">` input — the case pins that it is
+    // ignored. Held in a variable (not an inline literal) so the extra key is
+    // a runtime fact, not an excess-property type error.
+    const envelopeWithTimeout = {
+      ...baseEnvelope,
+      maxTurns: 7,
+      timeoutMs: 999_999,
+    };
+    const out = applyEnvelopeOverrides(envelopeWithTimeout, deps);
     assert.equal(out.timeoutMs, deps.timeoutMs, "timeoutMs 不被 envelope 覆盖");
     // only maxTurns takes effect, every other field preserved bit for bit (spread guard)
     assert.equal(out.maxTurns, 7);
@@ -512,7 +521,8 @@ describe("subagent worker: applyEnvelopeOverrides (D8 per-call 隔离, SC5)", ()
     const deps = makeDeps(
       createStubModel({ responses: [assistantResult({ texts: ["ok"] })] })
     );
-    const out = applyEnvelopeOverrides({ ...baseEnvelope, timeoutMs: 1 }, deps);
+    const envelopeTimeoutOnly = { ...baseEnvelope, timeoutMs: 1 };
+    const out = applyEnvelopeOverrides(envelopeTimeoutOnly, deps);
     assert.equal(out, deps, "timeoutMs 单独出现不触发任何对象重建");
   });
 
@@ -575,9 +585,9 @@ describe("subagent worker: parseWorkerEnvelope 失败 → ProtocolError 上抛 (
 // ---------------------------------------------------------------------------
 
 describe("subagent worker: buildThinkingParams + adapter seam (type sanity)", () => {
-  it("buildThinkingParams(thinking.type=disabled) 映射为 {effort: undefined, mode:{type:'disabled'}}", () => {
+  it("buildThinkingParams(thinking=off) 映射为 {mode:'off', effort:''}", () => {
     const params = buildThinkingParams(TEST_ENV.llm);
-    assert.deepEqual(params, { effort: undefined, mode: { type: "disabled" } });
+    assert.deepEqual(params, { effort: "", mode: "off" });
   });
 
   it("createRealAnthropicAdapter 不会因 env.llm.stream=off 抛错 (model seam 形态)", () => {
@@ -589,7 +599,7 @@ describe("subagent worker: buildThinkingParams + adapter seam (type sanity)", ()
       model: TEST_ENV.llm.model,
       maxTokens: TEST_ENV.llm.maxOutputTokens,
       temperature: TEST_ENV.llm.temperature,
-      thinking: { type: "disabled" },
+      thinking: { mode: "off" },
       stream: false,
     });
     assert.equal(typeof adapter.step, "function");
@@ -755,7 +765,7 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
       sandboxRoot: "/tmp/sb",
       model: createStubModel({ responses: [] }),
       skillCatalog: createSkillCatalog([]),
-      system: () => undefined,
+      system: async () => undefined,
       trace: createNoopTraceService(),
     });
 
@@ -778,7 +788,7 @@ describe("subagent worker: CreateWorkerDepsOptions seam 字段 (类型契约)", 
         cwd,
         model: createStubModel({ responses: [] }),
         skillCatalog: createSkillCatalog([]),
-        system: () => undefined,
+        system: async () => undefined,
       });
       await deps.trace!.recordSubagentSpawn({
         id: "worker-trace-test",
@@ -819,10 +829,23 @@ describe("subagent worker: #468 disallowedTools 透传 createDefaultAciRegistry 
       sandboxRoot: "/tmp/sb",
       model: createStubModel({ responses: [] }),
       skillCatalog: createSkillCatalog([]),
-      system: () => undefined,
+      system: async () => undefined,
       trace: createNoopTraceService(),
       ...extra,
     };
+  }
+
+  /**
+   * `LoopEngineDeps.promptTools` is optional on the interface but the worker
+   * assembly always fills it; narrow with an assertion rather than a bare `!`.
+   */
+  function promptToolNames(deps: LoopEngineDeps): string[] {
+    const { promptTools } = deps;
+    assert.ok(
+      promptTools !== undefined,
+      "worker assembly must fill promptTools"
+    );
+    return promptTools().map((t) => t.name);
   }
 
   it("deny 5 禁项 → inner.list() 与 promptTools() 双面均无 bash/edit_file/write_file/web_fetch/web_search, 保留 read_file/grep/glob", async () => {
@@ -838,7 +861,7 @@ describe("subagent worker: #468 disallowedTools 透传 createDefaultAciRegistry 
       })
     );
     const innerNames = deps.registry.list().map((t) => t.name);
-    const promptNames = deps.promptTools().map((t) => t.name);
+    const promptNames = promptToolNames(deps);
     for (const denied of [
       "bash",
       "edit_file",
@@ -861,7 +884,7 @@ describe("subagent worker: #468 disallowedTools 透传 createDefaultAciRegistry 
   it("向后兼容: 不传 disallowedTools → 全量面不裁剪 (无 subagentManager → spawn_subagent 缺席, 其余工具俱在)", async () => {
     const deps = await createWorkerDeps(hermeticOpts());
     const innerNames = deps.registry.list().map((t) => t.name);
-    const promptNames = deps.promptTools().map((t) => t.name);
+    const promptNames = promptToolNames(deps);
     assert.ok(
       innerNames.includes("bash"),
       "inner.list() 应含 bash (未声明 deny-list)"
@@ -919,7 +942,7 @@ describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", (
         cwd: subagentsDir,
         model: createStubModel({ responses: [] }),
         skillCatalog: createSkillCatalog([]),
-        system: () => undefined,
+        system: async () => undefined,
         traceFilePath,
         taskId,
       });
@@ -938,6 +961,7 @@ describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", (
         llmCallIds: [],
         toolCallIds: [],
         decision: "completed",
+        status: "ok",
       });
       assert.ok(typeof id === "string", "file-mode 写盘必须成功");
 
@@ -975,7 +999,7 @@ describe("subagent worker: traceFilePath file-mode 接线 (T5 H1 review-fix)", (
           sandboxRoot: subagentsDir,
           model: createStubModel({ responses: [] }),
           skillCatalog: createSkillCatalog([]),
-          system: () => undefined,
+          system: async () => undefined,
           traceFilePath: join(subagentsDir, "agent-x.jsonl"),
         }),
         /taskId/

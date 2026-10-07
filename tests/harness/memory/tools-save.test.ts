@@ -28,7 +28,6 @@ import {
   mkdtemp,
   readFile,
   readdir,
-  rename,
   rm,
   writeFile,
 } from "node:fs/promises";
@@ -359,7 +358,7 @@ describe("memory_save — affirmative phrasing rejection (spec SC 9)", () => {
     it(`rejects: ${bad.title} / ${bad.body.slice(0, 10)}`, async () => {
       const tool = createMemorySaveTool({ memoryDir });
       await assert.rejects(
-        () => tool.handler(bad),
+        async () => tool.handler(bad),
         (err: unknown) => {
           const e = err as MemoryError;
           return (
@@ -372,7 +371,9 @@ describe("memory_save — affirmative phrasing rejection (spec SC 9)", () => {
 
   it("does not write any file when a negative-form draft is rejected", async () => {
     const tool = createMemorySaveTool({ memoryDir });
-    await assert.rejects(() => tool.handler({ title: "Never foo", body: "x" }));
+    await assert.rejects(async () =>
+      tool.handler({ title: "Never foo", body: "x" })
+    );
     const files = await readdir(memoryDir);
     assert.equal(files.length, 0);
   });
@@ -383,29 +384,29 @@ describe("memory_save — affirmative phrasing rejection (spec SC 9)", () => {
 describe("memory_save — schema boundary classes", () => {
   it("rejects empty title / empty body", async () => {
     const tool = createMemorySaveTool({ memoryDir });
-    await assert.rejects(() => tool.handler({ title: "", body: "x" }));
-    await assert.rejects(() => tool.handler({ title: "x", body: "" }));
+    await assert.rejects(async () => tool.handler({ title: "", body: "x" }));
+    await assert.rejects(async () => tool.handler({ title: "x", body: "" }));
   });
 
   it("rejects importance outside 1..5", async () => {
     const tool = createMemorySaveTool({ memoryDir });
-    await assert.rejects(() =>
+    await assert.rejects(async () =>
       tool.handler({ title: "x", body: "y", importance: 0 })
     );
-    await assert.rejects(() =>
+    await assert.rejects(async () =>
       tool.handler({ title: "x", body: "y", importance: 6 })
     );
   });
 
   it("rejects non-object input", async () => {
     const tool = createMemorySaveTool({ memoryDir });
-    await assert.rejects(() => tool.handler(null));
-    await assert.rejects(() => tool.handler("t"));
+    await assert.rejects(async () => tool.handler(null));
+    await assert.rejects(async () => tool.handler("t"));
   });
 
   it("rejects unknown fields (additionalProperties false)", async () => {
     const tool = createMemorySaveTool({ memoryDir });
-    await assert.rejects(() =>
+    await assert.rejects(async () =>
       tool.handler({ title: "x", body: "y", bogus: 1 } as never)
     );
   });
@@ -505,7 +506,6 @@ describe("memory_save — concurrent writes do not corrupt the filesystem", () =
 
   it("tmp/rename is atomic: a failed rename surfaces as a typed MemoryError", async () => {
     // Force rename to fail by making the target a directory with content.
-    const tool = createMemorySaveTool({ memoryDir });
     // Pre-create a directory named exactly like the slug rename target path is
     // impossible to predict (hash slug), so instead we exercise the error path
     // by making the memory dir read-only below — simplest deterministic check:
@@ -514,7 +514,7 @@ describe("memory_save — concurrent writes do not corrupt the filesystem", () =
     await writeFile(blockedDir, "file", "utf8");
     const blockedTool = createMemorySaveTool({ memoryDir: blockedDir });
     await assert.rejects(
-      () => blockedTool.handler({ title: "x", body: "y" }),
+      async () => blockedTool.handler({ title: "x", body: "y" }),
       (err: unknown) =>
         (err as MemoryError).name === "MemoryError" ||
         (err as MemoryError).name === "MemoryIOError"

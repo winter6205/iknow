@@ -55,9 +55,13 @@ describe("SlashCommandMenu — 候选渲染", () => {
   });
 
   it("selectedIndex 越界 → 钳制到边界（不崩溃）", () => {
-    const over = render(99, SLASH_COMMANDS);
+    // `slashCandidates("/")` is the command-only candidate list (same 14
+    // entries, same order as SLASH_COMMANDS, plus the `kind: "command"` tag
+    // SlashCommandMenuProps requires); SLASH_COMMANDS is the bare command
+    // vocabulary and is not a valid `candidates` value.
+    const over = render(99, slashCandidates("/"));
     assert.equal((over.match(/aria-selected="true"/g) ?? []).length, 1);
-    const under = render(-5, SLASH_COMMANDS);
+    const under = render(-5, slashCandidates("/"));
     assert.equal((under.match(/aria-selected="true"/g) ?? []).length, 1);
   });
 

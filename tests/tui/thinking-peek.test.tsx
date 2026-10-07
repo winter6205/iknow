@@ -41,7 +41,6 @@ import {
   formatThinkingLive,
 } from "../../src/tui/think-fold.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
-import type { LiveToolRun } from "../../src/tui/live-tool-state.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 
 const COLS = 60;
@@ -66,6 +65,9 @@ function sessionWith(
     turnCount: msgs.filter((m) => m.role === "assistant").length,
     updatedAt: "2026-08-27T00:00:00.000Z",
     jsonMode: false,
+    title: "thinking-peek",
+    cwd: "/tmp",
+    sanitized_at: "2026-08-27T00:00:00.000Z",
   };
   return attachSession(file);
 }

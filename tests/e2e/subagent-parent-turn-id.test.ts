@@ -50,6 +50,10 @@ function makeEnv(apiKey: string): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // ADR-0019 roots: unset here, so the resolver falls back to cwd (each case
+    // runs inside its own temp root).
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

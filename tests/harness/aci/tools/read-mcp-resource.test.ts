@@ -76,7 +76,7 @@ describe("createReadMcpResourceTool — normal path", () => {
     );
 
     expect(captured).toEqual({ server: "alpha", uri: "file:///a.txt" });
-    const parsed = JSON.parse(out);
+    const parsed = JSON.parse(String(out));
     expect(parsed.server).toBe("alpha");
     expect(parsed.uri).toBe("file:///a.txt");
     expect(parsed.contents).toHaveLength(1);
@@ -103,7 +103,7 @@ describe("createReadMcpResourceTool — normal path", () => {
       undefined
     );
 
-    const parsed = JSON.parse(out);
+    const parsed = JSON.parse(String(out));
     expect(parsed.contents[0]).toMatchObject({
       uri: "x://f.bin",
       mimeType: "application/octet-stream",
@@ -126,7 +126,7 @@ describe("createReadMcpResourceTool — normal path", () => {
     const tool = createReadMcpResourceTool({ getManager: () => mgr });
 
     const out = await tool.handler({ server: "a", uri: "a://1" }, undefined);
-    const parsed = JSON.parse(out);
+    const parsed = JSON.parse(String(out));
     expect(parsed.contents).toHaveLength(3);
     expect(parsed.contents[0]?.text).toBe("first");
     expect(parsed.contents[1]?.text).toBe("second");
@@ -172,7 +172,7 @@ describe("createReadMcpResourceTool — empty input", () => {
     }));
     const tool = createReadMcpResourceTool({ getManager: () => mgr });
     const out = await tool.handler({ server: "a", uri: "x://u" }, undefined);
-    const parsed = JSON.parse(out);
+    const parsed = JSON.parse(String(out));
     expect(parsed.contents).toEqual([]);
   });
 
@@ -282,7 +282,7 @@ describe("createReadMcpResourceTool — overflow / boundaries", () => {
     }));
     const tool = createReadMcpResourceTool({ getManager: () => mgr });
     const out = await tool.handler({ server: "a", uri: "x://big" }, undefined);
-    const parsed = JSON.parse(out);
+    const parsed = JSON.parse(String(out));
     expect(parsed.contents[0]?.text?.length).toBe(50_000);
   });
 
@@ -298,7 +298,7 @@ describe("createReadMcpResourceTool — overflow / boundaries", () => {
       { server: "a", uri: "x://big.bin" },
       undefined
     );
-    const parsed = JSON.parse(out);
+    const parsed = JSON.parse(String(out));
     expect(parsed.contents[0]?.blob?.length).toBe(b64.length);
   });
 
@@ -336,8 +336,8 @@ describe("createReadMcpResourceTool — concurrent / exception", () => {
       tool.handler({ server: "b", uri: "x://2" }, undefined),
     ]);
     expect(calls).toBe(2);
-    expect(JSON.parse(a).contents[0].text).toBe("payload-1");
-    expect(JSON.parse(b).contents[0].text).toBe("payload-2");
+    expect(JSON.parse(String(a)).contents[0].text).toBe("payload-1");
+    expect(JSON.parse(String(b)).contents[0].text).toBe("payload-2");
   });
 
   it("manager.readResource receives ctx.signal (ADR-0039 reopens the M3 decision)", async () => {

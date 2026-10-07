@@ -77,13 +77,16 @@ function buildTurnContent(
 } {
   const command = turn.bashCommandFrom?.(observed);
   const tool =
-    command !== undefined
-      ? { name: "bash", input: { command } }
-      : turn.tool;
+    command !== undefined ? { name: "bash", input: { command } } : turn.tool;
   const content: Array<Record<string, unknown>> = [];
   if (turn.text !== undefined) content.push({ type: "text", text: turn.text });
   if (tool !== undefined) {
-    content.push({ type: "tool_use", id: `call_${index}`, name: tool.name, input: {} });
+    content.push({
+      type: "tool_use",
+      id: `call_${index}`,
+      name: tool.name,
+      input: {},
+    });
   }
   if (content.length === 0) content.push({ type: "text", text: "done" });
   return { content, tool };
@@ -124,11 +127,30 @@ export async function startLoopbackModel(
       // The real adapter takes the SDK's `.stream()` arm, which is SSE — so the
       // stub must answer in SSE, not a bare JSON body.
       const events: Array<Record<string, unknown>> = [
-        { type: "message_start", message: { id: `msg_${index}`, type: "message", role: "assistant", model: "stub-model", content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 0 } } },
+        {
+          type: "message_start",
+          message: {
+            id: `msg_${index}`,
+            type: "message",
+            role: "assistant",
+            model: "stub-model",
+            content: [],
+            stop_reason: null,
+            stop_sequence: null,
+            usage: { input_tokens: 10, output_tokens: 0 },
+          },
+        },
       ];
       content.forEach((block, i) => {
-        events.push({ type: "content_block_start", index: i, content_block: block });
-        if (block["type"] === "tool_use") {
+        events.push({
+          type: "content_block_start",
+          index: i,
+          content_block: block,
+        });
+        // A `tool_use` block only reaches `content` when `tool` was defined
+        // (buildTurnContent pushes it under `tool !== undefined`), so the extra
+        // guard is a narrowing, not a behavioural branch.
+        if (block["type"] === "tool_use" && tool !== undefined) {
           // The SDK reads a tool_use block's arguments from
           // input_json_delta, not from content_block_start — a block that only
           // carried `input` would parse to {} and the tool would see no
@@ -142,13 +164,20 @@ export async function startLoopbackModel(
             },
           });
         } else {
-          events.push({ type: "content_block_delta", index: i, delta: { type: "text_delta", text: block["text"] ?? "" } });
+          events.push({
+            type: "content_block_delta",
+            index: i,
+            delta: { type: "text_delta", text: block["text"] ?? "" },
+          });
         }
         events.push({ type: "content_block_stop", index: i });
       });
       events.push({
         type: "message_delta",
-        delta: { stop_reason: tool !== undefined ? "tool_use" : "end_turn", stop_sequence: null },
+        delta: {
+          stop_reason: tool !== undefined ? "tool_use" : "end_turn",
+          stop_sequence: null,
+        },
         usage: { output_tokens: 5 },
       });
       events.push({ type: "message_stop" });

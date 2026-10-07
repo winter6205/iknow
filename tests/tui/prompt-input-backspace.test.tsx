@@ -104,7 +104,9 @@ function walk(
   const rr = r as Record<string, unknown>;
   if (pred(rr)) out.push(rr);
   if (depth > 12) return out;
-  const children = rr.getChildren?.();
+  const getChildren = rr.getChildren;
+  const children =
+    typeof getChildren === "function" ? getChildren.call(rr) : undefined;
   if (Array.isArray(children)) {
     for (const c of children) walk(c, pred, depth + 1, out);
   }

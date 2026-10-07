@@ -184,7 +184,7 @@ describe("buildFailureSignature — 失败签名归一", () => {
       buildFailureSignature({
         exitCode: 1,
         outputText: out,
-        countRegex: /Tests:\s+(\d+) failed/,
+        countRegex: String.raw`Tests:\s+(\d+) failed`,
       }),
       "exit=1|Tests: 12 failed"
     );

@@ -26,12 +26,16 @@ import {
   type VerifyLoopOptions,
   type VerifyLoopOutcome,
 } from "../../../src/harness/verify/verify-loop.ts";
-import type { VerifyConfig } from "../../../src/harness/verify/types.ts";
+import type {
+  VerifyConfig,
+  VerificationRecord,
+} from "../../../src/harness/verify/types.ts";
 import type {
   AnthropicNativeMessage,
   RunResult,
 } from "../../../src/harness/model-adapter/types.ts";
 import type { LoopTrace } from "../../../src/harness/loop-trace.ts";
+import type { TraceService } from "../../../src/harness/trace/types.ts";
 
 /* ------------------------------ test fixtures ------------------------------ */
 
@@ -629,7 +633,7 @@ describe("SC10: classifier fail 轮次把 reason/evidence/missing 落进 Verific
       failEnvelope("missing deploy step", ["deploy to staging"]),
       passEnvelope("evidence present now"),
     ]);
-    const captured: Array<Record<string, unknown>> = [];
+    const captured: VerificationRecord[] = [];
     const trace: TraceService = {
       recordLlmCall: async () => undefined,
       recordToolCall: async () => undefined,
@@ -637,10 +641,16 @@ describe("SC10: classifier fail 轮次把 reason/evidence/missing 落进 Verific
       recordSession: async () => undefined,
       recordSandboxCmd: async () => undefined,
       recordVerification: async (rec) => {
-        captured.push(rec as Record<string, unknown>);
+        captured.push(rec);
         return rec.id;
       },
-    } as unknown as TraceService;
+      recordViolation: async () => undefined,
+      recordGoal: async () => undefined,
+      recordSubagentSpawn: async () => undefined,
+      recordSubagentStop: async () => undefined,
+      recordSubagentStateChange: async () => undefined,
+      recordSubagentStep: async () => undefined,
+    };
 
     const out = await runVerifyLoop({
       runFn,
@@ -656,16 +666,16 @@ describe("SC10: classifier fail 轮次把 reason/evidence/missing 落进 Verific
     // one fail round + one pass round → two records.
     assert.equal(captured.length, 2);
     const failRecord = captured[0]!;
-    assert.equal(failRecord["verdict"], "true-failure");
-    assert.equal(failRecord["reason"], "missing deploy step");
-    assert.deepEqual(failRecord["missing"], ["deploy to staging"]);
+    assert.equal(failRecord.verdict, "true-failure");
+    assert.equal(failRecord.reason, "missing deploy step");
+    assert.deepEqual(failRecord.missing, ["deploy to staging"]);
     assert.ok(
-      Array.isArray(failRecord["evidence"]),
+      Array.isArray(failRecord.evidence),
       "fail round 记录应含 evidence 数组"
     );
-    assert.equal((failRecord["evidence"] as unknown[])[0]?.["command"], "noop");
+    assert.equal(failRecord.evidence?.[0]?.["command"], "noop");
     // the pass record carries none of the classifier fail fields.
     const passRecord = captured[1]!;
-    assert.equal(passRecord["verdict"], "pass");
+    assert.equal(passRecord.verdict, "pass");
   });
 });

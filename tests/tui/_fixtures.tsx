@@ -34,7 +34,30 @@ import { createPermissionModeContext } from "../../src/harness/permission/index.
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import type { SkillCatalog } from "../../src/harness/skill/catalog.js";
 import type { TuiMcpViewExt } from "../../src/tui/deps.js";
+import type { CliRenderer } from "@opentui/core";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+
+/**
+ * React reads this flag off globalThis to decide whether `act` is legal.
+ * `@types/react` 19 does not declare it, so the render-smoke tests reach it
+ * through a typed view instead of an untyped globalThis index.
+ */
+const reactActEnv = globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean };
+
+/** Enable/disable React's act environment (render-smoke harnesses bracket a mount with it). */
+export function setReactActEnvironment(enabled: boolean): void {
+  reactActEnv.IS_REACT_ACT_ENVIRONMENT = enabled;
+}
+
+/**
+ * Run exactly one render-loop pass. `CliRenderer#loop` is private on the
+ * vendored OpenTUI surface, but it is the only one-shot way to flush the
+ * memory-buffered frame these render-smoke tests assert on (`start()` runs
+ * the loop until `stop()`), so the reach is deliberate and pinned here.
+ */
+export async function flushRendererFrame(renderer: CliRenderer): Promise<void> {
+  await (renderer as unknown as { loop(): Promise<void> }).loop();
+}
 
 export interface TuiHarnessProps {
   readonly bridge?: TuiBridge;

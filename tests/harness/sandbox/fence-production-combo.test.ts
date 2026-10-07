@@ -41,10 +41,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeAll, describe, it } from "vitest";
 
-import {
-  createBwrapFence,
-  type ProtectedTargetSkippedWarning,
-} from "../../../src/harness/sandbox/bwrap.js";
+import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.js";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.js";
 import { createProtectedTargetInventory } from "../../../src/harness/sandbox/protected-targets.js";
 import { protectedTargetFenceGuidance } from "../../../src/harness/sandbox/protected-target-feedback.js";

@@ -43,7 +43,9 @@ interface FakeChild {
   once: (event: string | symbol, ...args: unknown[]) => unknown;
 }
 
-function makeFakeChild(opts: { readonly exitOnKill?: boolean } = {}): FakeChild {
+function makeFakeChild(
+  opts: { readonly exitOnKill?: boolean } = {}
+): FakeChild {
   const kill = vi.fn(() => {
     if (opts.exitOnKill !== false) {
       // A real worker exits after wrapping up on SIGTERM; the fake ends + emits exit
@@ -68,7 +70,11 @@ function makeFakeChild(opts: { readonly exitOnKill?: boolean } = {}): FakeChild 
 function makeManagerHarness() {
   const children = new Map<string, FakeChild>();
   const manager = createSubAgentManager({
-    spawn: (def: SubAgentDefinition, taskId: string, _payload: WorkerEnvelope) => {
+    spawn: (
+      _def: SubAgentDefinition,
+      taskId: string,
+      _payload: WorkerEnvelope
+    ) => {
       const child = makeFakeChild();
       children.set(taskId, child);
       return child as unknown as ChildProcess;
@@ -106,7 +112,10 @@ describe("subagent_stop — 输入校验", () => {
     const { manager } = makeManagerHarness();
     const tool = createSubAgentStopTool({ manager });
     await assert.rejects(
-      () => Promise.resolve(tool.handler({ task_id: "" }, { conversationId: "c1" })),
+      () =>
+        Promise.resolve(
+          tool.handler({ task_id: "" }, { conversationId: "c1" })
+        ),
       ToolExecutionError
     );
   });
@@ -237,7 +246,10 @@ describe("subagent_stop — 中止快照竞态（不伪造终态）", () => {
     );
     assert.equal(out.status, "not_found");
     // Key pin: a vanished task must not fabricate any state via fallback (writing state:"failed" was a hallucination).
-    assert.ok(!("state" in out), "vanished task must not carry a fabricated state");
+    assert.ok(
+      !("state" in out),
+      "vanished task must not carry a fabricated state"
+    );
   });
 });
 

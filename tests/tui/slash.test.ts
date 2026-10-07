@@ -22,6 +22,7 @@ import {
   slashHintLines,
   slashSuggestions,
   type SlashCandidate,
+  type TuiSlashCommand,
 } from "../../src/tui/slash.js";
 import { resolveAgentCatalog } from "../../src/harness/subagent/catalog.js";
 import { skillNamesForHelp, toSlashEntries } from "../../src/tui/app.js";
@@ -175,9 +176,13 @@ describe("slashSuggestions: 前缀过滤 + 词表顺序（#337 Phase C → Slash
       "model",
       "yolo",
     ]);
-    expect(slashSuggestions("/")).toEqual(
-      commands.map((command) => ({ kind: "command" as const, command }))
-    );
+    // The assertions above pin every entry against the exact vocabulary list, so
+    // each element is a known command id, not an arbitrary string.
+    const expected: ReadonlyArray<SlashCandidate> = commands.map((command) => ({
+      kind: "command",
+      command: command as TuiSlashCommand,
+    }));
+    expect(slashSuggestions("/")).toEqual(expected);
     expect(commands).not.toContain("profile");
   });
 
@@ -1866,7 +1871,9 @@ describe("Task 4 守卫：slashCompleteFromCandidates 保持原契约", () => {
   });
 
   test("cursor 越界 → null", () => {
-    const list = [{ kind: "command", command: "quit" }];
+    const list: ReadonlyArray<SlashCandidate> = [
+      { kind: "command", command: "quit" },
+    ];
     expect(slashCompleteFromCandidates(list, -1)).toBeNull();
     expect(slashCompleteFromCandidates(list, 1)).toBeNull();
   });

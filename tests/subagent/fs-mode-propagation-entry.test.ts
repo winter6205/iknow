@@ -202,7 +202,7 @@ async function runWorkerEntry(opts: {
   readonly stderr: string;
   readonly stdout: string;
 }> {
-  const { home, sandboxRoot, task, argvLog } = opts;
+  const { home, sandboxRoot, task } = opts;
   // 1) ambient env: worker inherits parent env (ADR-0001), same shape as spawn.ts writes.
   for (const key of ENV_KEYS) {
     if (!savedEnv.has(key)) savedEnv.set(key, process.env[key]);

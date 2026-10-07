@@ -31,10 +31,7 @@ import type { PostToolUseHook } from "../../../src/harness/permission/types.js";
 
 /** The result kinds a PostToolUse hook can be handed. */
 type PostToolUseResultKind =
-  | "ok"
-  | "validation_failed"
-  | "tool_not_found"
-  | "execution_failed";
+  "ok" | "validation_failed" | "tool_not_found" | "execution_failed";
 
 const BASE_EVENT: Omit<ViolationEvent, "tier"> = {
   tool: "bash",
@@ -330,7 +327,10 @@ describe("consecutive confirmed violations (ADR-0135 streak)", () => {
       message: "[hard_wall] dangerous command",
     });
     assert.equal(counter.snapshot(), 2);
-    await observe(hook, { kind: "ok", payload: [{ type: "text", text: "done" }] });
+    await observe(hook, {
+      kind: "ok",
+      payload: [{ type: "text", text: "done" }],
+    });
     assert.equal(counter.snapshot(), 0);
     // Two more violations after the reset must not reach the threshold.
     await observe(hook, {
@@ -347,7 +347,10 @@ describe("consecutive confirmed violations (ADR-0135 streak)", () => {
   it("excluded failure classes are neutral: they neither increment nor reset", async () => {
     const cases = [
       // routine permission denial (non-dangerous)
-      { kind: "execution_failed", message: "[permission_denied] category default" },
+      {
+        kind: "execution_failed",
+        message: "[permission_denied] category default",
+      },
       // user declined the call
       { kind: "execution_failed", message: "[user_denied] user declined" },
       // per-call timeout (ADR-0091) — a timeout is not a security violation
@@ -405,7 +408,10 @@ describe("consecutive confirmed violations (ADR-0135 streak)", () => {
 
   it("a fresh counter (new user turn) starts at zero — no cross-turn leak", async () => {
     const first = createViolationCounter();
-    const hook = createKillSessionHook({ counter: first, onKill: () => undefined });
+    const hook = createKillSessionHook({
+      counter: first,
+      onKill: () => undefined,
+    });
     await observe(hook, {
       kind: "execution_failed",
       message: "[hard_wall] dangerous command",
@@ -512,7 +518,6 @@ describe("categorizeResult", () => {
         name: "bash",
         input: {},
         kind: "ok",
-        payload: [],
       }).tier,
       undefined
     );
@@ -588,7 +593,12 @@ describe("wireKillSessionNotification", () => {
         sink: (line) => sinkCalls.push(line),
       });
       const payload = (message: string): string =>
-        JSON.stringify({ kind: "violation", tier: "high", tool: "bash", message });
+        JSON.stringify({
+          kind: "violation",
+          tier: "high",
+          tool: "bash",
+          message,
+        });
       onKill(payload("x"));
       onKill(payload("y"));
       onKill(payload("z"));
@@ -648,7 +658,12 @@ describe("wireKillSessionNotification", () => {
       sink: (line) => sinkCalls.push(line),
     });
     onKill(
-      JSON.stringify({ kind: "violation", tier: "ultra", tool: "x", message: "y" })
+      JSON.stringify({
+        kind: "violation",
+        tier: "ultra",
+        tool: "x",
+        message: "y",
+      })
     );
     assert.match(sinkCalls[0] ?? "", /tier=unrecorded/);
     assert.doesNotMatch(sinkCalls[0] ?? "", /tier=mid\b/);

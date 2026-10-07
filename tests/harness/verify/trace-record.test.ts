@@ -33,19 +33,6 @@ import {
 } from "../../../src/harness/verify/types.ts";
 
 // Dual-track fixtures (verify domain + mirrored trace-domain shape)
-const SAMPLE_VERIFY_FULL: VerifyVerificationRecord = {
-  id: "ver-b3-1",
-  sessionId: "sess-b3-1",
-  round: 1,
-  verdict: "true-failure",
-  exitCode: 1,
-  action: "continue",
-  ts: "2026-08-16T00:00:00.000Z",
-  evidenceVerdict: "EVIDENCE_INSUFFICIENT",
-  gamingSignals: ["assertion count dropped", "new skip added"],
-  reason: REASON_UNVERIFIED,
-};
-
 const SAMPLE_VERIFY_MINIMAL: VerifyVerificationRecord = {
   id: "ver-b3-min",
   sessionId: "sess-b3-min",

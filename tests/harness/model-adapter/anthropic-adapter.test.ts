@@ -27,7 +27,33 @@ import type {
   RedactedThinkingBlock,
   ToolUseBlock,
   TextBlock,
+  Usage as SdkUsage,
 } from "@anthropic-ai/sdk/resources/messages/messages.js";
+
+/**
+ * A well-formed SDK `Usage`. The SDK type requires every field, but only the
+ * token counts (and, where a case says so, the cache breakdown) carry meaning
+ * for these fixtures — the rest are pinned to their documented "absent" value.
+ */
+function sdkUsage(overrides: {
+  readonly input_tokens: number;
+  readonly output_tokens: number;
+  readonly cache_creation_input_tokens?: number | null;
+  readonly cache_read_input_tokens?: number | null;
+  readonly cache_creation?: SdkUsage["cache_creation"];
+  readonly inference_geo?: string | null;
+}): SdkUsage {
+  return {
+    cache_creation: null,
+    cache_creation_input_tokens: null,
+    cache_read_input_tokens: null,
+    inference_geo: null,
+    output_tokens_details: null,
+    server_tool_use: null,
+    service_tier: null,
+    ...overrides,
+  };
+}
 
 function adapterFrom(
   responses: ReadonlyArray<SdkMessage>,
@@ -59,15 +85,17 @@ describe("createAnthropicAdapter (T11)", () => {
       content: [{ type: "text", text: "hi there" }] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
+      container: null,
+      stop_details: null,
       // ADR-0008 Decision 2: reuse this usage fixture to assert that a missing
       // cache_creation_input_tokens maps to null, a present
       // cache_read_input_tokens passes through, and snake→camel lands on result.usage.
-      usage: {
+      usage: sdkUsage({
         input_tokens: 100,
         output_tokens: 20,
         cache_creation_input_tokens: null,
         cache_read_input_tokens: 5,
-      },
+      }),
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -106,7 +134,9 @@ describe("createAnthropicAdapter (T11)", () => {
       ] as ContentBlock[],
       stop_reason: "tool_use",
       stop_sequence: null,
-      usage: { input_tokens: 10, output_tokens: 4 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 10, output_tokens: 4 }),
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -143,7 +173,9 @@ describe("createAnthropicAdapter (T11)", () => {
       ] as ContentBlock[],
       stop_reason: "tool_use",
       stop_sequence: null,
-      usage: { input_tokens: 10, output_tokens: 6 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 10, output_tokens: 6 }),
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -167,7 +199,9 @@ describe("createAnthropicAdapter (T11)", () => {
       content: [{ type: "text", text: "partial answer" }] as ContentBlock[],
       stop_reason: "max_tokens",
       stop_sequence: null,
-      usage: { input_tokens: 10, output_tokens: 256 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 10, output_tokens: 256 }),
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -187,7 +221,9 @@ describe("createAnthropicAdapter (T11)", () => {
       content: [] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 10, output_tokens: 0 },
+      usage: sdkUsage({ input_tokens: 10, output_tokens: 0 }),
+      container: null,
+      stop_details: null,
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -214,7 +250,7 @@ describe("createAnthropicAdapter (T11)", () => {
       ],
       stop_reason: "tool_use",
       stop_sequence: null,
-      usage: { input_tokens: 1, output_tokens: 1 },
+      usage: sdkUsage({ input_tokens: 1, output_tokens: 1 }),
     } as unknown as SdkMessage;
     const adapter = adapterFrom([bad]);
     await assert.rejects(
@@ -284,7 +320,9 @@ describe("createAnthropicAdapter (T11)", () => {
       ] as ContentBlock[],
       stop_reason: "refusal",
       stop_sequence: null,
-      usage: { input_tokens: 5, output_tokens: 8 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 5, output_tokens: 8 }),
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -308,7 +346,9 @@ describe("createAnthropicAdapter (017 signal/timeout signature)", () => {
       content: [{ type: "text", text: "hello" }] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 1, output_tokens: 1 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 1, output_tokens: 1 }),
     };
     const adapter = adapterFrom([sdkResp]);
     const controller = new AbortController();
@@ -330,7 +370,9 @@ describe("createAnthropicAdapter (017 signal/timeout signature)", () => {
       content: [{ type: "text", text: "still ok" }] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 1, output_tokens: 1 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 1, output_tokens: 1 }),
     };
     // Fresh adapter so it consumes the fresh response.
     const adapter = adapterFrom([sdkResp]);
@@ -354,7 +396,9 @@ describe("createAnthropicAdapter (017 signal/timeout signature)", () => {
       content: [{ type: "text", text: "with timeout" }] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 1, output_tokens: 1 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 1, output_tokens: 1 }),
     };
     const adapter = createAnthropicAdapter({
       responses: [sdkResp],
@@ -398,7 +442,9 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
       ] as ContentBlock[],
       stop_reason: "tool_use",
       stop_sequence: null,
-      usage: { input_tokens: 10, output_tokens: 5 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 10, output_tokens: 5 }),
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -475,7 +521,9 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
       ] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 5, output_tokens: 1 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 5, output_tokens: 1 }),
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -520,7 +568,9 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
       ] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 4, output_tokens: 2 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 4, output_tokens: 2 }),
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -565,7 +615,9 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
       ] as ContentBlock[],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 5, output_tokens: 1 },
+      container: null,
+      stop_details: null,
+      usage: sdkUsage({ input_tokens: 5, output_tokens: 1 }),
     };
     const adapter = adapterFrom([sdkResp]);
     const result = (await adapter.step(
@@ -592,12 +644,14 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
       role: "assistant",
       model: "claude-test-model",
       content: [
-        // @ts-expect-error - intentionally invalid block type to test rejection
+        // A block type this adapter does not translate, to test rejection. The
+        // SDK type now admits `image`, so this no longer needs a type directive;
+        // the runtime rejection assertion below is what the case pins.
         { type: "image", source: { type: "base64", data: "..." } },
       ],
       stop_reason: "end_turn",
       stop_sequence: null,
-      usage: { input_tokens: 1, output_tokens: 1 },
+      usage: sdkUsage({ input_tokens: 1, output_tokens: 1 }),
     } as unknown as SdkMessage;
     const adapter = adapterFrom([bad]);
     await assert.rejects(
@@ -627,7 +681,9 @@ function makeFakeClient(opts: {
     content: [{ type: "text", text: "ok" }] as ContentBlock[],
     stop_reason: "end_turn",
     stop_sequence: null,
-    usage: { input_tokens: 1, output_tokens: 1 },
+    container: null,
+    stop_details: null,
+    usage: sdkUsage({ input_tokens: 1, output_tokens: 1 }),
   };
   // Only the messages.create subset; widest possible typing.
   return {

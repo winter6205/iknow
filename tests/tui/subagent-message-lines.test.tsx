@@ -164,30 +164,9 @@ describe("卡级投影的组合面 — 无 title 时第 1 行与 join 键（SC1 
       role: "explore",
       inFlightTool: "Bash",
     });
-    expect(
-      projectSubagentCardLines(
-        [other],
-        undefined,
-        80,
-        new Map([["toolu_other", "别人的标题"]])
-      )
-    ).toBeNull();
-    expect(
-      projectSubagentCardLines(
-        [other],
-        "  ",
-        80,
-        new Map([["toolu_other", "别人的标题"]])
-      )
-    ).toBeNull();
-    expect(
-      projectSubagentCardLines(
-        [other],
-        "toolu_nobody",
-        80,
-        new Map([["toolu_other", "别人的标题"]])
-      )
-    ).toBeNull();
+    expect(projectSubagentCardLines([other], undefined, 80)).toBeNull();
+    expect(projectSubagentCardLines([other], "  ", 80)).toBeNull();
+    expect(projectSubagentCardLines([other], "toolu_nobody", 80)).toBeNull();
   });
 
   test("completed：第 2 行逐字 `✓ Done`，taskPreview 不上卡（SC7 的宿主可见形态）", () => {

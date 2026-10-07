@@ -33,7 +33,10 @@ const sum: ToolDef = {
     properties: { a: { type: "number" }, b: { type: "number" } },
     required: ["a", "b"],
   },
-  handler: ({ a, b }) => ({ sum: (a as number) + (b as number) }),
+  handler: (input: unknown) => {
+    const { a, b } = input as { a: number; b: number };
+    return { sum: a + b };
+  },
 };
 
 describe("createRegistry (S13)", () => {

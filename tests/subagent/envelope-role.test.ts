@@ -57,13 +57,18 @@ const TEST_ENV: IknowEnv = {
     maxOutputTokens: 1024,
     temperature: 0,
     stream: "off",
-    thinking: { type: "disabled" },
+    thinking: "off",
+    thinkingEffort: "",
     maxTurns: undefined,
-    timeoutMs: undefined,
+    timeoutMs: 300_000,
   },
   web: { proxy: undefined, searchUrl: undefined },
   compress: { contextWindow: 200000, thresholdTokens: undefined },
-  chat: { showThinking: false, quiet: false },
+  chat: { showThinking: false },
+  mcp: { connectTimeoutMs: 60_000 },
+  subagent: { taskTimeoutMs: undefined, maxConcurrentWorkers: 15 },
+  workspaceRoot: undefined,
+  productRoot: undefined,
 };
 
 /** Hermetic createWorkerDeps assembly — stub-model + empty skill + noop trace + placeholder system. */
@@ -75,7 +80,7 @@ function hermeticOpts(
     sandboxRoot: "/tmp/sb",
     model: createStubModel({ responses: [] }),
     skillCatalog: createSkillCatalog([]),
-    system: () => undefined,
+    system: async () => undefined,
     trace: createNoopTraceService(),
     ...extra,
   };

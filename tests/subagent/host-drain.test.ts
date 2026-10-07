@@ -48,6 +48,7 @@ function fakeManager(
     // the manager interface gained read-only enumeration methods — the fake implements them for structural compatibility.
     getCapacity: () => 15,
     listSubagents: () => [],
+    subscribe: () => () => {},
   };
 }
 

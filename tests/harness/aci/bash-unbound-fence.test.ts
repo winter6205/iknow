@@ -25,15 +25,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
-import {
-  afterAll,
-  afterEach,
-  beforeEach,
-  describe,
-  expect,
-  it,
-  vi,
-} from "vitest";
+import { afterAll, afterEach, describe, expect, it, vi } from "vitest";
 
 // Foreground: block the real bwrap probe and real execution, capture the fence.
 // Background: defaultBackgroundSpawn goes through node:child_process.spawn; the

@@ -49,15 +49,6 @@ async function untilFrame(
   throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
 }
 
-/** Non-React assertion wait (promise settlement / callback counts). */
-async function until(cond: () => boolean, ms = 3000): Promise<void> {
-  const start = Date.now();
-  while (!cond()) {
-    if (Date.now() - start > ms) throw new Error("until timeout");
-    await new Promise((r) => setTimeout(r, 10));
-  }
-}
-
 /** Wait for the ask promise to settle: must keep calling renderOnce while
  * waiting — mock stdin bytes are only parsed and dispatched during render
  * passes, so a bare await would never see the keys reach the handler. */

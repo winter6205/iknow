@@ -128,19 +128,6 @@ async function makeFakeManager(): Promise<{
   return { manager, spawned };
 }
 
-async function makeRealManager(opts?: {
-  tasksDir?: string;
-}): Promise<{ manager: BackgroundTaskManager }> {
-  const root = await fs.mkdtemp(join(tmpdir(), "iknow-bg-life-"));
-  const manager = createBackgroundTaskManager({
-    tasksDir:
-      opts?.tasksDir ??
-      resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
-    spawn: async () => spawnRealDetached() as unknown as ChildProcess,
-  });
-  return { manager };
-}
-
 async function readRec(
   tasksDir: string,
   taskId: string

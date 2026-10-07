@@ -27,7 +27,6 @@ import assert from "node:assert/strict";
 import {
   chmodSync,
   existsSync,
-  mkdirSync,
   mkdtempSync,
   rmSync,
   writeFileSync,
@@ -65,8 +64,6 @@ function canRunSandbox(): boolean {
   );
   return r.status === 0;
 }
-
-const text = (t: string) => ({ type: "text" as const, text: t });
 
 /**
  * Content-gate signal for the stub-model turns: an attempted `npm test` bash

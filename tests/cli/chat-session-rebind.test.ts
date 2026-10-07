@@ -28,6 +28,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { processChatLine } from "../../src/cli/chat-session.ts";
+import type { ProcessChatLineResult } from "../../src/cli/chat-session.ts";
+import type { LoopEngineDeps } from "../../src/harness/index.ts";
 import {
   SessionStore,
   CURRENT_SCHEMA_VERSION,
@@ -79,14 +81,55 @@ function afterEachCleanup(): void {
 // stderr interception goes through the shared helper captureStderrOf (writeErr
 // SSOT), so visible-degradation and silence assertions share one suppress path.
 
+/**
+ * Wrap a deps adapter so every `step` records the model-visible message history
+ * it was handed. `LoopEngineDeps.adapter` is readonly, so this returns a NEW
+ * deps object instead of mutating the one passed in.
+ */
+function withMessageCapture(deps: LoopEngineDeps): {
+  readonly deps: LoopEngineDeps;
+  readonly messages: () => string;
+} {
+  let seen = "";
+  const base = deps.adapter;
+  return {
+    deps: {
+      ...deps,
+      adapter: {
+        ...base,
+        step: async (state, request, signal) => {
+          seen = JSON.stringify(state.messages);
+          return base.step(state, request, signal);
+        },
+      },
+    },
+    messages: () => seen,
+  };
+}
+
+/**
+ * A structurally complete SubAgentManager fake.
+ *
+ * `SubAgentManager`'s members are `readonly`, so per-test behaviour is passed
+ * as an `overrides` patch spread over the defaults instead of being assigned
+ * onto the returned object.
+ */
 function makeManagerStub(
   opts: {
     readonly drain?: Array<{ taskId: string; envelope: SubAgentEnvelope }>;
+    readonly overrides?: Partial<SubAgentManager>;
   } = {}
 ): SubAgentManager {
   return {
     spawn: () => ({ taskId: "t-1" }),
-    queryBuffer: () => ({ status: "completed" }),
+    // A completed worker reads back as its terminal envelope (queryBuffer's
+    // `completed` arm IS SubAgentEnvelope — there is no "completed" status).
+    queryBuffer: () =>
+      ({
+        status: "ok",
+        summary: "stub",
+        result: "stub",
+      }) satisfies SubAgentEnvelope,
     waitFor: async () =>
       ({
         status: "ok",
@@ -99,6 +142,9 @@ function makeManagerStub(
     abortTask: () => false,
     getCapacity: () => 15,
     listSubagents: () => [],
+    // Required by the interface; returns the unsubscribe seam and never fires.
+    subscribe: () => () => {},
+    ...opts.overrides,
   };
 }
 
@@ -229,10 +275,11 @@ describe("chat-session rebind 重建缝（review High-1）", () => {
 
     // The refresh's visible degradation goes to process.stderr (writeErr SSOT),
     // so capture it here
-    let r;
+    let r: ProcessChatLineResult | undefined;
     const stderr = await captureStderrOf(async () => {
       r = await processChatLine({ line: "q", ctx });
     });
+    assert.ok(r !== undefined, "processChatLine must return a result");
     assert.equal(r.ranQuery, true);
     assert.equal(ctx.engineRoot, mainRoot); // root not switched
     assert.ok(stderr.includes("引擎重建失败"), "重建失败必须可见（stderr）");
@@ -263,33 +310,29 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
           },
         },
       ],
-    });
-    oldManager.drainCompleted = () => {
-      closeoutEvents.push("drain");
-      return [
-        {
-          taskId: "old-task",
-          envelope: {
-            status: "ok",
-            summary: "old wait:false result",
-            result: "old manager completed body",
-          },
+      overrides: {
+        drainCompleted: () => {
+          closeoutEvents.push("drain");
+          return [
+            {
+              taskId: "old-task",
+              envelope: {
+                status: "ok",
+                summary: "old wait:false result",
+                result: "old manager completed body",
+              },
+            },
+          ];
         },
-      ];
-    };
-    oldManager.shutdown = async () => {
-      closeoutEvents.push("shutdown");
-    };
-    const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
-    let modelMessages = "";
-    const rebuiltAdapter = rebuiltDeps.adapter;
-    rebuiltDeps.adapter = {
-      ...rebuiltAdapter,
-      step: async (state, request, signal) => {
-        modelMessages = JSON.stringify(state.messages);
-        return rebuiltAdapter.step(state, request, signal);
+        shutdown: async () => {
+          closeoutEvents.push("shutdown");
+        },
       },
-    };
+    });
+    const captured = withMessageCapture(
+      makeDeps([assistantResult({ texts: ["rebuilt"] })])
+    );
+    const rebuiltDeps = captured.deps;
 
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["turn-1"] })],
@@ -314,7 +357,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
 
     assert.equal(result.ranQuery, true);
     assert.match(
-      modelMessages,
+      captured.messages(),
       /old wait:false result/,
       "the completed result must reach the next primary-model run"
     );
@@ -338,7 +381,6 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
 
     const closeoutEvents: string[] = [];
     let running = true;
-    const oldManager = makeManagerStub();
     const completed = {
       taskId: "running-old-task",
       envelope: {
@@ -347,29 +389,27 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
         result: "old running wait:false result",
       },
     };
-    oldManager.listActive = () => (running ? [completed.taskId] : []);
-    oldManager.drainCompleted = () => {
-      closeoutEvents.push("drain");
-      return running ? [] : [completed];
-    };
-    oldManager.waitFor = async (taskId) => {
-      closeoutEvents.push(`wait:${taskId}`);
-      running = false;
-      return completed.envelope;
-    };
-    oldManager.shutdown = async () => {
-      closeoutEvents.push("shutdown");
-    };
-    const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
-    let modelMessages = "";
-    const rebuiltAdapter = rebuiltDeps.adapter;
-    rebuiltDeps.adapter = {
-      ...rebuiltAdapter,
-      step: async (state, request, signal) => {
-        modelMessages = JSON.stringify(state.messages);
-        return rebuiltAdapter.step(state, request, signal);
+    const oldManager = makeManagerStub({
+      overrides: {
+        listActive: () => (running ? [completed.taskId] : []),
+        drainCompleted: () => {
+          closeoutEvents.push("drain");
+          return running ? [] : [completed];
+        },
+        waitFor: async (taskId: string) => {
+          closeoutEvents.push(`wait:${taskId}`);
+          running = false;
+          return completed.envelope;
+        },
+        shutdown: async () => {
+          closeoutEvents.push("shutdown");
+        },
       },
-    };
+    });
+    const captured = withMessageCapture(
+      makeDeps([assistantResult({ texts: ["rebuilt"] })])
+    );
+    const rebuiltDeps = captured.deps;
 
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["turn-1"] })],
@@ -400,7 +440,7 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
       ["wait:running-old-task", "drain", "shutdown"],
       "rebind must wait for running old-manager work before shutdown"
     );
-    assert.match(modelMessages, /old running manager completed/);
+    assert.match(captured.messages(), /old running manager completed/);
     assert.equal(
       stderr,
       "",
@@ -420,19 +460,22 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     });
 
     const closeoutEvents: string[] = [];
-    const oldManager = makeManagerStub();
-    oldManager.listActive = () => ["undelivered-old-task"];
-    oldManager.drainCompleted = () => {
-      closeoutEvents.push("drain");
-      return [];
-    };
-    oldManager.waitFor = async () => {
-      closeoutEvents.push("wait");
-      throw new Error("old task wait failed");
-    };
-    oldManager.shutdown = async () => {
-      closeoutEvents.push("shutdown");
-    };
+    const oldManager = makeManagerStub({
+      overrides: {
+        listActive: () => ["undelivered-old-task"],
+        drainCompleted: () => {
+          closeoutEvents.push("drain");
+          return [];
+        },
+        waitFor: async () => {
+          closeoutEvents.push("wait");
+          throw new Error("old task wait failed");
+        },
+        shutdown: async () => {
+          closeoutEvents.push("shutdown");
+        },
+      },
+    });
     const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["turn-1"] })],
@@ -477,11 +520,14 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
 
     let oldShutdownCalls = 0;
     const shutdownOrder: string[] = [];
-    const oldManager = makeManagerStub();
-    oldManager.shutdown = async () => {
-      oldShutdownCalls += 1;
-      shutdownOrder.push("old");
-    };
+    const oldManager = makeManagerStub({
+      overrides: {
+        shutdown: async () => {
+          oldShutdownCalls += 1;
+          shutdownOrder.push("old");
+        },
+      },
+    });
     const oldShutdown = oldManager.shutdown.bind(oldManager);
     const newManager = makeManagerStub();
     let rebuiltShutdownCalls = 0;
@@ -495,8 +541,11 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
       onTurnComplete: () => {},
       drain: async () => {},
     } satisfies AutoMemoryHook;
-    const om1: OverlayPrefetchFn = async () => null;
-    const om2: OverlayPrefetchFn = async () => null;
+    // OverlayPrefetchFn resolves the overlay TEXT; "" is the empty overlay
+    // (attachPrefetchOverlay returns userText unchanged), which is what these
+    // two identity-swapped stubs mean.
+    const om1: OverlayPrefetchFn = async () => "";
+    const om2: OverlayPrefetchFn = async () => "";
     const rebuiltDeps = makeDeps([assistantResult({ texts: ["rebuilt"] })]);
 
     const ctx = makeCtx({
@@ -563,26 +612,32 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
     });
 
     let oldDrainCalls = 0;
-    const oldManager = makeManagerStub();
-    oldManager.drainCompleted = () => {
-      oldDrainCalls += 1;
-      return [];
-    };
-    let newDrainCalls = 0;
-    const newManager = makeManagerStub();
-    newManager.drainCompleted = () => {
-      newDrainCalls += 1;
-      return [
-        {
-          taskId: "task-1",
-          envelope: {
-            status: "ok",
-            summary: "done",
-            result: "subagent result",
-          },
+    const oldManager = makeManagerStub({
+      overrides: {
+        drainCompleted: () => {
+          oldDrainCalls += 1;
+          return [];
         },
-      ];
-    };
+      },
+    });
+    let newDrainCalls = 0;
+    const newManager = makeManagerStub({
+      overrides: {
+        drainCompleted: () => {
+          newDrainCalls += 1;
+          return [
+            {
+              taskId: "task-1",
+              envelope: {
+                status: "ok",
+                summary: "done",
+                result: "subagent result",
+              },
+            },
+          ];
+        },
+      },
+    });
 
     const ctx = makeCtx({
       responses: [assistantResult({ texts: ["turn-1"] })],
@@ -642,10 +697,11 @@ describe("chat-session rebind 句柄换血（2026-08-29 收敛修复）", () => 
       };
     };
 
-    let r;
+    let r: ProcessChatLineResult | undefined;
     const stderr = await captureStderrOf(async () => {
       r = await processChatLine({ line: "q", ctx });
     });
+    assert.ok(r !== undefined, "processChatLine must return a result");
     assert.equal(r.ranQuery, true);
     assert.equal(rebuilds, 0, "IO 错误不得触发重建");
     assert.equal(ctx.engineRoot, mainRoot);

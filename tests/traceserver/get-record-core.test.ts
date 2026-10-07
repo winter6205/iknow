@@ -23,7 +23,6 @@ import {
   TRACE_BACKSTOP_MARKER,
   applyTraceOutputBackstop,
 } from "../../src/traceserver/output-backstop.ts";
-import { TraceReadError } from "../../src/traceserver/types.ts";
 
 /**
  * Contract suite for `get_record` — the third read axis.

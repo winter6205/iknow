@@ -14,7 +14,6 @@ import {
   statusTone,
   isErr,
   STATIONS,
-  type TraceEvent,
 } from "../../web/src/lib/flowTree.ts";
 
 const iso = (h: number, m: number, s: number) =>
@@ -108,7 +107,6 @@ describe("recordsToEvents", () => {
         status: "ok",
       },
     ]);
-    const byId = new Map(events.map((e) => [e.label, e]));
     assert.equal(events.filter((e) => e.turn === 0).length, 2);
     assert.equal(events.filter((e) => e.turn === 1).length, 3);
     // tool_call resolves to turn 1 via its parent llm_call

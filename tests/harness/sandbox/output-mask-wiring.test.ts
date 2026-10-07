@@ -121,16 +121,20 @@ describe("output mask wiring (SC20)", () => {
       // recordToolCall is the carrier most likely to embed tool payloads
       // (arguments / result). Inject the sentinel in the tool result.
       void trace.recordToolCall({
-        toolCallId: "tc1",
         parentLlmCallId: "p1",
         toolName: "bash",
+        toolKind: "ok",
+        argumentsCaptured: true,
         arguments: { command: "echo" },
+        resultCaptured: true,
         result: {
           kind: "ok",
           payload: [{ type: "text", text: `out: ${SENTINEL}` }],
         },
-        startedAt: 0,
+        startedAt: "1970-01-01T00:00:00.000Z",
+        endedAt: "1970-01-01T00:00:00.001Z",
         durationMs: 1,
+        status: "ok",
       });
       const traceFile = join(scratch, "conv-mask-1.jsonl");
       assert.ok(existsSync(traceFile));

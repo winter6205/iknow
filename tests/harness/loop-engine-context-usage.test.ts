@@ -18,7 +18,6 @@ import { run } from "../../src/harness/loop-engine.ts";
 import type { LoopAdapter } from "../../src/harness/loop-engine.ts";
 import type {
   AnthropicNativeMessage,
-  AssistantTurnResult,
   CountTokensInput,
   TokenUsage,
 } from "../../src/harness/model-adapter/types.ts";

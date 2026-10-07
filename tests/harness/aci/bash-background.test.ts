@@ -55,7 +55,14 @@ import {
   createBackgroundTaskManager,
   defaultBackgroundSpawn,
 } from "../../../src/harness/background/manager.ts";
-import type { BackgroundTaskManager } from "../../../src/harness/background/manager.ts";
+import type {
+  BackgroundStatusResult,
+  BackgroundTaskManager,
+} from "../../../src/harness/background/manager.ts";
+import {
+  NOT_STARTED_CLEANUP,
+  type CleanupEvidence,
+} from "../../../src/harness/sandbox/cleanup-result.ts";
 import { resolveTasksDir } from "../../../src/harness/background/paths.ts";
 import { createSecretRegistry } from "../../../src/harness/secret-roundtrip/index.ts";
 
@@ -75,6 +82,20 @@ afterEach(async () => {
   );
 });
 
+/**
+ * `ToolExecutionResult.payload` is `AnthropicContentBlock[]`, a union whose
+ * `text` member only exists on the text arm. Every ok result this file asserts
+ * on is a single text block, so read it through this narrowing.
+ */
+function okText(result: ToolExecutionResult): string {
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") throw new Error("not ok");
+  const block = result.payload[0]!;
+  assert.equal(block.type, "text");
+  if (block.type !== "text") throw new Error("not text");
+  return block.text;
+}
+
 function hasBwrap(): boolean {
   const probe = spawnSync("bwrap", ["--version"], { stdio: "ignore" });
   return probe.status === 0;
@@ -88,14 +109,22 @@ function makeFakeManager(): {
   const spawn = vi.fn();
   const manager = {
     spawn: spawn as unknown as BackgroundTaskManager["spawn"],
-    status: vi.fn(async () => ({
+    status: vi.fn(async (): Promise<BackgroundStatusResult> => ({
       status: "running",
       task_id: "bg-0123456789ab",
       exit_code: null,
       command: "",
+      cleanup: NOT_STARTED_CLEANUP,
+      deadline_at: null,
+      cause: null,
     })),
     output: vi.fn(),
-    stop: vi.fn(async () => undefined),
+    stop: vi.fn(async (): Promise<CleanupEvidence> => ({
+      state: "not_started",
+    })),
+    shutdown: vi.fn(async () => undefined),
+    registerConversationDeletedListener: vi.fn(),
+    onConversationDeleted: vi.fn(),
   } satisfies BackgroundTaskManager;
   return { manager, spawn };
 }
@@ -341,10 +370,11 @@ describe("bash background handler（fake manager）", () => {
     // `echo rm -rf /` anymore. The target does not exist, so a wall that
     // stopped rejecting could still not destroy anything from this scratch dir.
     await assert.rejects(
-      tool.handler({
-        command: "rm -rf ./bash-bg-danger-nonexistent",
-        background: true,
-      }),
+      async () =>
+        tool.handler({
+          command: "rm -rf ./bash-bg-danger-nonexistent",
+          background: true,
+        }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("bash: dangerous command rejected")
@@ -357,7 +387,7 @@ describe("bash background handler（fake manager）", () => {
     const tool = createBashTool(cwd);
 
     await assert.rejects(
-      tool.handler({ command: "sleep 300", background: true }),
+      async () => tool.handler({ command: "sleep 300", background: true }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("background")
@@ -379,7 +409,7 @@ describe("bash background handler（fake manager）", () => {
     const tool = createBashTool(cwd, { backgroundManager: manager });
 
     await assert.rejects(
-      tool.handler({ command: "sleep 300", background: true }),
+      async () => tool.handler({ command: "sleep 300", background: true }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("io_failure: save bg-0123456789ab")
@@ -596,7 +626,7 @@ describe("bash background tier 对照（timeoutMsOverride seam）", () => {
       );
       assert.equal(result.kind, "ok");
       if (result.kind === "ok") {
-        const payload = JSON.parse(result.payload[0]!.text) as {
+        const payload = JSON.parse(okText(result)) as {
           task_id: string;
           log_path: string;
         };

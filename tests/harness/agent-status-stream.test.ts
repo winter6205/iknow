@@ -42,18 +42,16 @@ import {
 // ---------------------------------------------------------------------------
 
 /** Event collector: records only agent_status events (other types are counted, never interpreted). */
+type AgentStatusEvent = Extract<HarnessStreamEvent, { type: "agent_status" }>;
+
 interface EventProbe {
   readonly onStream: (event: HarnessStreamEvent) => void;
   /** agent_status event objects as-is, in arrival order (for field-level asserts). */
-  readonly agentStatusEvents: HarnessStreamEvent &
-    {
-      type: "agent_status";
-    }[];
+  readonly agentStatusEvents: AgentStatusEvent[];
 }
 
 function makeEventProbe(): EventProbe {
-  const agentStatusEvents: (HarnessStreamEvent & { type: "agent_status" })[] =
-    [];
+  const agentStatusEvents: AgentStatusEvent[] = [];
   const onStream = (event: HarnessStreamEvent): void => {
     if (event.type === "agent_status") agentStatusEvents.push(event);
   };

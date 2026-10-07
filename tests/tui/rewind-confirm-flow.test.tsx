@@ -49,14 +49,16 @@ function anchor(head: string | null, text: string): LedgerRewindTarget {
 
 function makeFile(dataDir: string): SessionFileV1 {
   return {
-    id: CONVERSATION_ID,
+    schemaVersion: 1,
+    conversation_id: CONVERSATION_ID,
     workspaceRoot: dataDir,
     messages: [],
-    createdAt: "2026-09-17T00:00:00.000Z",
     updatedAt: "2026-09-17T00:00:00.000Z",
     turnCount: 0,
     jsonMode: false,
-    lastUsage: null,
+    title: CONVERSATION_ID,
+    cwd: dataDir,
+    sanitized_at: "2026-09-17T00:00:00.000Z",
   };
 }
 
@@ -112,6 +114,9 @@ async function mountApp(
     },
     listSessions: async () => [],
     loadSessionFile: async () => file,
+    openSession: async () => {
+      throw new Error("unused");
+    },
     compactSession: async () => ({
       compacted: false,
       reason: "below_token_threshold" as const,

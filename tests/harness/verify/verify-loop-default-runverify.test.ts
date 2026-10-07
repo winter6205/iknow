@@ -14,18 +14,15 @@ import { join } from "node:path";
 import { afterAll, describe, expect, it, vi } from "vitest";
 import assert from "node:assert/strict";
 
-vi.mock(
-  "../../../src/harness/verify/sandbox-run.ts",
-  async (importOriginal) => {
-    const actual = await vi.importActual<
-      typeof import("../../../src/harness/verify/sandbox-run.ts")
-    >("../../../src/harness/verify/sandbox-run.ts");
-    return {
-      ...actual,
-      makeDefaultRunVerify: vi.fn(),
-    };
-  }
-);
+vi.mock("../../../src/harness/verify/sandbox-run.ts", async () => {
+  const actual = await vi.importActual<
+    typeof import("../../../src/harness/verify/sandbox-run.ts")
+  >("../../../src/harness/verify/sandbox-run.ts");
+  return {
+    ...actual,
+    makeDefaultRunVerify: vi.fn(),
+  };
+});
 
 import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts";
 import { runVerifyLoop } from "../../../src/harness/verify/verify-loop.ts";

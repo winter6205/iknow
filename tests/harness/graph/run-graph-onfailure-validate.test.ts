@@ -183,7 +183,7 @@ describe("run_graph onFailure 校验：非法失败边 typed 拒绝、零 spawn"
       { conversationId: CONV }
     );
     await waitForChildren(children, 1);
-    settle(children[0]!, fail("boom"));
+    settle(children[0]!, fail("crashed"));
     await first;
 
     await expect(

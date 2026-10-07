@@ -93,9 +93,10 @@ describe("chat / ask entry-point dataDir threading (review-fix M-2)", () => {
       resolveServeDataDir(alt),
       deriveProjectIdentityRoot({ cwd: workspaceRoot })
     );
+    const projectDir = store.getProjectDir();
     assert.ok(
-      store.projectDir.startsWith(`${alt}/projects/`),
-      `projectDir must sit under <alt>/projects/, got ${store.projectDir}`
+      projectDir.startsWith(`${alt}/projects/`),
+      `projectDir must sit under <alt>/projects/, got ${projectDir}`
     );
   });
 });

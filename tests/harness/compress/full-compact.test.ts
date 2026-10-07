@@ -25,7 +25,6 @@ import type { CompactAdapter } from "../../../src/harness/compress/full-compact.
 import type {
   AnthropicNativeMessage,
   AssistantTurnResult,
-  LoopState,
   TokenUsage,
 } from "../../../src/harness/model-adapter/types.ts";
 

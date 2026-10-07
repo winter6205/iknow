@@ -38,6 +38,7 @@ import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 // executor normalizes the message" into a tautology written by the test itself).
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
+import { assistantResult } from "../cli/_fixtures.ts";
 
 /** PER_TASK_TIMEOUT_MS defaults to 2 hours (contract Assumptions 1). */
 const PER_TASK_TIMEOUT_MS_DEFAULT = 120 * 60 * 1000;
@@ -56,6 +57,8 @@ function baseManager(over: Partial<SubAgentManager>): SubAgentManager {
     // here so every over-spread instance gets it.
     getCapacity: () => 15,
     listSubagents: () => [],
+    // T3 terminal-notification subscription: no subscriber is registered here.
+    subscribe: () => () => {},
     ...over,
   };
 }
@@ -245,8 +248,8 @@ describe("SC4: wait:true tool_result 带 task_id + tmp_root", () => {
     expect(out.status).toBe("ok");
     expect(out.task_id).toBe(locator.task_id);
     expect(out.tmp_root).toBe(locator.tmp_root);
-    expect(out.task_id.length).toBeGreaterThan(0);
-    expect(out.tmp_root.length).toBeGreaterThan(0);
+    expect(out.task_id?.length).toBeGreaterThan(0);
+    expect(out.tmp_root?.length).toBeGreaterThan(0);
     expect(
       out.product_roster === undefined || out.product_roster.length === 0
     ).toBe(true);
@@ -625,17 +628,7 @@ describe("T12: messages_captured 真值 (loop-engine.ts 三处 recordLlmCall)", 
       const exec = createExecutor(reg);
       const model = createStubModel({
         responses: [
-          {
-            texts: ["done"],
-            toolCalls: [],
-            supplierStop: "success",
-            nativeMessage: {
-              role: "assistant",
-              content: [{ type: "text", text: "done" }],
-            },
-            projection: { texts: ["done"], toolCalls: [] },
-            usage: undefined,
-          },
+          assistantResult({ texts: ["done"], supplierStop: "success" }),
         ],
       });
       await run("hi", {

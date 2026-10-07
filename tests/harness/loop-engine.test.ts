@@ -1956,10 +1956,12 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
         results: ReadonlyArray<ToolExecutionResult>
       ): AnthropicContentBlock[] => {
         return results.map((r) => {
+          // `message` only exists on the failure variants; the ok arm never
+          // reads it.
           const text =
             r.kind === "ok"
-              ? JSON.stringify(r.payload ?? {})
-              : `[${r.kind}] ${r.message ?? ""}`;
+              ? JSON.stringify(r.payload)
+              : `[${r.kind}] ${"message" in r ? (r.message ?? "") : ""}`;
           return {
             type: "tool_result" as const,
             tool_use_id: r.toolUseId,
@@ -2077,8 +2079,10 @@ describe("loop engine T5 #152: thinking 保留与回传", () => {
               type: "text" as const,
               text:
                 r.kind === "ok"
-                  ? JSON.stringify(r.payload ?? {})
-                  : (r.message ?? ""),
+                  ? JSON.stringify(r.payload)
+                  : "message" in r
+                    ? (r.message ?? "")
+                    : "",
             },
           ],
         })),
@@ -3082,7 +3086,7 @@ describe("loop engine manual-compact-trigger T1: 短历史 + 缺省阈值下 pro
         maxTurns: 3,
         // thresholdTokens deliberately absent → getAutoCompactThreshold uses
         // floor(0.95 × 200000) = 190000, far above the estimate of 3 prior + 1 user.
-        compress: { contextWindow: 200_000 },
+        compress: { contextWindow: 200_000, thresholdTokens: undefined },
       },
       undefined,
       { priorMessages: prior }

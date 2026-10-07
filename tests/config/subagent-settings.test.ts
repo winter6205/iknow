@@ -430,7 +430,10 @@ describe("subagent settings — 每条路由各自的输出预算（真实 setti
   });
 
   /** Two providers, one model entry each; an omitted budget stays omitted. */
-  function routeSettings(mainTokens?: number, subTokens?: number): object {
+  function routeSettings(
+    mainTokens?: number,
+    subTokens?: number
+  ): Record<string, unknown> {
     const entry = (id: string, tokens?: number) => ({
       id,
       ...(tokens === undefined ? {} : { maxTokens: tokens }),

@@ -61,8 +61,11 @@ interface CapturedSpawn {
 }
 
 function makeManagerCapturingPayload(opts: {
-  readonly skillIndexSnapshot?: () =>
-    readonly SkillIndexSnapshotEntry[] | undefined;
+  // The seam hands the getter this spawn's parent-session anchor, exactly like
+  // `CreateSubAgentManagerOptions.skillIndexSnapshot`.
+  readonly skillIndexSnapshot?: (
+    conversationId: string | undefined
+  ) => readonly SkillIndexSnapshotEntry[] | undefined;
   readonly parentSandboxRoot: string;
 }): {
   readonly manager: ReturnType<typeof createSubAgentManager>;

@@ -73,7 +73,10 @@ describe("AciRegistry.retireBuiltin — B6 退场 seam", () => {
     // simulate a tool_search hit
     const def = reg.discover("query_trace");
     assert.ok(def !== undefined);
-    assert.equal(def?.aci.lazy, true);
+    assert.equal(def?.name, "query_trace");
+    // discover() is declared as returning ToolDef, so read the ACI metadata
+    // through catalog.get — the same byName slot discover resolved from.
+    assert.equal(reg.catalog.get("query_trace")?.aci.lazy, true);
     // visibleSchemas should bring it back at the tail
     const names = reg.visibleSchemas().map((t) => t.name);
     assert.deepEqual(names, ["bash", "query_trace"]);

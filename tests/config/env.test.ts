@@ -50,8 +50,8 @@ import { getAutoCompactThreshold } from "../../src/harness/compress/threshold.ts
 import {
   formatLlmBudgetConfigError,
   isLlmBudgetConfigError,
-  loadIknowSettings,
   type IknowSettings,
+  type IknowSettingsLlmProvider,
 } from "../../src/config/settings.ts";
 
 /**
@@ -1627,7 +1627,7 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
   /** Minimal registry fixture: the providers section must be legal (models non-empty) or the settings layer drops it. */
   function settingsWithProviders(
     model: string,
-    providers: ReadonlyArray<Record<string, unknown>>,
+    providers: ReadonlyArray<IknowSettingsLlmProvider>,
     extra?: { apiKey?: string }
   ): IknowSettings {
     return {
@@ -1636,7 +1636,7 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
         ...(extra?.apiKey === undefined ? {} : { apiKey: extra.apiKey }),
         providers,
       },
-    } as IknowSettings;
+    };
   }
 
   it("命中注册表 → baseUrl = provider.baseUrl 去尾斜杠，apiKey = process.env[apiKeyEnv]", () => {
@@ -1761,6 +1761,11 @@ describe("loadIknowEnv — llm.providers 解析 (ADR-0093 / T3)", () => {
       assert.fail("expected loadIknowEnv to throw");
     } catch (err) {
       assert.ok(isLlmProviderConfigError(err));
+      // LlmProviderConfigError is a two-kind union; narrow to the kind this
+      // case produces before reading its payload fields.
+      assert.equal(err.kind, "provider_api_key_missing");
+      if (err.kind !== "provider_api_key_missing")
+        throw new Error("wrong kind");
       // All load-bearing payload fields present (otherwise the render side cannot get provider / env name).
       assert.equal(err.providerId, "minimax-cn");
       assert.equal(err.apiKeyEnv, "MINIMAX_CN_API_KEY");

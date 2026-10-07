@@ -105,6 +105,8 @@ const TEST_ENV: IknowEnv = {
   compress: { contextWindow: 200_000, thresholdTokens: undefined },
   mcp: { connectTimeoutMs: 60_000 },
   subagent: { taskTimeoutMs: undefined },
+  workspaceRoot: undefined,
+  productRoot: undefined,
 };
 
 const scratchPaths: string[] = [];

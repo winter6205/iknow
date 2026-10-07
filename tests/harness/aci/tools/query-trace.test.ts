@@ -25,17 +25,6 @@ import { TRACE_BACKSTOP_MARKER } from "../../../../src/traceserver/output-backst
 
 const scratchPaths: string[] = [];
 
-/**
- * The scan-cap case below writes and then reads a 10,001-row fixture, because
- * `QUERY_TRACE_MAX_RECORD_ID_SCAN = 10_000` is the contract it pins: the target
- * id sits one row past the cap, so the scan has to run to exhaustion. That one
- * case costs 2.5s on an idle core but measured 5158ms inside a full 385-file
- * `npm test` — over the 5000ms default. The fork pool (`maxForks: 3` on 4
- * cores) decides whether it lands above or below, which is why it failed
- * in the full run and passed standalone. Not state pollution: the fixtures are
- * mkdtemp-only, and `pool: "forks"` runs each file in its own process.
- */
-const SCAN_CAP_TEST_TIMEOUT = 20_000;
 /** Sessions live in the two-level tree `<dir>/projects/<slug>/<convId>/trace.jsonl`. */
 const TEST_PROJECT_SLUG = "test-project-aci-query-trace";
 

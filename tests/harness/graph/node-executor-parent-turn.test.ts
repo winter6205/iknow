@@ -74,7 +74,7 @@ describe("createSubAgentNodeExecutor — parentTurnId", () => {
       trace,
       parentTurnId: "turn-graph-1",
     });
-    const outcome = await exec("a");
+    const outcome = await exec("a", { outputs: {} });
 
     assert.deepEqual(outcome, { status: "done", output: "r" });
     assert.equal(defs.length, 1);
@@ -88,7 +88,7 @@ describe("createSubAgentNodeExecutor — parentTurnId", () => {
     const { manager, defs } = fakeManager();
 
     const exec = createSubAgentNodeExecutor({ manager, plans, trace });
-    await exec("a");
+    await exec("a", { outputs: {} });
 
     assert.ok(!("parentTurnId" in defs[0]!));
     for (const s of steps) assert.ok(!("parentTurnId" in s));

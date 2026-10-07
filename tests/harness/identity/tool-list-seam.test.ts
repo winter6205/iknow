@@ -46,8 +46,10 @@ afterAll(async () => {
 function baseCtx(): AssemblyContext {
   return {
     cwd: process.cwd(),
+    projectIdentityRoot: process.cwd(),
     userHome: workDir,
     bootstrapActive: false, // disable BOOTSTRAP segment; base is identity + soul only
+    memoryEnabled: false,
   };
 }
 
@@ -105,8 +107,10 @@ describe("#224 W4 tool-list injection seam (empty shell)", () => {
   it("createIknowSystemResolver opts.toolList threads through to assemble output", async () => {
     const resolver = createIknowSystemResolver({
       cwd: process.cwd(),
+      projectIdentityRoot: process.cwd(),
       userHome: workDir,
       surface: "ask", // ask surface → bootstrapActive=false
+      memoryEnabled: false,
       toolList: () => ["alpha", "beta"],
     });
     const out = await resolver();
@@ -121,13 +125,17 @@ describe("#224 W4 tool-list injection seam (empty shell)", () => {
   it("createIknowSystemResolver without opts.toolList → byte-identical to undefined-returning seam", async () => {
     const resolverBaseline = createIknowSystemResolver({
       cwd: process.cwd(),
+      projectIdentityRoot: process.cwd(),
       userHome: workDir,
       surface: "ask",
+      memoryEnabled: false,
     });
     const resolverSeamUndef = createIknowSystemResolver({
       cwd: process.cwd(),
+      projectIdentityRoot: process.cwd(),
       userHome: workDir,
       surface: "ask",
+      memoryEnabled: false,
       toolList: () => undefined,
     });
     const a = await resolverBaseline();

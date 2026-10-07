@@ -40,13 +40,17 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
       stream: "on",
     },
     chat: { showThinking: false },
-    web: { searchUrl: undefined },
+    web: { searchUrl: undefined, proxy: undefined },
     // IknowCompressEnv is required (build-engine forwards it to deps.compress).
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     // MCP connect timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
     // Subagent config arm (build-engine reads taskTimeoutMs).
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env
+    // side keeps its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

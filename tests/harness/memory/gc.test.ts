@@ -587,7 +587,7 @@ describe("runMemoryGc — archive disabled entries out of the hot dir", () => {
     await put("edge30", { disabled: true, updated_at: daysAgo(30) });
     await put("edge29", { disabled: true, updated_at: daysAgo(29) });
     const result = await runMemoryGc(memoryDir, { nowMs: NOW });
-    assert.deepEqual(result.archived.sort(), ["edge30"]);
+    assert.deepEqual([...result.archived].sort(), ["edge30"]);
     assert.ok(
       (await readdir(join(memoryDir, "archive"))).includes("edge30.md")
     );
@@ -602,7 +602,7 @@ describe("runMemoryGc — archive disabled entries out of the hot dir", () => {
     await put("d4", { disabled: true, updated_at: daysAgo(5) });
     await put("live", { updated_at: daysAgo(1) });
     const result = await runMemoryGc(memoryDir, { nowMs: NOW, cap: 2 });
-    assert.deepEqual(result.archived.sort(), ["d1", "d2"]);
+    assert.deepEqual([...result.archived].sort(), ["d1", "d2"]);
     const archived = (await readdir(join(memoryDir, "archive"))).sort();
     assert.deepEqual(archived, ["d1.md", "d2.md"]);
     const scan = await listStoreEntries(memoryDir);
@@ -640,7 +640,7 @@ describe("runMemoryGc — archive disabled entries out of the hot dir", () => {
     await put("stale", { disabled: true, updated_at: daysAgo(31) });
     await put("d1", { disabled: true, updated_at: daysAgo(29) });
     const first = await runMemoryGc(memoryDir, { nowMs: NOW, cap: 1 });
-    assert.deepEqual(first.archived.sort(), ["d1", "stale"]);
+    assert.deepEqual([...first.archived].sort(), ["d1", "stale"]);
     const hotBefore = (await readdir(memoryDir)).sort();
     const archiveBefore = (await readdir(join(memoryDir, "archive"))).sort();
 

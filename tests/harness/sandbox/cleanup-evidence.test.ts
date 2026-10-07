@@ -50,6 +50,8 @@ function shFence(command: string): BwrapFence {
   return Object.freeze({
     argv: Object.freeze(["sh", "-c", command]),
     sealed: true as const,
+    // The bare-argv fixture emits no boundary block, so it names no mask.
+    exactFileMaskPaths: Object.freeze([]),
   });
 }
 
@@ -70,7 +72,7 @@ function groupGone(pgid: number): boolean {
 
 function cleanup(
   code: SandboxRunResult["cleanup"]
-): SandboxRunResult["cleanup"] {
+): NonNullable<SandboxRunResult["cleanup"]> {
   assert.ok(code, "the execution plane must carry cleanup evidence");
   return code;
 }
@@ -121,9 +123,10 @@ describe("foreground cleanup evidence — runInSandbox", () => {
     assert.equal(groupGone(pgid), false, "group is alive before the abort");
     controller.abort();
     const result = await execution;
-    assert.equal(cleanup(result.cleanup).state, "confirmed_stopped");
+    const evidence = cleanup(result.cleanup);
+    assert.equal(evidence.state, "confirmed_stopped");
     assert.equal(
-      cleanup(result.cleanup).pgid,
+      evidence.pgid,
       pgid,
       "confirmed evidence carries the observed process-group id"
     );

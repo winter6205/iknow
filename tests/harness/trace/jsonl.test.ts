@@ -1233,7 +1233,7 @@ describe("createJsonlTraceService — file-mode (traceFilePath) 互斥合约", (
         // Conservative cap for directory mode (rotation.ts default 5MB) —
         // the tiny value proves file-mode never enters maybeRotate: if rotation
         // applied, the first write would already produce trace.1.jsonl.
-        rotation: { maxFileBytes: 1 },
+        rotation: { maxTotalBytes: 1 },
       });
       await svc.recordToolCall(SAMPLE_TOOL);
       await svc.recordToolCall(SAMPLE_TOOL);

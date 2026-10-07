@@ -71,7 +71,7 @@ describe("write_file last-read 闸 — SC3 分叉", () => {
     const tool = createWriteFileTool(root, { lastReadLedger: ledger });
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler(
           { path: "existing.txt", content: "clobbered\n" },
           { conversationId: "conv-a" }
@@ -91,7 +91,7 @@ describe("write_file last-read 闸 — SC3 分叉", () => {
     });
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler(
           { path: "existing.txt", content: "clobbered\n" },
           { conversationId: "conv-a" }
@@ -147,7 +147,8 @@ describe("write_file last-read 闸 — SC3 分叉", () => {
     });
 
     await assert.rejects(
-      () => tool.handler({ path: "existing.txt", content: "clobbered\n" }),
+      async () =>
+        tool.handler({ path: "existing.txt", content: "clobbered\n" }),
       isRefusal
     );
     assert.equal(await readFile(target, "utf8"), "original\n");
@@ -211,7 +212,7 @@ describe("write_file last-read 闸 — SC1 同回合读后覆写", () => {
 
     await reader.handler({ path: "a.ts" }, { conversationId: "conv-a" });
     await assert.rejects(
-      () =>
+      async () =>
         writer.handler(
           { path: "a.ts", content: "new\n" },
           { conversationId: "conv-b" }
@@ -228,7 +229,7 @@ describe("write_file last-read 闸 — SC1 同回合读后覆写", () => {
     const ledger = createLastReadLedgerHost();
     const reader = createReadFileTool(root, { lastReadLedger: ledger });
 
-    await assert.rejects(() =>
+    await assert.rejects(async () =>
       reader.handler({ path: "a.ts", offset: 99 }, { conversationId: "conv-a" })
     );
     assert.equal(ledger.ledgerFor("conv-a")?.has(target), false);

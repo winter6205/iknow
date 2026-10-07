@@ -55,6 +55,7 @@ import {
 } from "../../src/tui/thinking-picker.js";
 import { ADJUSTABLE_EFFORT_LEVELS } from "../../src/tui/slash.js";
 import type { ModalKeyEvent } from "../../src/tui/modal.js";
+import { flushRendererFrame, setReactActEnvironment } from "./_fixtures.tsx";
 
 const noKey = {
   upArrow: false,
@@ -345,7 +346,7 @@ async function renderPickerText(
   state: ThinkingPickerState,
   cols = 80
 ): Promise<string> {
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  setReactActEnvironment(true);
   const stdin = new Readable({ read() {} }) as unknown as NodeJS.ReadStream;
   const stdout = new TestWriteStream(cols, 24) as unknown as NodeJS.WriteStream;
   const config: CliRendererConfig = {
@@ -364,14 +365,14 @@ async function renderPickerText(
     act(() => {
       root.render(<ThinkingPicker state={state} />);
     });
-    await renderer.loop();
+    await flushRendererFrame(renderer);
     const bytes = renderer.currentRenderBuffer.getRealCharBytes(true);
     return new TextDecoder().decode(bytes);
   } finally {
     act(() => root.unmount());
     renderer.destroy();
     // Restore the global even on assertion failure to avoid polluting later cases.
-    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    setReactActEnvironment(false);
   }
 }
 

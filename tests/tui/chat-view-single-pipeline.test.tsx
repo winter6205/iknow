@@ -55,6 +55,9 @@ function sessionWith(
     turnCount: msgs.filter((m) => m.role === "assistant").length,
     updatedAt: "2026-09-07T00:00:00.000Z",
     jsonMode: false,
+    title: "t3-single-pipeline",
+    cwd: "/tmp",
+    sanitized_at: "2026-09-07T00:00:00.000Z",
     ...(thinkingMs !== undefined ? { thinkingMs } : {}),
   };
   return attachSession(file);

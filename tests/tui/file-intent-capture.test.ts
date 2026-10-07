@@ -89,7 +89,7 @@ const userMsg = (t: string) => ({
 });
 
 /** A session with a real persisted head, so an intent has a branch anchor. */
-async function seedChain(id: string): Promise<string | null> {
+async function seedChain(id: string): Promise<string> {
   await store.save({ id, file: sampleFile(id) });
   await store.appendEvents({ id, events: [userMsg("go")] });
   const log = parseSessionJsonl(
@@ -318,10 +318,8 @@ describe("TUI write records a durable per-file intent", () => {
     }
     expect(refusal).toBeInstanceOf(NativeStatePortError);
     expect((refusal as NativeStatePortError).code).toBe("PERSIST_FAILED");
-    expect(await readFile(join(taskRoot, "guarded.ts"), "utf8")).toBe(
-      "old\n",
-      "the refused write left the file alone"
-    );
+    // the refused write left the file alone
+    expect(await readFile(join(taskRoot, "guarded.ts"), "utf8")).toBe("old\n");
     expect(await durableIntents(id)).toHaveLength(0);
   });
 });
@@ -369,9 +367,15 @@ describe("TUI engine reaches the host runtime-persistence binder", () => {
     // than racing one tick.
     const facts = await pollFacts(id);
     expect(facts.length).toBe(1);
-    expect(facts[0]!.fact.kind).toBe("worker_progress");
-    expect(facts[0]!.fact.taskId).toBe("task-binder-1");
-    expect(facts[0]!.fact.state).toBe("stopped");
+    const fact = facts[0]!.fact;
+    expect(fact.kind).toBe("worker_progress");
+    // RuntimeOperationFact is a 3-arm union; taskId/state live on the worker
+    // arm, so read them through the kind check asserted above.
+    if (fact.kind !== "worker_progress") {
+      throw new Error(`expected a worker_progress fact, got ${fact.kind}`);
+    }
+    expect(fact.taskId).toBe("task-binder-1");
+    expect(fact.state).toBe("stopped");
     expect(facts[0]!.anchorEventId).toBe(head);
   });
 

@@ -82,7 +82,6 @@ import type {
   AssistantTurnResult,
   LoopState,
 } from "../../../src/harness/model-adapter/types.ts";
-import type { LoopAdapter } from "../../../src/harness/loop-engine.ts";
 import { toAnthropicToolResults } from "../../../src/harness/tools/tool-result.ts";
 import type { ToolExecutionResult } from "../../../src/harness/tools/types.ts";
 

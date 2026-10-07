@@ -598,11 +598,13 @@ describe("filterLiveToolRunsAgainstSpawnCards", () => {
       id: "tu-w3",
       name: "spawn_subagent",
       status: "running",
+      input: undefined,
     };
     const ghost: LiveToolRun = {
       id: "tu-ghost",
       name: "spawn_subagent",
       status: "running",
+      input: undefined,
     };
     const cards = new Map([
       [
@@ -623,6 +625,7 @@ describe("filterLiveToolRunsAgainstSpawnCards", () => {
       id: "tu-only",
       name: "spawn_subagent",
       status: "running",
+      input: undefined,
     };
     expect(
       filterLiveToolRunsAgainstSpawnCards([first], new Map()).map((r) => r.id)

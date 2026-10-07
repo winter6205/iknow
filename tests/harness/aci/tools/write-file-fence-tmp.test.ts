@@ -59,7 +59,7 @@ describe("write_file — session tmp host dir (SC4 / S2)", () => {
     const tool = createWriteFileTool(taskRoot, { tmpDir: pad });
 
     await assert.rejects(
-      () => tool.handler({ path: "", content: "nope\n" }),
+      async () => tool.handler({ path: "", content: "nope\n" }),
       (error: unknown) =>
         error instanceof ToolExecutionError && !error.message.includes("wrote")
     );
@@ -83,7 +83,8 @@ describe("write_file — session tmp host dir (SC4 / S2)", () => {
     const tool = createWriteFileTool(taskRoot, { tmpDir: pad });
 
     await assert.rejects(
-      () => tool.handler({ path: "/tmp/ok.txt", content: "must-not-land\n" }),
+      async () =>
+        tool.handler({ path: "/tmp/ok.txt", content: "must-not-land\n" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("outside workspace")
@@ -128,7 +129,7 @@ describe("write_file — session tmp host dir (SC4 / S2)", () => {
     const longName = `${"n".repeat(400)}.txt`;
 
     await assert.rejects(
-      () => tool.handler({ path: join(pad, longName), content: "x\n" }),
+      async () => tool.handler({ path: join(pad, longName), content: "x\n" }),
       ToolExecutionError
     );
     assert.equal(await doesNotExist(join(taskRoot, longName)), true);
@@ -185,7 +186,8 @@ describe("write_file — session tmp host dir (SC4 / S2)", () => {
 
     try {
       await assert.rejects(
-        () => tool.handler({ path: join(pad, "blocked.txt"), content: "x\n" }),
+        async () =>
+          tool.handler({ path: join(pad, "blocked.txt"), content: "x\n" }),
         ToolExecutionError
       );
       assert.equal(await doesNotExist(join(pad, "blocked.txt")), true);
@@ -220,7 +222,7 @@ describe("edit_file — session tmp host dir (SC4 / S2)", () => {
     const tool = createEditFileTool(taskRoot, { tmpDir: pad });
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           path: "/tmp/ok.txt",
           old_str: "before",
@@ -240,7 +242,7 @@ describe("edit_file — session tmp host dir (SC4 / S2)", () => {
     const tool = createEditFileTool(taskRoot, { tmpDir: pad });
 
     await assert.rejects(
-      () =>
+      async () =>
         tool.handler({
           path: "",
           old_str: "a",

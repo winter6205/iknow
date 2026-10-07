@@ -10,12 +10,13 @@
  * stub runInSandbox), same shape as tests/subagent/bash-mode-channel.test.ts.
  */
 import assert from "node:assert/strict";
+import { createEgressViolationSink } from "../../../src/harness/sandbox/egress/violations.js";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-vi.mock("../../../src/harness/sandbox/index.ts", async (importOriginal) => {
+vi.mock("../../../src/harness/sandbox/index.ts", async () => {
   const actual = await vi.importActual<
     typeof import("../../../src/harness/sandbox/index.ts")
   >("../../../src/harness/sandbox/index.ts");
@@ -44,6 +45,20 @@ interface CapturedFence {
 const captured: CapturedFence[] = [];
 
 /**
+ * The captured fence's env map. `CapturedFence` carries an index signature, so
+ * `env` reads as `unknown`; this keeps the narrowing in one place instead of at
+ * every assertion.
+ */
+function fenceEnv(fence: CapturedFence): Record<string, string> {
+  const env = fence.env;
+  assert.ok(
+    env !== undefined && typeof env === "object",
+    "the fence was assembled with an env map"
+  );
+  return env as Record<string, string>;
+}
+
+/**
  * The verify cwd IS the name-pattern scan root (specs/effect-boundary-protection
  * .md "Scan scope"), so it must be a real directory — the inventory refuses an
  * absent root at assembly rather than assembling a fence whose name arm matched
@@ -70,7 +85,12 @@ vi.mocked(sandboxIndex.createBwrapFence)
   .mockReset()
   .mockImplementation((opts) => {
     captured.push(opts as unknown as CapturedFence);
-    return { argv: ["bwrap", "--", "bash", "-c", "true"], sealed: true };
+    return {
+      argv: ["bwrap", "--", "bash", "-c", "true"],
+      sealed: true as const,
+      // the fake never assembles a boundary block, so it names no mask
+      exactFileMaskPaths: [],
+    };
   });
 vi.mocked(sandboxIndex.runInSandbox).mockReset().mockResolvedValue({
   exitCode: 0,
@@ -130,7 +150,7 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
     try {
       const runVerify = makeDefaultRunVerify({ cwd, tmpDir: sessionTmp });
       await runVerify("true", {});
-      assert.equal(captured[0]!.env["TMPDIR"], sessionTmp);
+      assert.equal(fenceEnv(captured[0]!)["TMPDIR"], sessionTmp);
       // $TMPDIR and the tmpRoot handed to the fence must be the same value
       // (the path seen inside the fence cannot diverge from the bind source).
       const runArgs = vi.mocked(sandboxIndex.runInSandbox).mock
@@ -160,7 +180,7 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
         "工作区档必须把会话 tmp 作为 --bind <tmpRoot> 源端交给 fence"
       );
       assert.equal(opts["workspaceRoot"], cwd);
-      assert.equal(captured[0]!.env["TMPDIR"], sessionTmp);
+      assert.equal(fenceEnv(captured[0]!)["TMPDIR"], sessionTmp);
     } finally {
       rmSync(cwd, { recursive: true, force: true });
       rmSync(sessionTmp, { recursive: true, force: true });
@@ -264,7 +284,9 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
     };
     vi.mocked(sandboxIndex.createEgressSession).mockReset();
     vi.mocked(sandboxIndex.createEgressSession).mockResolvedValue({
+      id: "verify-egress-session",
       spec: fakeSpec,
+      violationSink: createEgressViolationSink(),
       dispose: async () => undefined,
     });
     captured.length = 0;
@@ -281,7 +303,7 @@ describe("makeDefaultRunVerify — egress 缝装配 (ADR-0097 / T7)", () => {
     await runVerify("true", {});
     const fence = captured[0]!;
     assert.deepEqual(fence.egress, fakeSpec);
-    assert.equal(fence.env.HTTP_PROXY, "http://127.0.0.1:19090");
+    assert.equal(fenceEnv(fence).HTTP_PROXY, "http://127.0.0.1:19090");
   });
 
   it("createEgressSession 抛错 → fence 不带 egress spec,verify 仍能执行 (fail-closed)", async () => {

@@ -8,15 +8,12 @@
  * Manager's own semantics are covered by manager.test.ts; this file focuses
  * solely on build-engine connecting the two seams to the manager correctly.
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  buildHarnessEngine,
-  type BuiltEngine,
-} from "../../../src/harness/build-engine.ts";
+import { buildHarnessEngine } from "../../../src/harness/build-engine.ts";
 import { createNoAskUser } from "../../../src/harness/permission/ask-user.ts";
 import type { IknowEnv } from "../../../src/config/env.ts";
 import type { McpClientHandle } from "../../../src/harness/mcp/manager.js";
@@ -42,6 +39,10 @@ function makeEnv(apiKey: string): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env side keeps
+    // its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 

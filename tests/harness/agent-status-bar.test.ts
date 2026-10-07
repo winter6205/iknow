@@ -474,6 +474,10 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env
+    // side keeps its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 
@@ -529,7 +533,7 @@ describe("agent status bar T1: gating (ask / worker do not inject)", () => {
       sandboxRoot: tmp,
       model: createStubModel({ responses: [] }),
       skillCatalog: createSkillCatalog([]),
-      system: () => undefined,
+      system: async () => undefined,
       trace: createNoopTraceService(),
       userHome: tmp,
       cwd: tmp,

@@ -257,7 +257,7 @@ describe("run_graph 取消 × 失败边再进入（phase2 边界）", () => {
     await waitForChildren(children, 2);
     controller.abort();
     // a(2) still settles by its real outcome — failed (the cancel symptom).
-    settle(children[1]!, fail("still-crashed"));
+    settle(children[1]!, fail("crashed"));
 
     await expect(pending).rejects.toThrow(ToolExecutionError);
     await expect(pending).rejects.toThrow(/cancel/i);

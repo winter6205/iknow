@@ -303,15 +303,15 @@ describe("bash_output happy path（fake manager）", () => {
 
 describe("bash_output / bash_stop typed-error passthrough", () => {
   it("task_not_found → ToolExecutionError 渲染 `${kind}: ${context}`（kind 判别）", async () => {
-    const { manager } = makeFakeManager();
-    manager.output.mockRejectedValue({
+    const { manager, output } = makeFakeManager();
+    output.mockRejectedValue({
       kind: "task_not_found",
       context: "bg-0123456789ab",
     });
     const tool = createBashOutputTool({ backgroundManager: manager });
 
     await assert.rejects(
-      tool.handler({ task_id: "bg-0123456789ab" }),
+      async () => tool.handler({ task_id: "bg-0123456789ab" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message === "bash_output: task_not_found: bg-0123456789ab"
@@ -319,15 +319,15 @@ describe("bash_output / bash_stop typed-error passthrough", () => {
   });
 
   it("empty task_id 透传 → empty_task_id kind 渲染（不拦截空串）", async () => {
-    const { manager } = makeFakeManager();
-    manager.output.mockRejectedValue({
+    const { manager, output } = makeFakeManager();
+    output.mockRejectedValue({
       kind: "empty_task_id",
       context: "output",
     });
     const tool = createBashOutputTool({ backgroundManager: manager });
 
     await assert.rejects(
-      tool.handler({ task_id: "" }),
+      async () => tool.handler({ task_id: "" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message === "bash_output: empty_task_id: output"
@@ -335,27 +335,27 @@ describe("bash_output / bash_stop typed-error passthrough", () => {
   });
 
   it("missing task_id → 工具层自己拒绝（ToolExecutionError，schema 之外的防御）", async () => {
-    const { manager } = makeFakeManager();
+    const { manager, output } = makeFakeManager();
     const tool = createBashOutputTool({ backgroundManager: manager });
 
     await assert.rejects(
-      tool.handler({}),
+      async () => tool.handler({}),
       (error: unknown) =>
         error instanceof ToolExecutionError && error.message.includes("task_id")
     );
-    assert.equal(manager.output.mock.calls.length, 0);
+    assert.equal(output.mock.calls.length, 0);
   });
 
   it("bash_stop task_not_found → ToolExecutionError 渲染 `task_not_found: <id>`", async () => {
-    const { manager } = makeFakeManager();
-    manager.stop.mockRejectedValue({
+    const { manager, stop } = makeFakeManager();
+    stop.mockRejectedValue({
       kind: "task_not_found",
       context: "bg-0123456789ab",
     });
     const tool = createBashStopTool({ backgroundManager: manager });
 
     await assert.rejects(
-      tool.handler({ task_id: "bg-0123456789ab" }),
+      async () => tool.handler({ task_id: "bg-0123456789ab" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message === "bash_stop: task_not_found: bg-0123456789ab"
@@ -363,12 +363,12 @@ describe("bash_output / bash_stop typed-error passthrough", () => {
   });
 
   it("bash_stop empty task_id 透传 → empty_task_id kind 渲染", async () => {
-    const { manager } = makeFakeManager();
-    manager.stop.mockRejectedValue({ kind: "empty_task_id", context: "stop" });
+    const { manager, stop } = makeFakeManager();
+    stop.mockRejectedValue({ kind: "empty_task_id", context: "stop" });
     const tool = createBashStopTool({ backgroundManager: manager });
 
     await assert.rejects(
-      tool.handler({ task_id: "" }),
+      async () => tool.handler({ task_id: "" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message === "bash_stop: empty_task_id: stop"

@@ -29,7 +29,6 @@ import { createGraphModeContext } from "../../../src/harness/graph/mode.ts";
 import { run } from "../../../src/harness/loop-engine.ts";
 import type { LoopEngineDeps } from "../../../src/harness/loop-engine.ts";
 import { createRegistry } from "../../../src/harness/tools/registry.ts";
-import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { createStubModel } from "../../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../../src/harness/stubs/stub-tool.ts";
 import { PromptTooLongError } from "../../../src/harness/errors.ts";
@@ -493,7 +492,7 @@ describe("断言② 矩阵收口", () => {
   it("M-2 makeInstantClient 返回 schema 化工具(供目录渲染)", async () => {
     const handle = makeInstantClient([{ name: "zed" }]);
     const tools = await handle.listTools();
-    assert.equal((tools as { name: string }[])[0]!.name, "zed");
+    assert.equal(tools[0]?.name, "zed");
     expect(tools).toBeDefined();
   });
 });

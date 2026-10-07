@@ -249,10 +249,7 @@ function maybeReport(
  * the whole probe); the raw error travels with the result so capability
  * detection can read `code` (-32601).
  */
-async function safeCall(
-  name: string,
-  call: () => Promise<unknown>
-): Promise<ProbeCallResult> {
+async function safeCall(call: () => unknown): Promise<ProbeCallResult> {
   try {
     const v = await call();
     return { kind: "ok", value: v };
@@ -305,7 +302,7 @@ async function run(): Promise<void> {
 
   // 1) lsp_definition — points at the fixture position; assert the result names the target file.
   // No manual didOpen: handler-level ensureOpen opens the file and builds the project.
-  const def = await safeCall("lsp_definition", () =>
+  const def = await safeCall(() =>
     get("lsp_definition").handler({
       file: target,
       line,
@@ -319,7 +316,7 @@ async function run(): Promise<void> {
   );
 
   // 2) lsp_references — locations referencing the target symbol.
-  const refs = await safeCall("lsp_references", () =>
+  const refs = await safeCall(() =>
     get("lsp_references").handler({
       file: target,
       line,
@@ -329,7 +326,7 @@ async function run(): Promise<void> {
   maybeReport("lsp_references", refs);
 
   // 3) lsp_hover — hover at the target symbol should return a type signature.
-  const hover = await safeCall("lsp_hover", () =>
+  const hover = await safeCall(() =>
     get("lsp_hover").handler({
       file: target,
       line,
@@ -339,19 +336,19 @@ async function run(): Promise<void> {
   maybeReport("lsp_hover", hover);
 
   // 4) lsp_document_symbol — file-level symbols should be returned.
-  const docSym = await safeCall("lsp_document_symbol", () =>
+  const docSym = await safeCall(() =>
     get("lsp_document_symbol").handler({ file: target })
   );
   maybeReport("lsp_document_symbol", docSym);
 
   // 5) lsp_workspace_symbol — empty query pulls the full symbol list.
-  const wsSym = await safeCall("lsp_workspace_symbol", () =>
+  const wsSym = await safeCall(() =>
     get("lsp_workspace_symbol").handler({ file: target })
   );
   maybeReport("lsp_workspace_symbol", wsSym);
 
   // 6) lsp_go_to_implementation — target symbol should have an implementation.
-  const impl = await safeCall("lsp_go_to_implementation", () =>
+  const impl = await safeCall(() =>
     get("lsp_go_to_implementation").handler({
       file: target,
       line,
@@ -361,7 +358,7 @@ async function run(): Promise<void> {
   maybeReport("lsp_go_to_implementation", impl);
 
   // 7) lsp_prepare_call_hierarchy — call hierarchy can be prepared at the target's definition site.
-  const prep = await safeCall("lsp_prepare_call_hierarchy", () =>
+  const prep = await safeCall(() =>
     get("lsp_prepare_call_hierarchy").handler({
       file: target,
       line,
@@ -371,7 +368,7 @@ async function run(): Promise<void> {
   maybeReport("lsp_prepare_call_hierarchy", prep);
 
   // 8) lsp_incoming_calls — multi-step: prepare then forward incomingCalls.
-  const inc = await safeCall("lsp_incoming_calls", () =>
+  const inc = await safeCall(() =>
     get("lsp_incoming_calls").handler({
       file: target,
       line,
@@ -381,7 +378,7 @@ async function run(): Promise<void> {
   maybeReport("lsp_incoming_calls", inc);
 
   // 9) lsp_outgoing_calls — multi-step: prepare then forward outgoingCalls.
-  const out = await safeCall("lsp_outgoing_calls", () =>
+  const out = await safeCall(() =>
     get("lsp_outgoing_calls").handler({
       file: target,
       line,
@@ -394,7 +391,7 @@ async function run(): Promise<void> {
   //     publishDiagnostics, or return empty XML; empty XML is not a failure
   //     (push timing cannot be guaranteed from the probe side), only sentinels
   //     are excluded.
-  const diag = await safeCall("lsp_diagnostics", () =>
+  const diag = await safeCall(() =>
     get("lsp_diagnostics").handler({ file: diagFile })
   );
   maybeReport("lsp_diagnostics", diag, (value) =>

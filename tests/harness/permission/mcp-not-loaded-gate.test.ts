@@ -213,6 +213,8 @@ describe("T3 / ADR-0046 §3 — mcp__ 直呼加载(原 B4 §2 hydrate 路径)", 
       registry: reg,
       policy: createPermissionPolicy(),
       askUser: async () => true,
+      // the seam this case is about: the tool is already discovered
+      isDiscovered: (name: string) => discovered.has(name),
     });
 
     const gate = await perm.gateOne(

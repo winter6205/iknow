@@ -44,6 +44,10 @@ function makeBundle(): RuntimeBundle {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // ADR-0019 root anchors: unset in the fixture (loadIknowEnv maps an empty
+    // IKNOW_WORKSPACE_ROOT / IKNOW_PRODUCT_ROOT to undefined).
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
   return { env } as unknown as RuntimeBundle;
 }
@@ -95,13 +99,16 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
     );
 
     expect(result.kind).toBe("execution_failed");
-    expect(result.message).toContain("[worktree_isolation]");
+    // ToolExecutionResult is a discriminated union; `message` only exists on
+    // the failure arms, so read it through the kind check asserted above.
+    const message = result.kind === "execution_failed" ? result.message : "";
+    expect(message).toContain("[worktree_isolation]");
     // model-provision contract: an unbound mutate in the main repo is gated
     // directly, the gate NEVER provisions — creating the task worktree is the
     // model's job (the create-worktree ACI tool), so the block message must
     // point at it.
     expect(calls).toEqual([]);
-    expect(result.message).toContain("create-worktree");
+    expect(message).toContain("create-worktree");
     // zero writes to the main repo (gating happens before tool execution)
     expect(await Bun.file(join(root, "hello.txt")).exists()).toBe(false);
   });
@@ -130,7 +137,8 @@ describe("buildTuiDeps — worktree isolation host seam (review High-1)", () => 
     );
 
     expect(provisionCalls).toBe(0);
-    expect(result.message ?? "").not.toContain("[worktree_isolation]");
+    const message = result.kind === "execution_failed" ? result.message : "";
+    expect(message).not.toContain("[worktree_isolation]");
   });
 });
 

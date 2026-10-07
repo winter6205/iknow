@@ -418,7 +418,7 @@ describe("read_file — offset/limit paging", () => {
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "tiny.txt", offset: 2 }),
+      async () => tool.handler({ path: "tiny.txt", offset: 2 }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message ===
@@ -432,7 +432,7 @@ describe("read_file — offset/limit paging", () => {
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "tiny.txt", offset: 100 }),
+      async () => tool.handler({ path: "tiny.txt", offset: 100 }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message ===
@@ -446,7 +446,7 @@ describe("read_file — offset/limit paging", () => {
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "tiny.txt", limit: 0 }),
+      async () => tool.handler({ path: "tiny.txt", limit: 0 }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message === "[read_file] limit must be a positive integer"
@@ -459,7 +459,7 @@ describe("read_file — offset/limit paging", () => {
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "tiny.txt", limit: -1 }),
+      async () => tool.handler({ path: "tiny.txt", limit: -1 }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message === "[read_file] limit must be a positive integer"
@@ -472,7 +472,7 @@ describe("read_file — offset/limit paging", () => {
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "tiny.txt", limit: 1.5 }),
+      async () => tool.handler({ path: "tiny.txt", limit: 1.5 }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message === "[read_file] limit must be a positive integer"
@@ -510,7 +510,7 @@ describe("read_file — error paths", () => {
     const tool = createReadFileTool(root);
 
     await assert.rejects(
-      () => tool.handler({ path: "nope.txt" }),
+      async () => tool.handler({ path: "nope.txt" }),
       (error: unknown) => error instanceof ToolExecutionError
     );
   });
@@ -521,7 +521,7 @@ describe("read_file — error paths", () => {
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "subdir" }),
+      async () => tool.handler({ path: "subdir" }),
       (error: unknown) => error instanceof ToolExecutionError
     );
   });
@@ -556,7 +556,7 @@ describe("read_file — error paths", () => {
     const tool = createReadFileTool(root);
 
     await assert.rejects(
-      () => tool.handler({ path: "../etc/passwd" }),
+      async () => tool.handler({ path: "../etc/passwd" }),
       (error: unknown) => error instanceof ToolExecutionError
     );
   });
@@ -571,7 +571,7 @@ describe("read_file — size/binary guards", () => {
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "big.txt" }),
+      async () => tool.handler({ path: "big.txt" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message ===
@@ -601,7 +601,7 @@ describe("read_file — size/binary guards", () => {
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "blob.bin" }),
+      async () => tool.handler({ path: "blob.bin" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message ===
@@ -617,7 +617,7 @@ describe("read_file — size/binary guards", () => {
 
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "tiny.bin" }),
+      async () => tool.handler({ path: "tiny.bin" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.startsWith("[read_file] binary file rejected: ")
@@ -645,7 +645,7 @@ describe("read_file — protected-path policy refusals (host-read-policy SC2/SC3
     const tool = createReadFileTool(root);
     for (const rel of [".ssh/id_rsa", ".env"]) {
       await assert.rejects(
-        () => tool.handler({ path: rel }),
+        async () => tool.handler({ path: rel }),
         (error: unknown) =>
           error instanceof ToolExecutionError &&
           /protected-path roster/.test(error.message) &&
@@ -658,7 +658,7 @@ describe("read_file — protected-path policy refusals (host-read-policy SC2/SC3
     const root = await makeProtectedTree();
     const tool = createReadFileTool(root);
     await assert.rejects(
-      () => tool.handler({ path: "alias.txt" }),
+      async () => tool.handler({ path: "alias.txt" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         /protected-path roster/.test(error.message)

@@ -33,6 +33,7 @@ import { run } from "../../src/harness/loop-engine.ts";
 import type {
   AnthropicNativeMessage,
   LoopEngineDeps,
+  LoopState,
 } from "../../src/harness/index.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
@@ -207,6 +208,10 @@ function makeEnv(apiKey: string): IknowEnv {
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // Roots are supplied explicitly to buildHarnessEngine; the env
+    // side keeps its "unset" default.
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
 }
 
@@ -663,11 +668,14 @@ describe("T5 技能索引增量注入 — SC4 (compact 后不重贴)", () => {
     let attempt = 0;
     const adapter: LoopEngineDeps["adapter"] = Object.freeze({
       encodeUserText: (t: string) => ({
-        role: "user",
-        content: [{ type: "text", text: t }],
+        role: "user" as const,
+        content: [{ type: "text" as const, text: t }],
       }),
       encodeToolResults: () => [],
-      step: async (_state, request) => {
+      step: async (
+        _state: LoopState,
+        request: { readonly tools?: unknown }
+      ) => {
         attempt += 1;
         if (attempt === 1) throw new PromptTooLongError("synthetic");
         if (request.tools === undefined) {

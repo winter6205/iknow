@@ -28,7 +28,6 @@
  * is ever printed.
  */
 import { spawnSync } from "node:child_process";
-import { mkdtempSync } from "node:fs";
 import {
   chmodSync,
   existsSync,

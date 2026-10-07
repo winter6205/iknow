@@ -57,7 +57,7 @@ function makeGatedClient(opts: {
     releaseGate = resolve;
   });
 
-  const handles = new Set<() => void>();
+  const handles = new Set<Parameters<McpClientHandle["onListChanged"]>[0]>();
   const handle: McpClientHandle = {
     connect: async () => {
       if (opts.neverResolve) {
@@ -81,16 +81,16 @@ function makeGatedClient(opts: {
 
 const STUB_CONFIG: McpServerConfig = {
   name: "slow",
-  source: "global",
-  status: "active",
+  source: "user",
+  status: "enabled",
   kind: "stdio",
   entry: { command: "node", args: [] },
 };
 
 const PROGRESS_CONFIG: McpServerConfig = {
   name: "fast",
-  source: "global",
-  status: "active",
+  source: "user",
+  status: "enabled",
   kind: "stdio",
   entry: { command: "node", args: [] },
 };

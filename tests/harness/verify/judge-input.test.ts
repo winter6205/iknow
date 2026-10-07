@@ -233,7 +233,7 @@ describe("createRunClassifierFromManager — evidence-aware judge input (#449b B
     assert.equal(def.excludeFromHostDrain, true, "判官结果不得进 host-drain");
     // fail-closed: full ACI surface minus the 3 whitelist items = surface − {read_file, grep, glob}.
     assert.deepEqual(
-      [...def.disallowedTools].sort(),
+      [...(def.disallowedTools ?? [])].sort(),
       [...JUDGE_DISALLOWED_TOOLS].sort(),
       "disallowedTools must equal ACI_TOOLSET_NAMES − JUDGE_ALLOWED_BASELINE"
     );

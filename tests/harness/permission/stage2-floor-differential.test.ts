@@ -250,7 +250,10 @@ const AUTHORIZED_DIAGNOSTIC_MOVE = {
 const AUTHORIZED_MOVE_BY_LABEL: ReadonlyMap<
   DivergenceLabel,
   typeof AUTHORIZED_MOVE | typeof AUTHORIZED_DIAGNOSTIC_MOVE
-> = new Map([
+> = new Map<
+  DivergenceLabel,
+  typeof AUTHORIZED_MOVE | typeof AUTHORIZED_DIAGNOSTIC_MOVE
+>([
   ["authorized-id-move", AUTHORIZED_MOVE],
   ["authorized-diagnostic-move", AUTHORIZED_DIAGNOSTIC_MOVE],
 ]);
@@ -266,7 +269,8 @@ function isAuthorizedMove(
   head: WallValue
 ): typeof AUTHORIZED_MOVE | typeof AUTHORIZED_DIAGNOSTIC_MOVE | null {
   for (const shape of [AUTHORIZED_MOVE, AUTHORIZED_DIAGNOSTIC_MOVE] as const) {
-    if (sameValue(base, shape.base) && sameValue(head, shape.head)) return shape;
+    if (sameValue(base, shape.base) && sameValue(head, shape.head))
+      return shape;
   }
   return null;
 }
@@ -298,7 +302,11 @@ const HIT_FIELDS: ReadonlySet<string> = new Set(["id", "pattern"]);
 const SPAN_FIELDS: ReadonlySet<string> = new Set(["start", "end"]);
 const REVIEW_FIELDS: ReadonlySet<string> = new Set(["default", "full_auto"]);
 
-function readHit(value: unknown, field: string, where: string): DangerousPatternHit {
+function readHit(
+  value: unknown,
+  field: string,
+  where: string
+): DangerousPatternHit {
   const hit = value as Partial<DangerousPatternHit> | null;
   if (
     typeof hit !== "object" ||
@@ -308,7 +316,11 @@ function readHit(value: unknown, field: string, where: string): DangerousPattern
   ) {
     throw new Error(`${where}: \`${field}\` is not an {id, pattern} object`);
   }
-  rejectUnknownFields(hit as Record<string, unknown>, HIT_FIELDS, `${where} ${field}`);
+  rejectUnknownFields(
+    hit as Record<string, unknown>,
+    HIT_FIELDS,
+    `${where} ${field}`
+  );
   return { id: hit.id as DangerousPatternHit["id"], pattern: hit.pattern };
 }
 
@@ -339,7 +351,11 @@ function readSpan(value: unknown, where: string): FactSpan {
   ) {
     throw new Error(`${where}: \`span\` is not a {start, end} region`);
   }
-  rejectUnknownFields(span as Record<string, unknown>, SPAN_FIELDS, `${where} span`);
+  rejectUnknownFields(
+    span as Record<string, unknown>,
+    SPAN_FIELDS,
+    `${where} span`
+  );
   return { start: span.start, end: span.end };
 }
 
@@ -356,7 +372,11 @@ function readReview(value: unknown, where: string): ReviewEvidence {
         "answers in default and full_auto"
     );
   }
-  rejectUnknownFields(review as Record<string, unknown>, REVIEW_FIELDS, `${where} review`);
+  rejectUnknownFields(
+    review as Record<string, unknown>,
+    REVIEW_FIELDS,
+    `${where} review`
+  );
   return { default: review.default, full_auto: review.full_auto };
 }
 
@@ -391,9 +411,7 @@ function parseRow(line: string, index: number): FixtureRow {
     label,
     ...(cls === undefined ? {} : { class: cls as RelaxationClass }),
     ...(clause === undefined ? {} : { clause: clause as string }),
-    ...(raw.span === undefined
-      ? {}
-      : { span: readSpan(raw.span, where) }),
+    ...(raw.span === undefined ? {} : { span: readSpan(raw.span, where) }),
     ...(cause === undefined ? {} : { cause: cause as string }),
     ...(raw.review === undefined
       ? {}
@@ -460,7 +478,11 @@ function assertLabelIsCoherent(row: FixtureRow, where: string): void {
 
 /** Only reviewed rows carry span/cause/review; on any other row they lie. */
 function rejectEvidence(row: FixtureRow, where: string): void {
-  if (row.span !== undefined || row.cause !== undefined || row.review !== undefined)
+  if (
+    row.span !== undefined ||
+    row.cause !== undefined ||
+    row.review !== undefined
+  )
     throw new Error(
       `${where}: a ${row.label} row carries no review or new-deny evidence`
     );
@@ -474,9 +496,7 @@ function rejectEvidence(row: FixtureRow, where: string): void {
  */
 function assertFixedRowIsAuthorized(row: FixtureRow, where: string): void {
   if (denies(row.base) || !denies(row.head))
-    throw new Error(
-      `${where}: a fixed row is an allow-to-deny move, not this`
-    );
+    throw new Error(`${where}: a fixed row is an allow-to-deny move, not this`);
   if (row.wall !== "pattern")
     throw new Error(`${where}: the path wall authorized no new deny`);
   if (row.cause === undefined)
@@ -623,7 +643,10 @@ function unlicensedRelaxation(row: FixtureRow): string | null {
       row.command,
       row.base as DangerousPatternHit,
       null,
-      () => ({ pattern: () => row.base, sensitive: () => false })
+      {
+        pattern: () => row.base as DangerousPatternHit | null,
+        sensitive: () => false,
+      }
     );
     return priced.class === "4"
       ? null
@@ -751,9 +774,7 @@ describe("(a) the migration newly denies nothing it was not authorized to deny",
     const newlyDenied = rows
       .filter(
         (row) =>
-          !denies(row.base) &&
-          denies(liveHead(row)) &&
-          row.label !== "fixed"
+          !denies(row.base) && denies(liveHead(row)) && row.label !== "fixed"
       )
       .map(describeRow);
     expect(newlyDenied, "new denies appeared over the pre-state").toEqual([]);
@@ -946,7 +967,9 @@ describe("(d) every move is one of the two authorized shapes", () => {
       // deny -> deny, with the id unchanged: only the diagnostic text moved. A
       // reword or a re-id of the same verdict is not this shape.
       expect(denies(row.base), "the pre-state must deny the shape").toBe(true);
-      expect(denies(liveHead(row)), "HEAD must still deny the shape").toBe(true);
+      expect(denies(liveHead(row)), "HEAD must still deny the shape").toBe(
+        true
+      );
       expect((row.head as DangerousPatternHit).id).toBe(
         AUTHORIZED_DIAGNOSTIC_MOVE.base.id
       );
@@ -1022,7 +1045,10 @@ const INDEPENDENT_CLASSIFICATIONS: readonly IndependentClass[] = [
   "heredoc-null-receiver",
 ];
 
-function parseIndependentFixture(line: string, index: number): IndependentFixture {
+function parseIndependentFixture(
+  line: string,
+  index: number
+): IndependentFixture {
   const where = `independent fixture line ${index + 1}`;
   const raw = JSON.parse(line) as Record<string, unknown>;
   rejectUnknownFields(raw, INDEPENDENT_FIELDS, where);
@@ -1037,7 +1063,9 @@ function parseIndependentFixture(line: string, index: number): IndependentFixtur
     );
   const isPattern = raw.wall === "pattern";
   if (isPattern && raw.baseHit === undefined)
-    throw new Error(`${where}: a pattern-wall case must record its baseline hit`);
+    throw new Error(
+      `${where}: a pattern-wall case must record its baseline hit`
+    );
   if (!isPattern && typeof raw.sensitiveFragment !== "string")
     throw new Error(
       `${where}: a sensitive-wall case must record its sensitive fragment`
@@ -1078,7 +1106,8 @@ function baselineOracle(fix: IndependentFixture): Oracle {
   const fragment = fix.sensitiveFragment as string;
   return {
     pattern: () => null,
-    sensitive: (command) => command.toLowerCase().includes(fragment.toLowerCase()),
+    sensitive: (command) =>
+      command.toLowerCase().includes(fragment.toLowerCase()),
   };
 }
 
@@ -1095,12 +1124,15 @@ describe("the grader prices from its own labeled fixtures", () => {
     for (const cls of INDEPENDENT_CLASSIFICATIONS)
       expect(have.has(cls), `no fixture for ${cls}`).toBe(true);
     expect(
-      independentCases.some((fix) => fix.command === "chroot /srv rm -rf /tmp/x"),
+      independentCases.some(
+        (fix) => fix.command === "chroot /srv rm -rf /tmp/x"
+      ),
       "the not-on-the-inert-list executor is missing"
     ).toBe(true);
     expect(
       independentCases.some(
-        (fix) => fix.command === "echo rm -rf" && fix.classification === "proven-inert"
+        (fix) =>
+          fix.command === "echo rm -rf" && fix.classification === "proven-inert"
       ),
       "the proven inert example is missing"
     ).toBe(true);
@@ -1151,7 +1183,12 @@ describe("the grader prices from its own labeled fixtures", () => {
   it("classifies sensitive heredoc bodies positively and negatively", () => {
     for (const fix of independentCases) {
       if (fix.wall !== "sensitive") continue;
-      const verdict = classifySensitive(fix.command, true, false, baselineOracle(fix));
+      const verdict = classifySensitive(
+        fix.command,
+        true,
+        false,
+        baselineOracle(fix)
+      );
       if (fix.classification === "heredoc-data-body") {
         expect(
           verdict.label,
@@ -1226,8 +1263,7 @@ describe("(e) the floor the ledger prices, priced against the live wall", () => 
       const [literal, id] = entry;
       const hit: DangerousPatternHit = { id, pattern: literal };
       const oracle: Oracle = {
-        pattern: (text) =>
-          text.toLowerCase().includes(literal) ? hit : null,
+        pattern: (text) => (text.toLowerCase().includes(literal) ? hit : null),
         sensitive: () => false,
       };
       const verdict = classifyPattern(command, hit, null, oracle);
@@ -1275,10 +1311,15 @@ describe("(f) planted falsifiers: the grader itself must fail on each", () => {
   const realLine = (match: (raw: Record<string, unknown>) => boolean): string =>
     readFileSync(fixturePath, "utf8")
       .split("\n")
-      .find((line) => line.length > 0 && match(JSON.parse(line) as Record<string, unknown>))!;
+      .find(
+        (line) =>
+          line.length > 0 && match(JSON.parse(line) as Record<string, unknown>)
+      )!;
 
   const relaxationLine = () =>
-    realLine((raw) => raw.label === "expected-relaxation" && raw.wall === "pattern");
+    realLine(
+      (raw) => raw.label === "expected-relaxation" && raw.wall === "pattern"
+    );
 
   const planted = (raw: Record<string, unknown>): string => JSON.stringify(raw);
 
@@ -1346,7 +1387,13 @@ describe("(f) planted falsifiers: the grader itself must fail on each", () => {
     const deny = { id: "destructive-rm", pattern: "rm -rf" };
     expect(() =>
       parseRow(
-        planted({ command: cmd, wall: "pattern", base: deny, head: null, label: "same" }),
+        planted({
+          command: cmd,
+          wall: "pattern",
+          base: deny,
+          head: null,
+          label: "same",
+        }),
         0
       )
     ).toThrow(/labeled same but the two sides differ/);
@@ -1365,7 +1412,13 @@ describe("(f) planted falsifiers: the grader itself must fail on each", () => {
     ).toThrow(/allow-to-deny/);
     expect(() =>
       parseRow(
-        planted({ command: cmd, wall: "pattern", base: deny, head: null, label: "authorized-id-move" }),
+        planted({
+          command: cmd,
+          wall: "pattern",
+          base: deny,
+          head: null,
+          label: "authorized-id-move",
+        }),
         0
       )
     ).toThrow(/not the authorized pair/);
@@ -1392,7 +1445,11 @@ describe("(f) planted falsifiers: the grader itself must fail on each", () => {
         pinned.base,
         { ...pinned.head, pattern: `${pinned.head.pattern} 。` },
       ],
-      ["re-id'd verdict", pinned.base, { ...pinned.head, id: "malformed" }],
+      [
+        "re-id'd verdict",
+        pinned.base,
+        { ...pinned.head, id: "malformed" as DangerousPatternId },
+      ],
       [
         "prefix of the pattern",
         pinned.base,
@@ -1613,7 +1670,10 @@ describe("(f) planted falsifiers: the grader itself must fail on each", () => {
     delete missingCause.cause;
     expect(() =>
       parseRow(
-        planted({ ...missingCause, review: { default: "ask", full_auto: "ask" } }),
+        planted({
+          ...missingCause,
+          review: { default: "ask", full_auto: "ask" },
+        }),
         0
       )
     ).toThrow(/cause/);
@@ -1710,7 +1770,10 @@ describe("(f) planted falsifiers: the grader itself must fail on each", () => {
   it("refuses evidence fields on rows that price no evidence", () => {
     const raw = JSON.parse(relaxationLine()) as Record<string, unknown>;
     expect(() =>
-      parseRow(planted({ ...raw, review: { default: "ask", full_auto: "ask" } }), 0)
+      parseRow(
+        planted({ ...raw, review: { default: "ask", full_auto: "ask" } }),
+        0
+      )
     ).toThrow(/carries no review or new-deny evidence/);
   });
 });

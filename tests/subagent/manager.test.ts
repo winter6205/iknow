@@ -33,7 +33,6 @@ import {
   SubAgentWaitTimeoutError,
 } from "../../src/harness/subagent/manager.ts";
 import type {
-  QueryBufferResult,
   SubAgentDefinition,
   SubAgentManager,
 } from "../../src/harness/subagent/manager.ts";

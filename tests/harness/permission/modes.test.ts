@@ -26,7 +26,6 @@ import {
 import {
   checkPermission,
   createPermissionPolicy,
-  DEFAULT_BY_CATEGORY,
 } from "../../../src/harness/permission/policy.js";
 import type { AciToolDef } from "../../../src/harness/aci/types.js";
 
@@ -39,7 +38,12 @@ function fakeToolDef(
     description: "",
     inputSchema: { type: "object", properties: {} },
     handler: async () => "",
-    aci: { category, isConcurrencySafe: false, interruptBehavior: "block" },
+    aci: {
+      category,
+      isConcurrencySafe: false,
+      interruptBehavior: "block",
+      timeoutTier: "default",
+    },
   };
 }
 

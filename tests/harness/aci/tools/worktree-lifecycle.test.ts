@@ -8,11 +8,15 @@ import {
 } from "../../../../src/harness/aci/tools/create-worktree.ts";
 import { createListWorktreesTool } from "../../../../src/harness/aci/tools/list-worktrees.ts";
 import { createRemoveWorktreeTool } from "../../../../src/harness/aci/tools/remove-worktree.ts";
-import { WorktreeIsolationError } from "../../../../src/harness/isolation/worktree-gate.ts";
+import {
+  WorktreeIsolationError,
+  type WorktreeProvisionContext,
+  type WorktreeRemoveContext,
+} from "../../../../src/harness/isolation/worktree-gate.ts";
 
 describe("task worktree lifecycle ACI tools", () => {
   it("passes an optional name to provision and reports a discarded invalid name with the actual path", async () => {
-    const calls: Array<Record<string, unknown>> = [];
+    const calls: WorktreeProvisionContext[] = [];
     const provision: CreateWorktreeProvisionFn = async (ctx) => {
       calls.push(ctx);
       return "/repo/.iknow/worktrees/conv-1";
@@ -77,7 +81,7 @@ describe("task worktree lifecycle ACI tools", () => {
     const tool = createCreateWorktreeTool({ provision, root: "/repo" });
 
     await assert.rejects(
-      () => tool.handler({}, { conversationId: "conv-fail" }),
+      async () => tool.handler({}, { conversationId: "conv-fail" }),
       (error: unknown) => {
         assert.ok(error instanceof ToolExecutionError);
         assert.match(
@@ -119,7 +123,7 @@ describe("task worktree lifecycle ACI tools", () => {
   });
 
   it("removes by conversationId or label and forwards delete_branch", async () => {
-    let received: Record<string, unknown> | undefined;
+    let received: WorktreeRemoveContext | undefined;
     const tool = createRemoveWorktreeTool({
       root: "/repo",
       worktreeRemove: async (ctx) => {
@@ -158,7 +162,7 @@ describe("task worktree lifecycle ACI tools", () => {
     });
 
     await assert.rejects(
-      () => tool.handler({}),
+      async () => tool.handler({}),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("git unavailable")
@@ -183,13 +187,13 @@ describe("task worktree lifecycle ACI tools", () => {
     });
 
     await assert.rejects(
-      () => list.handler({ include_stale: "yes" }),
+      async () => list.handler({ include_stale: "yes" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("include_stale must be a boolean")
     );
     await assert.rejects(
-      () => remove.handler({ conversationId: "../outside" }),
+      async () => remove.handler({ conversationId: "../outside" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("safe conversation id or label")
@@ -209,7 +213,7 @@ describe("task worktree lifecycle ACI tools", () => {
     });
 
     await assert.rejects(
-      () => tool.handler({ conversationId: "conv-1" }),
+      async () => tool.handler({ conversationId: "conv-1" }),
       (error: unknown) =>
         error instanceof ToolExecutionError &&
         error.message.includes("[remove-worktree] kind=worktree_dirty")

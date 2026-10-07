@@ -57,6 +57,7 @@ import {
 } from "../../src/tui/app.js";
 import { PICKER_WIDTH } from "../../src/tui/thinking-picker.js";
 import { tuiPalette } from "../../src/tui/theme.js";
+import { flushRendererFrame, setReactActEnvironment } from "./_fixtures.tsx";
 
 const T0 = 1_700_000_000_000;
 
@@ -369,7 +370,7 @@ async function renderPanelText(
   state: CompactProgressState,
   cols = 80
 ): Promise<string> {
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  setReactActEnvironment(true);
   const stdin = new Readable({ read() {} }) as unknown as NodeJS.ReadStream;
   const stdout = new TestWriteStream(cols, 24) as unknown as NodeJS.WriteStream;
   const config: CliRendererConfig = {
@@ -388,13 +389,13 @@ async function renderPanelText(
     act(() => {
       root.render(<CompactProgress state={state} />);
     });
-    await renderer.loop();
+    await flushRendererFrame(renderer);
     const bytes = renderer.currentRenderBuffer.getRealCharBytes(true);
     return new TextDecoder().decode(bytes);
   } finally {
     act(() => root.unmount());
     renderer.destroy();
-    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    setReactActEnvironment(false);
   }
 }
 
@@ -441,7 +442,7 @@ async function renderPanelCells(
   state: CompactProgressState,
   cols = 80
 ): Promise<{ readonly filled: number; readonly dry: number }> {
-  globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+  setReactActEnvironment(true);
   const stdin = new Readable({ read() {} }) as unknown as NodeJS.ReadStream;
   const stdout = new TestWriteStream(cols, 24) as unknown as NodeJS.WriteStream;
   const renderer = await createCliRenderer({
@@ -459,7 +460,7 @@ async function renderPanelCells(
     act(() => {
       root.render(<CompactProgress state={state} />);
     });
-    await renderer.loop();
+    await flushRendererFrame(renderer);
     // Filled and unfilled cells share the `█` glyph; bg is the only
     // discriminator — read the span breakdown of the render buffer directly
     // (the fixture uses the real createCliRenderer, no testRender setup).
@@ -473,7 +474,7 @@ async function renderPanelCells(
   } finally {
     act(() => root.unmount());
     renderer.destroy();
-    globalThis.IS_REACT_ACT_ENVIRONMENT = false;
+    setReactActEnvironment(false);
   }
 }
 

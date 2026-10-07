@@ -207,7 +207,7 @@ describe("createEnvLoader", () => {
       const loader = createEnvLoader({ cwd: dirs.cwd, home: dirs.home });
       try {
         const received: string[] = [];
-        loader.subscribe((env) => {
+        loader.subscribe(() => {
           throw new Error("observer boom");
         });
         loader.subscribe((env) => received.push(env.llm.model));

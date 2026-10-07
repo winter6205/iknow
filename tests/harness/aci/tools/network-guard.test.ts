@@ -532,7 +532,9 @@ describe("createDefaultGuardDeps - 浏览器伪装 UA（反爬可达性）", () 
     const deps = createDefaultGuardDeps();
     // deps.fetch wraps the real globalThis.fetch and its closure cannot be
     // introspected for headers, so this verifies only the UA propagation path:
-    // passing ua explicitly still yields a well-formed deps.
+    // the no-arg default and the explicit ua both yield a well-formed deps.
+    assert.equal(typeof deps.fetch, "function");
+    assert.equal(typeof deps.lookup, "function");
     const custom = createDefaultGuardDeps("custom-ua/9.9");
     assert.equal(typeof custom.fetch, "function");
     assert.equal(typeof custom.lookup, "function");

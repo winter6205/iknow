@@ -31,12 +31,27 @@ import {
   createBackgroundTaskManager,
   DEFAULT_LOG_MAX_BYTES,
 } from "../../../src/harness/background/manager.js";
-import type { BackgroundTaskManager } from "../../../src/harness/background/manager.js";
+import type {
+  BackgroundSpawnResult,
+  BackgroundTaskManager,
+} from "../../../src/harness/background/manager.js";
 import { renderTaskError } from "../../../src/harness/background/registry.js";
 import { resolveTasksDir } from "../../../src/harness/background/paths.js";
 import { resolveProjectSessionDir } from "../../../src/session-api/store/session-store.js";
 
 // ── fake ChildProcess factory (same shape as subagent/manager.test.ts) ─────────
+
+/**
+ * Narrow a spawn receipt to its `ok` variant. `assert.equal` is not a
+ * TypeScript assertion signature, so the explicit guard is what narrows the
+ * union; the status assertion itself is preserved.
+ */
+function spawnedOk(
+  res: BackgroundSpawnResult
+): Extract<BackgroundSpawnResult, { status: "ok" }> {
+  assert.equal(res.status, "ok");
+  return res;
+}
 
 interface FakeChild {
   readonly stdin: PassThrough;
@@ -81,8 +96,7 @@ async function makeManager(opts?: {
       opts?.tasksDir ??
       resolveTasksDir({ dataDir: root, projectIdentityRoot: root }),
     spawn: async (_req) => {
-      const child = makeFakeChild();
-      child.pid = 12345 + spawned.length;
+      const child = makeFakeChild(12345 + spawned.length);
       spawned.push(child);
       return child as unknown as ChildProcess;
     },
@@ -105,14 +119,14 @@ describe("BackgroundTaskManager 正常路径", () => {
       cwd: process.cwd(),
     });
     assert.match(res.task_id, /^bg-[0-9a-f]{12}$/);
-    assert.ok(res.log_path.endsWith(`/${res.task_id}.log`));
+    assert.ok(spawnedOk(res).log_path.endsWith(`/${res.task_id}.log`));
 
     const status = await manager.status(res.task_id);
     assert.equal(status.status, "running");
     assert.equal(status.task_id, res.task_id);
 
     // Read back the persisted json; every field must match.
-    const jsonPath = res.log_path.replace(/\.log$/, ".json");
+    const jsonPath = spawnedOk(res).log_path.replace(/\.log$/, ".json");
     const raw = await fs.readFile(jsonPath, "utf8");
     const rec = JSON.parse(raw) as Record<string, unknown>;
     assert.equal(rec.task_id, res.task_id);
@@ -121,7 +135,7 @@ describe("BackgroundTaskManager 正常路径", () => {
     assert.equal(rec.pgid, 12345);
     assert.equal(rec.status, "running");
     assert.equal(rec.conversation_id, "");
-    assert.equal(rec.log_path, res.log_path);
+    assert.equal(rec.log_path, spawnedOk(res).log_path);
     assert.ok(typeof rec.created_at === "string");
     assert.ok(rec.created_at.length > 0);
   });
@@ -130,7 +144,10 @@ describe("BackgroundTaskManager 正常路径", () => {
     const { manager } = await makeManager();
     const res = await manager.spawn({ command: "echo fallback", cwd: "." });
     const rec = JSON.parse(
-      await fs.readFile(res.log_path.replace(/\.log$/, ".json"), "utf8")
+      await fs.readFile(
+        spawnedOk(res).log_path.replace(/\.log$/, ".json"),
+        "utf8"
+      )
     ) as { command: string };
     // Without recordCommand: manager internally takes `request.recordCommand ?? request.command`,
     // so the persisted command = request.command. Existing callers that spawn
@@ -174,7 +191,10 @@ describe("BackgroundTaskManager 正常路径", () => {
 
     // Persisted JSON: command field = placeholder form; the real secret never reaches disk.
     const rec = JSON.parse(
-      await fs.readFile(res.log_path.replace(/\.log$/, ".json"), "utf8")
+      await fs.readFile(
+        spawnedOk(res).log_path.replace(/\.log$/, ".json"),
+        "utf8"
+      )
     ) as { command: string };
     assert.equal(rec.command, 'echo "<<<SECRET_1>>>"');
     assert.ok(!rec.command.includes("sk-real-secret"));
@@ -203,10 +223,10 @@ describe("BackgroundTaskManager 正常路径", () => {
 
   it("模拟 exit 状态迁移 → exited + exitCode 落 json", async () => {
     const { manager, spawned } = await makeManager();
-    const { task_id, log_path } = await manager.spawn({
-      command: "exit 3",
-      cwd: ".",
-    });
+    const spawnedReceipt = spawnedOk(
+      await manager.spawn({ command: "exit 3", cwd: "." })
+    );
+    const { task_id, log_path } = spawnedReceipt;
     spawned[0]!.stdout.write("bye\n");
     spawned[0]!.emit("exit", 3, null);
 
@@ -557,7 +577,10 @@ describe("registry 读回一致性(字段全对齐)", () => {
       conversationId: "conv-test-1",
     });
     const rec = JSON.parse(
-      await fs.readFile(res.log_path.replace(/\.log$/, ".json"), "utf8")
+      await fs.readFile(
+        spawnedOk(res).log_path.replace(/\.log$/, ".json"),
+        "utf8"
+      )
     ) as Record<string, unknown>;
     assert.equal(rec.task_id, res.task_id);
     assert.equal(rec.command, "true");
@@ -565,7 +588,7 @@ describe("registry 读回一致性(字段全对齐)", () => {
     assert.equal(rec.owner_pid, process.pid);
     assert.equal(rec.pgid, spawned[0]!.pid);
     assert.equal(rec.status, "running");
-    assert.equal(rec.log_path, res.log_path);
+    assert.equal(rec.log_path, spawnedOk(res).log_path);
     assert.ok(typeof rec.created_at === "string");
   });
 });
@@ -598,8 +621,7 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
       }),
       spawn: async (req) => {
         capturedSpec = req.egressSpec;
-        const child = makeFakeChild();
-        child.pid = 99999;
+        const child = makeFakeChild(99999);
         return child as unknown as ChildProcess;
       },
     });
@@ -635,8 +657,7 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
       }),
       spawn: async (req) => {
         capturedSpec.push(req.egressSpec);
-        const child = makeFakeChild();
-        child.pid = 88888;
+        const child = makeFakeChild(88888);
         spawnedChildren.push(child);
         return child as unknown as ChildProcess;
       },
@@ -679,8 +700,7 @@ describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
       }),
       spawn: async (req) => {
         capturedSpec.push(req.egressSpec);
-        const child = makeFakeChild();
-        child.pid = 77777;
+        const child = makeFakeChild(77777);
         return child as unknown as ChildProcess;
       },
     });

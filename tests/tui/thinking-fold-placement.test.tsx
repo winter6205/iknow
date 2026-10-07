@@ -38,7 +38,6 @@ import {
 } from "../../src/tui/session-state.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
-import type { LiveToolRun } from "../../src/tui/live-tool-state.js";
 
 const COLS = 80;
 const ROWS = 36;

@@ -51,6 +51,10 @@ function makeBundle(
     // MCP connect timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
     subagent: { taskTimeoutMs: undefined },
+    // ADR-0019 root anchors: unset in the fixture (loadIknowEnv maps an empty
+    // IKNOW_WORKSPACE_ROOT / IKNOW_PRODUCT_ROOT to undefined).
+    workspaceRoot: undefined,
+    productRoot: undefined,
   };
   // buildHarnessEngine reads only `env`; other bundle fields are untouched.
   return { env } as unknown as RuntimeBundle;

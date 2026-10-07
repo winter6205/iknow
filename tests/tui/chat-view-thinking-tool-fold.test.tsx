@@ -43,6 +43,9 @@ function sessionWith(
     turnCount: msgs.filter((m) => m.role === "assistant").length,
     updatedAt: "2026-08-28T00:00:00.000Z",
     jsonMode: false,
+    title: "think-tool-fold",
+    cwd: "/tmp",
+    sanitized_at: "2026-08-28T00:00:00.000Z",
     ...(thinkingMs !== undefined ? { thinkingMs } : {}),
   };
   return attachSession(file);

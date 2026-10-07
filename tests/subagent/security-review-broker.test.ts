@@ -220,9 +220,12 @@ describe("ADR-0127 review frames (closed tagged members beside the frozen envelo
         })
       )
     );
-    assert.deepEqual(parseReviewBrokerReadyFrame('{"type":"review_broker_ready"}'), {
-      type: "review_broker_ready",
-    });
+    assert.deepEqual(
+      parseReviewBrokerReadyFrame('{"type":"review_broker_ready"}'),
+      {
+        type: "review_broker_ready",
+      }
+    );
     assert.deepEqual(
       parseReviewResponseFrame(
         '{"type":"review_response","request_id":"a","approved":true}'
@@ -279,10 +282,11 @@ describe("manager review broker — capability declaration and answer relay", ()
     );
     call.settle(true);
     await flush();
-    assert.deepEqual(
-      parseReviewResponseFrame(inbound[inbound.length - 1]),
-      { type: "review_response", request_id: "req-1", approved: true }
-    );
+    assert.deepEqual(parseReviewResponseFrame(inbound[inbound.length - 1]), {
+      type: "review_response",
+      request_id: "req-1",
+      approved: true,
+    });
   });
 
   it("concurrent requests from one worker are answered per request_id, never cross-bound", async () => {
@@ -298,16 +302,18 @@ describe("manager review broker — capability declaration and answer relay", ()
     calls[0].settle(true);
     await flush();
     assert.equal(inbound.length, 3); // envelope + broker_ready + answer(a)
-    assert.deepEqual(
-      parseReviewResponseFrame(inbound[inbound.length - 1]),
-      { type: "review_response", request_id: "a", approved: true }
-    );
+    assert.deepEqual(parseReviewResponseFrame(inbound[inbound.length - 1]), {
+      type: "review_response",
+      request_id: "a",
+      approved: true,
+    });
     calls[1].settle(false);
     await flush();
-    assert.deepEqual(
-      parseReviewResponseFrame(inbound[inbound.length - 1]),
-      { type: "review_response", request_id: "b", approved: false }
-    );
+    assert.deepEqual(parseReviewResponseFrame(inbound[inbound.length - 1]), {
+      type: "review_response",
+      request_id: "b",
+      approved: false,
+    });
   });
 
   it("two concurrent workers: approving one leaves the other pending and untouched", async () => {
@@ -356,18 +362,20 @@ describe("manager review broker — capability declaration and answer relay", ()
     child.stdout.write(reviewFrameLine({ request_id: "dup1" }));
     await flush();
     assert.equal(calls.length, 1);
-    assert.deepEqual(
-      parseReviewResponseFrame(inbound[inbound.length - 1]),
-      { type: "review_response", request_id: "dup1", approved: false }
-    );
+    assert.deepEqual(parseReviewResponseFrame(inbound[inbound.length - 1]), {
+      type: "review_response",
+      request_id: "dup1",
+      approved: false,
+    });
     inbound.length = 0;
     calls[0].settle(true);
     await flush();
     // the original still gets its own single true answer
-    assert.deepEqual(
-      parseReviewResponseFrame(inbound[inbound.length - 1]),
-      { type: "review_response", request_id: "dup1", approved: true }
-    );
+    assert.deepEqual(parseReviewResponseFrame(inbound[inbound.length - 1]), {
+      type: "review_response",
+      request_id: "dup1",
+      approved: true,
+    });
   });
 
   it("rogue review_request against a route-less parent does not crash the manager (child has no route either)", async () => {
@@ -382,10 +390,12 @@ describe("manager review broker — capability declaration and answer relay", ()
     });
     await flush();
     assert.equal(child.stdin.writableEnded, true);
-    const info = manager
-      .listSubagents()
-      .find((t) => t.state === "failed");
-    assert.equal(info, undefined, "rogue frame alone does not terminalize the task");
+    const info = manager.listSubagents().find((t) => t.state === "failed");
+    assert.equal(
+      info,
+      undefined,
+      "rogue frame alone does not terminalize the task"
+    );
   });
 
   it("a malformed review frame is a protocolError (closed grammar)", async () => {
@@ -395,9 +405,7 @@ describe("manager review broker — capability declaration and answer relay", ()
     const child = spawned[0];
     child.stdout.write('{"type":"review_request","request_id":"x"}\n');
     await flush();
-    const info = manager
-      .listSubagents()
-      .find((t) => t.state === "failed");
+    const info = manager.listSubagents().find((t) => t.state === "failed");
     assert.ok(info, "task fails on a malformed frame line");
     assert.equal(info.reason, "protocolError");
   });
@@ -409,9 +417,7 @@ describe("manager review broker — capability declaration and answer relay", ()
     const child = spawned[0];
     child.stdout.write('{"type":"review_something_else"}\n');
     await flush();
-    const info = manager
-      .listSubagents()
-      .find((t) => t.state === "failed");
+    const info = manager.listSubagents().find((t) => t.state === "failed");
     assert.equal(info?.reason, "protocolError");
   });
 });
@@ -494,10 +500,11 @@ describe("manager review broker — disposal settles pending relays with deny", 
     child.stdout.write(reviewFrameLine({ request_id: "rj1" }));
     await flush();
     assert.equal(seen.length, 1);
-    assert.deepEqual(
-      parseReviewResponseFrame(inbound[inbound.length - 1]),
-      { type: "review_response", request_id: "rj1", approved: false }
-    );
+    assert.deepEqual(parseReviewResponseFrame(inbound[inbound.length - 1]), {
+      type: "review_response",
+      request_id: "rj1",
+      approved: false,
+    });
   });
 });
 
@@ -516,9 +523,7 @@ describe("worker review control — end-to-end proof + fail-closed settles", () 
   it("stdin EOF settles the wait immediately with false (legacy / route-less parent)", async () => {
     const stdin = new PassThrough();
     const reader = attachWorkerStdinReader(stdin);
-    stdin.write(
-      JSON.stringify({ task: "t", sandboxRoot: "/tmp/x" }) + "\n"
-    );
+    stdin.write(JSON.stringify({ task: "t", sandboxRoot: "/tmp/x" }) + "\n");
     stdin.end();
     const envelopeLine = await reader.envelopeLine;
     assert.equal(JSON.parse(envelopeLine).task, "t");
@@ -539,7 +544,8 @@ describe("worker review control — end-to-end proof + fail-closed settles", () 
     assert.equal(await control.waitForBrokerReady(20), true);
     const route = control.createRoute({ timeoutMs: 5_000 });
     assert.equal(route.interactive, true);
-    const base: SecurityReviewRequest = {
+    // requestId is per-call; `base` holds only the shared half.
+    const base: Omit<SecurityReviewRequest, "requestId"> = {
       requirement: {
         cause: "execution-unresolved",
         span: { start: 1, end: 5 },
@@ -594,7 +600,8 @@ describe("worker review control — end-to-end proof + fail-closed settles", () 
     control.feed('{"type":"review_broker_ready"}');
     assert.equal(await control.waitForBrokerReady(20), true);
     const route = control.createRoute({ timeoutMs: 60 });
-    const base: SecurityReviewRequest = {
+    // requestId is per-call; `base` holds only the shared half.
+    const base: Omit<SecurityReviewRequest, "requestId"> = {
       requirement: {
         cause: "bounded-analysis-exhausted",
         span: { start: 0, end: 2 },
@@ -605,7 +612,11 @@ describe("worker review control — end-to-end proof + fail-closed settles", () 
       summaryHint: "bounded analysis exhausted",
     };
     const ctrl = new AbortController();
-    const pAbort = route.request({ ...base, requestId: "a1", signal: ctrl.signal });
+    const pAbort = route.request({
+      ...base,
+      requestId: "a1",
+      signal: ctrl.signal,
+    });
     const pClose = route.request({ ...base, requestId: "a2" });
     const pTimeout = route.request({ ...base, requestId: "a3" });
     await flush();

@@ -32,6 +32,7 @@ import {
   writeLiveTaskRoot,
 } from "../../../src/harness/session-roots.ts";
 import type { LiveTaskRoot } from "../../../src/harness/session-roots.ts";
+
 import type {
   Executor,
   ToolCall,
@@ -39,6 +40,19 @@ import type {
 } from "../../../src/harness/tools/types.ts";
 
 // -- helpers -----------------------------------------------------------------
+
+/**
+ * Narrow a receipt to its `execution_failed` variant and return the
+ * model-visible failure label. Keeps the `kind` assertion these tests already
+ * made — TypeScript cannot narrow through `expect().toBe()`.
+ */
+function failureMessage(result: ToolExecutionResult | undefined): string {
+  expect(result?.kind).toBe("execution_failed");
+  if (result?.kind !== "execution_failed") {
+    throw new Error(`expected an execution_failed result, got ${result?.kind}`);
+  }
+  return result.message;
+}
 
 /** Fake inner executor: records executeAll invocations. */
 function fakeInner(): {
@@ -66,7 +80,7 @@ function fakeInner(): {
       const out: ToolExecutionResult[] = batch.map((c) => ({
         kind: "ok",
         toolUseId: c.id,
-        payload: { wrote: true },
+        payload: [{ type: "text", text: "ok" }],
       }));
       for (const [i, r] of out.entries()) await onSettled?.(r, i);
       return out;
@@ -128,11 +142,11 @@ describe("T10 — gate reads live taskRoot (red→green of the original bug)", (
     // 1) Initial wave on the main repo: unbound mutate blocks. State stays
     //    open; provision is NEVER called (model-provision contract).
     const blocked = await gate.executeAll([writeCall("m1")]);
-    expect(blocked[0]!.kind).toBe("execution_failed");
-    expect(
-      blocked[0]!.message!.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)
-    ).toBe(true);
-    expect(blocked[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
+    const blockedMessage = failureMessage(blocked[0]);
+    expect(blockedMessage.startsWith(`${WORKTREE_ISOLATION_PREFIX} `)).toBe(
+      true
+    );
+    expect(blockedMessage).toContain(CREATE_WORKTREE_TOOL_HINT);
     expect(provisionCalls).toBe(0); // never provisions on the blocked path
     expect(invocations).toHaveLength(0); // inner never reached
 
@@ -169,8 +183,7 @@ describe("T10 — gate reads live taskRoot (red→green of the original bug)", (
 
     for (const id of ["m1", "m2", "m3"]) {
       const out = await gate.executeAll([writeCall(id)]);
-      expect(out[0]!.kind).toBe("execution_failed");
-      expect(out[0]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
+      expect(failureMessage(out[0])).toContain(CREATE_WORKTREE_TOOL_HINT);
     }
     expect(provisionCalls).toBe(0); // never provisions
     expect(invocations).toHaveLength(0); // inner never reached
@@ -206,7 +219,7 @@ describe("T10 — D2 batch snapshot (one wave = one root)", () => {
         return batch.map((c) => ({
           kind: "ok" as const,
           toolUseId: c.id,
-          payload: { wrote: true },
+          payload: [{ type: "text" as const, text: "ok" }],
         }));
       },
     };
@@ -237,7 +250,7 @@ describe("T10 — D2 batch snapshot (one wave = one root)", () => {
     // though the cell now reads the new task worktree, the snapshot is
     // already taken and the wave is locked to one root.
     expect(out[1]!.kind).toBe("execution_failed");
-    expect(out[1]!.message).toContain(CREATE_WORKTREE_TOOL_HINT);
+    expect(failureMessage(out[1])).toContain(CREATE_WORKTREE_TOOL_HINT);
 
     // D2 evidence: the gate did NOT invoke provision — the gate's snapshot
     // was "/main" (not task-worktree-shaped), so the mutate went straight to
@@ -310,7 +323,7 @@ describe("T10 — D11 invariant (gate adjudication root == consumer handler root
         return batch.map((c) => ({
           kind: "ok" as const,
           toolUseId: c.id,
-          payload: { wrote: true },
+          payload: [{ type: "text" as const, text: "ok" }],
         }));
       },
     };
@@ -370,7 +383,7 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
         return batch.map((c) => ({
           kind: "ok" as const,
           toolUseId: c.id,
-          payload: { wrote: true },
+          payload: [{ type: "text" as const, text: "ok" }],
         }));
       },
     };
@@ -398,10 +411,10 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
     expect(out[0]!.kind).toBe("ok");
     expect(cell.read()).toBe("/main");
     // the mutate is fail-closed blocked, never written to the flipped root
-    expect(out[1]!.kind).toBe("execution_failed");
-    expect(out[1]!.message).toContain(WORKTREE_ISOLATION_PREFIX);
+    const reboundMessage = failureMessage(out[1]);
+    expect(reboundMessage).toContain(WORKTREE_ISOLATION_PREFIX);
     // the block message points at re-issuing in the next wave of this run
-    expect(out[1]!.message).toContain("next wave of tool calls in this run");
+    expect(reboundMessage).toContain("next wave of tool calls in this run");
     // D11 evidence: write_file never reached a handler after the flip
     expect(reached).toEqual(["exit-1"]);
   });
@@ -431,8 +444,8 @@ describe("D11 — root-flip lifecycle tool flips the cell mid-wave: later mutate
 
     expect(out[0]!.kind).toBe("ok");
     expect(cell.read()).toBe("/repo/.iknow/worktrees/conv-2");
-    expect(out[1]!.kind).toBe("execution_failed");
-    expect(out[1]!.message).toContain(WORKTREE_ISOLATION_PREFIX);
+    const reboundMessage = failureMessage(out[1]);
+    expect(reboundMessage).toContain(WORKTREE_ISOLATION_PREFIX);
     expect(reached).toEqual(["enter-1"]);
   });
 

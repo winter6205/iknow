@@ -32,7 +32,6 @@ import { createNoopTraceService } from "../../../src/harness/trace/noop.ts";
 import type {
   ToolCallRecord,
   ViolationRecord,
-  ToolCallCause,
   CleanupTraceEvidence,
 } from "../../../src/harness/trace/types.ts";
 
@@ -74,7 +73,10 @@ function sampleToolCall(
 
 describe("tool_call cause (ADR-0091 timeout / ADR-0135 cancel)", () => {
   it("a per-call timeout is written as cause=timeout beside error.type=execution_failed", async () => {
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "c1" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "c1",
+    });
 
     await trace.recordToolCall(sampleToolCall({ cause: "timeout" }));
 
@@ -83,13 +85,19 @@ describe("tool_call cause (ADR-0091 timeout / ADR-0135 cancel)", () => {
     // The ADR-0005 envelope is unchanged: kind stays execution_failed and the
     // message stays the literal "timeout" the model already saw.
     expect(row!["tool_kind"]).toBe("execution_failed");
-    expect(row!["error"]).toEqual({ type: "execution_failed", message: "timeout" });
+    expect(row!["error"]).toEqual({
+      type: "execution_failed",
+      message: "timeout",
+    });
     // The new typed carrier is what a reviewer reads instead of the message.
     expect(row!["cause"]).toBe("timeout");
   });
 
   it("a security-interruption cancellation is written as cause=cancelled", async () => {
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "c2" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "c2",
+    });
 
     await trace.recordToolCall(
       sampleToolCall({
@@ -105,7 +113,10 @@ describe("tool_call cause (ADR-0091 timeout / ADR-0135 cancel)", () => {
   });
 
   it("no cause field is written when the result carried no recognized cause", async () => {
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "c3" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "c3",
+    });
 
     await trace.recordToolCall(
       sampleToolCall({
@@ -124,7 +135,10 @@ describe("tool_call cause (ADR-0091 timeout / ADR-0135 cancel)", () => {
     // *verdict* (the reviewer could not be reached), not a confirmed security
     // violation and not a timeout. cause stays absent so no reader can count
     // it toward a streak from the trace alone.
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "c4" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "c4",
+    });
 
     await trace.recordToolCall(
       sampleToolCall({
@@ -152,7 +166,10 @@ describe("tool_call cleanup evidence (ADR-0134 / cleanup-result.ts)", () => {
       pgid: 4242,
       detail: "process group 4242 still alive after 2000ms",
     };
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "k1" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "k1",
+    });
 
     await trace.recordToolCall(sampleToolCall({ cause: "timeout", cleanup }));
 
@@ -165,7 +182,10 @@ describe("tool_call cleanup evidence (ADR-0134 / cleanup-result.ts)", () => {
   });
 
   it("a confirmed stop carries its pgid, and a not_started teardown carries nothing else", async () => {
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "k2" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "k2",
+    });
 
     await trace.recordToolCall(
       sampleToolCall({
@@ -190,7 +210,10 @@ describe("tool_call cleanup evidence (ADR-0134 / cleanup-result.ts)", () => {
   });
 
   it("a result with no cleanup evidence omits the field entirely", async () => {
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "k3" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "k3",
+    });
 
     await trace.recordToolCall(sampleToolCall({ cause: "cancelled" }));
 
@@ -233,7 +256,10 @@ describe("recordViolation (security interruption through the shared service)", (
   };
 
   it("writes a violation row carrying the turn id, the count and per-item cleanup", async () => {
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "v1" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "v1",
+    });
 
     const id = await trace.recordViolation(INTERRUPTION);
 
@@ -249,7 +275,10 @@ describe("recordViolation (security interruption through the shared service)", (
   });
 
   it("preserves each cancelled item's owner id and its cleanup verdict verbatim", async () => {
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "v2" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "v2",
+    });
 
     await trace.recordViolation(INTERRUPTION);
 
@@ -279,7 +308,10 @@ describe("recordViolation (security interruption through the shared service)", (
   });
 
   it("a high-tier immediate kill records tier=high with no cleanup fabrication", async () => {
-    const trace = createJsonlTraceService({ filePath: dir, conversationId: "v3" });
+    const trace = createJsonlTraceService({
+      filePath: dir,
+      conversationId: "v3",
+    });
 
     await trace.recordViolation({
       ts: "2026-09-30T00:00:12.000Z",

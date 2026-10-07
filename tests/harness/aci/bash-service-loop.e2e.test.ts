@@ -74,6 +74,21 @@ import {
 import type { BackgroundTaskManager } from "../../../src/harness/background/manager.ts";
 import { resolveTasksDir } from "../../../src/harness/background/paths.ts";
 
+/**
+ * `ToolExecutionResult.payload` is `AnthropicContentBlock[]`, a union whose
+ * `text` member only exists on the text arm. Every ok result read here is a
+ * single text block, so narrow it in one place instead of casting at each
+ * `payload[0]!.text`.
+ */
+function okText(result: ToolExecutionResult): string {
+  assert.equal(result.kind, "ok");
+  if (result.kind !== "ok") throw new Error("not ok");
+  const block = result.payload[0]!;
+  assert.equal(block.type, "text");
+  if (block.type !== "text") throw new Error("not text");
+  return block.text;
+}
+
 // ── bwrap guard ──────────────────────────────────────────────────────────────
 
 function hasBwrap(): boolean {
@@ -205,9 +220,9 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
       const inner: Executor = Object.freeze({
         executeAll: async (
           calls: ReadonlyArray<ToolCall>,
-          signal,
-          _timeoutMs,
-          convId
+          signal?: AbortSignal,
+          _timeoutMs?: number,
+          convId?: string
         ): Promise<ReadonlyArray<ToolExecutionResult>> => {
           const call = calls[0]!;
           // Dispatch by call.name to the right handler — the bash handler
@@ -281,10 +296,10 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
         elapsedMs < 5_000,
         `background spawn should return in ms, got ${elapsedMs}ms`
       );
-      const spawnPayload = JSON.parse(
-        (spawnResult as Extract<ToolExecutionResult, { kind: "ok" }>)
-          .payload[0]!.text
-      ) as { task_id: string; log_path: string };
+      const spawnPayload = JSON.parse(okText(spawnResult)) as {
+        task_id: string;
+        log_path: string;
+      };
       assert.match(spawnPayload.task_id, /^bg-[0-9a-f]{12}$/);
       assert.ok(spawnPayload.log_path.endsWith(`${spawnPayload.task_id}.log`));
       const { task_id: taskId, log_path: logPath } = spawnPayload;
@@ -306,10 +321,10 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
           conversationId
         );
         if (outResult.kind === "ok") {
-          const out = JSON.parse(
-            (outResult as Extract<ToolExecutionResult, { kind: "ok" }>)
-              .payload[0]!.text
-          ) as { text: string; status: string };
+          const out = JSON.parse(okText(outResult)) as {
+            text: string;
+            status: string;
+          };
           if (out.text.includes(`listening on ${socketPath}`)) {
             listeningSeen = true;
             break;
@@ -352,10 +367,10 @@ describe("bash-service-loop closed loop e2e (#502 + #503)", () => {
         conversationId
       );
       assert.equal(stopResult.kind, "ok");
-      const stopPayload = JSON.parse(
-        (stopResult as Extract<ToolExecutionResult, { kind: "ok" }>).payload[0]!
-          .text
-      ) as { task_id: string; status: string };
+      const stopPayload = JSON.parse(okText(stopResult)) as {
+        task_id: string;
+        status: string;
+      };
       assert.equal(stopPayload.task_id, taskId);
       assert.equal(stopPayload.status, "stopped");
 
