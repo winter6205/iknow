@@ -33,7 +33,7 @@ One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 sta
 
 ### Harness / state and transport
 
-- `session-checkpoint-architecture.md` — published native execution snapshots, durable per-file progress, session-entry recovery, and final-request trace with shared immutable represented bodies; plans A/B/C implemented and merged, repair round plus joined acceptance matrix in progress (ADR-0136)
+- `session-checkpoint-architecture.md` — published native execution snapshots, durable per-file progress, session-entry recovery, and final-request trace with shared immutable represented bodies; plans A/B/C implemented and merged, host wiring landed (#1183), joined acceptance matrix 29/29 PROVEN — with the fresh-process / real-pty evidence classes kept out of CI (ADR-0136)
 - `code-restore.md` — rewind can restore workspace bytes from per-write preimages on the abandoned head chain (ADR-0121; ADR-0027 / ADR-0071 / ADR-0110)
 - `context-occupancy-autocompact.md` — the usage bar and the proactive compaction gate share one occupancy numerator (ADR-0118)
 - `session-list-title.md` — list title: standalone transcript event + lite-model generation (ADR-0113)

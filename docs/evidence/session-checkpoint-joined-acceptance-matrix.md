@@ -1,15 +1,25 @@
 # Session-checkpoint joined acceptance matrix (issue #1182)
 
-**Status: IN PROGRESS — this file is the run record, not a claim of completion.**
-Last updated during the final-gates round (issue #1185) on branch
-`fix/1185-checkpoint-final-gates`.
+**Status: 29/29 criteria PROVEN — rounds 4 and 5 closed the last two gates (issue #1185).**
+This is still the run record, not a claim about every environment: each row below
+carries its evidence level **and** its residual limit, and the binding statement is
+that pair, not the verdict alone. Last content update landed in #1183 (`9fa88f570`).
 
 **The tree every round-5 number was measured on is a LOCAL tree built on the
 pinned baseline `b420e318a`** — the published PR head — with rounds 4 and 5
-applied on top. That head is NOT itself green: it is the head whose full `npm
-test` run round 3 recorded as exiting non-zero, and none of this work was pushed
-to it. Nothing in this file may be read as a claim that `b420e318a` passes the
-full suite.
+applied on top. That baseline head is NOT itself green: it is the head whose full
+`npm test` run recorded as exiting non-zero, and none of this work was pushed to
+it. Nothing here may be read as a claim that `b420e318a` passes the full suite.
+The measured tree (baseline + rounds 4–5) is green — runs 2–5 are all `exit 0`
+(vitest 792/792, 12530/12530; bun 2065 pass / 1 skip / 0 fail). Keep the two
+statements apart: the baseline alone is not green, the measured tree is.
+
+**CI does not exercise the two strongest classes.** The fresh-process and
+real-pty files spawn a real `iknow ask` / `iknow chat` child whose assembly
+reaches `requireBwrap`; a GitHub-hosted runner either lacks bwrap or refuses to
+isolate, so those files are registered in `vitest.ci-excludes.ts` rather than run
+there. A green CI run is therefore **not** evidence for crash recovery — reproduce
+it locally on a bwrap-capable machine.
 
 Contract: `specs/session-checkpoint-architecture.md` (ADR-0136).
 Plan review that produced the repair scope:
