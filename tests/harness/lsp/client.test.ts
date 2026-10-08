@@ -199,6 +199,27 @@ describe("spawnClient sends initialized after initialize", () => {
     expect(initCalls).toHaveLength(1); // exactly once, no double-init
     expect(initCalls[0][1]).toEqual({});
   });
+
+  it("advertises hierarchical documentSymbol support in the initialize payload", async () => {
+    const { server } = makeFakeServer("caps-document-symbol");
+    const client = await getClient(ctx, "/root/caps.ts", { server });
+    expect(client).toBeDefined();
+
+    const initCall = mockSendRequest.mock.calls.find(
+      (c) => c[0] === "initialize"
+    );
+    const params = initCall?.[1] as {
+      capabilities: { textDocument?: { documentSymbol?: unknown } };
+    };
+    // Without this capability a server may legitimately answer the flat
+    // SymbolInformation[] form, whose range points at the declaration line
+    // start rather than the identifier — the resolver then cannot locate the
+    // symbol at all. Declaring it asks the server for the nested tree the
+    // resolver's happy path consumes.
+    expect(params.capabilities.textDocument?.documentSymbol).toEqual({
+      hierarchicalDocumentSymbolSupport: true,
+    });
+  });
 });
 
 // ── 2. broken memory ──────────────────────────────────────────────────────────

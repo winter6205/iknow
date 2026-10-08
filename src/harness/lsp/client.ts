@@ -801,13 +801,16 @@ async function awaitInitialize(args: {
         processId: args.child.pid ?? null,
         rootUri: pathToFileURL(args.root).href,
         // Advertise only the methods the harness actually sends: textDocument
-        // sync + diagnostic push subscription. Symbol capabilities are the
-        // **server's** (reported in its capabilities response), not declared
-        // client-side.
+        // sync + diagnostic push subscription. `hierarchicalDocumentSymbolSupport`
+        // is what asks the server for the nested `DocumentSymbol` tree
+        // (selectionRange + children) instead of the flat `SymbolInformation[]`
+        // form, whose range points at the declaration line start rather than
+        // the identifier the resolver needs.
         capabilities: {
           textDocument: {
             synchronization: { dynamicRegistration: false },
             publishDiagnostics: { relatedInformation: true },
+            documentSymbol: { hierarchicalDocumentSymbolSupport: true },
           },
           workspace: { symbol: { dynamicRegistration: false } },
         },

@@ -18,9 +18,11 @@
 //   - the final filesystem bytes of BOTH the worktree and the main checkout,
 //   - the result URIs.
 // A silent tool success or model prose never substitutes for these. When the
-// model did not take an arm's shape, the arm prints a RESIDUAL and does not
-// judge it (same discipline as real-llm/verify-status-contract.test.ts); it
-// never becomes a hidden pass.
+// model did not take another arm's shape, that arm prints a RESIDUAL and does
+// not judge it (same discipline as real-llm/verify-status-contract.test.ts); it
+// never becomes a hidden pass. The hover arms are the exception: they gate,
+// because a non-null hover naming the symbol is the contract under test, and
+// a residual cannot enforce a contract.
 //
 // The model drives ACTUAL host worktree creation/entry through the production
 // provisioner seams — nothing here rebinds a root by hand. The current model
@@ -40,7 +42,7 @@ import {
 import { join, resolve as resolvePath } from "node:path";
 import { pathToFileURL } from "node:url";
 
-import { afterAll, beforeAll, describe, it } from "vitest";
+import { afterAll, beforeAll, describe, expect, it } from "vitest";
 
 import { buildHarnessEngine } from "../src/harness/build-engine.ts";
 import { run, type LoopEngineDeps } from "../src/harness/loop-engine.ts";
@@ -56,11 +58,13 @@ import {
   type RoleSubstitutionDispatch as DispatchRecord,
 } from "./role-substitution-recorder.ts";
 import {
+  NESTED_METHOD_PATH,
   NO_ROOT_SENTINEL_PREFIX,
   RELATIVE_TS,
   RENAMED_SYMBOL,
   UNSAFE_ESCAPE_RELATIVE,
   UNIQUE_SYMBOL,
+  WORKSPACE_QUERY_SYMBOL,
   WORKTREE_SUBDIR,
   declaresSymbol,
   fileUrisIn,
@@ -547,31 +551,113 @@ async function runArm(
         console.log(
           `[wt-hover-known-symbol] trace:\n${traceLine(arm.dispatches)}`
         );
+        // Each degradation must fail the arm: a non-null hover naming the
+        // symbol is the contract, and a soft residual cannot enforce it.
         const hovers = allDispatches(arm.dispatches, "get_hover");
-        if (hovers.length === 0) {
-          console.log(
-            "[wt-hover-known-symbol] RESIDUAL: model did not call get_hover"
-          );
-          return;
-        }
+        expect(
+          hovers.length,
+          "[wt-hover-known-symbol] model did not call get_hover"
+        ).toBeGreaterThan(0);
         const text = resultText(hovers[hovers.length - 1]!.result);
         console.log(`[wt-hover-known-symbol] result: ${text}`);
-        if (
-          text.trim() === "" ||
-          text.trim() === "null" ||
-          text.startsWith("(")
-        ) {
-          console.log(
-            "[wt-hover-known-symbol] RESIDUAL: hover was empty/sentinel"
-          );
+        expect(
+          text.trim(),
+          "[wt-hover-known-symbol] hover was empty"
+        ).not.toBe("");
+        expect(
+          text.trim(),
+          "[wt-hover-known-symbol] hover returned the null string"
+        ).not.toBe("null");
+        expect(
+          text.startsWith("("),
+          "[wt-hover-known-symbol] hover returned a sentinel"
+        ).toBe(false);
+        expect(
+          text,
+          "[wt-hover-known-symbol] hover did not describe the symbol"
+        ).toContain(UNIQUE_SYMBOL);
+      }
+    );
+
+    it(
+      "wt-hover-top-level-symbol: hovering a top-level symbol is non-null",
+      { timeout: 360_000 },
+      async () => {
+        if (!HAS_KEY) {
+          console.log("[SKIP] LLM key not set; Not run");
           return;
         }
-        if (!text.includes(UNIQUE_SYMBOL)) {
-          console.log(
-            "[wt-hover-known-symbol] RESIDUAL: hover did not describe the symbol"
-          );
+        const c = TRAJECTORY_CASES.find(
+          (x) => x.id === "wt-hover-top-level-symbol"
+        )!;
+        const arm = await runArm(c);
+        console.log(
+          `[wt-hover-top-level-symbol] trace:\n${traceLine(arm.dispatches)}`
+        );
+        const hovers = allDispatches(arm.dispatches, "get_hover");
+        expect(
+          hovers.length,
+          "[wt-hover-top-level-symbol] model did not call get_hover"
+        ).toBeGreaterThan(0);
+        const text = resultText(hovers[hovers.length - 1]!.result);
+        console.log(`[wt-hover-top-level-symbol] result: ${text}`);
+        expect(
+          text.trim(),
+          "[wt-hover-top-level-symbol] hover was empty"
+        ).not.toBe("");
+        expect(
+          text.trim(),
+          "[wt-hover-top-level-symbol] hover returned the null string"
+        ).not.toBe("null");
+        expect(
+          text.startsWith("("),
+          "[wt-hover-top-level-symbol] hover returned a sentinel"
+        ).toBe(false);
+        expect(
+          text,
+          "[wt-hover-top-level-symbol] hover did not name the top-level symbol"
+        ).toContain(WORKSPACE_QUERY_SYMBOL);
+      }
+    );
+
+    it(
+      "wt-hover-nested-method: hovering a nested Class/method is non-null",
+      { timeout: 360_000 },
+      async () => {
+        if (!HAS_KEY) {
+          console.log("[SKIP] LLM key not set; Not run");
           return;
         }
+        const c = TRAJECTORY_CASES.find(
+          (x) => x.id === "wt-hover-nested-method"
+        )!;
+        const arm = await runArm(c);
+        console.log(
+          `[wt-hover-nested-method] trace:\n${traceLine(arm.dispatches)}`
+        );
+        const hovers = allDispatches(arm.dispatches, "get_hover");
+        expect(
+          hovers.length,
+          "[wt-hover-nested-method] model did not call get_hover"
+        ).toBeGreaterThan(0);
+        const text = resultText(hovers[hovers.length - 1]!.result);
+        console.log(`[wt-hover-nested-method] result: ${text}`);
+        expect(
+          text.trim(),
+          "[wt-hover-nested-method] hover was empty"
+        ).not.toBe("");
+        expect(
+          text.trim(),
+          "[wt-hover-nested-method] hover returned the null string"
+        ).not.toBe("null");
+        expect(
+          text.startsWith("("),
+          `[wt-hover-nested-method] hover returned a sentinel (path ${NESTED_METHOD_PATH})`
+        ).toBe(false);
+        expect(
+          text,
+          "[wt-hover-nested-method] hover did not name the method"
+        ).toContain(UNIQUE_SYMBOL);
       }
     );
 

@@ -41,10 +41,12 @@ import {
 import { createTaskWorktreeProvisioner } from "../../../src/session-api/worktree-rebind.ts";
 import { Pyright, Typescript } from "../../../src/harness/lsp/server.ts";
 import type { LspCtx, LspServerInfo } from "../../../src/harness/lsp/types.ts";
+import type { ToolExecutionContext } from "../../../src/harness/tools/types.ts";
 import {
   createLspClientPool,
   getClientDetailed,
 } from "../../../src/harness/lsp/client.ts";
+import { createSymbolQueryToolSet } from "../../../src/harness/aci/tools/symbol.ts";
 
 const tmpRoots: string[] = [];
 
@@ -85,6 +87,16 @@ function tsSource(marker: string): string {
     `  return ${marker}();`,
     `}`,
     ``,
+    `export interface ${marker}_Shape {`,
+    `  readonly value: number;`,
+    `}`,
+    ``,
+    `export class ${marker}_Widget {`,
+    `  method_${marker}(): number {`,
+    `    return 1;`,
+    `  }`,
+    `}`,
+    ``,
   ].join("\n");
 }
 
@@ -96,6 +108,10 @@ function pySource(marker: string): string {
     ``,
     `def caller_of_${marker}() -> int:`,
     `    return ${marker}()`,
+    ``,
+    `class ${marker}_Widget:`,
+    `    def method_of_${marker}(self) -> int:`,
+    `        return 1`,
     ``,
   ].join("\n");
 }
@@ -357,5 +373,122 @@ describe("T3 real language servers across production worktree rebinds", () => {
 
     expect(pool.shutDown).toBe(false);
     expect(pool.clients.size).toBe(0);
+  }, 300_000);
+});
+
+/* ---------- symbol-identity hover through the PRODUCTION tool handlers ---------- */
+
+/** Hover one symbol by identity through the production symbol-query tool set. */
+async function hoverByIdentity(
+  ctx: LspCtx,
+  file: string,
+  symbolPath: string
+): Promise<string> {
+  const hover = createSymbolQueryToolSet(ctx).find(
+    (t) => t.name === "get_hover"
+  );
+  if (hover === undefined) throw new Error("get_hover tool missing from the set");
+  const execCtx: ToolExecutionContext = { conversationId: "conv-t3-hover" };
+  const out = await hover.handler({ file, symbol_path: symbolPath }, execCtx);
+  return typeof out === "string" ? out : JSON.stringify(out);
+}
+
+/**
+ * A real hover is a non-null object whose contents name the symbol. Anything
+ * else — the `null` string, a `(symbol …)` resolution sentinel, a no-server
+ * sentinel — is the defect this leg exists to catch, so each is asserted
+ * against explicitly rather than allowed to pass as a soft result.
+ */
+function expectHoverNames(raw: string, name: string, what: string): void {
+  expect(raw, `${what}: hover must not be the JSON null string`).not.toBe("null");
+  expect(raw.trim(), `${what}: hover must be non-empty`).not.toBe("");
+  expect(raw, `${what}: hover must not be a resolution sentinel`).not.toContain(
+    '(symbol "'
+  );
+  const parsed = JSON.parse(raw) as { contents?: unknown };
+  expect(parsed.contents, `${what}: hover must carry contents`).toBeTruthy();
+  expect(
+    JSON.stringify(parsed.contents),
+    `${what}: hover must name ${name}`
+  ).toContain(name);
+}
+
+describe("T3 real language servers answer symbol-identity hover through the production tool set", () => {
+  it("real typescript-language-server hovers a top-level function, a top-level interface, and a nested Class/method", async () => {
+    const repo = makeGitRepo();
+    const cell = createLiveTaskRoot(repo);
+    const pool = createLspClientPool();
+    const ctx: LspCtx = { directory: repo, directoryCell: cell, pool };
+    try {
+      const topLevelFunction = await hoverByIdentity(
+        ctx,
+        RELATIVE_TS,
+        "main_ts_unique"
+      );
+      expectHoverNames(
+        topLevelFunction,
+        "main_ts_unique",
+        "top-level export function"
+      );
+
+      const topLevelInterface = await hoverByIdentity(
+        ctx,
+        RELATIVE_TS,
+        "main_ts_unique_Shape"
+      );
+      expectHoverNames(
+        topLevelInterface,
+        "main_ts_unique_Shape",
+        "top-level export interface"
+      );
+
+      const nestedMethod = await hoverByIdentity(
+        ctx,
+        RELATIVE_TS,
+        "main_ts_unique_Widget/method_main_ts_unique"
+      );
+      expectHoverNames(
+        nestedMethod,
+        "method_main_ts_unique",
+        "nested Class/method symbol_path"
+      );
+    } finally {
+      await pool.disposeAll();
+    }
+  }, 300_000);
+
+  it("real pyright hovers a top-level def, a class, and a nested Class/method", async () => {
+    const repo = makeGitRepo();
+    const cell = createLiveTaskRoot(repo);
+    const pool = createLspClientPool();
+    const ctx: LspCtx = { directory: repo, directoryCell: cell, pool };
+    try {
+      const topLevelDef = await hoverByIdentity(
+        ctx,
+        RELATIVE_PY,
+        "main_py_unique"
+      );
+      expectHoverNames(topLevelDef, "main_py_unique", "top-level def");
+
+      const classSymbol = await hoverByIdentity(
+        ctx,
+        RELATIVE_PY,
+        "main_py_unique_Widget"
+      );
+      expectHoverNames(classSymbol, "main_py_unique_Widget", "class");
+
+      const nestedMethod = await hoverByIdentity(
+        ctx,
+        RELATIVE_PY,
+        "main_py_unique_Widget/method_of_main_py_unique"
+      );
+      expectHoverNames(
+        nestedMethod,
+        "method_of_main_py_unique",
+        "nested Class/method symbol_path"
+      );
+    } finally {
+      await pool.disposeAll();
+    }
   }, 300_000);
 });

@@ -37,13 +37,23 @@ export const RELATIVE_TS = "src/unique.ts";
 export const UNIQUE_SYMBOL = "worktreeTrajectoryUnique";
 
 /**
- * A TOP-LEVEL symbol in RELATIVE_TS. The file-omitted `workspace/symbol` query
- * (find_symbol) only returns top-level declarations (tsserver `navto` does not
- * list class members), so the file-less case targets THIS symbol; the
- * hover / call-hierarchy / rename cases target the class method UNIQUE_SYMBOL,
- * whose range starts on its own name (hover there is non-null).
+ * A TOP-LEVEL function in RELATIVE_TS. The file-omitted `workspace/symbol`
+ * query (find_symbol) only returns top-level declarations (tsserver `navto`
+ * does not list class members), so the file-less case targets THIS symbol; it
+ * is also the top-level hover witness — a top-level function's declaration
+ * begins at `export`, so a resolver that positions hover at the line start
+ * instead of the identifier fails on this symbol. The hover / call-hierarchy /
+ * rename cases otherwise target the class method UNIQUE_SYMBOL.
  */
 export const WORKSPACE_QUERY_SYMBOL = "worktreeTrajectoryTopLevel";
+
+/**
+ * The class that declares UNIQUE_SYMBOL, and the NESTED `Class/method` path to
+ * it. A nested path resolves only when the server returns the class's
+ * `children`, so this path is the witness that the tree is genuinely nested.
+ */
+export const WIDGET_CLASS = "WorktreeTrajectoryWidget";
+export const NESTED_METHOD_PATH = `${WIDGET_CLASS}/${UNIQUE_SYMBOL}`;
 
 /** A caller of UNIQUE_SYMBOL — the witness that call-hierarchy returns a non-empty result. */
 export const CALLER_SYMBOL = "worktreeTrajectoryCaller";
@@ -110,13 +120,16 @@ export const UNSAFE_ESCAPE_RELATIVE = "../../../outside-project.ts";
 /* ------------------------------ source + seed fixtures ------------------------------ */
 
 /**
- * The seeded source: a class with two methods at fixed positions. Methods are
- * used (not top-level functions) because typescript-language-server answers
- * `textDocument/documentSymbol` with FLAT `SymbolInformation` (no
- * `selectionRange`); the resolver then positions at `location.range.start`,
- * which for a TOP-LEVEL declaration is column 0 (`export`) — hover there is
- * null. A method's range starts on its own name, so a bare method `symbol_path`
- * resolves to a position where hover and call-hierarchy return real content.
+ * The seeded source: a top-level declaration plus a class with two methods at
+ * fixed positions. The methods back the hover / call-hierarchy cases — the
+ * class method `worktreeTrajectoryCaller` calls `worktreeTrajectoryUnique`, so
+ * call-hierarchy has a real caller, and the nested symbol_path
+ * `WorktreeTrajectoryWidget/worktreeTrajectoryUnique` is a real path in the
+ * file's symbol tree. The client advertises
+ * `textDocument.documentSymbol.hierarchicalDocumentSymbolSupport`, so the
+ * server answers `textDocument/documentSymbol` with a nested `DocumentSymbol`
+ * tree that carries `selectionRange`; the resolver positions at the symbol's
+ * own name, where hover returns real content.
  *
  * No `package.json` on purpose — the provisioner's default project-dep
  * installer then skips with `no_package_json`, so no case shells out to a real
@@ -128,7 +141,9 @@ export function tsSource(
   topLevel = WORKSPACE_QUERY_SYMBOL
 ): string {
   return [
-    `export const ${topLevel} = 1;`,
+    `export function ${topLevel}(): number {`,
+    `  return 1;`,
+    `}`,
     ``,
     `export class WorktreeTrajectoryWidget {`,
     `  ${unique}(): number {`,
@@ -206,6 +221,8 @@ export type TrajectoryCaseKind =
   | "exit-confirm-original"
   | "unsafe-refusal"
   | "hover-known-symbol"
+  | "hover-top-level-symbol"
+  | "hover-nested-method"
   | "call-hierarchy-known-symbol";
 
 export type TrajectoryCase = {
@@ -278,6 +295,25 @@ export const TRAJECTORY_CASES: readonly TrajectoryCase[] = [
       "Use the create-worktree tool to create this conversation's isolated task worktree. " +
       "Then use get_hover with file `src/unique.ts` and symbol_path `worktreeTrajectoryUnique`, " +
       "and report the type signature. Do not run bash.",
+  },
+  {
+    id: "wt-hover-top-level-symbol",
+    title: "hover a top-level symbol in the active worktree",
+    kind: "hover-top-level-symbol",
+    prompt:
+      "Use the create-worktree tool to create this conversation's isolated task worktree. " +
+      "Then use get_hover with file `src/unique.ts` and symbol_path " +
+      "`worktreeTrajectoryTopLevel`, and report the type signature. Do not run bash.",
+  },
+  {
+    id: "wt-hover-nested-method",
+    title: "hover a nested Class/method in the active worktree",
+    kind: "hover-nested-method",
+    prompt:
+      "Use the create-worktree tool to create this conversation's isolated task worktree. " +
+      "Then use get_hover with file `src/unique.ts` and symbol_path " +
+      "`WorktreeTrajectoryWidget/worktreeTrajectoryUnique`, and report the type signature. " +
+      "Do not run bash.",
   },
   {
     id: "wt-call-hierarchy-known-symbol",

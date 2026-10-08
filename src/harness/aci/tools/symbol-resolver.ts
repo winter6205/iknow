@@ -26,6 +26,7 @@
  * the connection pool collects its caches too.
  */
 import { pathToFileURL } from "node:url";
+import { readFile } from "node:fs/promises";
 
 import { CancellationToken } from "vscode-jsonrpc/node";
 
@@ -34,20 +35,18 @@ import {
   isMethodNotFoundSentinel,
   requestOrMethodNotFoundSentinel,
 } from "./lsp.js";
+import {
+  isWellFormedPosition,
+  locateIdentifierInRange,
+  type IdentifierRange,
+  type LspPosition,
+} from "./symbol-position.js";
+
+export type { LspPosition };
 
 /** The only request this module issues — same method name as in `lsp.ts` /
  * `symbol.ts`. */
 const DOCUMENT_SYMBOL_METHOD = "textDocument/documentSymbol";
-
-/** LSP 0-based position (line/character both 0-based, per protocol). */
-export interface LspPosition {
-  readonly line: number;
-  readonly character: number;
-}
-
-interface LspRange {
-  readonly start?: LspPosition;
-}
 
 /**
  * Node shape after normalizing the two `textDocument/documentSymbol`
@@ -61,9 +60,9 @@ interface LspRange {
 export interface DocumentSymbolNode {
   readonly name: string;
   readonly kind?: number;
-  readonly range?: LspRange;
-  readonly selectionRange?: LspRange;
-  readonly location?: { readonly range?: LspRange };
+  readonly range?: IdentifierRange;
+  readonly selectionRange?: IdentifierRange;
+  readonly location?: { readonly range?: IdentifierRange };
   readonly children?: ReadonlyArray<DocumentSymbolNode>;
 }
 
@@ -117,6 +116,17 @@ const symbolInflight = new WeakMap<
   LspClient,
   Map<string, Promise<SymbolSnapshot>>
 >();
+
+interface TextEntry {
+  readonly fingerprint: string | undefined;
+  readonly text: string | undefined;
+}
+
+/** Flat responses carry no identifier position, so recovering it needs the
+ *  document text; cache it per client + uri, keyed by the same
+ *  `getDocumentFingerprint` content identity the symbol-tree cache uses (the
+ *  rationale lives once, in `fetchDocumentSymbols`). */
+const textCache = new WeakMap<LspClient, Map<string, TextEntry>>();
 
 /**
  * The gated entry requires a token, while this module's public signature
@@ -238,6 +248,29 @@ async function fetchDocumentSymbols(
   return task;
 }
 
+/**
+ * Read a file's text for the flat path, cached per client + uri and keyed by
+ * `client.getDocumentFingerprint(uri)` so a changed file is re-read. A read
+ * failure is not an error out of resolution: it means "no usable position",
+ * so it caches and returns `undefined` (the caller renders `no_position`).
+ */
+async function fetchDocumentText(
+  client: LspClient,
+  file: string
+): Promise<string | undefined> {
+  const uri = pathToFileURL(file).href;
+  const fingerprint = client.getDocumentFingerprint(uri);
+  const cache = mapFor(textCache, client);
+  const hit = cache.get(uri);
+  if (hit && hit.fingerprint === fingerprint) return hit.text;
+
+  const text = await readFile(file, "utf8").catch(() => undefined);
+  // Fingerprint re-read at response time, same reason as `fetchDocumentSymbols`:
+  // text changed during the read must not be cached under the old identity.
+  cache.set(uri, { fingerprint: client.getDocumentFingerprint(uri), text });
+  return text;
+}
+
 interface Match {
   readonly node: DocumentSymbolNode;
   readonly path: string;
@@ -291,13 +324,48 @@ export function collectSymbolPaths(
   return out.slice(0, MAX_SYMBOL_CANDIDATES);
 }
 
-/** Definition site: prefer selectionRange (the name itself), fall back to range / location.range. */
-function positionOf(node: DocumentSymbolNode): LspPosition | undefined {
-  return (
-    node.selectionRange?.start ??
-    node.range?.start ??
-    node.location?.range?.start
+/**
+ * Position of a resolved node. A well-formed `selectionRange` is the
+ * identifier itself — the hierarchical form, trusted without touching the
+ * document. Otherwise the payload is flat: read the text and recover the
+ * identifier column inside the node's reported range
+ * (`symbol-position.ts`). No text, or no unique in-range identifier →
+ * `undefined`, which the caller renders as `no_position` (never a throw).
+ */
+async function resolveNodePosition(
+  client: LspClient,
+  file: string,
+  node: DocumentSymbolNode
+): Promise<LspPosition | undefined> {
+  const selection = node.selectionRange?.start;
+  if (isWellFormedPosition(selection)) return selection;
+  const text = await fetchDocumentText(client, file);
+  if (text === undefined) return undefined;
+  return locateIdentifierInRange(
+    node.name,
+    node.range ?? node.location?.range,
+    text
   );
+}
+
+/**
+ * Choose the node(s) a `symbol_path` names. Rooted descent first
+ * (`Class/method`); a bare `method` falls through to a subtree search. A flat
+ * response has no `children`, so a multi-segment path cannot descend — and a
+ * flat node carries no container identity either, so the parent segment can
+ * never be confirmed against the node that owns the match. Falling back to
+ * the last segment would aim a rename at a same-named member of a different
+ * class, so a multi-segment path on a flat response simply has no matches.
+ * Hierarchical trees keep the rooted-then-anywhere order untouched.
+ */
+function selectMatches(
+  nodes: ReadonlyArray<DocumentSymbolNode>,
+  segments: ReadonlyArray<string>
+): ReadonlyArray<Match> {
+  const rooted = matchFrom(nodes, segments, "");
+  if (rooted.length > 0) return rooted;
+  if (segments.length > 1) return [];
+  return matchAnywhere(nodes, segments, "");
 }
 
 /** `a/b//c ` → `["a","b","c"]` (tolerates empty segments and padding; never matches an empty name). */
@@ -311,10 +379,12 @@ export function splitSymbolPath(symbolPath: string): ReadonlyArray<string> {
 /**
  * Resolve `{ file, symbol_path }` to an LSP position.
  *
- * Match order: strict descent from the root first (`Class/method`); if no
- * hit, try any subtree (so a bare `method` still resolves). Multiple hits →
- * `ambiguous` (never guess the first: a wrong pick would aim subsequent
- * rename / references at the wrong symbol).
+ * Match order (`selectMatches`): strict descent from the root first
+ * (`Class/method`); if no hit, try any subtree (so a bare `method` still
+ * resolves). Multiple hits → `ambiguous` (never guess the first: a wrong pick
+ * would aim subsequent rename / references at the wrong symbol). A flat
+ * response has no tree to descend and no container identity, so a
+ * multi-segment path there resolves to nothing rather than to a guess.
  *
  * Server without `textDocument/documentSymbol` (explicit false / `-32601`)
  * → `method_not_found` (a capability gap is intrinsic to the server, not a
@@ -337,9 +407,7 @@ export async function resolveSymbolPosition(
     return { kind: "not_found", candidates: collectSymbolPaths(nodes) };
   }
 
-  const rooted = matchFrom(nodes, segments, "");
-  const matches =
-    rooted.length > 0 ? rooted : matchAnywhere(nodes, segments, "");
+  const matches = selectMatches(nodes, segments);
   if (matches.length === 0) {
     return { kind: "not_found", candidates: collectSymbolPaths(nodes) };
   }
@@ -351,7 +419,7 @@ export async function resolveSymbolPosition(
   }
 
   const match = matches[0]!;
-  const position = positionOf(match.node);
+  const position = await resolveNodePosition(client, file, match.node);
   if (!position) return { kind: "no_position", path: match.path };
   return {
     kind: "found",

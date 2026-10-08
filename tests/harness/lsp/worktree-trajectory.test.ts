@@ -57,6 +57,7 @@ import { createEnterWorktreeTool } from "../../../src/harness/aci/tools/enter-wo
 import { createExitWorktreeTool } from "../../../src/harness/aci/tools/exit-worktree.ts";
 import {
   CALLER_SYMBOL,
+  NESTED_METHOD_PATH,
   NO_PROJECT_ANCHOR_PREFIX,
   NO_ROOT_SENTINEL_PREFIX,
   OWNER_RELATIVE_TS,
@@ -423,6 +424,90 @@ describe("T4 worktree-path trajectory — offline half (real tool layer + real t
       // The LSP tool set was exercised as the production surface (sanity that
       // the same ctx backs both families).
       expect(lspTools.map((t) => t.name)).toContain("lsp_document_symbol");
+    } finally {
+      await pool.disposeAll();
+    }
+  }, 300_000);
+
+  it("locks hover on a top-level symbol and a nested Class/method in the active worktree", async () => {
+    const repo = makeGitRepo();
+
+    const cell = createLiveTaskRoot(repo);
+    const provisioner = createTaskWorktreeProvisioner({});
+    const provision = withLiveTaskRootWrite(provisioner.provision, cell);
+    const pool = createLspClientPool();
+    const ctx: LspCtx = {
+      directory: repo,
+      directoryCell: cell,
+      pool,
+    };
+
+    const createWorktree = createCreateWorktreeTool({ provision, root: cell });
+    const queryTools = createSymbolQueryToolSet(ctx);
+    const trace: Step[] = [];
+    const execCtx: ToolExecutionContext = { conversationId: "conv-t4-hover" };
+
+    try {
+      const createOut = await invoke(trace, createWorktree, {}, execCtx);
+      const treeW = cell.read();
+      expect(createOut, "create-worktree result names the new tree").toContain(
+        treeW
+      );
+
+      // A bare TOP-LEVEL symbol_path: hover must land on the identifier, not
+      // on the `export` keyword a line-start range would give, so neither the
+      // null string nor a not-found sentinel may pass.
+      const topOut = await invoke(
+        trace,
+        pick(queryTools, "get_hover"),
+        { file: RELATIVE_TS, symbol_path: WORKSPACE_QUERY_SYMBOL },
+        execCtx
+      );
+      expect(
+        topOut,
+        "top-level hover is not the null string"
+      ).not.toBe("null");
+      expect(
+        topOut,
+        "top-level hover is not a resolution sentinel"
+      ).not.toContain('(symbol "');
+      const top = JSON.parse(topOut) as { contents?: unknown };
+      expect(
+        top.contents,
+        `top-level hover carries contents (raw=${topOut})`
+      ).toBeTruthy();
+      expect(
+        JSON.stringify(top.contents),
+        "top-level hover names the symbol"
+      ).toContain(WORKSPACE_QUERY_SYMBOL);
+
+      // A NESTED `Class/method` path resolves only when the response carries
+      // `children`; a sentinel here means the tree was not a tree.
+      const nestedOut = await invoke(
+        trace,
+        pick(queryTools, "get_hover"),
+        { file: RELATIVE_TS, symbol_path: NESTED_METHOD_PATH },
+        execCtx
+      );
+      expect(
+        nestedOut,
+        "nested hover is not the null string"
+      ).not.toBe("null");
+      expect(
+        nestedOut,
+        "nested hover is not a resolution sentinel"
+      ).not.toContain('(symbol "');
+      const nested = JSON.parse(nestedOut) as { contents?: unknown };
+      expect(
+        nested.contents,
+        `nested hover carries contents (raw=${nestedOut})`
+      ).toBeTruthy();
+      expect(
+        JSON.stringify(nested.contents),
+        "nested hover names the method"
+      ).toContain(UNIQUE_SYMBOL);
+
+      expect(trace.filter((step) => step.kind === "failed")).toEqual([]);
     } finally {
       await pool.disposeAll();
     }

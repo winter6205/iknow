@@ -2360,6 +2360,346 @@ describe("symbol tools share the initialize capability gate (explicit false → 
   });
 });
 
+// ── flat `SymbolInformation[]` responses: the identifier column must be
+//    recovered from the document text ───────────────────────────────────────
+//
+// Without the client-side `hierarchicalDocumentSymbolSupport` capability a
+// server may answer `textDocument/documentSymbol` with the flat
+// `SymbolInformation[]` form: keys are only `name` / `kind` / `location`, no
+// `children`, no `selectionRange`, and `location.range.start` is the
+// declaration line start (the `export` / `def` keyword). Feeding that column
+// to `hover` / `definition` / `rename` lands at character 0, so the resolver
+// must recover the identifier itself. These cases use the real resolver over a
+// real temp file (the flat path reads the document text); only the language
+// server client is faked.
+
+describe("flat documentSymbol responses resolve the identifier, not column 0", () => {
+  type RecordedCall = { method: string; params: unknown };
+
+  /** Flat `SymbolInformation` node: only `name` / `kind` / `location.range`. */
+  function flatNode(
+    name: string,
+    startLine: number,
+    endLine: number
+  ): Record<string, unknown> {
+    return {
+      name,
+      kind: 12,
+      location: {
+        range: {
+          start: { line: startLine, character: 0 },
+          end: { line: endLine, character: 0 },
+        },
+      },
+    };
+  }
+
+  /** Real temp project file + a faked server that answers `tree` for
+   *  documentSymbol (and `hoverResult` for hover); everything else `[]`. */
+  async function flatFixture(
+    fileBody: string,
+    tree: ReadonlyArray<unknown>,
+    hoverResult: unknown = { contents: "hovered" }
+  ): Promise<{ dir: string; file: string; calls: RecordedCall[] }> {
+    const dir = await mkdtemp(join(tmpdir(), "iknow-lsp-flat-"));
+    readPolicyScratch.push(dir);
+    await writeFile(join(dir, "package-lock.json"), "{}\n", "utf8");
+    await mkdir(join(dir, "src"), { recursive: true });
+    const file = join(dir, "src", "a.ts");
+    await writeFile(file, fileBody, "utf8");
+    const { client, calls } = makeFakeClient((method) =>
+      method === DOCUMENT_SYMBOL
+        ? tree
+        : method === "textDocument/hover"
+          ? hoverResult
+          : []
+    );
+    mockGetClient.mockResolvedValue(client);
+    return { dir, file, calls: calls as RecordedCall[] };
+  }
+
+  function runTool(
+    dir: string,
+    name: string,
+    input: Record<string, unknown>
+  ): Promise<unknown> {
+    return byName(createSymbolQueryToolSet({ directory: dir }), name).handler(
+      input
+    ) as Promise<unknown>;
+  }
+
+  it("resolves a top-level `export function` to the identifier column", async () => {
+    // "greet" starts at column 16, after "export function ".
+    const body = "export function greet(name) {\n  return name;\n}\n";
+    const { dir, file, calls } = await flatFixture(body, [
+      flatNode("greet", 0, 2),
+    ]);
+
+    await runTool(dir, "find_declaration", { file, symbol_path: "greet" });
+
+    expect(calls.map((c) => c.method)).toEqual([
+      DOCUMENT_SYMBOL,
+      "textDocument/definition",
+    ]);
+    expect(calls[1].params).toMatchObject({
+      position: { line: 0, character: 16 },
+    });
+  });
+
+  it("dispatches get_hover at the identifier (not the declaration keyword)", async () => {
+    // "greet" starts at column 4, after "def ".
+    const body = "def greet(name):\n    return name\n";
+    const { dir, file, calls } = await flatFixture(body, [
+      flatNode("greet", 0, 1),
+    ]);
+
+    await runTool(dir, "get_hover", { file, symbol_path: "greet" });
+
+    expect(calls.map((c) => c.method)).toEqual([
+      DOCUMENT_SYMBOL,
+      "textDocument/hover",
+    ]);
+    expect(calls[1].params).toMatchObject({
+      position: { line: 0, character: 4 },
+    });
+  });
+
+  it("refuses a multi-segment path on a flat response even when the last segment is unique", async () => {
+    // A flat node carries no container identity: "A/greet" cannot be told
+    // apart from a greet that belongs to a different class, so resolving it
+    // could aim a mutation at another class's member.
+    const body = "class A {\n  greet() {}\n}\n";
+    const tree = [flatNode("A", 0, 2), flatNode("greet", 1, 1)];
+    const { dir, file, calls } = await flatFixture(body, tree);
+
+    const out = (await runTool(dir, "find_declaration", {
+      file,
+      symbol_path: "A/greet",
+    })) as string;
+
+    expect(out).toContain("not found");
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("resolves a single-segment path on a flat response when the name is unique", async () => {
+    const body = "class A {\n  greet() {}\n}\n";
+    const tree = [flatNode("A", 0, 2), flatNode("greet", 1, 1)];
+    const { dir, file, calls } = await flatFixture(body, tree);
+
+    await runTool(dir, "find_declaration", { file, symbol_path: "greet" });
+
+    expect(calls.map((c) => c.method)).toEqual([
+      DOCUMENT_SYMBOL,
+      "textDocument/definition",
+    ]);
+    expect(calls[1].params).toMatchObject({
+      position: { line: 1, character: 2 },
+    });
+  });
+
+  it("returns ambiguous when two classes each define a method of the same name", async () => {
+    const body = "class A {\n  greet() {}\n}\nclass B {\n  greet() {}\n}\n";
+    const tree = [
+      flatNode("A", 0, 2),
+      flatNode("greet", 1, 1),
+      flatNode("B", 3, 5),
+      flatNode("greet", 4, 4),
+    ];
+    const { dir, file, calls } = await flatFixture(body, tree);
+
+    const out = (await runTool(dir, "find_declaration", {
+      file,
+      symbol_path: "greet",
+    })) as string;
+
+    expect(out).toContain("matches 2 symbols");
+    // No business request: the ambiguity is refused, not guessed.
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("does not pick the name as a substring of a longer identifier", async () => {
+    const body = "export const greeting = 1;\n";
+    const { dir, file, calls } = await flatFixture(body, [
+      flatNode("greet", 0, 0),
+    ]);
+
+    const out = (await runTool(dir, "find_declaration", {
+      file,
+      symbol_path: "greet",
+    })) as string;
+
+    expect(out).toContain("reported no source range");
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("does not pick the name inside a line comment", async () => {
+    const body = "// greet appears here\n";
+    const { dir, file, calls } = await flatFixture(body, [
+      flatNode("greet", 0, 0),
+    ]);
+
+    const out = (await runTool(dir, "find_declaration", {
+      file,
+      symbol_path: "greet",
+    })) as string;
+
+    expect(out).toContain("reported no source range");
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("does not pick the name inside a hash line comment", async () => {
+    const body = "# greet appears here\n";
+    const { dir, file, calls } = await flatFixture(body, [
+      flatNode("greet", 0, 0),
+    ]);
+
+    const out = (await runTool(dir, "find_declaration", {
+      file,
+      symbol_path: "greet",
+    })) as string;
+
+    expect(out).toContain("reported no source range");
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("does not pick the name inside a block comment", async () => {
+    const body = "/* greet across\n   multiple lines */\n";
+    const { dir, file, calls } = await flatFixture(body, [
+      flatNode("greet", 0, 1),
+    ]);
+
+    const out = (await runTool(dir, "find_declaration", {
+      file,
+      symbol_path: "greet",
+    })) as string;
+
+    expect(out).toContain("reported no source range");
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("does not pick the name inside a string literal", async () => {
+    const body = 'const x = "greet";\n';
+    const { dir, file, calls } = await flatFixture(body, [
+      flatNode("greet", 0, 0),
+    ]);
+
+    const out = (await runTool(dir, "find_declaration", {
+      file,
+      symbol_path: "greet",
+    })) as string;
+
+    expect(out).toContain("reported no source range");
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("refuses a name that appears twice as a whole token within the range", async () => {
+    const body = "export const greet = greet;\n";
+    const { dir, file, calls } = await flatFixture(body, [
+      flatNode("greet", 0, 0),
+    ]);
+
+    const out = (await runTool(dir, "find_declaration", {
+      file,
+      symbol_path: "greet",
+    })) as string;
+
+    // Not first-match-wins: two whole-token hits are ambiguous → no position.
+    expect(out).toContain("reported no source range");
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  it("refuses a range wider than 200 lines without scanning", async () => {
+    const body = "export function greet(name) {\n  return name;\n}\n";
+    const tree = [
+      {
+        name: "greet",
+        kind: 12,
+        location: {
+          range: {
+            start: { line: 0, character: 0 },
+            end: { line: 300, character: 0 },
+          },
+        },
+      },
+    ];
+    const { dir, file, calls } = await flatFixture(body, tree);
+
+    const out = (await runTool(dir, "find_declaration", {
+      file,
+      symbol_path: "greet",
+    })) as string;
+
+    expect(out).toContain("reported no source range");
+    expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+  });
+
+  const malformedRanges: ReadonlyArray<[string, Record<string, unknown>]> = [
+    [
+      "negative line",
+      { start: { line: -1, character: 0 }, end: { line: 0, character: 0 } },
+    ],
+    [
+      "negative character",
+      { start: { line: 0, character: -1 }, end: { line: 0, character: 5 } },
+    ],
+    [
+      "non-integer character",
+      { start: { line: 0, character: 1.5 }, end: { line: 0, character: 5 } },
+    ],
+    [
+      "NaN line",
+      {
+        start: { line: Number.NaN, character: 0 },
+        end: { line: 0, character: 0 },
+      },
+    ],
+    [
+      "Infinity character",
+      {
+        start: { line: 0, character: Number.POSITIVE_INFINITY },
+        end: { line: 0, character: 5 },
+      },
+    ],
+    [
+      "reversed bounds",
+      { start: { line: 2, character: 0 }, end: { line: 0, character: 0 } },
+    ],
+    [
+      "character far beyond the line length",
+      { start: { line: 0, character: 999 }, end: { line: 0, character: 999 } },
+    ],
+  ];
+
+  for (const [label, range] of malformedRanges) {
+    it(`refuses malformed server data (${label}) with no_position and no request`, async () => {
+      const body = "export function greet(name) {\n  return name;\n}\n";
+      const tree = [{ name: "greet", kind: 12, location: { range } }];
+      const { dir, file, calls } = await flatFixture(body, tree);
+
+      const out = (await runTool(dir, "find_declaration", {
+        file,
+        symbol_path: "greet",
+      })) as string;
+
+      expect(out).toContain("reported no source range");
+      expect(calls.map((c) => c.method)).toEqual([DOCUMENT_SYMBOL]);
+    });
+  }
+
+  it("a legitimate null hover response renders as the `null` string, not a failure", async () => {
+    const body = "export function greet(name) {\n  return name;\n}\n";
+    const { dir, file } = await flatFixture(
+      body,
+      [flatNode("greet", 0, 2)],
+      null
+    );
+
+    const out = await runTool(dir, "get_hover", { file, symbol_path: "greet" });
+
+    expect(out).toBe("null");
+  });
+});
+
 describe("symbol tools convert -32601 into the sentinel (no ToolExecutionError)", () => {
   it("find_declaration returns the sentinel when documentSymbol is unimplemented", async () => {
     const { client, calls } = makeFakeClient(() => {

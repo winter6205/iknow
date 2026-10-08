@@ -469,7 +469,7 @@ function isLspPosition(v: unknown): v is LspPosition {
   return typeof p.line === "number" && typeof p.character === "number";
 }
 
-/** The source type of `DocumentSymbolNode.range` only promises `start`;
+/** The resolver's `DocumentSymbolNode.range` type does not carry `end`;
  *  mutation tools need `end` to build a full range. Protocol-wise both
  *  `SymbolInformation.location.range` and `DocumentSymbol.range` carry
  *  `start` + `end`, but symbol-resolver.ts uses a narrow type so it does not
@@ -791,6 +791,9 @@ interface ResolvedSymbol {
   readonly client: LspClient;
   readonly symbol: DocumentSymbolNode;
   readonly path: string;
+  /** The resolver's own position for this symbol — never re-derived here, so
+   *  a mutation can never aim at a different position than a query. */
+  readonly position: LspPosition;
 }
 
 /**
@@ -864,6 +867,7 @@ async function withResolvedSymbolForMutate<T>(
       client,
       symbol: resolved.symbol,
       path: resolved.path,
+      position: resolved.position,
     });
   });
 }
@@ -927,10 +931,7 @@ function makeRenameSymbolTool(
               "textDocument/rename",
               {
                 textDocument: { uri },
-                position:
-                  target.symbol.selectionRange?.start ??
-                  target.symbol.range?.start ??
-                  target.symbol.location?.range?.start,
+                position: target.position,
                 newName: params.new_name,
               },
               cancel.token
@@ -1208,15 +1209,7 @@ function makeSafeDeleteSymbolTool(
           params.symbol_path,
           cancel.token,
           async (target) => {
-            const position =
-              target.symbol.selectionRange?.start ??
-              target.symbol.range?.start ??
-              target.symbol.location?.range?.start;
-            if (!position) {
-              throw new ToolExecutionError(
-                `[${name}] symbol "${target.path}" in ${file} has no position (cannot check references)`
-              );
-            }
+            const position = target.position;
             const uri = fileURLFromPath(file);
             // Stage 1: references (includeDeclaration:true) → check empty.
             const refsRaw = await requestOrMethodNotFoundSentinel(
