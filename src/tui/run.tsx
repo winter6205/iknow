@@ -780,14 +780,32 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // drops new WorktreeProvisionContext fields while still compiling — a
     // TUI-seam trace (2026-09-05) reproduced the same regression the CLI
     // seam had had (a requested name was dropped and a UUID-only leaf was
-    // created). Fail-closed behavior when the hub is absent belongs to this
-    // file's bridging logic (only here is bridgeRef known).
+    // created). Fail-closed when the hub is absent belongs to this file's
+    // bridging logic (only here is bridgeRef known).
+    // The full worktree lifecycle surface, not just creation: a TUI session
+    // that creates a task worktree must have the same production path back to
+    // the main checkout the other host entries get. Every seam reads the hub
+    // through the late-bound bridgeRef at CALL time (the engine is assembled
+    // before the bridge exists); an absent hub fails closed with a typed
+    // rejection rather than silently no-op'ing.
     const worktreeIsolation = createTuiWorktreeIsolationHost({
       provisionWorktree: (ctx) =>
         bridgeRef.hub?.provisionWorktree(ctx) ??
         Promise.reject(
           new Error("TUI Hub is not ready for worktree provision")
         ),
+      enterWorktree: (ctx) =>
+        bridgeRef.hub?.enterWorktree(ctx) ??
+        Promise.reject(new Error("TUI Hub is not ready for worktree enter")),
+      exitWorktree: (ctx) =>
+        bridgeRef.hub?.exitWorktree(ctx) ??
+        Promise.reject(new Error("TUI Hub is not ready for worktree exit")),
+      listTaskWorktrees: (ctx) =>
+        bridgeRef.hub?.listTaskWorktrees(ctx) ??
+        Promise.reject(new Error("TUI Hub is not ready for worktree list")),
+      removeTaskWorktree: (ctx) =>
+        bridgeRef.hub?.removeTaskWorktree(ctx) ??
+        Promise.reject(new Error("TUI Hub is not ready for worktree remove")),
     });
 
     const depsOpts: BuildTuiDepsOptions = {

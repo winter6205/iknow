@@ -53,15 +53,27 @@
  *     specs/host-read-policy.md SC4), on the same seam and the same channel
  *     the symbol QUERY family already uses. Two screens, because a rename's
  *     edit set is chosen by the SERVER rather than by the caller:
- *     `withResolvedSymbolForMutate` gates `params.file` before entering
- *     `withDocumentOpen`, and `applyWorkspaceEdit` screens every path the
+ *     `withResolvedSymbolForMutate` gates the resolved input file before
+ *     entering `withDocumentOpen`, and `applyWorkspaceEdit` screens every path the
  *     server put in the WorkspaceEdit before any read or write — a protected
  *     or undecidable path returns the sentinel string rather than reaching
  *     `didOpen` (where bytes enter the server) or the plain `readFile` /
  *     `writeFile` that follows it.
+ *   - **every write stays inside the LIVE task root** (ADR-0092 Round-2:
+ *     "writes = live `taskRoot`"). The read policy deliberately reaches
+ *     ordinary host paths outside the root (ADR-0128 host reach), so it
+ *     cannot be the write barrier; `applyWorkspaceEdit` therefore screens
+ *     the same whole batch against the entry snapshot's root, before any
+ *     read or write.
+ *   - **one operation uses ONE tree**. The model-supplied `file` is resolved
+ *     once at handler entry against the active-root snapshot
+ *     (`resolveInputFile`), and that single absolute path then drives root
+ *     finding, the read-policy verdict, the document open, the request URI
+ *     and the preimage root — so a live task-root rebind racing a call
+ *     cannot split it across two trees.
  */
-import { fileURLToPath } from "node:url";
-import { readFile } from "node:fs/promises";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { readFile, realpath } from "node:fs/promises";
 
 import type { CancellationToken } from "vscode-jsonrpc/node";
 
@@ -86,6 +98,8 @@ import {
   renderMethodNotFound,
   renderNoServer,
   requestOrMethodNotFoundSentinel,
+  activeRootEntry,
+  type ActiveRootEntry,
   stringifyResult,
   timeoutError,
 } from "./lsp.js";
@@ -95,6 +109,8 @@ import {
   type LspPosition,
 } from "./symbol-resolver.js";
 import { getClientDetailed } from "../../lsp/client.js";
+import { isWithinRoot } from "./helpers.js";
+import { decideRead } from "../read-policy.js";
 
 // ---------------------------------------------------------------------------
 // Schema — the five mutation tools share the `{ file, symbol_path }` base
@@ -550,16 +566,123 @@ function offsetFor(lines: string[], pos: LspPosition): number {
  * off as a successful rename); every file that succeeded is recorded in
  * `writtenFiles` for the return value and the invalidate trigger. */
 /** Per-call preimage-capture wiring handed down from the tool handler: the
- *  seam opts plus the root `relPath` is measured against. The call's
- *  transcript ids ride in `WritePreimageContext` (`execCtx` forwarded whole,
- *  so no optional chaining lands in the big handlers). */
+ *  seam opts. The root `relPath` is measured against is NOT here — it is
+ *  read from the live task root at handler entry and rides in
+ *  `WritePreimageContext`, because a root frozen at factory time would
+ *  measure the active tree's write against the tree the tool set was
+ *  assembled in. The call's transcript ids ride alongside it (`execCtx`
+ *  forwarded whole, so no optional chaining lands in the big handlers). */
 interface PreimageThread {
   readonly opts: PreimageOpts;
-  readonly rootAtCall: string;
 }
 
 interface WritePreimageContext extends PreimageThread {
+  /** Live task root this call resolved against; `relPath` is measured from
+   *  here. Same snapshot vintage as the resolved input file. */
+  readonly rootAtCall: string;
   readonly call: PreimageCallIds | undefined;
+}
+
+/**
+ * Write-containment screen for a server-returned edit target, on the same
+ * `T | string` channel as the read-policy denial and with the same
+ * all-or-nothing placement (before any read, capture or write).
+ *
+ * The read policy allows ordinary host paths outside the task root on
+ * purpose (ADR-0128 host reach) — it answers "may this be read?", not "may
+ * this be written?" — so it cannot stand as the write barrier. The
+ * containment root is the same one `write_file` / `edit_file` use: the LIVE
+ * task root (ADR-0092 Round-2). Screening against the entry snapshot keeps
+ * one operation inside one tree even if a rebind lands mid-call.
+ *
+ * The verdict is made on the CANONICALIZED target, not the lexical spelling:
+ * a lexical screen misses a symlink inside the root that points outside it,
+ * whose in-place write would land bytes past the root boundary.
+ *
+ * Armed only when `ctx` carries a `directoryCell` — the live root whose value
+ * a rebind replaces, and which build-engine always injects. Without one there
+ * is no live root to be bound to, so the read-policy screen stands alone
+ * exactly as before.
+ */
+function renderWriteContainmentDenial(file: string, root: string): string {
+  return (
+    `(write denied for ${file}: it is outside the active task root ${root} — ` +
+    `a symbol mutation may only write inside the tree the call resolved against; ` +
+    `no edits were applied.)`
+  );
+}
+
+/**
+ * Write-containment refusal for a target whose canonical location cannot be
+ * decided (dangling link, symlink loop, unreadable component). Same
+ * `T | string` channel and same `(write denied for …)` family as the
+ * outside-root denial — a target that cannot be proven inside the root is
+ * refused, never allowed and never a raw errno out of the handler. `why` is
+ * the read policy's already-curated text, so no bare errno name reaches the
+ * model.
+ */
+function renderWriteContainmentUnresolvableDenial(
+  file: string,
+  why: string
+): string {
+  return (
+    `(write denied for ${file}: the write target could not be resolved inside the active task root — ${why}; ` +
+    `no edits were applied.)`
+  );
+}
+
+/**
+ * Screen every server-returned edit target before ANY file in the batch is
+ * read, preimaged, or written. Two refusals in one sweep: write containment
+ * against the active task root (canonicalized — see the caller's doc), and
+ * the read policy's protected-path verdict. All-or-nothing: the first
+ * refusal aborts the whole batch, because a rename that wrote the first file
+ * and then stopped has already mutated the tree.
+ *
+ * Returns the refusal string, or null when every target passed.
+ */
+async function screenEditTargets(
+  ctx: LspCtx,
+  paths: Iterable<string>,
+  rootAtCall: string
+): Promise<string | null> {
+  // Containment is only meaningful against a live root; without the cell
+  // there is no root a rebind could move, and the read-policy verdict alone
+  // stands as before.
+  const armed = ctx.directoryCell !== undefined;
+  // Compare against the canonical root so a symlinked root cannot fake an
+  // escape (both sides realpath'd); a root that cannot be realpath'd falls
+  // back to its live value.
+  const canonicalRoot = armed
+    ? await realpath(rootAtCall).catch(() => rootAtCall)
+    : rootAtCall;
+  for (const filePath of paths) {
+    if (armed) {
+      const verdict = await decideRead(filePath, { taskRoot: rootAtCall });
+      // EXIT: an undecidable target is refused on this channel — never
+      // allowed, never a raw errno out of the handler. A protected-path
+      // verdict is not this screen's business: it is left to the read-policy
+      // denial below, which renders its own text.
+      if (verdict.outcome === "deny" && verdict.reason !== "protected_path") {
+        return renderWriteContainmentUnresolvableDenial(
+          filePath,
+          verdict.message
+        );
+      }
+      // EXIT: a server-returned target whose canonical location is outside the
+      // active task root is refused here rather than written, so a legal first
+      // edit cannot land while the second is refused.
+      if (
+        verdict.outcome === "allow" &&
+        !isWithinRoot(canonicalRoot, verdict.canonicalPath)
+      ) {
+        return renderWriteContainmentDenial(filePath, rootAtCall);
+      }
+    }
+    const denial = await documentOpenDenial(ctx, filePath);
+    if (denial !== null) return denial;
+  }
+  return null;
 }
 
 async function applyWorkspaceEdit(
@@ -576,15 +699,29 @@ async function applyWorkspaceEdit(
 > {
   const grouped = groupEditsByPath(edits);
   // A rename's edit set is chosen by the SERVER, not by the caller: an
-  // ordinary anchor file can drag a protected file into the same change. The
-  // anchor gate in withResolvedSymbolForMutate only sees `params.file`, so the
+  // ordinary anchor file can drag a protected file — or a file belonging to
+  // another tree entirely — into the same change. The anchor gate in
+  // withResolvedSymbolForMutate only sees the resolved input file, so the
   // whole set is screened here — before any read or write, and all-or-nothing,
   // because a rename that stops at the second file has already mutated the
   // first.
-  for (const filePath of grouped.keys()) {
-    const denial = await documentOpenDenial(ctx, filePath);
-    if (denial !== null) return denial;
-  }
+  //
+  // The verdict is made on the CANONICAL target, not the lexical spelling:
+  // `isWithinRoot` is pure `path.relative` and never follows a link, so a
+  // symlink inside the root pointing outside it would pass a lexical screen
+  // while the write (`publishFile` degrades to an in-place `writeFile` for a
+  // non-regular-file target) follows the link and lands bytes outside the
+  // active tree. Canonicalizing through the read policy resolves the final
+  // component exactly as `resolveWithinRoot` does and classifies an
+  // undecidable target (dangling link → ENOENT, loop → ELOOP, unreadable
+  // component → EACCES) as a resolution failure, so the same screen refuses
+  // it instead of allowing it.
+  const refusal = await screenEditTargets(
+    ctx,
+    grouped.keys(),
+    preimage.rootAtCall
+  );
+  if (refusal !== null) return refusal;
   const staged: Array<{ readonly filePath: string; readonly next: string }> =
     [];
   let editCount = 0;
@@ -677,17 +814,25 @@ interface ResolvedSymbol {
  * `writeFile`, with no second policy in between. The verdict rides the same
  * `T | string` channel as every other failure on this seam, so it is a
  * sentinel and never a thrown `ToolExecutionError`.
+ *
+ * `file` arrives already resolved against this call's one live-root snapshot
+ * (`resolveInputFile`, called by each handler at entry), so root finding, the
+ * policy verdict, the document open and the request URI all address the same
+ * bytes of the same tree. `rawFile` is the model's untouched input and is used
+ * only where the model needs to see what it typed (the no-server sentinel) —
+ * same split as the query family's `withResolvedSymbol`.
  */
 async function withResolvedSymbolForMutate<T>(
   ctx: LspCtx,
-  file: string,
+  entry: ActiveRootEntry,
   symbolPath: string,
   token: CancellationToken,
   run: (target: ResolvedSymbol) => Promise<T>
 ): Promise<T | string> {
+  const { file } = entry;
   const { client, failure } = await getClientDetailed(ctx, file);
   if (!client) {
-    return renderNoServer(ctx, failure ?? { reason: "no-server" }, file);
+    return renderNoServer(ctx, failure ?? { reason: "no-server" }, entry.raw);
   }
   const denial = await documentOpenDenial(ctx, file);
   if (denial !== null) return denial;
@@ -761,16 +906,22 @@ function makeRenameSymbolTool(
       execCtx?: ToolExecutionContext
     ): Promise<unknown> => {
       const params = validate(input) as RenameInput;
+      // One resolution per call: `file` and `rootAtCall` are read from the same
+      // snapshot vintage (adjacent synchronous reads), so the client lookup,
+      // the policy verdict, the open, the request URI, the preimage root and
+      // the write containment all speak about one tree.
+      const entry = activeRootEntry(ctx, params.file);
+      const { file, root: rootAtCall } = entry;
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
         return await withResolvedSymbolForMutate(
           ctx,
-          params.file,
+          entry,
           params.symbol_path,
           cancel.token,
           async (target) => {
-            const uri = fileURLFromPath(params.file);
+            const uri = fileURLFromPath(file);
             const result = await requestOrMethodNotFoundSentinel(
               target.client,
               "textDocument/rename",
@@ -795,7 +946,7 @@ function makeRenameSymbolTool(
             // failed — no empty catch.
             if (result === null || result === undefined) {
               throw new ToolExecutionError(
-                `[${name}] cannot rename ${params.symbol_path} to "${params.new_name}" in ${params.file}: existing declarations would conflict (the language server rejected the rename)`
+                `[${name}] cannot rename ${params.symbol_path} to "${params.new_name}" in ${file}: existing declarations would conflict (the language server rejected the rename)`
               );
             }
             // Normalization throws WorkspaceEditUnsupportedError at the
@@ -821,6 +972,7 @@ function makeRenameSymbolTool(
             }
             const applied = await applyWorkspaceEdit(ctx, docEdits, onEdit, {
               ...preimage,
+              rootAtCall,
               call: execCtx,
             });
             if (typeof applied === "string") return applied;
@@ -875,27 +1027,30 @@ function makeReplaceSymbolBodyTool(
           `[${name}] new_body is ${bodyBytes} bytes, exceeding ${MAX_NEW_BODY_BYTES}-byte cap (split the replacement across multiple calls or use edit_file)`
         );
       }
+      const entry = activeRootEntry(ctx, params.file);
+      const { file, root: rootAtCall } = entry;
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
         return await withResolvedSymbolForMutate(
           ctx,
-          params.file,
+          entry,
           params.symbol_path,
           cancel.token,
           async (target) => {
             const range = fullRangeOf(target.symbol);
             if (!range) {
               throw new ToolExecutionError(
-                `[${name}] symbol "${target.path}" in ${params.file} has no source range (cannot replace body)`
+                `[${name}] symbol "${target.path}" in ${file} has no source range (cannot replace body)`
               );
             }
             const edit: TextDocumentEdit = {
-              textDocument: { uri: fileURLFromPath(params.file) },
+              textDocument: { uri: fileURLFromPath(file) },
               edits: [{ range, newText: params.new_body }],
             };
             const applied = await applyWorkspaceEdit(ctx, [edit], onEdit, {
               ...preimage,
+              rootAtCall,
               call: execCtx,
             });
             if (typeof applied === "string") return applied;
@@ -956,19 +1111,21 @@ function makeInsertSymbolTool(
           `[${spec.name}] code is ${codeBytes} bytes, exceeding ${MAX_INSERT_BYTES}-byte cap (split the insertion across multiple calls or use edit_file)`
         );
       }
+      const entry = activeRootEntry(ctx, params.file);
+      const { file, root: rootAtCall } = entry;
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
         return await withResolvedSymbolForMutate(
           ctx,
-          params.file,
+          entry,
           params.symbol_path,
           cancel.token,
           async (target) => {
             const range = fullRangeOf(target.symbol);
             if (!range) {
               throw new ToolExecutionError(
-                `[${spec.name}] symbol "${target.path}" in ${params.file} has no source range (cannot determine insertion anchor)`
+                `[${spec.name}] symbol "${target.path}" in ${file} has no source range (cannot determine insertion anchor)`
               );
             }
             // Splice at range.start/end: before → insert `code + "\n"` ahead
@@ -981,11 +1138,12 @@ function makeInsertSymbolTool(
                 ? params.code + "\n"
                 : "\n" + params.code;
             const edit: TextDocumentEdit = {
-              textDocument: { uri: fileURLFromPath(params.file) },
+              textDocument: { uri: fileURLFromPath(file) },
               edits: [{ range: { start: anchor, end: anchor }, newText }],
             };
             const applied = await applyWorkspaceEdit(ctx, [edit], onEdit, {
               ...preimage,
+              rootAtCall,
               call: execCtx,
             });
             if (typeof applied === "string") return applied;
@@ -1039,12 +1197,14 @@ function makeSafeDeleteSymbolTool(
       execCtx?: ToolExecutionContext
     ): Promise<unknown> => {
       const params = validate(input) as SymbolMutateInput;
+      const entry = activeRootEntry(ctx, params.file);
+      const { file, root: rootAtCall } = entry;
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
         return await withResolvedSymbolForMutate(
           ctx,
-          params.file,
+          entry,
           params.symbol_path,
           cancel.token,
           async (target) => {
@@ -1054,10 +1214,10 @@ function makeSafeDeleteSymbolTool(
               target.symbol.location?.range?.start;
             if (!position) {
               throw new ToolExecutionError(
-                `[${name}] symbol "${target.path}" in ${params.file} has no position (cannot check references)`
+                `[${name}] symbol "${target.path}" in ${file} has no position (cannot check references)`
               );
             }
-            const uri = fileURLFromPath(params.file);
+            const uri = fileURLFromPath(file);
             // Stage 1: references (includeDeclaration:true) → check empty.
             const refsRaw = await requestOrMethodNotFoundSentinel(
               target.client,
@@ -1087,7 +1247,7 @@ function makeSafeDeleteSymbolTool(
                 symbol_path: target.path,
                 references,
                 message:
-                  `refusing to delete ${target.path} in ${params.file}: ${references.length} reference(s) exist. ` +
+                  `refusing to delete ${target.path} in ${file}: ${references.length} reference(s) exist. ` +
                   `Resolve them first (find_referencing_symbols) before deleting.`,
               });
             }
@@ -1096,7 +1256,7 @@ function makeSafeDeleteSymbolTool(
             const range = fullRangeOf(target.symbol);
             if (!range) {
               throw new ToolExecutionError(
-                `[${name}] symbol "${target.path}" in ${params.file} has no source range (cannot delete)`
+                `[${name}] symbol "${target.path}" in ${file} has no source range (cannot delete)`
               );
             }
             const edit: TextDocumentEdit = {
@@ -1105,6 +1265,7 @@ function makeSafeDeleteSymbolTool(
             };
             const applied = await applyWorkspaceEdit(ctx, [edit], onEdit, {
               ...preimage,
+              rootAtCall,
               call: execCtx,
             });
             if (typeof applied === "string") return applied;
@@ -1171,11 +1332,11 @@ function extractReferences(raw: unknown): ReadonlyArray<{
   return out;
 }
 
-/** `pathToFileURL` inlined to avoid a duplicate import alongside lsp.ts. */
+/** `file://` URI for a handler-resolved absolute path. `pathToFileURL` (not
+ *  string concatenation) so relative or special-character paths cannot
+ *  fabricate a bogus URL host. */
 function fileURLFromPath(file: string): string {
-  // pathToFileURL is built into node:url; reuse it directly rather than
-  // opening another import layer.
-  return new URL(`file://${file}`).href;
+  return pathToFileURL(file).href;
 }
 
 // ---------------------------------------------------------------------------
@@ -1227,12 +1388,14 @@ export function createSymbolMutateToolSet(
   opts: CreateSymbolMutateToolSetOptions
 ): ReadonlyArray<AciToolDef> {
   const { ctx, onEdit } = opts;
+  // Deliberately root-free: the task root moves with a live task-root rebind,
+  // so each handler reads its own snapshot at call time and supplies
+  // `rootAtCall` alongside `call`.
   const preimage: PreimageThread = {
     opts: {
       preimageCapture: opts.preimageCapture,
       rootIdentity: opts.rootIdentity,
     },
-    rootAtCall: ctx.directory,
   };
   // Order matches SYMBOL_MUTATE_TOOL_NAMES (Gate 3 indexes by name; the
   // order is the contract).

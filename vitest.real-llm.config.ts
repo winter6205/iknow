@@ -38,6 +38,13 @@ const TRACKED_INCLUDE = [
   // verify-outcome golden set (offline half + fixtures live under
   // tests/harness/verify/), HAS_KEY guard — no key → explicit Not run.
   "real-llm/verify-status-contract.test.ts",
+  // lsp-worktree-paths T4: real-model half of the worktree-path trajectory
+  // golden set. The model drives actual host worktree create/enter/exit through
+  // the production provisioner seams wired by buildHarnessEngine; the fixed
+  // cases + literals are shared with the offline half
+  // (tests/harness/lsp/worktree-trajectory.test.ts + .fixtures.ts). HAS_KEY
+  // guard — no key → explicit Not run.
+  "real-llm/worktree-trajectory.test.ts",
 ];
 
 const LOCAL_ONLY_INCLUDE = [

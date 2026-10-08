@@ -28,12 +28,26 @@
  * to disk; the function surface proves each kind stays distinguishable.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 
 import type { AciToolDef } from "../../../src/harness/aci/types.ts";
+import type { PreimageCaptureInput } from "../../../src/harness/aci/preimage-port.ts";
+import type { LiveTaskRoot } from "../../../src/harness/session-roots.ts";
+import {
+  createLiveTaskRoot,
+  writeLiveTaskRoot,
+} from "../../../src/harness/session-roots.ts";
+import { ToolExecutionError } from "../../../src/harness/errors.ts";
 
 const { mockGetClientDetailed } = vi.hoisted(() => ({
   mockGetClientDetailed: vi.fn<() => Promise<unknown>>(),
@@ -526,6 +540,443 @@ describe("normalizeWorkspaceEdit rejection contract", () => {
         ],
       })
     ).toEqual([{ textDocument: { uri: "untitled:foo" }, edits: [goodEdit] }]);
+  });
+});
+
+// ── Live task-root rebind: every mutation lands on the ACTIVE tree ──
+
+describe("after a live task-root rebind, mutations follow the active tree", () => {
+  /** Same body, different tail: each tree's bytes are individually provable,
+   *  so "which tree was written" is decidable from the bytes alone. */
+  const TREE_BODY = (marker: string): string =>
+    [
+      "const foo = 1;",
+      "function bar() {",
+      "  return foo;",
+      "}",
+      `// ${marker}`,
+    ].join("\n");
+
+  let oldDir: string;
+  let newDir: string;
+  let cell: LiveTaskRoot;
+  let tools: ReadonlyArray<AciToolDef>;
+  let onEditCalls: string[];
+  let captured: PreimageCaptureInput[];
+  let rpcUris: string[];
+
+  beforeEach(async () => {
+    oldDir = await mkdtemp(path.join(os.tmpdir(), "symbol-mutate-old-"));
+    newDir = await mkdtemp(path.join(os.tmpdir(), "symbol-mutate-new-"));
+    for (const dir of [oldDir, newDir]) {
+      await mkdir(path.join(dir, "src"), { recursive: true });
+      await writeFile(
+        path.join(dir, "src", "a.ts"),
+        TREE_BODY(path.basename(dir)),
+        "utf8"
+      );
+    }
+    cell = createLiveTaskRoot(oldDir);
+    onEditCalls = [];
+    captured = [];
+    rpcUris = [];
+    // The tool set is assembled BEFORE the rebind, exactly as the registry
+    // does at engine build time: anything frozen to ctx.directory at factory
+    // time is the stale tree here.
+    tools = createSymbolMutateToolSet({
+      ctx: { directory: oldDir, directoryCell: cell },
+      onEdit: (file) => onEditCalls.push(file),
+      preimageCapture: (input) => {
+        captured.push(input);
+      },
+    });
+  });
+
+  afterEach(async () => {
+    await rm(oldDir, { recursive: true, force: true });
+    await rm(newDir, { recursive: true, force: true });
+  });
+
+  /** A client that echoes the requested document uri back into the
+   *  WorkspaceEdit, so one pass proves the request URI, the applied target,
+   *  and the onEdit path all name the same tree. */
+  function rebindClient(): unknown {
+    return {
+      connection: {} as never,
+      process: {} as never,
+      getServerCapabilities: () => ({}),
+      ensureOpen: async () => undefined,
+      withDocumentOpen: async <T>(_file: string, fn: () => Promise<T>) => fn(),
+      sendRequest: async (method: string, params: unknown) => {
+        const uri = (params as { textDocument?: { uri?: string } }).textDocument
+          ?.uri;
+        if (uri) rpcUris.push(uri);
+        if (method === DOCUMENT_SYMBOL) return SAMPLE_SYMBOL_TREE;
+        if (method === "textDocument/references") return [];
+        return {
+          documentChanges: [{ textDocument: { uri }, edits: [FOO_EDIT] }],
+        };
+      },
+      sendNotification: async () => undefined,
+      getDiagnostics: () => [] as ReadonlyArray<unknown>,
+      getDocumentFingerprint: () => "fp-1",
+      dispose: () => undefined,
+    };
+  }
+
+  const newTreeFile = (): string => path.join(newDir, "src", "a.ts");
+  const oldTreeFile = (): string => path.join(oldDir, "src", "a.ts");
+  const oldTreeBytes = (): string => TREE_BODY(path.basename(oldDir));
+  const RELATIVE_INPUT = "src/a.ts";
+
+  /** Rebind to newDir, then run one tool against the relative input. */
+  async function runAfterRebind(
+    name: string,
+    input: Record<string, unknown>
+  ): Promise<string> {
+    mockGetClientDetailed.mockResolvedValue({ client: rebindClient() });
+    writeLiveTaskRoot(cell, newDir);
+    return (await byName(tools, name).handler({
+      file: RELATIVE_INPUT,
+      ...input,
+    })) as string;
+  }
+
+  it("all five mutation tools write the ACTIVE tree and leave the old tree byte-identical", async () => {
+    const cases: ReadonlyArray<
+      readonly [string, Record<string, unknown>, string]
+    > = [
+      ["rename_symbol", { symbol_path: "Foo", new_name: "baz" }, "renamed"],
+      [
+        "replace_symbol_body",
+        { symbol_path: "Foo", new_body: "const foo = 2;\n" },
+        "replaced",
+      ],
+      [
+        "insert_before_symbol",
+        { symbol_path: "Foo", code: "// before" },
+        "inserted",
+      ],
+      [
+        "insert_after_symbol",
+        { symbol_path: "Foo", code: "// after" },
+        "inserted",
+      ],
+      ["safe_delete_symbol", { symbol_path: "Foo" }, "deleted"],
+    ];
+
+    for (const [name, input, receiptKey] of cases) {
+      // Each tool gets its own fresh pair of trees so a case cannot be masked
+      // by the previous case's writes.
+      await resetTrees();
+      onEditCalls.length = 0;
+      captured.length = 0;
+      rpcUris.length = 0;
+
+      const out = await runAfterRebind(name, input);
+      const parsed = JSON.parse(out) as Record<string, unknown>;
+      expect(parsed[receiptKey], name).toBe(true);
+      // The reported files, the notifier invalidation and the preimage all
+      // identify the same ACTIVE-tree absolute path.
+      expect(parsed.files, name).toEqual([newTreeFile()]);
+      expect(onEditCalls, name).toEqual([newTreeFile()]);
+      expect(captured, name).toHaveLength(1);
+      expect(
+        path.join(captured[0]!.rootIdentity, captured[0]!.relPath),
+        name
+      ).toBe(newTreeFile());
+      expect(captured[0]!.relPath, name).toBe(RELATIVE_INPUT);
+      expect(captured[0]!.rootIdentity, name).toBe(newDir);
+      // Bytes: the active tree changed, the old tree did not.
+      expect(await readFile(newTreeFile(), "utf8"), name).not.toBe(
+        TREE_BODY(path.basename(newDir))
+      );
+      expect(await readFile(oldTreeFile(), "utf8"), name).toBe(oldTreeBytes());
+    }
+  });
+
+  /** Rewrite both trees back to their fixture bytes (fresh round per tool). */
+  async function resetTrees(): Promise<void> {
+    await writeFile(newTreeFile(), TREE_BODY(path.basename(newDir)), "utf8");
+    await writeFile(oldTreeFile(), oldTreeBytes(), "utf8");
+    writeLiveTaskRoot(cell, oldDir);
+  }
+
+  it("rename sends the request for the ACTIVE tree's absolute path", async () => {
+    const out = await runAfterRebind("rename_symbol", {
+      symbol_path: "Foo",
+      new_name: "baz",
+    });
+    expect(JSON.parse(out)).toMatchObject({ renamed: true });
+    // Two URI-bearing requests: the documentSymbol lookup and the rename
+    // itself — both must address the ACTIVE tree.
+    expect(rpcUris).toEqual([uriOf(newTreeFile()), uriOf(newTreeFile())]);
+  });
+
+  it("refuses an input that escapes the active root instead of writing outside it", async () => {
+    // The escape resolves (no anchor escapes the mock's root finding), so the
+    // applier's containment screen is the only thing standing between the
+    // server's edit set and a file outside the active tree. Both spellings
+    // name a real file: a ../ traversal and an absolute path in the OLD tree.
+    for (const escaping of [
+      "../outside.ts",
+      path.join(oldDir, "src", "a.ts"),
+    ]) {
+      await resetTrees();
+      onEditCalls.length = 0;
+      captured.length = 0;
+      mockGetClientDetailed.mockResolvedValue({
+        client: {
+          ...(rebindClient() as Record<string, unknown>),
+          sendRequest: async (method: string, params: unknown) => {
+            const uri = (params as { textDocument?: { uri?: string } })
+              .textDocument?.uri;
+            if (method === DOCUMENT_SYMBOL) return SAMPLE_SYMBOL_TREE;
+            // A server that drags the escaped anchor into its edit set.
+            return {
+              documentChanges: [
+                {
+                  textDocument: { uri: uri ?? uriOf(newTreeFile()) },
+                  edits: [FOO_EDIT],
+                },
+              ],
+            };
+          },
+        },
+      });
+      writeLiveTaskRoot(cell, newDir);
+      const out = (await byName(tools, "replace_symbol_body").handler({
+        file: escaping,
+        symbol_path: "Foo",
+        new_body: "const foo = 3;\n",
+      })) as string;
+
+      // Typed refusal, not an empty success: the result is a sentinel string
+      // naming the write denial, and nothing was written or invalidated.
+      expect(typeof out, escaping).toBe("string");
+      expect(out, escaping).toMatch(/\(write denied for /);
+      expect(out, escaping).toContain("no edits were applied");
+      expect(onEditCalls, escaping).toEqual([]);
+      expect(captured, escaping).toEqual([]);
+      expect(await readFile(oldTreeFile(), "utf8"), escaping).toBe(
+        oldTreeBytes()
+      );
+      expect(await readFile(newTreeFile(), "utf8"), escaping).toBe(
+        TREE_BODY(path.basename(newDir))
+      );
+    }
+  });
+
+  it("refuses a protected path inside the active root before any write", async () => {
+    await mkdir(path.join(newDir, "src"), { recursive: true });
+    const envFile = path.join(newDir, "src", ".env");
+    await writeFile(envFile, "SECRET=synthetic\n", "utf8");
+    mockGetClientDetailed.mockResolvedValue({ client: rebindClient() });
+    writeLiveTaskRoot(cell, newDir);
+    const out = (await byName(tools, "replace_symbol_body").handler({
+      file: "src/.env",
+      symbol_path: "Foo",
+      new_body: "leaked\n",
+    })) as string;
+
+    expect(out).toMatch(/read denied for .*\.env/);
+    expect(out).toContain("protected-path rule");
+    expect(await readFile(envFile, "utf8")).toBe("SECRET=synthetic\n");
+    expect(onEditCalls).toEqual([]);
+    expect(await readFile(newTreeFile(), "utf8")).toBe(
+      TREE_BODY(path.basename(newDir))
+    );
+  });
+
+  it("still fails typed when the applier cannot write the resolved path", async () => {
+    // The containment screen is not the only write barrier: an unremovable
+    // file inside the active root must surface as the existing typed write
+    // failure, never as a successful receipt.
+    const target = path.join(newDir, "src", "locked.ts");
+    await writeFile(target, TREE_BODY("locked"), "utf8");
+    await rm(target, { force: true });
+    await mkdir(target, { recursive: true }); // a directory cannot be published over
+    mockGetClientDetailed.mockResolvedValue({
+      client: {
+        ...(rebindClient() as Record<string, unknown>),
+        sendRequest: async (method: string, params: unknown) => {
+          const uri = (params as { textDocument?: { uri?: string } })
+            .textDocument?.uri;
+          if (method === DOCUMENT_SYMBOL) return SAMPLE_SYMBOL_TREE;
+          return {
+            documentChanges: [{ textDocument: { uri }, edits: [FOO_EDIT] }],
+          };
+        },
+      },
+    });
+    writeLiveTaskRoot(cell, newDir);
+    let thrown: unknown;
+    try {
+      await byName(tools, "replace_symbol_body").handler({
+        file: "src/locked.ts",
+        symbol_path: "Foo",
+        new_body: "const foo = 9;\n",
+      });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown).toBeInstanceOf(ToolExecutionError);
+    expect((thrown as Error).message).toContain("[symbol-mutate] cannot read");
+    expect(onEditCalls).toEqual([]);
+  });
+
+  // ── Write containment is judged on the CANONICAL target ──
+  //
+  // `isWithinRoot` is pure `path.relative` and never follows a link, so a
+  // symlink INSIDE the root pointing OUTSIDE it passes a lexical screen while
+  // the write (publishFile degrades to an in-place `writeFile` for a
+  // non-regular-file target) follows the link and lands bytes outside the
+  // active tree. These pin the canonical verdict in both directions, plus the
+  // undecidable-target refusals.
+
+  /** A client whose rename returns one fixed WorkspaceEdit uri (the server
+   *  dragged some path into the change); the anchor documentSymbol still
+   *  resolves so the handler reaches the applier. */
+  function clientReturningEdit(editUri: string): unknown {
+    return {
+      ...(rebindClient() as Record<string, unknown>),
+      sendRequest: async (method: string) => {
+        if (method === DOCUMENT_SYMBOL) return SAMPLE_SYMBOL_TREE;
+        if (method === "textDocument/references") return [];
+        return {
+          documentChanges: [
+            { textDocument: { uri: editUri }, edits: [FOO_EDIT] },
+          ],
+        };
+      },
+    };
+  }
+
+  it("refuses a symlink inside the active root whose target escapes it, before any write", async () => {
+    await resetTrees();
+    const outsideDir = await mkdtemp(
+      path.join(os.tmpdir(), "symbol-mutate-escape-")
+    );
+    const outsideFile = path.join(outsideDir, "stranger.ts");
+    const outsideBody = "export const stranger = 1;\n";
+    await writeFile(outsideFile, outsideBody, "utf8");
+    const linkPath = path.join(newDir, "src", "link.ts");
+    await symlink(outsideFile, linkPath);
+    try {
+      onEditCalls.length = 0;
+      captured.length = 0;
+      mockGetClientDetailed.mockResolvedValue({
+        client: clientReturningEdit(uriOf(linkPath)),
+      });
+      writeLiveTaskRoot(cell, newDir);
+      const out = (await byName(tools, "rename_symbol").handler({
+        file: "src/link.ts",
+        symbol_path: "Foo",
+        new_name: "baz",
+      })) as string;
+
+      // Typed refusal on the same channel as every other write denial …
+      expect(typeof out).toBe("string");
+      expect(out).toMatch(/\(write denied for /);
+      expect(out).toContain(linkPath);
+      // … and the whole batch is untouched: no preimage, no invalidate.
+      expect(captured).toEqual([]);
+      expect(onEditCalls).toEqual([]);
+      // The link's target (OUTSIDE the active root) keeps its bytes.
+      expect(await readFile(outsideFile, "utf8")).toBe(outsideBody);
+      // No in-root file was written either.
+      expect(await readFile(newTreeFile(), "utf8")).toBe(
+        TREE_BODY(path.basename(newDir))
+      );
+    } finally {
+      await rm(outsideDir, { recursive: true, force: true });
+    }
+  });
+
+  it("permits an in-root symlink whose target is also inside the active root", async () => {
+    await resetTrees();
+    const target = path.join(newDir, "src", "target.ts");
+    const targetBody = TREE_BODY("target");
+    await writeFile(target, targetBody, "utf8");
+    const linkPath = path.join(newDir, "src", "link.ts");
+    await symlink(target, linkPath);
+    onEditCalls.length = 0;
+    captured.length = 0;
+    mockGetClientDetailed.mockResolvedValue({
+      client: clientReturningEdit(uriOf(linkPath)),
+    });
+    writeLiveTaskRoot(cell, newDir);
+    const out = (await byName(tools, "rename_symbol").handler({
+      file: "src/link.ts",
+      symbol_path: "Foo",
+      new_name: "baz",
+    })) as string;
+
+    const parsed = JSON.parse(out) as Record<string, unknown>;
+    expect(parsed.renamed).toBe(true);
+    expect(parsed.files).toEqual([linkPath]);
+    expect(onEditCalls).toEqual([linkPath]);
+    expect(captured).toHaveLength(1);
+    // The write followed the link and landed on the in-root target.
+    expect(await readFile(target, "utf8")).toBe(
+      targetBody.replace("const foo", "const baz")
+    );
+  });
+
+  it("refuses a dangling symlink write target instead of writing or throwing", async () => {
+    await resetTrees();
+    const linkPath = path.join(newDir, "src", "dangling.ts");
+    await symlink(path.join(newDir, "src", "missing.ts"), linkPath);
+    onEditCalls.length = 0;
+    captured.length = 0;
+    mockGetClientDetailed.mockResolvedValue({
+      client: clientReturningEdit(uriOf(linkPath)),
+    });
+    writeLiveTaskRoot(cell, newDir);
+    // Anchor on an ordinary in-root file so the ENTRY read-policy gate allows
+    // the call; the server then drags the dangling link into its edit set,
+    // which only the applier's containment screen can refuse.
+    const out = (await byName(tools, "rename_symbol").handler({
+      file: "src/a.ts",
+      symbol_path: "Foo",
+      new_name: "baz",
+    })) as string;
+
+    expect(typeof out).toBe("string");
+    expect(out).toMatch(/\(write denied for /);
+    expect(out).toContain(linkPath);
+    expect(captured).toEqual([]);
+    expect(onEditCalls).toEqual([]);
+    expect(await readFile(newTreeFile(), "utf8")).toBe(
+      TREE_BODY(path.basename(newDir))
+    );
+  });
+
+  it("refuses a symlink-loop write target instead of writing or throwing", async () => {
+    await resetTrees();
+    const linkPath = path.join(newDir, "src", "loop.ts");
+    // A relative self-target: the link resolves to itself → ELOOP.
+    await symlink("loop.ts", linkPath);
+    onEditCalls.length = 0;
+    captured.length = 0;
+    mockGetClientDetailed.mockResolvedValue({
+      client: clientReturningEdit(uriOf(linkPath)),
+    });
+    writeLiveTaskRoot(cell, newDir);
+    const out = (await byName(tools, "rename_symbol").handler({
+      file: "src/a.ts",
+      symbol_path: "Foo",
+      new_name: "baz",
+    })) as string;
+
+    expect(typeof out).toBe("string");
+    expect(out).toMatch(/\(write denied for /);
+    expect(out).toContain(linkPath);
+    expect(captured).toEqual([]);
+    expect(onEditCalls).toEqual([]);
+    expect(await readFile(newTreeFile(), "utf8")).toBe(
+      TREE_BODY(path.basename(newDir))
+    );
   });
 });
 

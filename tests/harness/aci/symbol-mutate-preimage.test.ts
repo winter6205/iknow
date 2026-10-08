@@ -17,6 +17,11 @@ import { pathToFileURL } from "node:url";
 
 import type { AciToolDef } from "../../../src/harness/aci/types.ts";
 import type { PreimageCaptureInput } from "../../../src/harness/aci/preimage-port.ts";
+import type { LiveTaskRoot } from "../../../src/harness/session-roots.ts";
+import {
+  createLiveTaskRoot,
+  writeLiveTaskRoot,
+} from "../../../src/harness/session-roots.ts";
 
 const { mockGetClientDetailed } = vi.hoisted(() => ({
   mockGetClientDetailed: vi.fn<() => Promise<unknown>>(),
@@ -169,5 +174,229 @@ describe("rename_symbol → preimage port stages all files first", () => {
     expect(calls).toBe(2);
     expect(await readFile(mainFile, "utf8")).toBe(MAIN_BODY);
     expect(await readFile(otherFile, "utf8")).toBe(OTHER_BODY);
+  });
+});
+
+describe("the whole-batch preimage contract survives a live task-root rebind", () => {
+  /** Byte-identical bodies in both trees, so only the TREE the write landed
+   *  in is decidable — the preimage root must come from the active cell. */
+  let oldDir: string;
+  let newDir: string;
+  let cell: LiveTaskRoot;
+  let outsideDir: string;
+  let outsideFile: string;
+
+  const treeBody = (marker: string): string => `${MAIN_BODY}\n// ${marker}\n`;
+  const OTHER_TREE_BODY = (marker: string): string =>
+    `${OTHER_BODY}// ${marker}\n`;
+
+  beforeEach(async () => {
+    oldDir = await mkdtemp(path.join(os.tmpdir(), "symbol-mutate-preimg-old-"));
+    newDir = await mkdtemp(path.join(os.tmpdir(), "symbol-mutate-preimg-new-"));
+    outsideDir = await mkdtemp(
+      path.join(os.tmpdir(), "symbol-mutate-preimg-out-")
+    );
+    for (const dir of [oldDir, newDir]) {
+      await writeFile(
+        path.join(dir, "a.ts"),
+        treeBody(path.basename(dir)),
+        "utf8"
+      );
+      await writeFile(
+        path.join(dir, "b.ts"),
+        OTHER_TREE_BODY(path.basename(dir)),
+        "utf8"
+      );
+    }
+    outsideFile = path.join(outsideDir, "stranger.ts");
+    await writeFile(outsideFile, "export const stranger = 1;\n", "utf8");
+    cell = createLiveTaskRoot(oldDir);
+  });
+
+  afterEach(async () => {
+    for (const dir of [oldDir, newDir, outsideDir]) {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  /** Assemble the tool set against the OLD tree (as the registry does before
+   *  the switch), rebind, then run a rename whose input is relative. */
+  async function runRenameAfterRebind(
+    preimageCapture: (input: PreimageCaptureInput) => void | Promise<void>,
+    editTargets: (requestedUri: string | undefined) => unknown,
+    onEditCalls?: string[]
+  ): Promise<unknown> {
+    mockGetClientDetailed.mockResolvedValue({
+      client: {
+        connection: {} as never,
+        process: {} as never,
+        getServerCapabilities: () => ({}),
+        ensureOpen: async () => undefined,
+        withDocumentOpen: async <T>(_file: string, fn: () => Promise<T>) =>
+          fn(),
+        sendRequest: async (method: string, params: unknown) => {
+          if (method === DOCUMENT_SYMBOL) return SAMPLE_SYMBOL_TREE;
+          const uri = (params as { textDocument?: { uri?: string } })
+            .textDocument?.uri;
+          return editTargets(uri);
+        },
+        sendNotification: async () => undefined,
+        getDiagnostics: () => [] as ReadonlyArray<unknown>,
+        getDocumentFingerprint: () => "fp-1",
+        dispose: () => undefined,
+      },
+    });
+    const tools = createSymbolMutateToolSet({
+      ctx: { directory: oldDir, directoryCell: cell },
+      preimageCapture,
+      onEdit:
+        onEditCalls === undefined ? undefined : (f) => onEditCalls.push(f),
+    });
+    writeLiveTaskRoot(cell, newDir);
+    return byName(tools, "rename_symbol").handler({
+      file: "a.ts",
+      symbol_path: "Foo",
+      new_name: "baz",
+    });
+  }
+
+  it("captures the whole batch against the ACTIVE root before any byte lands", async () => {
+    const seen: PreimageCaptureInput[] = [];
+    const liveBytesAtCapture: string[] = [];
+    const a = path.join(newDir, "a.ts");
+    const b = path.join(newDir, "b.ts");
+    await runRenameAfterRebind(
+      (input) => {
+        seen.push(input);
+        liveBytesAtCapture.push(
+          `${readFileSync(a, "utf8")}|${readFileSync(b, "utf8")}`
+        );
+      },
+      () => ({
+        documentChanges: [
+          {
+            textDocument: {
+              uri: pathToFileURL(path.join(newDir, "a.ts")).href,
+            },
+            edits: [MAIN_EDIT],
+          },
+          {
+            textDocument: { uri: pathToFileURL(b).href },
+            edits: [OTHER_EDIT],
+          },
+        ],
+      })
+    );
+
+    // relPath is measured from the tree the write resolved against, not from
+    // the root the tool set was assembled with.
+    expect(seen.map((r) => r.rootIdentity)).toEqual([newDir, newDir]);
+    expect(seen.map((r) => r.relPath)).toEqual(["a.ts", "b.ts"]);
+    expect(seen[0]!.preBytes.toString("utf8")).toBe(
+      treeBody(path.basename(newDir))
+    );
+    expect(seen[1]!.preBytes.toString("utf8")).toBe(
+      OTHER_TREE_BODY(path.basename(newDir))
+    );
+    expect(liveBytesAtCapture).toEqual([
+      `${treeBody(path.basename(newDir))}|${OTHER_TREE_BODY(
+        path.basename(newDir)
+      )}`,
+      `${treeBody(path.basename(newDir))}|${OTHER_TREE_BODY(
+        path.basename(newDir)
+      )}`,
+    ]);
+    // Both edits landed in the ACTIVE tree only.
+    expect(await readFile(a, "utf8")).not.toBe(treeBody(path.basename(newDir)));
+    expect(await readFile(b, "utf8")).not.toBe(
+      OTHER_TREE_BODY(path.basename(newDir))
+    );
+    expect(await readFile(path.join(oldDir, "a.ts"), "utf8")).toBe(
+      treeBody(path.basename(oldDir))
+    );
+    expect(await readFile(path.join(oldDir, "b.ts"), "utf8")).toBe(
+      OTHER_TREE_BODY(path.basename(oldDir))
+    );
+  });
+
+  it("a server-returned target OUTSIDE the active root refuses the batch before any write", async () => {
+    const seen: PreimageCaptureInput[] = [];
+    const onEditCalls: string[] = [];
+    const out = (await runRenameAfterRebind(
+      (input) => {
+        seen.push(input);
+      },
+      () => ({
+        documentChanges: [
+          {
+            textDocument: {
+              uri: pathToFileURL(path.join(newDir, "a.ts")).href,
+            },
+            edits: [MAIN_EDIT],
+          },
+          // The legal in-root edit comes FIRST: the screen must reject the
+          // whole batch, not write this one and stop.
+          {
+            textDocument: { uri: pathToFileURL(outsideFile).href },
+            edits: [OTHER_EDIT],
+          },
+        ],
+      }),
+      onEditCalls
+    )) as string;
+
+    expect(typeof out).toBe("string");
+    expect(out).toMatch(/\(write denied for /);
+    expect(out).toContain(outsideFile);
+    expect(seen).toEqual([]);
+    expect(onEditCalls).toEqual([]);
+    expect(await readFile(path.join(newDir, "a.ts"), "utf8")).toBe(
+      treeBody(path.basename(newDir))
+    );
+    expect(await readFile(outsideFile, "utf8")).toBe(
+      "export const stranger = 1;\n"
+    );
+    expect(await readFile(path.join(oldDir, "a.ts"), "utf8")).toBe(
+      treeBody(path.basename(oldDir))
+    );
+  });
+
+  it("a server-returned PROTECTED path inside the active root refuses the batch before any write", async () => {
+    // .env is inside the active root, so containment alone would allow it; the
+    // read-policy screen is the only barrier and it must fire on the same
+    // whole-batch, before-capture posture as the containment one.
+    const envFile = path.join(newDir, ".env");
+    await writeFile(envFile, "SECRET=synthetic\n", "utf8");
+    const seen: PreimageCaptureInput[] = [];
+    const onEditCalls: string[] = [];
+    const out = (await runRenameAfterRebind(
+      (input) => {
+        seen.push(input);
+      },
+      () => ({
+        documentChanges: [
+          {
+            textDocument: {
+              uri: pathToFileURL(path.join(newDir, "a.ts")).href,
+            },
+            edits: [MAIN_EDIT],
+          },
+          {
+            textDocument: { uri: pathToFileURL(envFile).href },
+            edits: [OTHER_EDIT],
+          },
+        ],
+      }),
+      onEditCalls
+    )) as string;
+
+    expect(out).toMatch(/read denied for /);
+    expect(out).toContain("protected-path rule");
+    expect(seen).toEqual([]);
+    expect(onEditCalls).toEqual([]);
+    expect(await readFile(path.join(newDir, "a.ts"), "utf8")).toBe(
+      treeBody(path.basename(newDir))
+    );
+    expect(await readFile(envFile, "utf8")).toBe("SECRET=synthetic\n");
   });
 });

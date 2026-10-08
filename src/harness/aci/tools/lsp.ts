@@ -44,6 +44,7 @@ import type { CancellationToken } from "vscode-jsonrpc/node";
 import {
   getClientDetailed,
   isMethodNotFoundError,
+  resolveDirectorySnapshot,
   serverDeclaresUnsupported,
 } from "../../lsp/client.js";
 import type { LspClient, LspClientFailure } from "../../lsp/client.js";
@@ -187,6 +188,64 @@ interface DiagnosticsInput {
 }
 
 /**
+ * Pure per-file resolution against one already-read root snapshot.
+ *
+ * `~` forms pass through untouched: the read policy expands them against the
+ * home root (`toAbsolute`), and pre-resolving them here would both destroy
+ * that expansion and change the rendered denial text. Undecidable inputs
+ * (empty / whitespace) pass through for the same reason — the policy owns
+ * their fail-closed verdict (SC10), and every sentinel must keep naming the
+ * raw model input.
+ */
+function resolveFileInSnapshot(snapshot: string, file: string): string {
+  if (file.trim().length === 0) return file;
+  if (file === "~" || file.startsWith("~/")) return file;
+  // An absolute input only normalizes (no re-anchoring); a relative input
+  // resolves under the snapshot so the whole operation lands in the ACTIVE
+  // tree — never in the process working directory.
+  return path.isAbsolute(file)
+    ? path.normalize(file)
+    : path.resolve(snapshot, file);
+}
+
+/**
+ * Resolve a model-supplied file path against ONE read of the live task-root
+ * cell (the active-root snapshot). Called exactly once per handler entry;
+ * the single returned value then drives root finding, read-policy checks,
+ * document open, and request URIs (T1 contract).
+ *
+ * Downstream stages still re-read the cell (client.ts, documentOpenDenial).
+ * That does not straddle trees: a rebind between the two reads makes
+ * NearestRoot's upper bound reject the now-foreign resolved path, so the
+ * operation fails closed rather than addressing the other tree.
+ */
+export function resolveInputFile(ctx: LspCtx, file: string): string {
+  return resolveFileInSnapshot(resolveDirectorySnapshot(ctx), file);
+}
+
+/**
+ * One entry's identity against the active root: the live task-root snapshot
+ * and the model's input file resolved under it. Both come from the SAME cell
+ * read, so a caller cannot pair a path from one vintage with a root from
+ * another by reading the cell twice. `raw` is kept verbatim for sentinels,
+ * which must name what the model typed.
+ */
+export interface ActiveRootEntry {
+  /** Live task root this entry resolved against; also the write-containment root. */
+  readonly root: string;
+  /** `raw` resolved under `root` — drives lookup, policy, open, and URIs. */
+  readonly file: string;
+  /** The model's untouched input, for sentinel rendering only. */
+  readonly raw: string;
+}
+
+/** Build an {@link ActiveRootEntry} from a single read of the live cell. */
+export function activeRootEntry(ctx: LspCtx, raw: string): ActiveRootEntry {
+  const root = resolveDirectorySnapshot(ctx);
+  return { root, file: resolveFileInSnapshot(root, raw), raw };
+}
+
+/**
  * The `spawn-failed` arm: serverId + the failing stage + the retained cause +
  * the server's installHint (hint sentence omitted when the declaration is
  * absent), or the bare `unavailable` parenthetical when a start failure
@@ -230,7 +289,9 @@ export function renderNoServer(
         : `(no LSP server configured; supported extensions: ${extensions})`;
     }
     case "no-root":
-      return `(no LSP project root found above ${file} within ${ctx.directory}; missing root marker for ${failure.serverId ?? "unknown-server"})`;
+      // The upper bound named here is the LIVE root, not the frozen field:
+      // after a rebind the search stopped at the new tree.
+      return `(no LSP project root found above ${file} within ${resolveDirectorySnapshot(ctx)}; missing root marker for ${failure.serverId ?? "unknown-server"})`;
     case "spawn-failed":
       return renderSpawnFailed(failure);
   }
@@ -276,12 +337,14 @@ export function renderMethodNotFound(
  */
 /**
  * Takes `ctx: LspCtx` by family convention (same form as `renderNoServer`)
- * although it only reads `ctx.directory` — the sentinel text needs just the
- * directory interpolation, and a uniform signature spares callers
+ * although it only reads the effective root — the sentinel text needs just
+ * the directory interpolation, and a uniform signature spares callers
  * (`symbol.ts` `find_symbol` handler) from unpacking ctx for one field.
+ * The root is read from the live cell at render time: after a rebind the
+ * anchor advice must point at the active tree, never the stale one.
  */
 export function renderNoProjectAnchor(ctx: LspCtx): string {
-  return `(LSP workspace/symbol has no project anchor under ${ctx.directory}; an empty result from this path is not trustworthy — pass file=<a file inside the project to search> or use get_symbols_overview on a known file)`;
+  return `(LSP workspace/symbol has no project anchor under ${resolveDirectorySnapshot(ctx)}; an empty result from this path is not trustworthy — pass file=<a file inside the project to search> or use get_symbols_overview on a known file)`;
 }
 
 /**
@@ -597,10 +660,15 @@ export function timeoutError(
 export async function getClientForWorkspaceDetailed(
   ctx: LspCtx
 ): Promise<{ client?: LspClient; failure?: LspClientFailure }> {
+  // ONE read of the live root for the whole probe sweep: every sample path is
+  // built under the same snapshot, so all probes of one call describe one
+  // vintage. A cell flip mid-sweep then fails the later probes closed through
+  // NearestRoot's upper bound rather than answering from another tree.
+  const rootSnapshot = resolveDirectorySnapshot(ctx);
   let lastFailure: LspClientFailure = { reason: "no-server" };
   for (const server of SERVERS) {
     const ext = server.extensions[0];
-    const sample = path.join(ctx.directory, `iknow-workspace${ext}`);
+    const sample = path.join(rootSnapshot, `iknow-workspace${ext}`);
     const res = await getClientDetailed(ctx, sample, { server });
     if (res.client) return { client: res.client };
     if (res.failure) lastFailure = res.failure;
@@ -630,13 +698,22 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
     ): Promise<unknown> => {
       const params = validate(input) as
         PositionInput | FileOnlyInput | WorkspaceSymbolInput;
+      // ONE active-root read per entry: a relative input resolves under the
+      // live snapshot once, and that single resolved value then drives root
+      // finding, the policy verdict, the document open, and the request URI.
+      const file =
+        params.file !== undefined
+          ? resolveInputFile(ctx, params.file)
+          : undefined;
       // No file (lsp_workspace_symbol only) → workspace-level query, probing
       // servers in SERVERS order; with a file, original dispatch semantics.
       const { client, failure } =
-        params.file !== undefined
-          ? await getClientDetailed(ctx, params.file)
+        file !== undefined
+          ? await getClientDetailed(ctx, file)
           : await getClientForWorkspaceDetailed(ctx);
       if (!client) {
+        // The sentinel keeps the RAW model input (what the caller typed);
+        // only the root bound inside renders from the live snapshot.
         return renderNoServer(
           ctx,
           failure ?? { reason: "no-server" },
@@ -647,8 +724,8 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
       // protected or undecidable file never enters withDocumentOpen, so no
       // didOpen carries its bytes; the denial rides this family's
       // T | string channel as a sentinel.
-      if (params.file !== undefined) {
-        const denial = await documentOpenDenial(ctx, params.file);
+      if (file !== undefined) {
+        const denial = await documentOpenDenial(ctx, file);
         if (denial !== null) return denial;
       }
       // tsserver builds no project for files it hasn't opened → symbol ops
@@ -668,7 +745,7 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
           return await requestOrMethodNotFoundSentinel(
             client,
             spec.method,
-            spec.buildParams(params),
+            spec.buildParams(file !== undefined ? { ...params, file } : params),
             cancel.token
           );
         } catch (err) {
@@ -683,8 +760,8 @@ function makeOperationTool(ctx: LspCtx, spec: OperationSpec): AciToolDef {
         }
       };
       const result =
-        params.file !== undefined
-          ? await client.withDocumentOpen(params.file, run)
+        file !== undefined
+          ? await client.withDocumentOpen(file, run)
           : await run();
       return stringifyResult(result);
     },
@@ -717,7 +794,9 @@ function makeCallHierarchyCallTool(
       execCtx?: ToolExecutionContext
     ): Promise<unknown> => {
       const params = validate(input) as PositionInput;
-      const { client, failure } = await getClientDetailed(ctx, params.file);
+      // ONE active-root read per entry (same discipline as makeOperationTool).
+      const file = resolveInputFile(ctx, params.file);
+      const { client, failure } = await getClientDetailed(ctx, file);
       if (!client) {
         return renderNoServer(
           ctx,
@@ -725,7 +804,7 @@ function makeCallHierarchyCallTool(
           params.file
         );
       }
-      const denial = await documentOpenDenial(ctx, params.file);
+      const denial = await documentOpenDenial(ctx, file);
       if (denial !== null) return denial;
       // Same as makeOperationTool: the request-scoped window covers both
       // prepare + forward (didOpen spans the whole request, closed on exit).
@@ -734,11 +813,11 @@ function makeCallHierarchyCallTool(
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       let timedOutMethod = "textDocument/prepareCallHierarchy";
       try {
-        return await client.withDocumentOpen(params.file, async () => {
+        return await client.withDocumentOpen(file, async () => {
           const prepared = await requestOrMethodNotFoundSentinel(
             client,
             "textDocument/prepareCallHierarchy",
-            positionParams(params.file, params.line, params.character),
+            positionParams(file, params.line, params.character),
             cancel.token
           );
           if (cancel.timedOut()) {
@@ -865,9 +944,21 @@ export function makeDiagnosticsTool(
       }
       const targets: readonly string[] =
         params.file !== undefined ? [params.file] : (params.files ?? []);
+      // Synchronous map over the batch: every target resolves against the
+      // ONE snapshot read at entry (no await between reads → no drift
+      // window), so a mid-batch cell flip cannot split the batch across two
+      // trees.
+      const snapshot = resolveDirectorySnapshot(ctx);
       const segments: string[] = [];
-      for (const file of targets) {
-        segments.push(await diagnosticsSegment(ctx, file, execCtx));
+      for (const rawFile of targets) {
+        segments.push(
+          await diagnosticsSegment(
+            ctx,
+            rawFile,
+            resolveFileInSnapshot(snapshot, rawFile),
+            execCtx
+          )
+        );
       }
       // The single-file path is shaped exactly like the old round (one
       // segment, no separator); batch segments join with a blank line.
@@ -882,15 +973,20 @@ export function makeDiagnosticsTool(
  * window. Every outcome — no-server rendering, policy denial rendering, or
  * the rendered diagnostics — returns as a segment string; the loop in the
  * handler is pure accumulation.
+ *
+ * `rawFile` keeps the model input for the no-server sentinel; `file` is the
+ * active-root-resolved path that drives the policy verdict, the document
+ * open, the diagnostics URI, and the rendered file attribute.
  */
 async function diagnosticsSegment(
   ctx: LspCtx,
+  rawFile: string,
   file: string,
   execCtx?: ToolExecutionContext
 ): Promise<string> {
   const { client, failure } = await getClientDetailed(ctx, file);
   if (!client) {
-    return renderNoServer(ctx, failure ?? { reason: "no-server" }, file);
+    return renderNoServer(ctx, failure ?? { reason: "no-server" }, rawFile);
   }
   const denial = await documentOpenDenial(ctx, file);
   if (denial !== null) {

@@ -79,6 +79,10 @@ import {
   SYMBOL_MUTATE_TOOL_NAMES,
 } from "../../../src/harness/aci/tools/symbol-mutate.ts";
 import {
+  createLiveTaskRoot,
+  writeLiveTaskRoot,
+} from "../../../src/harness/session-roots.ts";
+import {
   classifyProbeResult,
   summarizeProbeVerdict,
 } from "../../../scripts/lsp-probe.ts";
@@ -3245,5 +3249,224 @@ describe("read policy on document open — concurrent calls on one shared client
     });
     expect(new Set(openedFiles)).toEqual(new Set([inRoot, outsideOrdinary]));
     expect(openedFiles).not.toContain(protectedFile);
+  });
+});
+
+// ── T1: one active-root snapshot per tool entry (live taskRoot cell) ─────────
+//
+// Incident contract (plans/lsp-worktree-paths.md T1): at each LSP tool entry,
+// read the live taskRoot cell ONCE, resolve a possibly-relative input file
+// path to an absolute path under that snapshot, and use that one resolved
+// path for root finding, read-policy checks, document open, and request URIs.
+// A file-less workspace query must anchor to the active (live) root.
+//
+// These cases run the REAL read policy over REAL temp trees (mkdtemp scratch,
+// never the repo data/ dir); only the language-server client is stubbed, so
+// the resolved path is observable through the recorded getClientDetailed
+// args, the didOpen URIs/texts, and the policy verdicts.
+
+describe("T1: resolve read and workspace-query paths from one active-root snapshot", () => {
+  /** Real temp project tree: a lockfile marker + a src file with unique bytes. */
+  async function makeTree(
+    dir: string,
+    fileBody: string
+  ): Promise<{ dir: string; file: string }> {
+    await mkdir(dir, { recursive: true });
+    await writeFile(join(dir, "package-lock.json"), "{}\n", "utf8");
+    await mkdir(join(dir, "src"), { recursive: true });
+    const file = join(dir, "src", "a.ts");
+    await writeFile(file, fileBody, "utf8");
+    return { dir, file };
+  }
+
+  it("a file-less workspace query after rebind anchors to the active root", async () => {
+    const oldDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-ws-old-"));
+    const newDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-ws-new-"));
+    readPolicyScratch.push(oldDir, newDir);
+    const cell = createLiveTaskRoot(oldDir);
+    const liveCtx = { ...ctx, directory: oldDir, directoryCell: cell };
+    const tools = createLspToolSet(liveCtx);
+
+    const { client } = makeFakeClient(() => [
+      { name: "uniqueNewTreeSymbol", kind: 12 },
+    ]);
+    mockGetClient.mockResolvedValue(client);
+
+    // The active root after the rebind: the workspace probe sample must be
+    // built from the LIVE cell value, not the frozen ctx.directory.
+    writeLiveTaskRoot(cell, newDir);
+    const out = (await byName(tools, "lsp_workspace_symbol").handler({
+      query: "uniqueNewTreeSymbol",
+    })) as string;
+
+    expect(JSON.parse(out)).toEqual([
+      { name: "uniqueNewTreeSymbol", kind: 12 },
+    ]);
+    expect(mockGetClientDetailed).toHaveBeenCalledWith(
+      liveCtx,
+      join(newDir, "iknow-workspace.ts"),
+      expect.objectContaining({
+        server: expect.objectContaining({ id: "typescript" }),
+      })
+    );
+  });
+
+  it("a relative path after rebind resolves under the active tree (open + URI)", async () => {
+    const oldDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-rel-old-"));
+    const newDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-rel-new-"));
+    readPolicyScratch.push(oldDir, newDir);
+    // Real files: the read policy canonicalizes through the filesystem, so
+    // the resolved path must exist on disk under the active tree.
+    const newTree = await makeTree(
+      newDir,
+      "export const freshTreeMarker = 2;\n"
+    );
+    await makeTree(oldDir, "export const staleTreeMarker = 1;\n");
+
+    const cell = createLiveTaskRoot(oldDir);
+    const liveCtx = { ...ctx, directory: oldDir, directoryCell: cell };
+    const tools = createLspToolSet(liveCtx);
+    const { client, opened, calls } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+
+    writeLiveTaskRoot(cell, newDir);
+    await byName(tools, "lsp_document_symbol").handler({ file: "src/a.ts" });
+
+    // The single resolved path drove the client lookup, the didOpen, and
+    // the request URI — all naming the ACTIVE tree's file.
+    expect(mockGetClient).toHaveBeenCalledWith(liveCtx, newTree.file);
+    expect(opened).toEqual([newTree.file]);
+    expect(calls[0].params).toEqual({
+      textDocument: { uri: pathToFileURL(newTree.file).href },
+    });
+  });
+
+  it("an absolute path inside the active tree still works after rebind", async () => {
+    const oldDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-abs-old-"));
+    const newDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-abs-new-"));
+    readPolicyScratch.push(oldDir, newDir);
+    const newTree = await makeTree(newDir, "export const absMarker = 3;\n");
+
+    const cell = createLiveTaskRoot(oldDir);
+    const liveCtx = { ...ctx, directory: oldDir, directoryCell: cell };
+    const tools = createLspToolSet(liveCtx);
+    const { client, opened, calls } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+
+    writeLiveTaskRoot(cell, newDir);
+    await byName(tools, "lsp_hover").handler({
+      file: newTree.file,
+      line: 1,
+      character: 13,
+    });
+
+    expect(mockGetClient).toHaveBeenCalledWith(liveCtx, newTree.file);
+    expect(opened).toEqual([newTree.file]);
+    expect(calls[0].method).toBe("textDocument/hover");
+  });
+
+  it("hover and call-hierarchy against a known symbol in the active tree return meaningful results", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-known-"));
+    readPolicyScratch.push(dir);
+    const tree = await makeTree(dir, "export const knownSymbol = 4;\n");
+
+    const cell = createLiveTaskRoot(dir);
+    const liveCtx = { ...ctx, directory: dir, directoryCell: cell };
+    const queryTools = createSymbolQueryToolSet(liveCtx);
+    const { client, calls } = makeFakeClient((method) =>
+      method === DOCUMENT_SYMBOL
+        ? SAMPLE_SYMBOL_TREE
+        : method === "textDocument/hover"
+          ? { hover: "of Foo.bar" }
+          : []
+    );
+    mockGetClient.mockResolvedValue(client);
+
+    const hoverOut = (await byName(queryTools, "get_hover").handler({
+      file: "src/a.ts",
+      symbol_path: "Foo/bar",
+    })) as string;
+    // The business request went out with the resolved position, so the
+    // returned payload is the responder's hover content, not a sentinel.
+    expect(calls.map((c) => c.method)).toEqual([
+      DOCUMENT_SYMBOL,
+      "textDocument/hover",
+    ]);
+    expect(JSON.parse(hoverOut)).toEqual({ hover: "of Foo.bar" });
+
+    const hierarchyTools = createLspToolSet(liveCtx);
+    const item = { name: "foo", uri: pathToFileURL(tree.file).href, range: {} };
+    const { client: hClient, calls: hCalls } = makeFakeClient((method) =>
+      method === "textDocument/prepareCallHierarchy" ? [item] : ["callee-1"]
+    );
+    mockGetClient.mockResolvedValue(hClient);
+    const callsOut = (await byName(
+      hierarchyTools,
+      "lsp_incoming_calls"
+    ).handler({
+      file: tree.file,
+      line: 1,
+      character: 13,
+    })) as string;
+    expect(hCalls.map((c) => c.method)).toEqual([
+      "textDocument/prepareCallHierarchy",
+      "callHierarchy/incomingCalls",
+    ]);
+    expect(JSON.parse(callsOut)).toEqual(["callee-1"]);
+  });
+
+  it("the no-anchor sentinel keeps its wording but names the LIVE root", async () => {
+    const oldDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-anchor-old-"));
+    const newDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-anchor-new-"));
+    readPolicyScratch.push(oldDir, newDir);
+    const cell = createLiveTaskRoot(oldDir);
+    const liveCtx = { ...ctx, directory: oldDir, directoryCell: cell };
+    const tools = createSymbolQueryToolSet(liveCtx);
+    const { client } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+
+    writeLiveTaskRoot(cell, newDir);
+    const out = (await byName(tools, "find_symbol").handler({
+      query: "anything",
+    })) as string;
+
+    // renderNoProjectAnchor interpolates the live snapshot, so the frozen
+    // oldDir can never appear in the sentinel.
+    expect(out).toBe(
+      "(LSP workspace/symbol has no project anchor under " +
+        newDir +
+        "; an empty result from this path is not trustworthy — pass file=<a file inside the project to search> or use get_symbols_overview on a known file)"
+    );
+    expect(out).not.toContain(oldDir);
+  });
+
+  it("a relative protected path is denied by its RESOLVED path and never opened", async () => {
+    const oldDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-prot-old-"));
+    const newDir = await mkdtemp(join(tmpdir(), "iknow-lsp-t1-prot-new-"));
+    readPolicyScratch.push(oldDir, newDir);
+    await mkdir(join(newDir, "src"), { recursive: true });
+    // Synthetic secret fixture: never a real credential (project rule).
+    const protectedFile = join(newDir, "src", ".env");
+    await writeFile(protectedFile, "SECRET=1\n", "utf8");
+
+    const cell = createLiveTaskRoot(oldDir);
+    const liveCtx = { ...ctx, directory: oldDir, directoryCell: cell };
+    const tools = createLspToolSet(liveCtx);
+    const { client, opened, calls } = makeFakeClient(() => []);
+    mockGetClient.mockResolvedValue(client);
+
+    writeLiveTaskRoot(cell, newDir);
+    const out = (await byName(tools, "lsp_document_symbol").handler({
+      file: "src/.env",
+    })) as string;
+
+    // The denial names the resolved absolute path (the policy verdict ran on
+    // it), the file never entered the open window, and no RPC was sent.
+    expect(out).toContain(
+      `(read denied for ${protectedFile}: protected-path rule`
+    );
+    expect(out).toContain("protected-path roster");
+    expect(opened).toEqual([]);
+    expect(calls).toHaveLength(0);
   });
 });

@@ -44,6 +44,8 @@ import {
   renderNoProjectAnchor,
   renderNoServer,
   requestOrMethodNotFoundSentinel,
+  activeRootEntry,
+  type ActiveRootEntry,
   stringifyResult,
   timeoutError,
 } from "./lsp.js";
@@ -164,20 +166,26 @@ function renderResolution(
  * didCloses the document — between two tool calls the file is not kept open
  * on the server.
  *
+ * `entry` arrives already resolved against the handler entry's one active-root
+ * snapshot (see `activeRootEntry` in lsp.ts) — this function performs no
+ * resolution of its own, so root finding, the policy verdict, the document
+ * open, and the request URI all use the same path.
+ *
  * Three stages: resolve the language server → `withDocumentOpen` + locating
  * via the documentSymbol tree → `run`. Failure paths normalize to
  * model-readable strings, the same shape as the success path's stringify.
  */
 async function withResolvedSymbol<T>(
   ctx: LspCtx,
-  file: string,
+  entry: ActiveRootEntry,
   symbolPath: string,
   token: CancellationToken,
   run: (client: LspClient, position: LspPosition) => Promise<T>
 ): Promise<T | string> {
+  const { file } = entry;
   const { client, failure } = await getClientDetailed(ctx, file);
   if (!client) {
-    return renderNoServer(ctx, failure ?? { reason: "no-server" }, file);
+    return renderNoServer(ctx, failure ?? { reason: "no-server" }, entry.raw);
   }
   // The read policy is consulted before the open window: a protected or
   // undecidable file never enters withDocumentOpen, so no didOpen carries its
@@ -227,19 +235,24 @@ function makeSymbolOperationTool(
       execCtx?: ToolExecutionContext
     ): Promise<unknown> => {
       const params = validate(input) as SymbolInput;
+      // ONE active-root read per entry: the resolved path drives resolution,
+      // the policy verdict, the open, and the request URI; the raw input is
+      // kept only for the no-server sentinel's rendering.
+      const entry = activeRootEntry(ctx, params.file);
+      const { file } = entry;
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       try {
         return await withResolvedSymbol(
           ctx,
-          params.file,
+          entry,
           params.symbol_path,
           cancel.token,
           async (client, position) => {
             const result = await requestOrMethodNotFoundSentinel(
               client,
               spec.method,
-              spec.buildParams(params.file, position),
+              spec.buildParams(file, position),
               cancel.token
             );
             if (cancel.timedOut())
@@ -281,20 +294,24 @@ function makeSymbolCallHierarchyTool(
       execCtx?: ToolExecutionContext
     ): Promise<unknown> => {
       const params = validate(input) as SymbolInput;
+      // ONE active-root read per entry (same discipline as
+      // makeSymbolOperationTool).
+      const entry = activeRootEntry(ctx, params.file);
+      const { file } = entry;
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
       let timedOutMethod = "textDocument/prepareCallHierarchy";
       try {
         return await withResolvedSymbol(
           ctx,
-          params.file,
+          entry,
           params.symbol_path,
           cancel.token,
           async (client, position) => {
             const prepared = await requestOrMethodNotFoundSentinel(
               client,
               "textDocument/prepareCallHierarchy",
-              symbolPositionParams(params.file, position),
+              symbolPositionParams(file, position),
               cancel.token
             );
             if (cancel.timedOut())
@@ -377,9 +394,16 @@ function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
       execCtx?: ToolExecutionContext
     ): Promise<unknown> => {
       const params = validate(input) as FindSymbolInput;
-      const { client, failure } =
+      // ONE active-root read per entry; `file` (resolved) and `params.file`
+      // (raw) stay distinct exactly as in the coordinate family.
+      const entry =
         params.file !== undefined
-          ? await getClientDetailed(ctx, params.file)
+          ? activeRootEntry(ctx, params.file)
+          : undefined;
+      const file = entry?.file;
+      const { client, failure } =
+        file !== undefined
+          ? await getClientDetailed(ctx, file)
           : await getClientForWorkspaceDetailed(ctx);
       if (!client) {
         return renderNoServer(
@@ -391,8 +415,8 @@ function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
       // A `file` anchor means this call will open the document → the read
       // policy decides first; a workspace-level query without `file` opens
       // nothing and consults nothing.
-      if (params.file !== undefined) {
-        const denial = await documentOpenDenial(ctx, params.file);
+      if (file !== undefined) {
+        const denial = await documentOpenDenial(ctx, file);
         if (denial !== null) return denial;
       }
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
@@ -430,9 +454,7 @@ function makeFindSymbolTool(ctx: LspCtx, description: string): AciToolDef {
           cancel.dispose();
         }
       };
-      return params.file !== undefined
-        ? client.withDocumentOpen(params.file, run)
-        : run();
+      return file !== undefined ? client.withDocumentOpen(file, run) : run();
     },
   });
 }
@@ -458,7 +480,11 @@ function makeSymbolsOverviewTool(ctx: LspCtx, description: string): AciToolDef {
       execCtx?: ToolExecutionContext
     ): Promise<unknown> => {
       const params = validate(input) as FileInput;
-      const { client, failure } = await getClientDetailed(ctx, params.file);
+      // ONE active-root read per entry: root finding, policy check, document
+      // open, and request URI all see the same resolved path.
+      const entry = activeRootEntry(ctx, params.file);
+      const { file } = entry;
+      const { client, failure } = await getClientDetailed(ctx, file);
       if (!client) {
         return renderNoServer(
           ctx,
@@ -466,17 +492,17 @@ function makeSymbolsOverviewTool(ctx: LspCtx, description: string): AciToolDef {
           params.file
         );
       }
-      const denial = await documentOpenDenial(ctx, params.file);
+      const denial = await documentOpenDenial(ctx, file);
       if (denial !== null) return denial;
       const timeoutMs = ctx.requestTimeoutMs ?? DEFAULT_LSP_REQUEST_TIMEOUT_MS;
       const cancel = createRequestCancellation(execCtx, timeoutMs);
-      return client.withDocumentOpen(params.file, async () => {
+      return client.withDocumentOpen(file, async () => {
         try {
           const result = await requestOrMethodNotFoundSentinel(
             client,
             method,
             {
-              textDocument: { uri: pathToFileURL(params.file).href },
+              textDocument: { uri: pathToFileURL(file).href },
             },
             cancel.token
           );
