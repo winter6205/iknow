@@ -235,3 +235,9 @@ docs/integration-materials.env.example
 # docs/archive/ 已被上方 archive/ 规则覆盖，无需重复。
 docs/handoff/
 docs/security-boundaries.md
+
+# 本地生成的 walkthrough 单文件产物（193KB HTML + docmap），
+# 仅本地保留、不回仓。
+docs/walkthrough.html
+docs/iknow-walkthrough.html
+docs/.walkthrough.docmap.json
