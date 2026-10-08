@@ -1152,7 +1152,9 @@ type HubPrivate = {
     conversationId: string;
     currentRoot: string;
     provisionedRoot: string;
+    intent?: { acceptedAt: bigint };
   }) => void;
+  mintRebindIntent: () => { acceptedAt: bigint };
   enterWorktree: (ctx: {
     conversationId?: string;
     root: string;
@@ -1293,6 +1295,261 @@ describe("workspace-root-required T3 — Hub dirty-root conditional save", () =>
       priorMessages: session.messages,
     });
     expect((await store.load(conversationId)).workspaceRoot).toBe(reboundRoot);
+  });
+
+  // #1227: the pending root is superseded by RECENCY, not held first-wins.
+  // A create-then-exit in one run is sequential (both tools are
+  // isConcurrencySafe:false, so executeAll runs them in separate waves), so
+  // the later exit must persist the main checkout. The old first-wins guard
+  // dropped the exit root and persisted the stale worktree.
+  it("persists the LATEST successful rebind: create-then-exit in one run saves the main checkout, not the worktree", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const privateApi = privateHub(hub);
+
+    const worktreeRoot = await privateApi.provisionWorktree({
+      conversationId,
+      root: repo,
+    });
+    const exitedRoot = await privateApi.exitWorktree({
+      conversationId,
+      root: worktreeRoot,
+    });
+    expect(exitedRoot).toBe(repo);
+
+    // nothing written until the conditional save
+    expect((await store.load(conversationId)).workspaceRoot).toBe(repo);
+
+    const session = await store.load(conversationId);
+    await privateApi.conditionalSave({
+      conversationId,
+      session,
+      result: completedResult(),
+      priorMessages: session.messages,
+    });
+
+    // the newest successful rebind wins; a fresh store observes it
+    const reloaded = await new SessionStore(baseDir, process.cwd()).load(
+      conversationId
+    );
+    expect(reloaded.workspaceRoot).toBe(repo);
+    // the tree is preserved — exit never removes it
+    expect(existsSync(worktreeRoot)).toBe(true);
+    expect(git(repo, "worktree", "list")).toContain(worktreeRoot);
+  });
+
+  // #1227: only the exact pending VERSION a save persisted may be cleared —
+  // not merely a version whose path string is equal. ABA over A -> B -> A:
+  // a save in flight persists A(v1); before it resolves, the session leaves
+  // to B and re-enters A, publishing A(v2) — the same path, a new version.
+  // A string-equality consume would drop v2 unpersisted.
+  it("a same-path rebind published during a save is NOT consumed by that save (ABA)", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId: convA } = await makeHubWithSession(repo);
+    const { conversationId: convB } = await makeHubWithSession(repo);
+    const privateApi = privateHub(hub);
+
+    const wtA = await privateApi.provisionWorktree({
+      conversationId: convA,
+      root: repo,
+    });
+    // B enters A's tree -> pending A(v1)
+    await privateApi.enterWorktree({
+      conversationId: convB,
+      root: repo,
+      targetConversationId: convA,
+    });
+
+    const session = await store.load(convB);
+    const realSave = store.save.bind(store);
+    const spy = vi.spyOn(store, "save").mockImplementationOnce(async (arg) => {
+      await realSave(arg);
+      // while that save is in flight: leave to the main repo, then re-enter
+      // the same tree -> pending A(v2), byte-identical path to A(v1)
+      await privateApi.exitWorktree({ conversationId: convB, root: wtA });
+      await privateApi.enterWorktree({
+        conversationId: convB,
+        root: repo,
+        targetConversationId: convA,
+      });
+    });
+
+    await privateApi.conditionalSave({
+      conversationId: convB,
+      session,
+      result: completedResult(),
+      priorMessages: session.messages,
+    });
+    spy.mockRestore();
+    expect((await store.load(convB)).workspaceRoot).toBe(wtA);
+
+    // A(v2) survived the save that persisted A(v1): it is still pending. A
+    // conditional save that would otherwise persist NOTHING (turnCount 0, so
+    // the checkpoint decision is "none") must therefore still write, because a
+    // pending root exists. Under string-equality consume it was wrongly dropped
+    // and this save is skipped.
+    const after = await store.load(convB);
+    const saveSpy = vi.spyOn(store, "save");
+    expect(
+      await privateApi.conditionalSave({
+        conversationId: convB,
+        session: after,
+        result: {
+          ...completedResult(),
+          turnCount: 0,
+          stopReason: "cancelled",
+          finalText: null,
+        },
+        priorMessages: after.messages,
+      })
+    ).toBe(true);
+    expect(saveSpy).toHaveBeenCalledTimes(1);
+    expect((await store.load(convB)).workspaceRoot).toBe(wtA);
+
+    // and that version is consumed exactly once
+    saveSpy.mockClear();
+    const settled = await store.load(convB);
+    await privateApi.conditionalSave({
+      conversationId: convB,
+      session: settled,
+      result: {
+        ...completedResult(),
+        turnCount: 0,
+        stopReason: "cancelled",
+        finalText: null,
+      },
+      priorMessages: settled.messages,
+    });
+    expect(saveSpy).not.toHaveBeenCalled();
+    saveSpy.mockRestore();
+  });
+
+  // #1227: a save that fails retains the pending root for retry; a newer
+  // rebind arriving DURING that save must still be pending afterwards.
+  it("a newer rebind arriving during a save stays pending after that save completes", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId: convA } = await makeHubWithSession(repo);
+    const { conversationId: convB } = await makeHubWithSession(repo);
+    const privateApi = privateHub(hub);
+
+    const wtA = await privateApi.provisionWorktree({
+      conversationId: convA,
+      root: repo,
+    });
+    await privateApi.enterWorktree({
+      conversationId: convB,
+      root: repo,
+      targetConversationId: convA,
+    });
+
+    const session = await store.load(convB);
+    const realSave = store.save.bind(store);
+    const slowSave = vi
+      .spyOn(store, "save")
+      .mockImplementationOnce(async (arg) => {
+        await realSave(arg);
+        // a newer successful rebind lands while this save is in flight
+        await privateApi.exitWorktree({ conversationId: convB, root: wtA });
+      });
+
+    await privateApi.conditionalSave({
+      conversationId: convB,
+      session,
+      result: completedResult(),
+      priorMessages: session.messages,
+    });
+    slowSave.mockRestore();
+
+    // the older save wrote the worktree; the newer exit must NOT have been
+    // consumed by it and must still be pending -> the next save persists repo
+    expect((await store.load(convB)).workspaceRoot).toBe(wtA);
+    await persistDirtyRoot(hub, convB);
+    expect((await store.load(convB)).workspaceRoot).toBe(repo);
+  });
+
+  // #1227: the retryable-root protection the first-wins guard was added for.
+  // Two provisions racing on one conversation are structurally identical —
+  // `provision()` returns the in-flight promise or the already-bound root —
+  // so acceptance ordering cannot clobber a competing provision's root, and a
+  // failed save still leaves the root for the next attempt.
+  it("a competing provision does not clobber a retryable root, and a failed save keeps it for retry", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const privateApi = privateHub(hub);
+
+    const [first, second] = await Promise.all([
+      privateApi.provisionWorktree({ conversationId, root: repo }),
+      privateApi.provisionWorktree({ conversationId, root: repo }),
+    ]);
+    // the racing provisions agree on one root; acceptance ordering is a no-op
+    expect(first).toBe(second);
+
+    const session = await store.load(conversationId);
+    const failed = vi.spyOn(store, "save").mockRejectedValueOnce({
+      kind: "write_failed",
+      conversation_id: conversationId,
+    });
+    await expect(
+      privateApi.conditionalSave({
+        conversationId,
+        session,
+        result: completedResult(),
+        priorMessages: session.messages,
+      })
+    ).rejects.toMatchObject({ kind: "write_failed" });
+    failed.mockRestore();
+
+    // still pending after the failure — retryable, not lost
+    await persistDirtyRoot(hub, conversationId);
+    expect((await store.load(conversationId)).workspaceRoot).toBe(first);
+  });
+
+  // #1227: publication is ordered by ACCEPTANCE, not completion. A provision
+  // accepted first but completing AFTER a newer exit published must not
+  // resurrect the worktree root — plain completion-order last-writer-wins
+  // would persist the stale worktree here and reproduce the #1227 symptom.
+  // Reachability: the ACI tool path serializes these seams (all three tools are
+  // `isConcurrencySafe: false`), so this drives the public hub seam directly.
+  it("a stale provision completing after a newer accepted exit does not resurrect the worktree root", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+    const privateApi = privateHub(hub);
+
+    const worktreeRoot = join(repo, ".iknow", "worktrees", conversationId);
+    await privateApi.provisionWorktree({ conversationId, root: repo });
+
+    // The hazard, driven through the intent API: a provision is ACCEPTED
+    // (intent minted) and stalls before publishing; a newer exit then publishes
+    // the main checkout; the stalled provision finally publishes LAST. Plain
+    // completion-order last-writer-wins persists the stale worktree here.
+    const staleIntent = privateApi.mintRebindIntent();
+    const exited = await privateApi.exitWorktree({
+      conversationId,
+      root: worktreeRoot,
+    });
+    expect(exited).toBe(repo);
+    // the stalled provision now completes, publishing after the newer exit
+    privateApi.markWorktreeRootDirty({
+      conversationId,
+      currentRoot: repo,
+      provisionedRoot: worktreeRoot,
+      intent: staleIntent,
+    });
+
+    const session = await store.load(conversationId);
+    await privateApi.conditionalSave({
+      conversationId,
+      session,
+      result: completedResult(),
+      priorMessages: session.messages,
+    });
+    // the newer accepted exit wins: the stale provision was dropped
+    expect((await store.load(conversationId)).workspaceRoot).toBe(repo);
   });
 
   // ADR-0037 §6 amendment 2026-09-07:

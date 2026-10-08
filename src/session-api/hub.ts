@@ -1357,12 +1357,27 @@ function hostTurnError(err: unknown): unknown {
   return isNativeStatePortError(cause) ? cause : err;
 }
 
+/** One rebind seam's acceptance record (#1227). Minted before the provisioner is
+ *  awaited, so `acceptedAt` orders rebinds by acceptance rather than by which
+ *  provisioner happened to finish last. */
+interface RebindIntent {
+  readonly acceptedAt: bigint;
+}
+
 export class SessionHub {
   private readonly store: SessionStore;
   /** ADR-0037: task-worktree build + this-session-only root rebind host seam. */
   private readonly worktreeProvisioner: TaskWorktreeProvisioner;
-  /** Roots returned by provision but not yet persisted with the turn. */
-  private readonly dirtyWorktreeRoots = new Map<string, string>();
+  /** Roots returned by a successful rebind but not yet persisted with the turn.
+   *  Ordered by ACCEPTANCE, not completion (#1227): the stored `intent` is the
+   *  identity a save must match to clear the record, so a rebind republished
+   *  mid-save survives even when it carries a byte-identical path. */
+  private readonly dirtyWorktreeRoots = new Map<
+    string,
+    { readonly root: string; readonly intent: RebindIntent }
+  >();
+  /** Monotonic rebind acceptance counter; `bigint` so it cannot wrap. */
+  private lastRebindSequence = 0n;
   /** ADR-0136 §4: the published state a session-ENTRY recovery restored, one
    * shot per conversation: the next turn's model context (spec §2.1). */
   private readonly restoredContexts = new Map<
@@ -1769,6 +1784,10 @@ export class SessionHub {
    * session contributes no anchor (fail-closed contract unchanged).
    */
   async provisionWorktree(ctx: WorktreeProvisionContext): Promise<string> {
+    // Mint FIRST, before any await: this seam is now the newest accepted
+    // rebind, and a later-accepted seam that publishes first must win over it.
+    const intent =
+      ctx.conversationId === undefined ? undefined : this.mintRebindIntent();
     const anchorSessionRoot = await this.loadSessionWorkspaceRoot(
       ctx.conversationId
     );
@@ -1778,11 +1797,14 @@ export class SessionHub {
         ? undefined
         : { sessionWorkspaceRoot: anchorSessionRoot }
     );
-    if (ctx.conversationId !== undefined) {
+    // A thrown provision publishes nothing; its typed error propagates and the
+    // pending root from the last success stays retryable.
+    if (ctx.conversationId !== undefined && intent !== undefined) {
       this.markWorktreeRootDirty({
         conversationId: ctx.conversationId,
         currentRoot: ctx.root,
         provisionedRoot,
+        intent,
       });
     }
     return provisionedRoot;
@@ -1818,12 +1840,15 @@ export class SessionHub {
     root: string;
     targetConversationId: string;
   }): Promise<{ path: string; receipt: string }> {
+    const intent =
+      ctx.conversationId === undefined ? undefined : this.mintRebindIntent();
     const entered = await this.worktreeProvisioner.enter(ctx);
-    if (ctx.conversationId !== undefined) {
+    if (ctx.conversationId !== undefined && intent !== undefined) {
       this.markWorktreeRootDirty({
         conversationId: ctx.conversationId,
         currentRoot: ctx.root,
         provisionedRoot: entered.path,
+        intent,
       });
     }
     return entered;
@@ -1842,6 +1867,8 @@ export class SessionHub {
     conversationId?: string;
     root: string;
   }): Promise<string> {
+    const intent =
+      ctx.conversationId === undefined ? undefined : this.mintRebindIntent();
     const anchorSessionRoot = await this.loadSessionWorkspaceRoot(
       ctx.conversationId
     );
@@ -1852,11 +1879,12 @@ export class SessionHub {
         ? { sessionWorkspaceRoot: anchorSessionRoot }
         : {}),
     });
-    if (ctx.conversationId !== undefined) {
+    if (ctx.conversationId !== undefined && intent !== undefined) {
       this.markWorktreeRootDirty({
         conversationId: ctx.conversationId,
         currentRoot: ctx.root,
         provisionedRoot: repoRoot,
+        intent,
       });
     }
     return repoRoot;
@@ -1881,13 +1909,38 @@ export class SessionHub {
     readonly conversationId: string;
     readonly currentRoot: string;
     readonly provisionedRoot: string;
+    /** Absent only on a direct internal publish (tests) with no seam to order against. */
+    readonly intent?: RebindIntent;
   }): void {
     if (opts.provisionedRoot === opts.currentRoot) return;
-    // Keep the first successful changed root until its save succeeds. This
-    // prevents a concurrent provision result from replacing a retryable root.
-    if (!this.dirtyWorktreeRoots.has(opts.conversationId)) {
-      this.dirtyWorktreeRoots.set(opts.conversationId, opts.provisionedRoot);
+    // #1227 linearization: publication order is ACCEPTANCE order, not
+    // completion order. A seam mints its acceptance sequence before awaiting
+    // the provisioner, so a stale completion landing after a newer accepted
+    // rebind already published is dropped instead of clobbering it — plain
+    // completion-order last-writer-wins would resurrect the bug whenever the
+    // slower call happens to finish last.
+    const published = this.dirtyWorktreeRoots.get(opts.conversationId);
+    if (
+      published !== undefined &&
+      opts.intent !== undefined &&
+      published.intent.acceptedAt > opts.intent.acceptedAt
+    ) {
+      return;
     }
+    this.dirtyWorktreeRoots.set(opts.conversationId, {
+      root: opts.provisionedRoot,
+      intent: opts.intent ?? this.mintRebindIntent(),
+    });
+  }
+
+  /** Mint this seam's acceptance record. Called BEFORE awaiting the
+   *  provisioner, so ordering compares acceptance, never completion. The
+   *  sequence is a bigint: it cannot overflow within any process lifetime, so
+   *  there is no wrap-around ordering hazard to defend. */
+  private mintRebindIntent(): RebindIntent {
+    const next = this.lastRebindSequence + 1n;
+    this.lastRebindSequence = next;
+    return { acceptedAt: next };
   }
 
   /**
@@ -3509,12 +3562,12 @@ export class SessionHub {
    *  workspaceRoot: Rejected"). The hub-side live value is the dirty-root
    *  record: `markWorktreeRootDirty` runs on every successful
    *  provision/enter/exit seam — the same seam resolution that moves the
-   *  engine's `LiveTaskRoot` cell — and the record is cleared only once
-   *  conditionalSave has persisted the new root. So while the record is
-   *  present the file's root is stale and writes must follow the record;
-   *  absent, the persisted root IS the live root. `rootIdentity` is derived
-   *  from the same live value (`rootIdentityFor(live)`), and `relPath` in
-   *  every op is measured from it.
+   *  engine's `LiveTaskRoot` cell — and the latest published root is cleared
+   *  only once conditionalSave has persisted that exact version. So while the
+   *  record is present the file's root is stale and writes must follow the
+   *  record; absent, the persisted root IS the live root. `rootIdentity` is
+   *  derived from the same live value (`rootIdentityFor(live)`), and `relPath`
+   *  in every op is measured from it.
    *
    *  The abandoned set spans two ledgers (ADR-0121): the parent's own
    *  stamped events, plus every worker whose `spawn_subagent` tool_use lives
@@ -3543,7 +3596,7 @@ export class SessionHub {
     ]);
     const { workspaceRoot } = await this.store.load(conversationId);
     const liveRoot =
-      this.dirtyWorktreeRoots.get(conversationId) ?? workspaceRoot;
+      this.dirtyWorktreeRoots.get(conversationId)?.root ?? workspaceRoot;
     if (liveRoot === undefined) {
       // No live task root to restore into: same family as an unreadable blob
       // (ADR-0121) — while ops remain, the transcript must not advance past
@@ -4279,11 +4332,10 @@ export class SessionHub {
       // engine writes to. An unreadable log has no recorded root to read, and
       // the process cwd is the only honest last resort.
       roots: {
-        resolve: (file) =>
-          resolveLiveRoot({
-            ...(this.dirtyWorktreeRoots.get(conversationId) !== undefined
-              ? { dirtyRoot: this.dirtyWorktreeRoots.get(conversationId) }
-              : {}),
+        resolve: (file) => {
+          const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId)?.root;
+          return resolveLiveRoot({
+            ...(dirtyRoot !== undefined ? { dirtyRoot } : {}),
             ...(file?.workspaceRoot !== undefined
               ? { recordedRoot: file.workspaceRoot }
               : {}),
@@ -4291,7 +4343,8 @@ export class SessionHub {
               ? { boundRoot: this.boundRoot }
               : {}),
             cwd: file?.cwd ?? process.cwd(),
-          }),
+          });
+        },
         identityOf: (liveRoot) => this.rootIdentityFor(liveRoot),
       },
       ...(this.onRecoveryProgress !== undefined
@@ -4412,8 +4465,8 @@ export class SessionHub {
     const { conversationId, session, result, priorMessages } = opts;
     const diskPrior = opts.diskPrior ?? priorMessages;
     const decision = decideCheckpointPersist(result, priorMessages);
-    const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId);
-    if (decision.kind === "none" && dirtyRoot === undefined) return false;
+    const pendingRoot = this.dirtyWorktreeRoots.get(conversationId);
+    if (decision.kind === "none" && pendingRoot === undefined) return false;
     const now = new Date().toISOString();
     const updated =
       decision.kind === "none"
@@ -4527,11 +4580,14 @@ export class SessionHub {
     conversationId: string,
     save: (root: string | undefined) => Promise<void>
   ): Promise<void> {
-    const dirtyRoot = this.dirtyWorktreeRoots.get(conversationId);
-    await save(dirtyRoot);
+    const pending = this.dirtyWorktreeRoots.get(conversationId);
+    await save(pending?.root);
+    // Clear only the exact intent this save persisted. A rebind published while
+    // the save was in flight is a newer intent and stays pending, even when its
+    // path is byte-identical (#1227).
     if (
-      dirtyRoot !== undefined &&
-      this.dirtyWorktreeRoots.get(conversationId) === dirtyRoot
+      pending !== undefined &&
+      this.dirtyWorktreeRoots.get(conversationId)?.intent === pending.intent
     ) {
       this.dirtyWorktreeRoots.delete(conversationId);
     }
