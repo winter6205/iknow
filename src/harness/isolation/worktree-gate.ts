@@ -19,7 +19,11 @@
  *     `provision` callback; the deterministic task-worktree path shape
  *     (`isTaskWorktreePath`) and identity (`taskWorktreeOwnerOf`) live here
  *     because the gate routes on them — session-api re-exports them as the
- *     single SSOT.
+ *     single SSOT. Boundness (`isBoundWorktreeRoot`, issue 1231) lives here
+ *     too: the gitdir entered-stamp (`enteredStampOf` / `markWorktreeEntered`)
+ *     and linked-worktree pointer resolution are git-layer facts the gate's
+ *     writability routing depends on, so the predicate stays one SSOT that
+ *     session-api / read-policy / worker re-import (never a second copy).
  *
  * Failure semantics (ADR-0037 §6, fail-closed):
  *   - every failure exits as a typed `WorktreeIsolationError` (non-empty,
@@ -41,8 +45,8 @@
  * OFF restores main-repo writes on the next wave.
  */
 import { execFile } from "node:child_process";
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { existsSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, resolve } from "node:path";
 import { errorMessage } from "../errors.js";
 import { VIOLATION_PREFIXES } from "../permission/prefixes.js";
 import { FILE_WRITE_TOOL_NAMES } from "../aci/tools/symbol-mutate.js";
@@ -226,6 +230,15 @@ export type WorktreeIsolationErrorKind =
   | "current_worktree"
   | "worktree_remove_failed"
   | "branch_delete_failed"
+  /**
+   * issue 1231 — `remove-worktree` against a checkout OUTSIDE
+   * `<repoRoot>/.iknow/worktrees/`. Such a tree is one this provisioner never
+   * created (an operator's own `git worktree add`, or a session that entered
+   * it), so removing it would destroy work the operator owns. Distinct from
+   * `worktree_not_found` — the tree plainly exists; it is simply not ours to
+   * delete.
+   */
+  | "external_worktree"
   /**
    * ADR-0070 — `enter-worktree`
    * Pre-occupancy check: the target tree is already pointed at by
@@ -617,6 +630,16 @@ export function taskWorktreeBranch(
 const OWNER_SIDECAR_NAME = "iknow-conversation-id";
 
 /**
+ * gitdir-sidecar name recording an EXPLICIT enter of a linked worktree
+ * (issue 1231), beside the existing `iknow-conversation-id` owner sidecar.
+ * Written by `markWorktreeEntered` once `enter` succeeds; read by
+ * `enteredStampOf`. Durable (survives restart, unlike the in-process `bound`
+ * latch), so the boundness of an external root is a record of explicit entry,
+ * never a guess.
+ */
+export const ENTERED_STAMP_NAME = "iknow-entered-by";
+
+/**
  * True when `root` is shaped as `<any>/.iknow/worktrees/<leaf>`.
  * Shape only — not identity. Labeled name-only leaves still match.
  */
@@ -626,6 +649,24 @@ export function isTaskWorktreePath(root: string): boolean {
     basename(dirname(root)) === "worktrees" &&
     basename(dirname(dirname(root))) === ".iknow"
   );
+}
+
+/**
+ * True when `root` is a LINKED git worktree checkout (`.git` is a file, not a
+ * dir). Moved here verbatim from `session-api/worktree-rebind.ts` (issue 1231,
+ * Slice A): the "any linked worktree" shape fact is git-layer knowledge the
+ * boundness predicate and `mainCheckoutOf` both need, so it lives beside
+ * `isTaskWorktreePath` rather than crossing the module boundary. Pure shape /
+ * stat — no git call, never throws.
+ */
+export function isLinkedWorktreeRoot(root: string): boolean {
+  const dotGit = join(root, ".git");
+  if (!existsSync(dotGit)) return false;
+  try {
+    return statSync(dotGit).isFile();
+  } catch {
+    return false;
+  }
 }
 
 function parseGitdirPointer(gitMeta: string): string | undefined {
@@ -664,17 +705,30 @@ function writeOwnerSidecar(worktreePath: string, conversationId: string): void {
   }
 }
 
-function ownerFromGitdirSidecar(root: string): string | undefined {
+/**
+ * Resolve the per-worktree gitdir from `<root>/.git` (the `gitdir:` pointer
+ * file git writes for a LINKED worktree). Returns undefined when `.git` is
+ * absent / a directory (main checkout) / unreadable / not a gitdir pointer —
+ * never throws. Single resolution SSOT shared by the owner sidecar and the
+ * entered-stamp readers (issue 1231), so both sidecars are always found in
+ * the same gitdir.
+ */
+function gitdirPointerFor(root: string): string | undefined {
+  if (root.length === 0) return undefined; // no cwd-relative `.git` probe
   const gitFile = join(root, ".git");
   if (!existsSync(gitFile)) return undefined;
   let gitMeta: string;
   try {
     gitMeta = readFileSync(gitFile, "utf8");
   } catch {
-    // EXIT: .git pointer unreadable — fall through to path inversion
+    // EXIT: .git pointer unreadable — no gitdir to resolve
     return undefined;
   }
-  const gitdir = parseGitdirPointer(gitMeta);
+  return parseGitdirPointer(gitMeta);
+}
+
+function ownerFromGitdirSidecar(root: string): string | undefined {
+  const gitdir = gitdirPointerFor(root);
   if (gitdir === undefined) return undefined;
   const sidecar = join(gitdir, OWNER_SIDECAR_NAME);
   if (!existsSync(sidecar)) return undefined;
@@ -685,6 +739,65 @@ function ownerFromGitdirSidecar(root: string): string | undefined {
     // EXIT: sidecar unreadable — fall through to path inversion
     return undefined;
   }
+}
+
+/**
+ * Read the explicit-enter stamp from the target's gitdir sidecar
+ * (`<gitdir>/iknow-entered-by`, resolved by the SAME `gitdirPointerFor` the
+ * owner sidecar uses). The value is validated against
+ * `SAFE_CONVERSATION_ID_RE`; every failure (no `.git`, main checkout,
+ * unreadable, malformed) degrades to undefined — fail-closed, never throws.
+ */
+export function enteredStampOf(root: string): string | undefined {
+  const gitdir = gitdirPointerFor(root);
+  if (gitdir === undefined) return undefined;
+  try {
+    const id = readFileSync(join(gitdir, ENTERED_STAMP_NAME), "utf8").trim();
+    return SAFE_CONVERSATION_ID_RE.test(id) ? id : undefined;
+  } catch {
+    // EXIT: stamp absent / unreadable — a never-entered root stays unbound.
+    return undefined;
+  }
+}
+
+/**
+ * Record an explicit enter of `root` by writing the stamp into the target's
+ * gitdir sidecar. Best-effort: the enter itself already succeeded, so a
+ * stamp-write failure (a main checkout with no gitdir pointer, read-only
+ * gitdir, I/O error) must NOT throw — mirroring the create-side
+ * `writeOwnerSidecar` contract, minus its fail-closed throw, because this
+ * runs on the post-success path where the enter must not be unwound.
+ */
+export function markWorktreeEntered(
+  root: string,
+  conversationId: string
+): void {
+  try {
+    const gitdir = gitdirPointerFor(root);
+    if (gitdir === undefined) return;
+    writeFileSync(join(gitdir, ENTERED_STAMP_NAME), `${conversationId}\n`, {
+      encoding: "utf8",
+    });
+  } catch {
+    // Best-effort: a failed stamp leaves the root unbound, never a hard error.
+  }
+}
+
+/**
+ * THE boundness predicate (issue 1231 SSOT): true when `root` is a writable
+ * bound worktree root. Two classes:
+ *   - task-worktree-shaped `<repo>/.iknow/worktrees/<leaf>` (path shape);
+ *   - a linked worktree carrying an explicit-enter stamp (`enteredStampOf`).
+ *
+ * A linked worktree WITHOUT a stamp (e.g. an operator running `iknow chat`
+ * from a random registered checkout) is NOT bound: making it writable would
+ * reopen the hole the ro-bind fence closes for bash (issue 1231 design). So
+ * shape-only adoption of `isLinkedWorktreeRoot` is deliberately NOT this
+ * predicate. Writability call sites use THIS; TASK-SHAPE sites keep
+ * `isTaskWorktreePath`.
+ */
+export function isBoundWorktreeRoot(root: string): boolean {
+  return isTaskWorktreePath(root) || enteredStampOf(root) !== undefined;
 }
 
 /** Return the decorative label from a task-worktree leaf, if present. */
@@ -799,25 +912,60 @@ export function worktreeGuidance(
 }
 
 /**
- * ADR-0037 §4: the stable main checkout
- * that owns `root` — `root` itself when it is not task-worktree-shaped,
- * otherwise the repo three levels up (`<main>/.iknow/worktrees/<leaf>`).
+ * ADR-0037 §4 / ADR-0019: the stable main checkout
+ * that owns `root` — `root` itself when it is neither task-worktree-shaped nor
+ * a linked worktree, otherwise the checkout the git layer resolves to.
+ *
+ * Two shapes:
+ *   - task worktree `<main>/.iknow/worktrees/<leaf>` → the repo three levels up
+ *     (path-shape SSOT, unchanged — no disk read);
+ *   - an EXTERNAL linked worktree (issue 1231 discovery: a registered checkout
+ *     outside `.iknow/`, so `isTaskWorktreePath` is false but `.git` is a file)
+ *     → resolve the gitdir pointer in `<root>/.git`, honour a `commondir` file
+ *     when git wrote one, and return the parent of the common git dir. Without
+ *     this, an entered external root would drift `productRoot` /
+ *     `projectIdentityRoot` / the memory namespace onto the external checkout
+ *     (an ADR-0019 divergence introduced by the boundness change).
  *
  * This is the `productRoot` derivation hosts need when they hold **only** a
  * session root: after a rebind (and after a restart that resumes a session
  * already anchored on a tree) the session root is the tree, and identity /
- * per-root state must still resolve to the main checkout. Same naming SSOT as
- * `isTaskWorktreePath`, so it is a pure path derivation — no git call, no
- * `process.cwd()` fallback.
+ * per-root state must still resolve to the main checkout. Filesystem reads
+ * only — no git subprocess, no `process.cwd()` fallback.
  */
 export function mainCheckoutOf(root: string): string {
-  return isTaskWorktreePath(root) ? dirname(dirname(dirname(root))) : root;
+  if (isTaskWorktreePath(root)) return dirname(dirname(dirname(root)));
+  // Empty / blank root: no `.git` to inspect. `join("", ".git")` would probe a
+  // cwd-relative path, so guard before the linked-worktree branch.
+  if (root.length === 0) return root;
+  if (!isLinkedWorktreeRoot(root)) return root;
+  const gitdir = gitdirPointerFor(root);
+  if (gitdir === undefined) return root;
+  return dirname(commonGitDirOf(resolve(root, gitdir)));
+}
+
+/**
+ * Resolve a linked worktree's COMMON git dir from its per-worktree gitdir.
+ * git writes a `commondir` file (a path relative to `gitdir`) for a worktree
+ * whose gitdir lives elsewhere; when present it is authoritative. Absent →
+ * the default `<common>/.git/worktrees/<name>` layout, whose grandparent is
+ * the common git dir. Reads only; never throws.
+ */
+function commonGitDirOf(gitdir: string): string {
+  const commondirFile = join(gitdir, "commondir");
+  try {
+    const raw = readFileSync(commondirFile, "utf8").trim();
+    if (raw.length > 0) return resolve(gitdir, raw);
+  } catch {
+    // EXIT: no commondir / unreadable — fall through to the default layout.
+  }
+  return dirname(dirname(gitdir));
 }
 
 /**
  * issue 1059 — UNBOUND_FENCE decision helper: the exact condition under
  * which a bash fence must physically `--ro-bind` the main checkout (gate ON
- * and the live wave root is the main checkout, i.e. NOT a task worktree).
+ * and the live wave root is the main checkout, i.e. NOT a bound worktree).
  * Returns the main checkout path to bind read-only, or undefined when the
  * session is bound (or the gate is off) and the fence shape stays byte-
  * identical to before. One predicate, three consumers (foreground bash,
@@ -829,7 +977,7 @@ export function unboundFenceMainCheckout(args: {
   root: string;
 }): string | undefined {
   if (!args.gateOn) return undefined;
-  if (isTaskWorktreePath(args.root)) return undefined;
+  if (isBoundWorktreeRoot(args.root)) return undefined;
   return args.root;
 }
 
@@ -898,6 +1046,19 @@ export interface WorktreeEnterContext {
   readonly root: string;
   /** Owner conversation id whose task worktree to enter. */
   readonly targetConversationId: string;
+  /**
+   * Issue 1231 — exact-path selector, for a checkout that carries no
+   * conversation id or label (an operator's own worktree, or any registered
+   * external tree). Mutually exclusive with `targetConversationId`: the host
+   * resolves a `path` against the git listing and never joins it onto
+   * anything, so a caller cannot smuggle a traversal through this field.
+   *
+   * The field lives on this SSOT — not on a tool-local widened type — because
+   * the host seams thread this object by hand. A field declared only beside
+   * the tool is dropped by any per-field destructuring wrapper, which is
+   * exactly how `name` was lost before (hub.ts:4905-4908).
+   */
+  readonly path?: string;
 }
 
 /**
@@ -965,6 +1126,14 @@ export interface TaskWorktreeInfo {
   readonly dirty: boolean;
   /** Present only when the entry came from an orphaned task branch. */
   readonly stale?: true;
+  /**
+   * issue 1231 — a registered same-repo checkout that is NOT task-shaped
+   * (`isTaskWorktreePath` false): an operator's own linked worktree outside
+   * `.iknow/worktrees/`. It carries no conversationId of its own (empty
+   * string) and is entered by explicit path selector, never auto-provisioned;
+   * `remove-worktree` refuses an external row (Slice C).
+   */
+  readonly external?: true;
 }
 
 export interface WorktreeListContext {
@@ -1283,17 +1452,18 @@ export function createWorktreeIsolationExecutor(
     if (state.status === "bound" && state.boundRoot === snapshotRoot) {
       return undefined; // passthrough
     }
-    // Model-provision contract: a session on a non-task-worktree root
-    // (main repo) can never be bound — block with the ACI-tool notice and
-    // NEVER provision (no `git worktree add` on the execution path). The
-    // block is side-effect free; state stays open so later mutates re-block.
-    // The host seam below only notifies — persistence is the host's, and
-    // the block receipt itself is unchanged with or without a subscriber.
+    // Model-provision contract: a session on a non-bound root (main repo, or
+    // a linked worktree with no explicit-enter stamp) can never be bound —
+    // block with the ACI-tool notice and NEVER provision (no `git worktree
+    // add` on the execution path). The block is side-effect free; state stays
+    // open so later mutates re-block. The host seam below only notifies —
+    // persistence is the host's, and the block receipt itself is unchanged
+    // with or without a subscriber.
     //
     // `root` here is the **wave snapshot** of `liveTaskRoot` taken at
     // executeAll entry. mid-wave flips (create-worktree) do not
     // change this snapshot — rebind takes effect on the NEXT wave.
-    if (state.status === "open" && !isTaskWorktreePath(snapshotRoot)) {
+    if (state.status === "open" && !isBoundWorktreeRoot(snapshotRoot)) {
       const message = unboundMutateNotice();
       notifyUnboundBlocked(call, conversationId, turnId, message);
       return block(call.id, message);

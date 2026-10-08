@@ -88,10 +88,14 @@ const ALL_KINDS: readonly WorktreeIsolationErrorKind[] = [
   // (classification-table row; operator_required — the model cannot release
   // someone else's claim; see assertNotClaimed in worktree-rebind.ts).
   "worktree_claimed",
+  // issue 1231 — `remove-worktree` refusing an operator-owned checkout outside
+  // this repository's task worktree area (classification-table row;
+  // operator_required — the model cannot delete the operator's tree).
+  "external_worktree",
 ];
 
 describe("RECOVERABILITY — SC6 编译期穷尽", () => {
-  it("覆盖全部 17 个 kind（typecheck 是主防线，此处为防呆）", () => {
+  it("覆盖全部 18 个 kind（typecheck 是主防线，此处为防呆）", () => {
     expect(Object.keys(RECOVERABILITY).sort()).toEqual([...ALL_KINDS].sort());
   });
 

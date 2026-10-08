@@ -34,13 +34,16 @@
  * worktree fails closed with `foreign_worktree`.
  */
 import { copyFile, lstat, mkdir, readFile } from "node:fs/promises";
-import { dirname, join, relative, resolve } from "node:path";
-import { existsSync, statSync } from "node:fs";
+import { basename, dirname, join, relative, resolve } from "node:path";
+import { existsSync } from "node:fs";
 
 import {
   createTaskWorktree,
+  isBoundWorktreeRoot,
   isTaskWorktreePath,
+  isLinkedWorktreeRoot,
   mainCheckoutOf,
+  markWorktreeEntered,
   resolveTaskWorktreeLabel,
   taskWorktreeOwnerOf,
   taskWorktreePath,
@@ -166,11 +169,14 @@ export interface TaskWorktreeProvisioner {
   ): Promise<string>;
   /**
    * Explicit enter: move a session anchored at the MAIN repo onto an
-   * EXISTING task worktree of THIS repository (listing/path SSOT, selector =
-   * `targetConversationId`). Creates no tree and touches no foreign
-   * HEAD — the only effect is the caller's own rebind (store-mode persists
-   * workspaceRoot; hub-mode returns the root for the dirty-root
-   * conditional-save protocol). Idempotent per conversation.
+   * EXISTING checkout of THIS repository. The target is selected from the
+   * listing by `targetConversationId` (conversation id, task label, branch
+   * name, or leaf directory name), or by `path` (an exact path from the
+   * listing, issue #1231 — this is how an operator's own external checkout is
+   * addressed). Creates no tree and touches no foreign HEAD — the only
+   * effect is the caller's own rebind (store-mode persists workspaceRoot;
+   * hub-mode returns the root for the dirty-root conditional-save protocol)
+   * plus the durable explicit-enter stamp. Idempotent per conversation.
    *
    * Fail-closed: missing target → `worktree_not_found`; target that is not a
    * linked checkout or belongs to another repository → `foreign_worktree`;
@@ -193,9 +199,17 @@ export interface TaskWorktreeProvisioner {
    * anything else fails closed with typed `rebind_failed`.
    */
   exit(req: WorktreeExitRequest): Promise<string>;
-  /** List active task worktrees, optionally including orphaned task branches. */
+  /**
+   * List the repository's registered checkouts: task worktrees (with an
+   * orphaned task branch when `includeStale` is set) and — since issue #1231
+   * — registered linked checkouts outside the task dir, marked `external`.
+   */
   list(ctx: WorktreeListContext): Promise<ReadonlyArray<TaskWorktreeInfo>>;
-  /** Remove a clean, safe task worktree and optionally its task branch. */
+  /**
+   * Remove a clean, safe task worktree and optionally its task branch.
+   * External checkouts (issue #1231) are refused: this seam may never destroy
+   * an operator's own checkout.
+   */
   remove(ctx: WorktreeRemoveContext): Promise<WorktreeRemoval>;
   /**
    * True when `root` is a task worktree this provisioner created (or
@@ -218,9 +232,20 @@ export interface WorktreeProvisionAnchor {
 }
 
 /**
- * Enter request — the harness `WorktreeEnterContext` SSOT (no local copy).
+ * Enter request — the harness `WorktreeEnterContext` SSOT plus the optional
+ * exact-path selector (issue #1231).
+ *
+ * `targetConversationId` is the id / label / branch / leaf selector;
+ * `path` (when set) is an exact absolute path that must equal a listed
+ * worktree's path. The two are alternative selectors: `path` mode resolves
+ * only by exact path against the listing (no legacy task-path fallback) and
+ * skips the `targetConversationId` id-shape gate — a path carries separators
+ * by design, so it is constrained by the exact-path lookup instead of the
+ * segment regex.
  */
-export type WorktreeEnterRequest = WorktreeEnterContext;
+export type WorktreeEnterRequest = WorktreeEnterContext & {
+  readonly path?: string;
+};
 
 /**
  * Exit request: the harness `WorktreeExitContext` SSOT (engine root is
@@ -248,6 +273,7 @@ export interface WorktreeExitRequest extends WorktreeExitContext {
  */
 export {
   isTaskWorktreePath,
+  isLinkedWorktreeRoot,
   mainCheckoutOf,
   resolveTaskWorktreeLabel,
   taskWorktreeBranch,
@@ -273,17 +299,6 @@ export {
  * importers.
  */
 export { SAFE_CONVERSATION_ID_RE };
-
-/** True when `root` is a LINKED git worktree checkout (`.git` is a file, not a dir). */
-function isLinkedWorktreeRoot(root: string): boolean {
-  const dotGit = join(root, ".git");
-  if (!existsSync(dotGit)) return false;
-  try {
-    return statSync(dotGit).isFile();
-  } catch {
-    return false;
-  }
-}
 
 interface WorktreePorcelainRecord {
   readonly path: string;
@@ -379,8 +394,8 @@ function selectTaskWorktree(
   if (byConversation.length > 1) {
     throw new WorktreeIsolationError(
       "ambiguous_worktree",
-      `worktree isolation: conversation selector '${selector}' matches multiple task worktrees: ${byConversation
-        .map((entry) => entry.conversationId)
+      `worktree isolation: selector '${selector}' matches multiple worktrees: ${byConversation
+        .map((entry) => entry.path)
         .join(", ")}`
     );
   }
@@ -390,12 +405,161 @@ function selectTaskWorktree(
   if (byLabel.length > 1) {
     throw new WorktreeIsolationError(
       "ambiguous_worktree",
-      `worktree isolation: label '${selector}' is ambiguous; matching conversation ids: ${byLabel
-        .map((entry) => entry.conversationId)
+      `worktree isolation: selector '${selector}' is ambiguous; matching worktrees: ${byLabel
+        .map((entry) => entry.path)
+        .join(", ")}`
+    );
+  }
+
+  // Per-entry fallback for external rows (issue #1231): an external checkout
+  // has `conversationId === ""` and no label, so it is reachable only by its
+  // branch name or its leaf directory name. Ambiguity keeps the typed
+  // `ambiguous_worktree`; every diagnostic interpolates the SELECTOR and
+  // lists PATHS — never `conversationId`, which is the empty string on every
+  // external row and would render a blank list.
+  const byBranch = active.filter(
+    (entry) => entry.branch.length > 0 && entry.branch === selector
+  );
+  if (byBranch.length === 1) return byBranch[0];
+  if (byBranch.length > 1) {
+    throw new WorktreeIsolationError(
+      "ambiguous_worktree",
+      `worktree isolation: selector '${selector}' matches multiple worktrees by branch name: ${byBranch
+        .map((entry) => entry.path)
+        .join(", ")}`
+    );
+  }
+
+  const byLeaf = active.filter((entry) => basename(entry.path) === selector);
+  if (byLeaf.length === 1) return byLeaf[0];
+  if (byLeaf.length > 1) {
+    throw new WorktreeIsolationError(
+      "ambiguous_worktree",
+      `worktree isolation: selector '${selector}' matches multiple worktrees by leaf name: ${byLeaf
+        .map((entry) => entry.path)
         .join(", ")}`
     );
   }
   return undefined;
+}
+
+/**
+ * Exact-path selector for enter-worktree (issue #1231). The requested path
+ * must match a LISTED entry's path (resolved-normalized) — never a free-form
+ * path, never joined onto a root. `git worktree list` is the authority for
+ * which checkouts exist, so an exact match against its projection is the only
+ * safe way to accept an operator's own external checkout. Returns undefined
+ * when nothing matches, so the caller fails closed with `worktree_not_found`.
+ */
+function selectWorktreeByPath(
+  entries: ReadonlyArray<TaskWorktreeInfo>,
+  path: string
+): TaskWorktreeInfo | undefined {
+  const normalized = resolve(path);
+  return entries.find(
+    (entry) => entry.path.length > 0 && resolve(entry.path) === normalized
+  );
+}
+
+/**
+ * Project one `git worktree list --porcelain` record into a list row, or
+ * undefined when the record is not a discoverable checkout (issue #1231).
+ *
+ * Two row shapes:
+ *   - EXTERNAL — a linked worktree outside `<repoRoot>/.iknow/worktrees/`
+ *     (an operator's own `git worktree add`), surfaced so `list-worktrees`
+ *     shows it and `enter-worktree` can rebind onto one. The main checkout is
+ *     excluded by `isLinkedWorktreeRoot`: `.git` there is a DIRECTORY, only a
+ *     LINKED checkout has `.git` as a file. Same-repository needs no extra
+ *     proof — git only ever lists this repository's worktrees.
+ *   - TASK — the historical shape, byte-identical: still owner-resolvable
+ *     only, so an unowned task-shaped directory is dropped exactly as before.
+ */
+async function listWorktreeRow(
+  runGit: GitRunner,
+  record: {
+    readonly path: string;
+    readonly branch?: string;
+    readonly head?: string;
+  }
+): Promise<TaskWorktreeInfo | undefined> {
+  const dirty = await readWorktreeDirty(runGit, record.path);
+  const branch = record.branch ?? "";
+  if (isTaskWorktreePath(record.path)) {
+    const owner = taskWorktreeOwnerOf(record.path);
+    if (owner === undefined) return undefined;
+    return {
+      label: taskWorktreeLabelOf(record.path),
+      conversationId: owner,
+      path: record.path,
+      branch,
+      head: record.head ?? "",
+      dirty,
+    };
+  }
+  if (!isLinkedWorktreeRoot(record.path)) return undefined;
+  return {
+    label: undefined,
+    conversationId: "",
+    path: record.path,
+    branch,
+    head: record.head ?? "",
+    dirty,
+    external: true,
+  };
+}
+
+/**
+ * Segment-safety gate for the id/label selector (issue #1231). `path` mode
+ * skips it by design: a path carries separators, so it is constrained by an
+ * exact match against the listing instead (see `resolveEnterTarget`).
+ * Extracted from `enter` so that function's branch count reflects real
+ * decision points rather than selector validation.
+ */
+function assertSafeEnterSelector(
+  req: WorktreeEnterRequest,
+  hasRequestedPath: boolean
+): void {
+  if (hasRequestedPath) return;
+  if (SAFE_CONVERSATION_ID_RE.test(req.targetConversationId)) return;
+  throw new WorktreeIsolationError(
+    "rebind_failed",
+    `worktree isolation: target conversation id ${JSON.stringify(req.targetConversationId)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$); refusing to resolve a task worktree with it`
+  );
+}
+
+/**
+ * Resolve the enter target against the git listing (the source of truth for
+ * every registered checkout).
+ *
+ * `path` mode matches ONLY an exact registered path and has no legacy
+ * fallback — a path that is not a listed checkout is not enterable, which is
+ * what keeps a free-form path from resolving to an arbitrary directory. The
+ * id/label mode prefers an exact conversation id, then a unique label, then
+ * the per-entry branch/leaf fallback (external rows, issue #1231); its legacy
+ * UUID-only path fallback keeps old trees enterable even when a host uses a
+ * minimal git runner.
+ */
+function resolveEnterTarget(
+  req: WorktreeEnterRequest,
+  listed: ReadonlyArray<TaskWorktreeInfo>,
+  hasRequestedPath: boolean
+): string {
+  if (hasRequestedPath) {
+    const match = selectWorktreeByPath(listed, req.path!);
+    if (match === undefined) {
+      throw new WorktreeIsolationError(
+        "worktree_not_found",
+        `worktree isolation: no worktree of this repository is registered at ${req.path}; run list-worktrees to see the discoverable checkouts`
+      );
+    }
+    return match.path;
+  }
+  const selected = selectTaskWorktree(listed, req.targetConversationId);
+  return (
+    selected?.path ??
+    taskWorktreePath(req.root, req.targetConversationId, undefined)
+  );
 }
 
 async function runGitForLifecycle(
@@ -938,12 +1102,20 @@ export function createTaskWorktreeProvisioner(
     // workspaceRoot equals this engine's root has explicitly entered (or
     // created) this tree — the anchor is written only by a tool success plus
     // a session save, so it is the restart-safe explicit opt-in. Admit the
-    // mutate even when the tree belongs to ANOTHER conversation, but ONLY on
-    // task-worktree-shaped roots: an unrelated (manual) worktree persisted as
-    // workspaceRoot is never adopted and stays fail-closed foreign_worktree.
+    // mutate even when the tree belongs to ANOTHER conversation.
+    //
+    // The boundness half is `isBoundWorktreeRoot`, NOT the task-shape test
+    // (issue #1231). The two must agree: the harness gate admits a mutate on
+    // exactly the roots this predicate calls bound, so keeping the shape test
+    // here made a RESUMED session on an entered external worktree fail closed
+    // with `foreign_worktree` — the entered tree would have been writable only
+    // in the process that entered it. The stamp is what makes widening safe:
+    // it is written only by a successful `enter`, so a linked worktree that was
+    // merely cd'd into (never entered) still carries no stamp and still fails
+    // closed below.
     if (
       anchor?.sessionWorkspaceRoot === ctx.root &&
-      isTaskWorktreePath(ctx.root)
+      isBoundWorktreeRoot(ctx.root)
     ) {
       bound.set(conversationId, ctx.root);
       taskRoots.add(ctx.root);
@@ -1104,12 +1276,14 @@ export function createTaskWorktreeProvisioner(
         `worktree isolation: conversation id ${JSON.stringify(conversationId)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$); refusing to rebind with it`
       );
     }
-    if (!SAFE_CONVERSATION_ID_RE.test(req.targetConversationId)) {
-      throw new WorktreeIsolationError(
-        "rebind_failed",
-        `worktree isolation: target conversation id ${JSON.stringify(req.targetConversationId)} is not a safe path/branch segment (expected ^[A-Za-z0-9][A-Za-z0-9_-]*$); refusing to resolve a task worktree with it`
-      );
-    }
+    const requestedPath = req.path;
+    const hasRequestedPath =
+      requestedPath !== undefined && requestedPath.length > 0;
+    // The id-shape gate applies to the id/label selector only. `path` mode
+    // deliberately skips it: a path carries separators by design, so it is
+    // constrained instead to an EXACT match against the listing —
+    // never joined onto anything, never accepted free-form.
+    assertSafeEnterSelector(req, hasRequestedPath);
 
     // Enter only from the main repo: a caller already inside a linked
     // worktree must exit first — this structurally prevents nested task
@@ -1121,15 +1295,10 @@ export function createTaskWorktreeProvisioner(
       );
     }
 
-    // Resolve an exact conversation id first, then a unique decorative label.
-    // The list is the source of truth for labeled leaves; the legacy
-    // UUID-only path fallback keeps old trees enterable even when a host uses
-    // a minimal git runner.
+    // Resolve the target from the listing (source of truth for every
+    // registered checkout).
     const listed = await list({ root: req.root });
-    const selected = selectTaskWorktree(listed, req.targetConversationId);
-    const target =
-      selected?.path ??
-      taskWorktreePath(req.root, req.targetConversationId, undefined);
+    const target = resolveEnterTarget(req, listed, hasRequestedPath);
     const current = bound.get(conversationId);
     if (current === target) {
       return enterResultOf(target); // idempotent re-enter (zero writes)
@@ -1165,7 +1334,11 @@ export function createTaskWorktreeProvisioner(
     if (!existsSync(target)) {
       throw new WorktreeIsolationError(
         "worktree_not_found",
-        `worktree isolation: no task worktree matches '${req.targetConversationId}' at ${target}; check the conversation id or label, or create the tree first with the create-worktree tool`
+        `worktree isolation: no worktree matches ${
+          hasRequestedPath
+            ? `path ${requestedPath}`
+            : `'${req.targetConversationId}'`
+        } at ${target}; check the id, label, or path, or create the tree first with the create-worktree tool`
       );
     }
     if (!isLinkedWorktreeRoot(target)) {
@@ -1187,6 +1360,18 @@ export function createTaskWorktreeProvisioner(
     // outside SessionHub rebind the session file here; SessionHub omits the
     // store and persists the returned root through conditionalSave.
     await persistWorkspaceRoot(conversationId, target, "enter rebind");
+
+    // Durable explicit-enter stamp (issue #1231). This is the record that
+    // makes an EXTERNAL checkout (registered outside `.iknow/worktrees/`)
+    // writable for this session: the harness boundness predicate
+    // (`isBoundWorktreeRoot`) admits a root only when it is task-shaped OR
+    // carries this stamp, so the stamp must exist before the next wave's
+    // mutate is adjudicated. Written only after every validation AND the
+    // durable rebind succeeded — so a stamp is by construction the record of a
+    // SUCCESSFUL enter, never of a rejected one. Best-effort:
+    // `markWorktreeEntered` never throws, so a stamp I/O failure cannot turn a
+    // successful enter into a failed one.
+    markWorktreeEntered(target, conversationId);
 
     // Register the boundary BEFORE the (bounded but slow) install. `enter`
     // has no in-flight map of its own (unlike `provision`'s `pending`), so the
@@ -1228,25 +1413,31 @@ export function createTaskWorktreeProvisioner(
     }
 
     // Rebound detection (fail-closed): a session that never rebound has no
-    // in-process entry, no durable anchor, and no shaped engine root.
+    // in-process entry, no durable anchor, and no bound engine root.
+    //
+    // Boundness, not task-shape (issue #1231): an entered EXTERNAL worktree
+    // must be exitable too. With the shape test here, a session resumed after
+    // a restart on such a root has an empty `bound` Map and no shaped anchor,
+    // so `exit-worktree` would report "there is nothing to exit" — leaving the
+    // session stranded on the worktree it just entered.
     const boundRoot = bound.get(conversationId);
-    const shapedCurrent = isTaskWorktreePath(req.root) ? req.root : undefined;
-    const shapedAnchor =
+    const boundCurrent = isBoundWorktreeRoot(req.root) ? req.root : undefined;
+    const boundAnchor =
       req.sessionWorkspaceRoot !== undefined &&
-      isTaskWorktreePath(req.sessionWorkspaceRoot)
+      isBoundWorktreeRoot(req.sessionWorkspaceRoot)
         ? req.sessionWorkspaceRoot
         : undefined;
     if (
       boundRoot === undefined &&
-      shapedCurrent === undefined &&
-      shapedAnchor === undefined
+      boundCurrent === undefined &&
+      boundAnchor === undefined
     ) {
       throw new WorktreeIsolationError(
         "rebind_failed",
-        `worktree isolation: session ${conversationId} is not currently rebound to a task worktree; there is nothing to exit`
+        `worktree isolation: session ${conversationId} is not currently rebound to a worktree; there is nothing to exit`
       );
     }
-    const tree = shapedCurrent ?? boundRoot ?? shapedAnchor!;
+    const tree = boundCurrent ?? boundRoot ?? boundAnchor!;
 
     // Main repo root SSOT: the git common dir of the tree is
     // `<repoRoot>/.git` (worktree-safe, restart-safe) — one level up is the
@@ -1278,20 +1469,10 @@ export function createTaskWorktreeProvisioner(
     const entries: TaskWorktreeInfo[] = [];
 
     for (const record of records) {
-      if (!isTaskWorktreePath(record.path)) continue;
-      const owner = taskWorktreeOwnerOf(record.path);
-      if (owner === undefined) continue;
-      const dirty = await readWorktreeDirty(runGit, record.path);
-      const branch = record.branch ?? "";
-      if (branch.length > 0) activeBranches.add(branch);
-      entries.push({
-        label: taskWorktreeLabelOf(record.path),
-        conversationId: owner,
-        path: record.path,
-        branch,
-        head: record.head ?? "",
-        dirty,
-      });
+      const row = await listWorktreeRow(runGit, record);
+      if (row === undefined) continue;
+      if (row.branch.length > 0) activeBranches.add(row.branch);
+      entries.push(row);
     }
 
     if (ctx.includeStale !== true) {
@@ -1336,6 +1517,17 @@ export function createTaskWorktreeProvisioner(
       throw new WorktreeIsolationError(
         "worktree_not_found",
         `worktree isolation: no active task worktree matches '${ctx.targetConversationId}'`
+      );
+    }
+    // Issue #1231 guard: an `external` row is a checkout this provisioner
+    // never created (an operator's own `git worktree add`). `remove-worktree`
+    // must never destroy an operator's checkout, so it refuses here — with a
+    // NAMED kind rather than overloading `worktree_not_found` (which would
+    // report a false "does not exist" for a tree that plainly does).
+    if (selected.external === true) {
+      throw new WorktreeIsolationError(
+        "external_worktree",
+        `worktree isolation: ${selected.path} is a checkout outside this repository's task worktree area (an operator's own worktree); remove-worktree only removes task trees it manages — remove this checkout with git yourself`
       );
     }
 

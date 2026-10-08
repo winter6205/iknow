@@ -23,20 +23,31 @@
  */
 import { afterAll, describe, expect, it } from "vitest";
 import { execFileSync } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, basename } from "node:path";
 
 import {
   CREATE_WORKTREE_TOOL_HINT,
+  ENTERED_STAMP_NAME,
   WorktreeIsolationError,
   classifyCall,
   createTaskWorktree,
   createWorktreeIsolationExecutor,
   createWorktreeOnMutateHolder,
+  enteredStampOf,
+  isBoundWorktreeRoot,
+  isLinkedWorktreeRoot,
   isTaskWorktreePath,
   mainCheckoutOf,
+  markWorktreeEntered,
   resolveTaskWorktreeLabel,
   taskWorktreeBranch,
   taskWorktreeLabelOf,
@@ -111,6 +122,27 @@ function gitAllowFail(cwd: string, ...args: string[]): string {
 afterAll(() => {
   for (const r of roots) rmSync(r, { recursive: true, force: true });
 });
+
+/** Resolve the per-worktree gitdir from a linked worktree's `.git` file. */
+function gitdirOfWorktree(wt: string): string {
+  const meta = readFileSync(join(wt, ".git"), "utf8");
+  return meta.replace(/^gitdir:\s*/, "").trim();
+}
+
+/**
+ * Create a LINKED worktree OUTSIDE `.iknow/worktrees/` (the issue-1231
+ * "external" shape: `.git` is a file, `isTaskWorktreePath` false).
+ */
+async function makeExternalWorktree(repo: string): Promise<string> {
+  const wt = join(repo, "..", `external-${basename(repo)}`);
+  roots.push(wt);
+  await createTaskWorktree({
+    repoRoot: repo,
+    worktreePath: wt,
+    branch: "iknow/task-external",
+  });
+  return wt;
+}
 
 /**
  * Fake inner executor: records executeAll invocations and answers every call
@@ -714,6 +746,19 @@ describe("unboundFenceMainCheckout — UNBOUND_FENCE state predicate", () => {
       })
     ).toBeUndefined();
   });
+
+  // issue 1231: the fence predicate switched from shape to boundness — a
+  // never-entered external linked worktree is fenced (returned to be ro-bound),
+  // an entered one is not.
+  it("gate ON + external linked worktree root: fenced until entered, then not", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    expect(unboundFenceMainCheckout({ gateOn: true, root: wt })).toBe(wt);
+    markWorktreeEntered(wt, "conv-entered");
+    expect(
+      unboundFenceMainCheckout({ gateOn: true, root: wt })
+    ).toBeUndefined();
+  });
 });
 
 describe("unboundFenceErofsGuidance — EROFS reflow builder (ADR-0109)", () => {
@@ -909,6 +954,206 @@ describe("mainCheckoutOf", () => {
   it("is idempotent: applying it to its own output changes nothing", () => {
     const once = mainCheckoutOf("/repo/.iknow/worktrees/conv-1");
     expect(mainCheckoutOf(once)).toBe(once);
+  });
+
+  // issue 1231 Slice A — a LINKED worktree must resolve to the stable main
+  // checkout, not to itself: without this the identity / memory namespace of an
+  // entered external root would drift onto the external tree (ADR-0019).
+  it("resolves a linked worktree to its owning main checkout (not itself)", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    expect(isTaskWorktreePath(wt)).toBe(false);
+    expect(isLinkedWorktreeRoot(wt)).toBe(true);
+    expect(mainCheckoutOf(wt)).toBe(repo);
+    // the resolved root is idempotent under a second application
+    expect(mainCheckoutOf(mainCheckoutOf(wt))).toBe(repo);
+  });
+
+  it("honours the commondir file when present, and the default layout when absent", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    const gitdir = gitdirOfWorktree(wt);
+    // git writes a `commondir` for a standard worktree — the commondir branch.
+    expect(existsSync(join(gitdir, "commondir"))).toBe(true);
+    expect(mainCheckoutOf(wt)).toBe(repo);
+    // deleting it exercises the fallback default layout (<common>/.git/worktrees/<name>)
+    rmSync(join(gitdir, "commondir"), { force: true });
+    expect(mainCheckoutOf(wt)).toBe(repo);
+  });
+});
+
+// -- linked-worktree boundness + entered stamp (issue 1231 Slice A) -----------
+
+describe("isBoundWorktreeRoot — truth table over the four root classes", () => {
+  it("main checkout (.git is a dir) → false (unchanged: ro-bind)", () => {
+    const repo = makeGitRepo();
+    expect(isLinkedWorktreeRoot(repo)).toBe(false);
+    expect(isBoundWorktreeRoot(repo)).toBe(false);
+  });
+
+  it("task worktree shape → true (path shape, no stamp required)", () => {
+    expect(isTaskWorktreePath("/repo/.iknow/worktrees/conv-1")).toBe(true);
+    expect(isBoundWorktreeRoot("/repo/.iknow/worktrees/conv-1")).toBe(true);
+  });
+
+  it("external linked worktree WITHOUT a stamp → false (the cd-hole security case)", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    expect(isTaskWorktreePath(wt)).toBe(false);
+    expect(isLinkedWorktreeRoot(wt)).toBe(true);
+    // Never entered: a session cd'd into a random registered worktree must
+    // stay read-only — shape-only adoption of isLinkedWorktreeRoot would
+    // reopen the hole the ro-bind fence closes for bash.
+    expect(enteredStampOf(wt)).toBeUndefined();
+    expect(isBoundWorktreeRoot(wt)).toBe(false);
+  });
+
+  it("external linked worktree WITH a stamp → true", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    markWorktreeEntered(wt, "conv-entered");
+    expect(enteredStampOf(wt)).toBe("conv-entered");
+    expect(isBoundWorktreeRoot(wt)).toBe(true);
+  });
+});
+
+/**
+ * Issue 1231 acceptance — the predicate only pays off if the two enforcement
+ * surfaces actually follow it. Both halves are asserted here against REAL git
+ * worktrees, because a unit test of `isBoundWorktreeRoot` alone would pass even
+ * if the gate or the fence still keyed on path shape:
+ *
+ *   1. `gateMutate` (worktree-gate.ts:1296) must let a mutate through on an
+ *      ENTERED external root instead of blocking it with the create-worktree
+ *      hint (and must keep provisioning zero trees — the gate never provisions);
+ *   2. `unboundFenceMainCheckout` (worktree-gate.ts:832) must return undefined
+ *      for that root, so bwrap does NOT `--ro-bind` the entered tree. This half
+ *      is the one that carries bash writes, which the gate classifies `read`.
+ *
+ * The negative arm (never entered → ro-bind) is the security case and is
+ * pinned above at the predicate level; it is re-asserted here at the fence.
+ */
+describe("issue 1231 — an entered external worktree is writable end to end", () => {
+  it("gate admits a mutate on an entered external root", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    markWorktreeEntered(wt, "conv-entered");
+
+    const { inner, calls } = fakeInner();
+    const adjudicatedFor: (string | undefined)[] = [];
+    const gate = createWorktreeIsolationExecutor({
+      enabled: { get: () => true },
+      liveTaskRoot: createLiveTaskRoot(wt),
+      provision: async ({ conversationId }) => {
+        adjudicatedFor.push(conversationId);
+        return wt;
+      },
+      inner,
+    });
+
+    const out = await gate.executeAll(
+      [writeCall()],
+      undefined,
+      undefined,
+      "conv-entered"
+    );
+
+    // Not blocked: the result is the inner executor's own `ok`, and the write
+    // reached the handler (this is what `write_file` will resolve its root to).
+    expect(out[0]!.kind).toBe("ok");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.calls[0]!.name).toBe("write_file");
+    // A BOUND root is adjudicated through `provision` (the per-conversation
+    // passthrough that carries the durable-anchor adoption) rather than
+    // blocked — the host seam resolves it to this same root, so no tree is
+    // created. What matters for issue 1231 is that the call is admitted, not
+    // which seam admits it.
+    expect(adjudicatedFor).toEqual(["conv-entered"]);
+  });
+
+  it("the same root stays blocked and un-provisioned while it carries no stamp", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    expect(enteredStampOf(wt)).toBeUndefined();
+
+    const { inner, calls } = fakeInner();
+    const provisionedFor: (string | undefined)[] = [];
+    const gate = createWorktreeIsolationExecutor({
+      enabled: { get: () => true },
+      liveTaskRoot: createLiveTaskRoot(wt),
+      provision: async ({ conversationId }) => {
+        provisionedFor.push(conversationId);
+        return wt;
+      },
+      inner,
+    });
+
+    const out = await gate.executeAll(
+      [writeCall()],
+      undefined,
+      undefined,
+      "conv-x"
+    );
+
+    // Fail-closed: same receipt as the main-repo unbound state, and crucially
+    // NO provisioning — an operator's checkout never gets a nested tree.
+    expect(failureMessage(out[0])).toContain(CREATE_WORKTREE_TOOL_HINT);
+    expect(calls).toHaveLength(0);
+    expect(provisionedFor).toEqual([]);
+  });
+
+  it("the bash fence ro-binds a never-entered external root and not an entered one", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+
+    // Never entered → the main checkout to ro-bind is the root itself, so
+    // bwrap mounts the operator's checkout read-only.
+    expect(unboundFenceMainCheckout({ gateOn: true, root: wt })).toBe(wt);
+
+    // Entered → no ro-bind, so bash writes land in the entered tree.
+    markWorktreeEntered(wt, "conv-entered");
+    expect(
+      unboundFenceMainCheckout({ gateOn: true, root: wt })
+    ).toBeUndefined();
+
+    // Switch OFF is unchanged for both roots: the fence never engages.
+    expect(
+      unboundFenceMainCheckout({ gateOn: false, root: wt })
+    ).toBeUndefined();
+  });
+});
+
+describe("enteredStampOf / markWorktreeEntered — round-trip + fail-closed", () => {
+  it("markWorktreeEntered then enteredStampOf returns the conversation id", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    markWorktreeEntered(wt, "conv-abc_123");
+    expect(enteredStampOf(wt)).toBe("conv-abc_123");
+  });
+
+  it("a missing stamp (never entered) returns undefined", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    expect(enteredStampOf(wt)).toBeUndefined();
+    // non-existent / empty roots degrade to undefined, never throw
+    expect(enteredStampOf("/no/such/root")).toBeUndefined();
+    expect(enteredStampOf("")).toBeUndefined();
+  });
+
+  it("a garbage stamp (fails SAFE_CONVERSATION_ID_RE) returns undefined", async () => {
+    const repo = makeGitRepo();
+    const wt = await makeExternalWorktree(repo);
+    const gitdir = gitdirOfWorktree(wt);
+    writeFileSync(join(gitdir, ENTERED_STAMP_NAME), "bad/id with spaces\n");
+    expect(enteredStampOf(wt)).toBeUndefined();
+    expect(isBoundWorktreeRoot(wt)).toBe(false);
+  });
+
+  it("markWorktreeEntered is best-effort: it never throws on a non-gitdir root", () => {
+    expect(() => markWorktreeEntered("/no/such/root", "conv-1")).not.toThrow();
+    // a main checkout has `.git` as a directory (no gitdir pointer) — still no throw
+    const repo = makeGitRepo();
+    expect(() => markWorktreeEntered(repo, "conv-1")).not.toThrow();
   });
 });
 

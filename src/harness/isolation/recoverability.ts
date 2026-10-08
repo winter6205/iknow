@@ -140,6 +140,16 @@ export const RECOVERABILITY = {
     category: "operator_required",
     note: "task worktree is already claimed by another existing session record; release it via the other session's exit-worktree or by deleting the session record",
   },
+  // Issue 1231 — the target is a checkout outside this repository's task
+  // worktree area, i.e. one the operator created with their own
+  // `git worktree add`. Removing it is an operator decision no model action can
+  // reach, so this is operator_required for the same reason as
+  // worktree_claimed: retrying only burns turns, and the stop directive is
+  // wired in automatically by `gateBlockNotice`.
+  external_worktree: {
+    category: "operator_required",
+    note: "target is an operator-owned checkout outside this repository's task worktree area; remove-worktree only manages task trees it created, so ask the operator to run git worktree remove",
+  },
 } as const satisfies Record<WorktreeIsolationErrorKind, Recoverability>;
 
 /**

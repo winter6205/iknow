@@ -1827,18 +1827,26 @@ export class SessionHub {
 
   /**
    * Hub-visible enter seam (serve/chat harness hosts; TUI wires
-   * provision-only): move this conversation onto an EXISTING task worktree
-   * of this repository (owner = targetConversationId). The provisioner
+   * provision-only): move this conversation onto an EXISTING worktree
+   * of this repository (a task tree selected by owner, or an external checkout
+   * selected by exact `path`, issue #1231). The provisioner
    * validates the tree (exists /
    * linked / same repo) and rebinds in memory; the changed root is recorded
    * for this conversation and persisted only by the next conditional save —
    * the same dirty-root protocol the create path uses. The tree itself is
    * never created, moved, or checked out.
+   *
+   * The parameter is the harness `WorktreeEnterContext` SSOT, not a restated
+   * inline shape: this method is the target of the seam wiring above, so any
+   * field declared only on the tool side is dropped here without a compiler
+   * error.
    */
   async enterWorktree(ctx: {
     conversationId?: string;
     root: string;
     targetConversationId: string;
+    /** Exact-path selector for an external checkout (issue #1231). */
+    path?: string;
   }): Promise<{ path: string; receipt: string }> {
     const intent =
       ctx.conversationId === undefined ? undefined : this.mintRebindIntent();
@@ -4910,18 +4918,14 @@ export class SessionHub {
           provisionWorktree: (ctx) => this.provisionWorktree(ctx),
         }),
         // enter-worktree tool seam — a session explicitly enters an existing
-        // task worktree of this repo (including another session's tree); the
-        // authorization anchor is the persisted session.workspaceRoot.
-        worktreeEnter: ({
-          conversationId,
-          root: sessionRoot,
-          targetConversationId,
-        }) =>
-          this.enterWorktree({
-            conversationId,
-            root: sessionRoot,
-            targetConversationId,
-          }),
+        // worktree of this repo (a task tree including another session's, or
+        // an external checkout by exact path, issue #1231); the authorization
+        // anchor is the persisted session.workspaceRoot.
+        //
+        // Forward the whole ctx: a per-field destructuring wrapper silently
+        // dropped `name` once (hub.ts:4905-4908) and would have dropped the
+        // exact-path selector `path` the same way (issue #1231 review).
+        worktreeEnter: (ctx) => this.enterWorktree(ctx),
         // exit-worktree tool seam — the session returns to the main-repo
         // root; the tree is kept, not deleted.
         worktreeExit: ({ conversationId, root: sessionRoot }) =>
@@ -5101,18 +5105,14 @@ export class SessionHub {
           provisionWorktree: (ctx) => this.provisionWorktree(ctx),
         }),
         // enter-worktree tool seam — a session explicitly enters an existing
-        // task worktree of this repo (including another session's tree); the
-        // authorization anchor is the persisted session.workspaceRoot.
-        worktreeEnter: ({
-          conversationId,
-          root: sessionRoot,
-          targetConversationId,
-        }) =>
-          this.enterWorktree({
-            conversationId,
-            root: sessionRoot,
-            targetConversationId,
-          }),
+        // worktree of this repo (a task tree including another session's, or
+        // an external checkout by exact path, issue #1231); the authorization
+        // anchor is the persisted session.workspaceRoot.
+        //
+        // Forward the whole ctx: a per-field destructuring wrapper silently
+        // dropped `name` once (hub.ts:4905-4908) and would have dropped the
+        // exact-path selector `path` the same way (issue #1231 review).
+        worktreeEnter: (ctx) => this.enterWorktree(ctx),
         // exit-worktree tool seam — the session returns to the main-repo
         // root; the tree is kept, not deleted.
         worktreeExit: ({ conversationId, root: sessionRoot }) =>

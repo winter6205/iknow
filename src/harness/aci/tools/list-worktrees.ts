@@ -47,6 +47,10 @@ function serialize(entries: ReadonlyArray<TaskWorktreeInfo>): string {
       head: entry.head,
       dirty: entry.dirty,
       ...(entry.stale === true ? { stale: true } : {}),
+      // Issue #1231 — a linked checkout outside the task area. Its
+      // conversationId is empty and its label is null; the path is the handle
+      // for enter-worktree.
+      ...(entry.external === true ? { external: true } : {}),
     }))
   );
 }
@@ -57,7 +61,8 @@ export function createListWorktreesTool(
   return Object.freeze({
     name: "list-worktrees",
     description:
-      "List task worktrees belonging to this repository with their label, conversation id, path, branch, HEAD, and dirty state. " +
+      "List the checkouts belonging to this repository with their label, conversation id, path, branch, HEAD, and dirty state. " +
+      "Entries marked external=true are linked checkouts that live outside the task worktree area (for example an operator's own git worktree) and can be entered by their path. " +
       "Use include_stale=true to also discover task branches that currently have no linked checkout; the result is JSON " +
       "suitable for selecting a unique label before enter-worktree or auditing a cleanup.",
     inputSchema: {

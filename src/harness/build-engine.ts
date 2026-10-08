@@ -94,7 +94,7 @@ import {
   createWorktreeOnMutateHolder,
   classifyCall,
   mainCheckoutOf,
-  isTaskWorktreePath,
+  isBoundWorktreeRoot,
   type MutateClass,
   type WorktreeGateReader,
   type WorktreeIsolationHostOpts,
@@ -1123,7 +1123,7 @@ export async function buildHarnessEngine(
             // new taskRoot automatically and no new workers spawn under the
             // old root (matching the manager's sandboxRootCell form: def
             // validation under the old root rejects).
-            ...(isTaskWorktreePath(workspaceRoot)
+            ...(isBoundWorktreeRoot(workspaceRoot)
               ? { sessionRoot: () => liveTaskRoot.read() }
               : {}),
             // ADR-0092: the fs mode crosses the process boundary too — the
@@ -1516,7 +1516,11 @@ export async function buildHarnessEngine(
       // survives root switches); unwired hosts (ask / direct tests) → the
       // registry builds its own and the gate works as usual.
       ...lastReadLedgerOption(opts),
-      ...memoryRegistryOptions(memoryToolsEnabled, memoryDir, memoryCapabilityOn),
+      ...memoryRegistryOptions(
+        memoryToolsEnabled,
+        memoryDir,
+        memoryCapabilityOn
+      ),
       skillCatalog,
       ...(subagentManager ? { subagentManager } : undefined),
       // Capacity holder → registry → tool factory (when
@@ -1688,7 +1692,11 @@ export async function buildHarnessEngine(
       // non-empty overwrite", consistent with fail-closed; read / bash still
       // run, they just aren't recorded).
       ...lastReadLedgerOption(opts),
-      ...memoryRegistryOptions(memoryToolsEnabled, memoryDir, memoryCapabilityOn),
+      ...memoryRegistryOptions(
+        memoryToolsEnabled,
+        memoryDir,
+        memoryCapabilityOn
+      ),
       skillCatalog,
       ...(subagentManager ? { subagentManager } : undefined),
       ...(backgroundManager ? { backgroundManager } : {}),
@@ -2403,38 +2411,36 @@ export async function buildHarnessEngine(
           },
         })
       : undefined;
-  const overlayMemoryPrefetch =
-    surfaceOverlaysMemoryPrefetch({
-      memoryEnabled,
-      surface,
-      anyMemoryFlagOn: autoExtractOn || tuiLive,
-      tuiLive,
-    })
-      ? async (
-          query: string,
-          prefetchOpts?: PrefetchQueryOpts
-        ): Promise<string> => {
-          // Total memory OFF first, then the read-path autoExtract gate:
-          // dream-only sessions stay memory-capable but still inject nothing.
-          if (!memoryPrefetchAllowed(memoryCapabilityOn, memoryFlags))
-            return "";
-          try {
-            return await buildMemoryPrefetchOverlay({
-              memoryDir,
-              query,
-              excludeIds: prefetchOpts?.excludeIds,
-            });
-          } catch (error) {
-            // EXIT: log-and-continue — missing prefetch must not fail the turn.
-            console.warn(
-              `[memory/prefetch] overlay skipped: ${
-                error instanceof Error ? error.message : String(error)
-              }`
-            );
-            return "";
-          }
+  const overlayMemoryPrefetch = surfaceOverlaysMemoryPrefetch({
+    memoryEnabled,
+    surface,
+    anyMemoryFlagOn: autoExtractOn || tuiLive,
+    tuiLive,
+  })
+    ? async (
+        query: string,
+        prefetchOpts?: PrefetchQueryOpts
+      ): Promise<string> => {
+        // Total memory OFF first, then the read-path autoExtract gate:
+        // dream-only sessions stay memory-capable but still inject nothing.
+        if (!memoryPrefetchAllowed(memoryCapabilityOn, memoryFlags)) return "";
+        try {
+          return await buildMemoryPrefetchOverlay({
+            memoryDir,
+            query,
+            excludeIds: prefetchOpts?.excludeIds,
+          });
+        } catch (error) {
+          // EXIT: log-and-continue — missing prefetch must not fail the turn.
+          console.warn(
+            `[memory/prefetch] overlay skipped: ${
+              error instanceof Error ? error.message : String(error)
+            }`
+          );
+          return "";
         }
-      : undefined;
+      }
+    : undefined;
   return {
     deps,
     engine,

@@ -9,7 +9,7 @@ import {
 } from "node:path";
 
 import { ToolExecutionError } from "../errors.js";
-import { isTaskWorktreePath } from "../isolation/worktree-gate.js";
+import { isBoundWorktreeRoot } from "../isolation/worktree-gate.js";
 import type { FsModeContext } from "../sandbox/fs-mode.js";
 import { FS_ISOLATION_MODE_DEFAULT } from "../sandbox/fs-mode.js";
 import { resolveSessionFenceTmp } from "../sandbox/fence-tmp.js";
@@ -348,8 +348,9 @@ async function canonicalContainmentRoot(
  * read tools so the extra-root set is built from one rule:
  * - `projectIdentityRoot` absent → no extra (undefined).
  * - `allowProjectIdentityRoot === true` (production: isolation ON) additionally
- *   requires the live root to be a task worktree, so a same-run rebind opens
- *   the passthrough without widening the OFF / main-checkout surface.
+ *   requires the live root to be a BOUND worktree (`isBoundWorktreeRoot`, issue
+ *   1231 — task-shaped or explicitly entered), so a same-run rebind opens the
+ *   passthrough without widening the OFF / main-checkout surface.
  * - `allowProjectIdentityRoot === false` → hard deny.
  * - key not threaded (legacy / worker direct-factory callers) → the threaded
  *   root passes unguarded, matching the historical tri-state behavior.
@@ -360,7 +361,7 @@ function gateProjectIdentityRoot(
   allowProjectIdentityRoot: boolean | undefined
 ): string | undefined {
   if (projectIdentityRoot === undefined) return undefined;
-  if (allowProjectIdentityRoot === true && !isTaskWorktreePath(liveRoot)) {
+  if (allowProjectIdentityRoot === true && !isBoundWorktreeRoot(liveRoot)) {
     return undefined;
   }
   if (allowProjectIdentityRoot === false) return undefined;

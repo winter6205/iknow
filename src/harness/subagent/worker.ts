@@ -114,7 +114,7 @@ import {
 import { createMergedCatalogResolver } from "./user-catalog.js";
 import { resolveSubagentCapabilities, type BashMode } from "./capability.js";
 import {
-  isTaskWorktreePath,
+  isBoundWorktreeRoot,
   mainCheckoutOf,
 } from "../isolation/worktree-gate.js";
 import {
@@ -686,9 +686,11 @@ export async function createWorkerRuntime(
   // isolationHost is present), but its fence taskRoot = sandboxRoot (frozen at
   // spawn; the registry has no liveTaskRoot). The main chain's "load the
   // identity root only after rebind" predicate reduces here to: sandboxRoot is
-  // a task-worktree shape — same source as the build-engine spawn-site check
-  // feeding sessionRoot (taskWorktreeOwnerOf, the same function in
-  // build-engine.ts):
+  // a BOUND worktree — `isBoundWorktreeRoot` (issue 1231: task-shaped OR an
+  // external linked worktree carrying the explicit-enter stamp). NOTE: the
+  // build-engine spawn-site check feeding sessionRoot (build-engine.ts:1126)
+  // still uses shape-only `isTaskWorktreePath`; it must switch to the same
+  // boundness predicate so both sides agree on external entered roots.
   //   - OFF / unbound (sandboxRoot = main checkout): don't pass — .git sits
   //     inside cwd, no read channel is missing (the rationale in
   //     ADR-0037), bytes same as today, never wider than the main chain;
@@ -701,7 +703,7 @@ export async function createWorkerRuntime(
   // build-engine's sessionRoots use (mainCheckoutOf(opts.projectIdentityRoot ??
   // cwd)) — no new state source; if the fallback path is absent on disk, the
   // policy contract root fails loud (ADR-0037).
-  const identityFenceRoot = isTaskWorktreePath(sandboxRoot)
+  const identityFenceRoot = isBoundWorktreeRoot(sandboxRoot)
     ? (opts.projectIdentityRoot ?? mainCheckoutOf(sandboxRoot))
     : undefined;
   const defaultTraceDir = resolve(
@@ -1888,9 +1890,9 @@ export interface WorkerReviewControl {
    */
   readonly waitForBrokerReady: (timeoutMs?: number) => Promise<boolean>;
   /** Build the route (only call after waitForBrokerReady() === true). */
-  readonly createRoute: (
-    opts?: { readonly timeoutMs?: number }
-  ) => SecurityReviewRoute;
+  readonly createRoute: (opts?: {
+    readonly timeoutMs?: number;
+  }) => SecurityReviewRoute;
   /** Feed one post-envelope stdin line (dispatch / protocol note). */
   readonly feed: (line: string) => void;
   /** Stdin reached EOF / error: settle everything pending with deny. */

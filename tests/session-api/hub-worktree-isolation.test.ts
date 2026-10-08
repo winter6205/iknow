@@ -2266,3 +2266,105 @@ describe("worktree isolation wiring (T8 - exit-worktree)", () => {
     expect((await store.load(convB)).workspaceRoot).toBe(repo);
   });
 });
+
+// -- issue #1231: enter an EXTERNAL checkout by exact path, end to end -------
+//
+// The provisioner-level tests drive `prov.enter({ path })` directly, which
+// cannot catch a field the PRODUCTION wiring drops in transit. That is exactly
+// what happened: `WorktreeEnterContext` carried no `path`, and both hub
+// closures re-listed the three known fields by hand, so the tool sent `path`
+// and the provisioner never saw it — the model got a misleading
+// `rebind_failed` naming the empty target id. This suite drives the real
+// executor → hub seam → provisioner chain the model actually uses.
+
+describe("worktree isolation wiring (issue 1231 — external checkout by path)", () => {
+  it("enters an operator-owned worktree by exact path and the next mutate lands there", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+
+    // An operator's own checkout, created outside iknow and outside
+    // `.iknow/worktrees/` — the exact shape issue #1231 reports as invisible.
+    const external = join(repo, "..", `operator-tree-${Date.now()}`);
+    git(repo, "worktree", "add", "-q", external, "-b", "operator-branch");
+    expect(existsSync(join(external, ".git"))).toBe(true);
+    const worktreesBefore = git(repo, "worktree", "list");
+
+    // The tool receives `path`, not `conversationId` — there is no owner id.
+    const deps = await ensure(hub, repo);
+    const [enterResult] = await deps.executor.executeAll(
+      [{ id: "enter-ext", name: "enter-worktree", input: { path: external } }],
+      undefined,
+      undefined,
+      conversationId
+    );
+    expect(enterResult.kind).toBe("ok");
+    expect(resultText(enterResult)).toContain(external);
+    // Enter creates nothing and touches the branch it was handed.
+    expect(git(repo, "worktree", "list")).toBe(worktreesBefore);
+    expect(git(external, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      "operator-branch"
+    );
+
+    await persistDirtyRoot(hub, conversationId);
+    expect((await store.load(conversationId)).workspaceRoot).toBe(external);
+
+    // Acceptance: subsequent tools use the entered worktree as the session root.
+    const enteredDeps = await ensure(hub, external);
+    const mutate = await runMutate(enteredDeps, conversationId);
+    expect(mutate.kind).toBe("ok");
+    expect(existsSync(join(external, "hello.txt"))).toBe(true);
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+  });
+
+  it("a never-entered external checkout stays read-only for that same session", async () => {
+    // Counter-example for the widening above: the boundness switch admits an
+    // external root only because `enter` stamped it. A root nobody entered
+    // must keep failing closed, so rooting the session at one cannot by itself
+    // grant write access.
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+
+    const external = join(repo, "..", `cold-tree-${Date.now()}`);
+    git(repo, "worktree", "add", "-q", external, "-b", "cold-branch");
+
+    // No enter-worktree call: the session is merely rooted at a worktree.
+    const deps = await ensure(hub, external);
+    const mutate = await runMutate(deps, conversationId);
+
+    const failure = expectFailure(mutate);
+    // Fail-closed with the unbound-mutate notice: the gate blocks BEFORE
+    // adjudicating, so there is no typed kind here (a typed `foreign_worktree`
+    // only appears once a bound root is admitted to `provision`).
+    expect(failure.message).toContain("[worktree_isolation]");
+    expect(existsSync(join(external, "hello.txt"))).toBe(false);
+    expect(existsSync(join(repo, "hello.txt"))).toBe(false);
+  });
+
+  it("a bogus path fails typed without rebinding the session", async () => {
+    await setSettingsIsolation(true);
+    const repo = makeGitRepo();
+    const { hub, conversationId } = await makeHubWithSession(repo);
+
+    const deps = await ensure(hub, repo);
+    const [result] = await deps.executor.executeAll(
+      [
+        {
+          id: "enter-bogus",
+          name: "enter-worktree",
+          input: { path: join(repo, "no-such-checkout") },
+        },
+      ],
+      undefined,
+      undefined,
+      conversationId
+    );
+
+    const failure = expectFailure(result);
+    expect(failure.message).toContain("worktree_not_found");
+    // No rebind: the session stays on the main repo.
+    await persistDirtyRoot(hub, conversationId);
+    expect((await store.load(conversationId)).workspaceRoot).toBe(repo);
+  });
+});

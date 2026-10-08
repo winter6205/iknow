@@ -23,7 +23,7 @@ import {
 } from "node:fs";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import {
   SessionStore,
@@ -36,6 +36,7 @@ import type {
 import { createTaskWorktreeProvisioner } from "../../src/session-api/worktree-rebind.ts";
 import {
   createTaskWorktree,
+  enteredStampOf,
   mainCheckoutOf,
   taskWorktreeBranch,
   taskWorktreeOwnerOf,
@@ -121,6 +122,33 @@ async function makeStoreWithSessions(repo: string, ids: string[]) {
     await store.save({ id, file: makeSessionFile(id, repo) });
   }
   return { store, baseDir };
+}
+
+/**
+ * A linked git worktree of `repo` that lives OUTSIDE `<repo>/.iknow/worktrees/`
+ * — an operator's own `git worktree add` checkout (issue #1231). A fresh temp
+ * PARENT holds the checkout so two calls can share a leaf name (the ambiguity
+ * case) while git still accepts each distinct absolute path. The `-b` branch
+ * is created and checked out in it.
+ */
+function makeExternalWorktree(
+  repo: string,
+  parentTag: string,
+  leaf: string,
+  branch: string
+): string {
+  const parent = mkdtempSync(join(tmpdir(), `iknow-wt-ext-${parentTag}-`));
+  roots.push(parent);
+  const wt = join(parent, leaf);
+  git(repo, "worktree", "add", wt, "-b", branch);
+  return wt;
+}
+
+/** Registered-checkout count of `repo` (one `worktree ` line per checkout). */
+function worktreeCount(repo: string): number {
+  return git(repo, "worktree", "list", "--porcelain")
+    .split("\n")
+    .filter((line) => line.startsWith("worktree ")).length;
 }
 
 afterAll(() => {
@@ -1808,5 +1836,345 @@ describe("worktreeExclusive — T3 / ADR-0070 enter 前置占用检查 + worktre
     // Each bound Map claims for itself — the de-facto state after the TOCTOU window.
     expect(guest1.isTaskWorktreeRoot(tree)).toBe(true);
     expect(guest2.isTaskWorktreeRoot(tree)).toBe(true);
+  });
+});
+
+// -- issue #1231: external worktree discovery, entry, and the remove guard -------
+//
+// A registered linked checkout of THIS repository that lives outside
+// `<repo>/.iknow/worktrees/` used to be invisible to list-worktrees and
+// un-enterable (enter resolved only from the task listing). These cases pin the
+// new contract: list() emits it as an `external` row, enter binds the session
+// to it (by exact path or by branch/leaf selector) WITHOUT creating a tree, the
+// explicit-enter stamp is written so the harness predicate can recognize the
+// root, and remove refuses to destroy an operator's own checkout.
+describe("issue #1231 — external worktree discovery and entry", () => {
+  /** Store wrapper that counts saves, so a rejected enter provably did not rebind. */
+  function countingStore(real: SessionStore) {
+    let saves = 0;
+    const store = {
+      load: (id: string) => real.load(id),
+      save: async (opts: { id: string; file: SessionFileV1 }) => {
+        saves += 1;
+        await real.save(opts);
+      },
+    };
+    return { store, saves: () => saves };
+  }
+
+  it("discovers an external same-repo worktree in list() and enters it by exact path", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const ext = makeExternalWorktree(repo, "path", "checkout", "feature-path");
+    const prov = createTaskWorktreeProvisioner({ store });
+
+    const entries = await prov.list({ root: repo });
+    const external = entries.find((entry) => entry.external === true);
+    expect(external).toBeDefined();
+    expect(external?.path).toBe(ext);
+    expect(external?.conversationId).toBe("");
+    expect(external?.label).toBeUndefined();
+    expect(external?.branch).toBe("feature-path");
+    expect(external?.dirty).toBe(false);
+    // The main checkout is never emitted as an external row.
+    expect(entries.some((entry) => entry.path === repo)).toBe(false);
+
+    const entered = await prov.enter({
+      conversationId: "conv-guest",
+      root: repo,
+      targetConversationId: "",
+      path: ext,
+    });
+    expect(entered.path).toBe(ext);
+    expect((await store.load("conv-guest")).workspaceRoot).toBe(ext);
+  });
+
+  it("enters an external checkout by its branch name and by its leaf name", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, [
+      "conv-by-branch",
+      "conv-by-leaf",
+    ]);
+    const ext = makeExternalWorktree(repo, "sel", "checkout", "feature-sel");
+    const prov = createTaskWorktreeProvisioner({ store });
+
+    const byBranch = await prov.enter({
+      conversationId: "conv-by-branch",
+      root: repo,
+      targetConversationId: "feature-sel",
+    });
+    expect(byBranch.path).toBe(ext);
+    const byLeaf = await prov.enter({
+      conversationId: "conv-by-leaf",
+      root: repo,
+      targetConversationId: "checkout",
+    });
+    expect(byLeaf.path).toBe(ext);
+  });
+
+  it("stamps the entered external root so the harness predicate can recognize it", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const ext = makeExternalWorktree(
+      repo,
+      "stamp",
+      "checkout",
+      "feature-stamp"
+    );
+    const prov = createTaskWorktreeProvisioner({ store });
+
+    expect(enteredStampOf(ext)).toBeUndefined();
+    await prov.enter({
+      conversationId: "conv-guest",
+      root: repo,
+      targetConversationId: "",
+      path: ext,
+    });
+    expect(enteredStampOf(ext)).toBe("conv-guest");
+  });
+
+  it("regression: a task worktree is still enterable by conversationId and by label", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, [
+      "conv-owner",
+      "conv-by-id",
+      "conv-by-label",
+    ]);
+    const prov = createTaskWorktreeProvisioner({ store });
+    const tree = await prov.provision({
+      conversationId: "conv-owner",
+      root: repo,
+      name: "fix-648",
+    });
+
+    const byId = await prov.enter({
+      conversationId: "conv-by-id",
+      root: repo,
+      targetConversationId: "conv-owner",
+    });
+    expect(byId.path).toBe(tree);
+    const byLabel = await prov.enter({
+      conversationId: "conv-by-label",
+      root: repo,
+      targetConversationId: "fix-648",
+    });
+    expect(byLabel.path).toBe(tree);
+  });
+
+  it("preserves the external checkout: branch, uncommitted changes, and the worktree count are unchanged", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const ext = makeExternalWorktree(
+      repo,
+      "preserve",
+      "checkout",
+      "feature-preserve"
+    );
+    await writeFile(join(ext, "wip.txt"), "uncommitted\n", "utf8");
+    const prov = createTaskWorktreeProvisioner({ store });
+
+    const countBefore = worktreeCount(repo);
+    const listed = await prov.list({ root: repo });
+    expect(listed.find((entry) => entry.path === ext)?.dirty).toBe(true);
+
+    await prov.enter({
+      conversationId: "conv-guest",
+      root: repo,
+      targetConversationId: "",
+      path: ext,
+    });
+
+    // No replacement worktree: the count is unchanged, the branch is the same,
+    // and the uncommitted file survived.
+    expect(worktreeCount(repo)).toBe(countBefore);
+    expect(git(ext, "rev-parse", "--abbrev-ref", "HEAD").trim()).toBe(
+      "feature-preserve"
+    );
+    expect(existsSync(join(ext, "wip.txt"))).toBe(true);
+    expect(readFileSync(join(ext, "wip.txt"), "utf8")).toBe("uncommitted\n");
+    // Enter never provisions: no nested task tree was created in the checkout.
+    expect(existsSync(join(ext, ".iknow"))).toBe(false);
+    expect(git(repo, "worktree", "list")).toContain(ext);
+  });
+
+  it("rejects a path that is not a listed checkout with typed worktree_not_found and no rebind", async () => {
+    const repo = makeGitRepo();
+    const real = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const { store, saves } = countingStore(real.store);
+    const prov = createTaskWorktreeProvisioner({ store });
+    const bogus = join(repo, "not-a-worktree");
+
+    await expect(
+      prov.enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "",
+        path: bogus,
+      })
+    ).rejects.toMatchObject({
+      name: "WorktreeIsolationError",
+      kind: "worktree_not_found",
+    });
+    expect(saves()).toBe(0);
+    expect((await real.store.load("conv-guest")).workspaceRoot).toBe(repo);
+    expect(prov.isTaskWorktreeRoot(bogus)).toBe(false);
+  });
+
+  // --- review repairs: the two High findings, each pinned at the seam the
+  // production wiring actually uses (a fresh provisioner = a restarted hub).
+
+  it("a RESUMED session on an entered external root is still admitted (restart durability)", async () => {
+    const repo = makeGitRepo();
+    const real = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const ext = makeExternalWorktree(
+      repo,
+      "resume",
+      "checkout",
+      "feature-resume"
+    );
+
+    // Process 1: enter, which persists workspaceRoot and stamps the gitdir.
+    const first = createTaskWorktreeProvisioner({ store: real.store });
+    await first.enter({
+      conversationId: "conv-guest",
+      root: repo,
+      targetConversationId: "",
+      path: ext,
+    });
+    expect((await real.store.load("conv-guest")).workspaceRoot).toBe(ext);
+
+    // Process 2: a FRESH provisioner has an empty `bound` Map — the only
+    // surviving evidence is the persisted anchor plus the gitdir stamp. The
+    // harness gate admits this root (isBoundWorktreeRoot), so this seam must
+    // agree; when it keyed on task-shape it fell through to foreign_worktree
+    // and every mutate failed after a restart.
+    const second = createTaskWorktreeProvisioner({ store: real.store });
+    const adopted = await second.provision(
+      { conversationId: "conv-guest", root: ext },
+      { sessionWorkspaceRoot: ext }
+    );
+    expect(adopted).toBe(ext);
+    expect(second.isTaskWorktreeRoot(ext)).toBe(true);
+  });
+
+  it("a session whose root was never entered still fails closed after restart", async () => {
+    // The counter-example that makes the arm above safe: boundness widened to
+    // `isBoundWorktreeRoot`, which admits an EXTERNAL root iff it carries the
+    // enter stamp. A registered worktree nobody entered has no stamp, so it
+    // must keep failing closed — this is the cd-hole the stamp exists to close.
+    const repo = makeGitRepo();
+    const real = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const ext = makeExternalWorktree(repo, "cold", "checkout", "feature-cold");
+    expect(enteredStampOf(ext)).toBeUndefined();
+
+    const fresh = createTaskWorktreeProvisioner({ store: real.store });
+    await expect(
+      fresh.provision(
+        { conversationId: "conv-guest", root: ext },
+        { sessionWorkspaceRoot: ext }
+      )
+    ).rejects.toMatchObject({
+      name: "WorktreeIsolationError",
+      kind: "foreign_worktree",
+    });
+  });
+
+  it("exit-worktree returns a resumed session on an entered external root to the main checkout", async () => {
+    const repo = makeGitRepo();
+    const real = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const ext = makeExternalWorktree(
+      repo,
+      "exiting",
+      "checkout",
+      "feature-exiting"
+    );
+
+    const first = createTaskWorktreeProvisioner({ store: real.store });
+    await first.enter({
+      conversationId: "conv-guest",
+      root: repo,
+      targetConversationId: "",
+      path: ext,
+    });
+
+    // Fresh process: empty `bound`, and the root is not task-shaped, so a
+    // shape-only rebound test reported "there is nothing to exit" and stranded
+    // the session on the tree it had just entered.
+    const second = createTaskWorktreeProvisioner({ store: real.store });
+    const back = await second.exit({
+      conversationId: "conv-guest",
+      root: ext,
+      sessionWorkspaceRoot: ext,
+    });
+    expect(back).toBe(repo);
+    expect((await real.store.load("conv-guest")).workspaceRoot).toBe(repo);
+  });
+
+  it("rejects an ambiguous selector with typed ambiguous_worktree naming the selector and no rebind", async () => {
+    const repo = makeGitRepo();
+    const real = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const { store, saves } = countingStore(real.store);
+    const prov = createTaskWorktreeProvisioner({ store });
+    const extA = makeExternalWorktree(repo, "amb-a", "checkout", "branch-a");
+    const extB = makeExternalWorktree(repo, "amb-b", "checkout", "branch-b");
+    expect(basename(extA)).toBe("checkout");
+    expect(basename(extB)).toBe("checkout");
+
+    const error = await prov
+      .enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "checkout",
+      })
+      .then(() => undefined)
+      .catch((err: unknown) => err as { kind?: string; message?: string });
+    expect(error?.kind).toBe("ambiguous_worktree");
+    // The diagnostic interpolates the SELECTOR (never the empty external
+    // conversationId), so it is non-empty and points at the selector.
+    expect(error?.message).toContain("'checkout'");
+    expect(error?.message).toContain(extA);
+    expect(saves()).toBe(0);
+    expect((await real.store.load("conv-guest")).workspaceRoot).toBe(repo);
+  });
+
+  it("rejects another repository's checkout with typed foreign_worktree and no rebind", async () => {
+    const repo = makeGitRepo();
+    const otherRepo = makeGitRepo();
+    const real = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const { store, saves } = countingStore(real.store);
+    const prov = createTaskWorktreeProvisioner({ store });
+    // A task-shaped path that is actually a linked checkout of ANOTHER repo:
+    // the legacy task-path fallback derives it, existsSync + is-linked pass,
+    // and the gitCommonDir comparison is what fails closed.
+    const foreignTree = join(repo, ".iknow", "worktrees", "foreign-conv");
+    mkdirSync(dirname(foreignTree), { recursive: true });
+    git(otherRepo, "worktree", "add", foreignTree, "-b", "foreign-branch");
+
+    await expect(
+      prov.enter({
+        conversationId: "conv-guest",
+        root: repo,
+        targetConversationId: "foreign-conv",
+      })
+    ).rejects.toMatchObject({
+      name: "WorktreeIsolationError",
+      kind: "foreign_worktree",
+    });
+    expect(saves()).toBe(0);
+    expect((await real.store.load("conv-guest")).workspaceRoot).toBe(repo);
+    expect(prov.isTaskWorktreeRoot(foreignTree)).toBe(false);
+  });
+
+  it("remove refuses an external checkout (typed kind) and leaves it on disk", async () => {
+    const repo = makeGitRepo();
+    const { store } = await makeStoreWithSessions(repo, ["conv-guest"]);
+    const ext = makeExternalWorktree(repo, "rm", "checkout", "feature-rm");
+    const prov = createTaskWorktreeProvisioner({ store });
+
+    await expect(
+      prov.remove({ root: repo, targetConversationId: "feature-rm" })
+    ).rejects.toMatchObject({ kind: "external_worktree" });
+    expect(existsSync(ext)).toBe(true);
+    expect(git(repo, "worktree", "list")).toContain(ext);
   });
 });
