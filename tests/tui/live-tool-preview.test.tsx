@@ -977,20 +977,22 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
       id: "tu-ctw-accent",
       name: "create-worktree",
       status: "ok",
-      input: {},
-      detail: "Created worktree",
+      input: { name: "demo-tree" },
+      detail: "demo-tree",
     };
     const setup = await renderBox(run, 80);
     const expectedDim = RGBA.fromHex(tuiPalette.dim);
     const { lines } = setup.captureSpans();
-    // Human-readable lines are English and name the new registered tool;
-    // the rendered detail must actually appear on the frame, or the color
+    // The completed line draws the precomputed detail (exactly what app.tsx's
+    // post_tool_use path stores from `summarizeToolCall`); the registry text
+    // behind it is pinned in tests/cli/chat-stream-preview.test.ts (k). The
+    // rendered detail must actually appear on the frame, or the color
     // assertion spins vacuously (old-name assertions broke after the rename —
     // pin the actually visible text here).
     let sawLine = false;
     for (const line of lines) {
       for (const span of line.spans) {
-        if (span.text.includes("create-worktree · Created worktree")) {
+        if (span.text.includes("create-worktree · demo-tree")) {
           sawLine = true;
           expect(rgbaEq(span.fg, expectedDim)).toBe(false);
         }
@@ -998,5 +1000,28 @@ describe("liveToolPreviewTextLines / liveToolPreviewBox: live bash 结果预览"
     }
     expect(sawLine).toBe(true);
     await setup.renderer.destroy();
+  });
+
+  test("SC5 live running：树名未到齐 → 裸注册名，不出现 `· ?`", () => {
+    // The running projection goes through the registry (summarizePartialInput →
+    // runningSummary), so this pins the streaming half of the same contract:
+    // the "?" placeholder appears only once the call settled. While the input
+    // is still arriving the line stays the bare registered name.
+    const notYet: LiveToolRun = {
+      id: "tu-ctw-notyet",
+      name: "create-worktree",
+      status: "running",
+      input: undefined,
+      partialInput: "{}",
+    };
+    expect(liveToolPreviewTextLines(notYet, 80)[0]).toBe("create-worktree");
+    const arrived: LiveToolRun = {
+      ...notYet,
+      id: "tu-ctw-arrived",
+      partialInput: '{"name":"demo-tree"}',
+    };
+    expect(liveToolPreviewTextLines(arrived, 80)[0]).toBe(
+      "create-worktree · demo-tree"
+    );
   });
 });

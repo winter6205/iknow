@@ -140,8 +140,8 @@ _Avoid_: 成功 bash 只留标题把 Updating files 藏掉；只留 dim 预览�
 **retract class（收）**: 落定后不摊正文预览的工具类（读 / 多数搜 / 查询）。live 是否进过程块改问 **live noise**，不是本表整表折进 `calling`。`read_file` / `read_image` 仍不摊文件内容（图不摊像素）；`web_search` / `web_fetch` 走 **live signal**。
 _Avoid_: 给 `read_file` / `read_image` 加内容或像素预览；失败折进计数；把 retract 等同于 live 全折
 
-**accent class（点名着色）**: 落定后以非 dim 的 `accent` 色 + 人读表述留在屏幕上的特定能力（skill、task worktree 生命周期工具）。必须进显示注册表。
-_Avoid_: 浅色隐藏；只进计数；用 error 红当点名色
+**accent class（点名着色）**: 落定后以非 dim 的 `accent` 色 + 人读表述留在屏幕上的特定能力（skill、改树的四件 task worktree 生命周期工具 `create` / `enter` / `exit` / `remove`；只读列举 `list-worktrees` 归 **live noise**）。必须进显示注册表。
+_Avoid_: 浅色隐藏；只进计数；用 error 红当点名色；把只读列举当点名
 
 **failure overlay（失败横切）**: 任意落定类在失败时覆盖成功态分类——留标题、一行短错误、error 色、不进折叠计数、不用 dim `⎿` 堆长文。error 色优先于 accent。
 _Avoid_: 失败跟成功走同一收；把失败当成第四类工具表；失败五行走 dim 预览

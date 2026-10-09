@@ -1215,14 +1215,13 @@ test("SC5 accent 成功：建树工具人读表述（label / 路径叶子）走 
   );
   await setup.waitForVisualIdle();
   const frame = setup.captureCharFrame();
-  // human-readable process lines follow the summary registry in English and
-  // name the target with its registered name (semantics still task worktree).
-  // The accent assertion is unchanged; stronger than before, this also checks
-  // that no Chinese residue remains.
-  expect(frame).toContain("Entered worktree abc-leaf-123");
+  // The process line is `registered name · tree`: the detail names the target,
+  // it never restates the action. The accent assertion is unchanged; the
+  // Chinese-residue check was already there.
+  expect(frame).toContain("enter-worktree · abc-leaf-123");
   expect(frame.includes("进入任务工作树")).toBe(false);
   const expectedAccent = RGBA.fromHex(tuiPalette.accent);
-  const fg = fgOfSpanWith(setup, "Entered worktree abc-leaf-123");
+  const fg = fgOfSpanWith(setup, "enter-worktree · abc-leaf-123");
   expect(fg).toBeDefined();
   expect(rgbaEq(fg!, expectedAccent)).toBe(true);
   await setup.renderer.destroy();

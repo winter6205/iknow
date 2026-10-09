@@ -185,6 +185,24 @@ function writeFileRunningSummary(r: Record<string, unknown>): string {
   return `Wrote ${path} (${countLines(content)} lines)`;
 }
 
+/** `enter-worktree` target as its input names it: the id / label selector
+ *  first, then the exact-path selector (the tool accepts exactly one). For a
+ *  task tree the path's last segment IS the leaf, so the segment reads as the
+ *  tree's name; for a linked checkout outside the task area it is that
+ *  checkout's directory name. Empty string when the input carries neither
+ *  selector (while streaming: it has not arrived yet).
+ *  Projection only: the naming SSOT stays in
+ *  `harness/isolation/worktree-gate.ts`, which this module must not import
+ *  (CLI → harness would invert the layering). */
+function enterWorktreeTarget(rec: Record<string, unknown>): string {
+  const id = rec.conversationId;
+  if (typeof id === "string" && id.length > 0) return id;
+  const path = rec.path;
+  if (typeof path !== "string" || path.length === 0) return "";
+  const segments = path.replace(/[\\/]+$/, "").split(/[\\/]+/);
+  return segments[segments.length - 1] ?? "";
+}
+
 /** Text display for one tool: summary + optional running summary. */
 interface ToolSummaryDisplay {
   readonly summary: (rec: Record<string, unknown>) => string;
@@ -207,8 +225,9 @@ interface ToolSummaryDisplay {
  *  grep=pattern).
  *
  *  The five task-worktree lifecycle tools use their registered names in the
- *  human-readable line — the semantics are still task worktrees; the wording
- *  names only the action and the target id, no policy. */
+ *  human-readable line — the semantics are still task worktrees. create /
+ *  enter / remove name the tree the call points at; exit / list point at no
+ *  tree and keep their action wording. */
 export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
   write_file: {
     summary: wroteLinesSummary,
@@ -272,14 +291,28 @@ export const TOOL_SUMMARIES: Readonly<Record<string, ToolSummaryDisplay>> = {
     summary: (r) => `MCP resource ${pickString(r, "uri", "?")}`,
   },
   query_trace: { summary: () => "Trace query" },
-  // The five task-worktree lifecycle tools: registered names in the human line, action + target id.
-  "create-worktree": { summary: () => "Created worktree" },
+  // The five task-worktree lifecycle tools: the line already carries the tool
+  // name, so create / enter / remove detail is the tree the call points at,
+  // never a restatement of the action. Fidelity limit: that is the tree the
+  // call ASKED for. `create-worktree` with an invalid label has the label
+  // discarded by the provisioner (the tree then takes the conversation id as
+  // its leaf) and the display layer cannot see that id, so the line keeps the
+  // requested name and the tool receipt — which reports `name discarded: …;
+  // actual path: …` — stays authoritative. Absent selector → "?" once settled;
+  // the running summaries return "" instead, so a half-streamed input shows the
+  // bare name rather than `· ?`.
+  "create-worktree": {
+    summary: (r) => pickString(r, "name"),
+    runningSummary: (r) => pickString(r, "name", ""),
+  },
   "enter-worktree": {
-    summary: (r) => `Entered worktree ${pickString(r, "conversationId", "?")}`,
+    summary: (r) => enterWorktreeTarget(r) || "?",
+    runningSummary: enterWorktreeTarget,
   },
   "exit-worktree": { summary: () => "Exited worktree" },
   "remove-worktree": {
-    summary: (r) => `Removed worktree ${pickString(r, "conversationId", "?")}`,
+    summary: (r) => pickString(r, "conversationId"),
+    runningSummary: (r) => pickString(r, "conversationId", ""),
   },
   "list-worktrees": { summary: () => "Listed worktrees" },
 };

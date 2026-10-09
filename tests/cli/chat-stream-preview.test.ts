@@ -550,36 +550,89 @@ describe("createStreamPreviewSink: CLI 与 TUI 共用 live tool line（D1）", (
 
   it("(j) 注册表里的工作树五件人读表述为英文（D1 / create-worktree D5）", () => {
     const names = new Set(registeredToolDisplayNames());
-    for (const n of [
-      "create-worktree",
-      "enter-worktree",
-      "exit-worktree",
-      "remove-worktree",
-      "list-worktrees",
-    ]) {
+    // Representative inputs (not `{}` only), so each line is checked with the
+    // detail it actually carries.
+    const inputs: ReadonlyArray<[string, unknown]> = [
+      ["create-worktree", { name: "source-scope-405" }],
+      ["enter-worktree", { conversationId: "abc" }],
+      ["exit-worktree", {}],
+      ["remove-worktree", { conversationId: "abc" }],
+      ["list-worktrees", {}],
+    ];
+    for (const [n, input] of inputs) {
       assert.ok(names.has(n));
       const line = formatToolStatusLine({
         toolName: n,
-        input: {},
+        input,
         status: "ok",
       });
       assert.ok(!/[一-鿿]/.test(line), `${n} line is English: ${line}`);
     }
-    assert.equal(
-      formatToolStatusLine({
-        toolName: "create-worktree",
-        input: {},
-        status: "ok",
-      }),
-      "create-worktree · Created worktree"
-    );
-    assert.equal(
-      formatToolStatusLine({
-        toolName: "enter-worktree",
-        input: { conversationId: "abc" },
-        status: "ok",
-      }),
-      "enter-worktree · Entered worktree abc"
-    );
+  });
+
+  it("(k) 工作树生命周期行点名目标树；未到达的选择器不画 `· ?`（D1）", () => {
+    const line = (
+      toolName: string,
+      input: unknown,
+      status: "ok" | "running" | "failed" = "ok"
+    ): string => formatToolStatusLine({ toolName, input, status });
+    const cases: ReadonlyArray<readonly [string, string]> = [
+      // The tree the call points at, not a restatement of the action.
+      [
+        line("create-worktree", { name: "source-scope-405" }),
+        "create-worktree · source-scope-405",
+      ],
+      // No name → the provisioner names the tree by the conversation id, which
+      // the display layer cannot see: the registry's "?" placeholder, never a
+      // guessed tree name.
+      [line("create-worktree", {}), "create-worktree · ?"],
+      // An invalid label is shown as requested (the provisioner discards it and
+      // the tool receipt names the actual path) — pinned so the limit is a
+      // documented contract, not an accident.
+      [
+        line("create-worktree", { name: "Bad Name" }),
+        "create-worktree · Bad Name",
+      ],
+      // enter has two selectors: id / label, else the exact path's last segment.
+      [
+        line("enter-worktree", { conversationId: "abc" }),
+        "enter-worktree · abc",
+      ],
+      [
+        line("enter-worktree", {
+          path: "/repo/.iknow/worktrees/source-scope-405",
+        }),
+        "enter-worktree · source-scope-405",
+      ],
+      [
+        line("enter-worktree", { path: "/opt/checkout/" }),
+        "enter-worktree · checkout",
+      ],
+      [line("enter-worktree", {}), "enter-worktree · ?"],
+      // remove selects by id / label only (the tool takes no path).
+      [
+        line("remove-worktree", { conversationId: "abc" }),
+        "remove-worktree · abc",
+      ],
+      // exit / list point at no tree: action wording kept (accent class needs
+      // human-readable wording, docs/CONTEXT.md `accent class`).
+      [line("exit-worktree", {}), "exit-worktree · Exited worktree"],
+      [line("list-worktrees", {}), "list-worktrees · Listed worktrees"],
+      // Running: the selector has not arrived → bare name, no `· ?` flicker.
+      [line("create-worktree", {}, "running"), "create-worktree"],
+      [line("enter-worktree", {}, "running"), "enter-worktree"],
+      [line("remove-worktree", {}, "running"), "remove-worktree"],
+      [
+        line("create-worktree", { name: "demo" }, "running"),
+        "create-worktree · demo",
+      ],
+      // Failure overlay keeps the detail and prefixes the line.
+      [
+        line("create-worktree", { name: "demo" }, "failed"),
+        "[失败] create-worktree · demo",
+      ],
+      [line("enter-worktree", {}, "failed"), "[失败] enter-worktree · ?"],
+    ];
+    for (const [got, want] of cases) assert.equal(got, want);
   });
 });
