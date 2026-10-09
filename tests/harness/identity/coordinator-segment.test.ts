@@ -238,8 +238,21 @@ describe("IKNOW_COORDINATOR_TEXT — SSOT 文案验收", () => {
     expect(IKNOW_COORDINATOR_TEXT).toMatch(
       /wait:false.*terminal completion wakes a silent run through the host mailbox\/subscription/s
     );
+    // The parenthetical must be actionable on both arms: status polling while
+    // the task runs, full-report retrieval through `tmp_path` once completed.
     expect(IKNOW_COORDINATOR_TEXT).toMatch(
-      /subagent_result only for an explicit status query/
+      /while a task runs, use subagent_result to poll status/i
+    );
+    expect(IKNOW_COORDINATOR_TEXT).toMatch(
+      /the receipt's `task_id` and the pad-relative `tmp_path`/
+    );
+    expect(IKNOW_COORDINATOR_TEXT).toMatch(
+      /`final\.md`, taken from the receipt's `output_path`/
+    );
+    expect(IKNOW_COORDINATOR_TEXT).toMatch(/to read the full report/);
+    // Regression lock: the status-only restriction must not come back.
+    expect(IKNOW_COORDINATOR_TEXT).not.toMatch(
+      /only for an explicit status query/i
     );
     expect(IKNOW_COORDINATOR_TEXT).not.toContain(
       "A future version may add an explicit asynchronous mode"

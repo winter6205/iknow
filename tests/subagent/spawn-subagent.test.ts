@@ -588,8 +588,19 @@ describe("spawn_subagent — AciToolDef 元数据", () => {
 
     expect(waitDescription).toMatch(/terminal completion/i);
     expect(waitDescription).toMatch(/silent run/i);
-    expect(waitDescription).toMatch(/explicit status query/i);
-    expect(waitDescription).not.toMatch(/poll with subagent_result/i);
+    // The wait field must name both arms of the canonical reader: status
+    // polling while the task runs, full-report retrieval once it completes.
+    expect(waitDescription).toMatch(
+      /while the task runs, use subagent_result to poll status/i
+    );
+    expect(waitDescription).toMatch(
+      /use subagent_result with the receipt's task_id and the pad-relative tmp_path/i
+    );
+    expect(waitDescription).toMatch(/final\.md/);
+    expect(waitDescription).toMatch(/read the full report/i);
+    // Regression lock: the status-only restriction must not come back —
+    // subagent_result is also the completed-report reader.
+    expect(waitDescription).not.toMatch(/only for an explicit status query/i);
   });
 
   it("#357 T1: inputSchema 含 sandboxRoot 字段(string,可选)", () => {

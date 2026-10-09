@@ -778,7 +778,7 @@ Result handling: a completed spawn returns the envelope {status: "ok", summary, 
 
 Parallelize by issuing multiple spawn_subagent calls in one turn: each spawns an independent worker process and they run concurrently. Keep each task self-contained; sub-agents cannot spawn further sub-agents.
 
-(For wait:false in chat/tui/serve, terminal completion wakes a silent run through the host mailbox/subscription; use subagent_result only for an explicit status query.)
+(For wait:false in chat/tui/serve, terminal completion wakes a silent run through the host mailbox/subscription; while a task runs, use subagent_result to poll status, and once it completes, use subagent_result with the receipt's \`task_id\` and the pad-relative \`tmp_path\` (for example \`final.md\`, taken from the receipt's \`output_path\`) to read the full report.)
 `.trim();
 
 /** Subagent-coordinator segment rendering: title + body (coordinatorSegment

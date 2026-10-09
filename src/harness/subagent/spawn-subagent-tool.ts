@@ -11,8 +11,9 @@
  * dispatched as several spawn_subagent calls in one turn (each call blocks
  * its own wait; the executor is concurrency-safe). `wait:false` returns
  * `{task_id}` immediately — the async arm, where the host mailbox/subscribe
- * path wakes a silent run on terminal completion and `subagent_result` stays
- * available for explicit queries.
+ * path wakes a silent run on terminal completion and `subagent_result` is the
+ * pull surface for both the running status query and the full-report read
+ * (receipt `output_path` passed back as `tmp_path`).
  *
  * `subagent_type` routes the sub-agent through the agent catalog: the value
  * resolves to a catalog id stored in `def.role` and later injected as the
@@ -372,7 +373,7 @@ export function createSpawnSubAgentTool(
   // Description assembled from two spliced templates: fixed prefix + cap
   // clause. The splice closure re-reads the holder each time, so the model
   // sees the current N when it reads the description.
-  const descriptionPrefix = `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. Omit \`subagent_type\` and the sub-agent runs as \`general-purpose\` — the writable, full-tool-surface default; \`explore\` is the read-only type, request it explicitly. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately. In chat/tui/serve, terminal completion wakes the host through the mailbox/subscribe path and starts a silent run; this is the primary completion path. Use \`subagent_result\` only for an explicit status query. `;
+  const descriptionPrefix = `Delegate a self-contained task when it needs multi-step exploration, independent verification, or parallelizable work. Omit \`subagent_type\` and the sub-agent runs as \`general-purpose\` — the writable, full-tool-surface default; \`explore\` is the read-only type, request it explicitly. Keep every task self-contained. Default \`wait:true\` — the call blocks until the sub-agent finishes and returns the parent-visible short handoff with summary, changed paths, status, and stop_reason when available (timeout 2 hours default; override via \`timeoutMs\`). Issue multiple \`spawn_subagent\` calls in one turn only for independent tasks. Pass \`wait:false\` for fire-and-forget: returns \`{task_id}\` immediately. In chat/tui/serve, terminal completion wakes the host through the mailbox/subscribe path and starts a silent run; this is the primary completion path. When the short handoff is not enough, use \`subagent_result\` to read the full worker report: pass the receipt's \`task_id\` and the pad-relative \`tmp_path\` (for example \`final.md\`, taken from the receipt's \`output_path\`); \`tmp_root\` stays diagnostic metadata. `;
   const descriptionCatalog =
     `\n\nAvailable subagent types (set \`subagent_type\` to route):\n` +
     proseLines;
@@ -450,7 +451,7 @@ export function createSpawnSubAgentTool(
         wait: {
           type: "boolean",
           description:
-            "When true (default), block until the sub-agent finishes and return the parent-visible short handoff (summary, changed paths, status, and stop_reason when available). When false, return {task_id} immediately; in chat/tui/serve, terminal completion wakes a silent run through the host mailbox/subscription. Use subagent_result only for an explicit status query.",
+            "When true (default), block until the sub-agent finishes and return the parent-visible short handoff (summary, changed paths, status, and stop_reason when available). When false, return {task_id} immediately; in chat/tui/serve, terminal completion wakes a silent run through the host mailbox/subscription. While the task runs, use subagent_result to poll status; once it completes, use subagent_result with the receipt's task_id and the pad-relative tmp_path (for example final.md, taken from the receipt's output_path) to read the full report.",
         },
         maxTurns: {
           type: "integer",

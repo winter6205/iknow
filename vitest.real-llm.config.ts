@@ -45,6 +45,13 @@ const TRACKED_INCLUDE = [
   // (tests/harness/lsp/worktree-trajectory.test.ts + .fixtures.ts). HAS_KEY
   // guard — no key → explicit Not run.
   "real-llm/worktree-trajectory.test.ts",
+  // subagent-output-handoff T5: real-model A/B half of the handoff-retrieval
+  // trajectory golden set (arm-A = pre-change wording derived from the live
+  // tool text via the promptTools presentation seam, arm-B = committed HEAD).
+  // Fixed inputs and hard gates are shared with the offline half
+  // (tests/subagent/subagent-output-handoff.test.ts + .fixtures.ts). HAS_KEY
+  // guard — no key → explicit Not run.
+  "real-llm/subagent-output-handoff.test.ts",
 ];
 
 const LOCAL_ONLY_INCLUDE = [

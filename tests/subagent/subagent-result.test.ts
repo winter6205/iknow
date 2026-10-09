@@ -19,13 +19,21 @@
  * ajv strict validation (createAciRegistry compiles inputSchema with
  * additionalProperties:false); the handler receives already-validated input —
  * not re-tested here.
+ *
+ * The appended "T4 / T1" sections at the bottom of this file cover the shipped
+ * pad contract: bounded continuation (paged / wide reports past the line
+ * window), concurrent readers on the same and on distinct tasks, and the
+ * failure / path-privacy surfaces that must keep holding.
  */
 import { EventEmitter } from "node:events";
 import {
+  chmodSync,
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,9 +49,14 @@ import {
 } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { FINAL_TEXT_PAD_NAME } from "../../src/harness/subagent/envelope.ts";
+import {
+  PAD_ROSTER_LINE_LIMIT,
+  READ_FILE_MAX_FILE_BYTES,
+} from "../../src/harness/subagent/pad-inspect.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import type { AciToolDef } from "../../src/harness/aci/types.ts";
 import { workerFenceTmpPath } from "../../src/harness/sandbox/fence-tmp.ts";
+import { hasLoneSurrogate, padLineCount } from "./pad-text-invariants.ts";
 
 /** fake manager: queryBuffer maps taskId to one of four states; other members are stubs. */
 function makeFakeManager(): SubAgentManager {
@@ -273,7 +286,7 @@ describe("subagent_result — AciToolDef 元数据", () => {
 });
 
 /**
- * T5 (parent-visible-tmp): list / read worker pad via subagent_result.
+ * Pad list / read (parent-visible tmp): list / read worker pad via subagent_result.
  * Real manager + on-disk pad — fake queryBuffer cannot prove SC3/S2-B.
  */
 interface FakeChild {
@@ -317,7 +330,7 @@ function makePadScratch(): { root: string; subagentsDir: string } {
   return { root, subagentsDir };
 }
 
-describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
+describe("subagent_result — pad list/read", () => {
   let subagentsDir: string;
   let sessionRoot: string;
 
@@ -455,5 +468,775 @@ describe("subagent_result — T5 pad list/read (SC3 / SC6 / S2-B)", () => {
     expect(typeof out).toBe("string");
     expect(out).not.toBeInstanceOf(Promise);
     expect(manager.waitFor).not.toBe(tool.handler);
+  });
+});
+
+// ── Bounded pad continuation ────────────────────────────────────────────────
+//
+// The pad reader stays synchronous, relative-path-only, and inside the worker
+// fence, while a report longer than one window stays fully retrievable: a
+// tail witness lands on a later bounded page, and assembling the pages
+// reproduces the original in order — with the line and byte caps still
+// present and no hidden truncation. The failure and path-privacy cases below
+// lock the typed rejection surface, which must stay free of raw filesystem
+// text.
+//
+// The exact parameter and field names are pinned ONCE here — one adapter, four
+// constants — so the contract assertions stay about observable behavior rather
+// than spelling.
+
+/** Input key naming where the next page continues (0-based, like read_file's `offset`). */
+const PAD_PAGE_OFFSET_ARG = "offset";
+/** Result key naming the offset to pass on the following call (absent at EOF). */
+const PAD_PAGE_CURSOR_FIELD = "next_offset";
+/** Result key flagging that this page ended at end-of-file. */
+const PAD_PAGE_EOF_FIELD = "eof";
+/** The executor's serialized-output floor (ADR-0006 `OUTPUT_HARD_CAP`). */
+const EXECUTOR_OUTPUT_HARD_CAP = 20_000;
+/**
+ * Pad caps that must SURVIVE pagination. `EXECUTOR_OUTPUT_HARD_CAP` mirrors a
+ * private src constant on purpose: it is the gate the pages are sized *against*,
+ * so re-stating it here makes the test fail if the pad budget ever drifts from
+ * the executor floor it was derived from.
+ */
+
+interface PadPage {
+  readonly raw: string;
+  readonly content: string;
+  readonly cursor: number;
+  readonly eof: boolean;
+}
+
+/**
+ * One bounded page: same public boundary as the model (the `subagent_result`
+ * handler), with the continuation offset applied. A page body is the RAW slice
+ * including its own line separators — the continuation signal lives in
+ * metadata (`PAD_PAGE_CURSOR_FIELD` / `PAD_PAGE_EOF_FIELD`), never inside
+ * `content`, so successive bodies concatenate to the original byte for byte.
+ */
+function readPadPage(
+  tool: AciToolDef,
+  taskId: string,
+  tmpPath: string,
+  offset: number
+): PadPage {
+  const raw = pollJson(tool, {
+    task_id: taskId,
+    tmp_path: tmpPath,
+    [PAD_PAGE_OFFSET_ARG]: offset,
+  });
+  const parsed = JSON.parse(raw) as Record<string, unknown>;
+  expect(parsed.status).toBe("ok");
+  const content = parsed.content;
+  expect(typeof content).toBe("string");
+  expect(raw.length).toBeLessThanOrEqual(EXECUTOR_OUTPUT_HARD_CAP);
+  const eof = parsed[PAD_PAGE_EOF_FIELD];
+  expect(
+    typeof eof,
+    "a bounded page must say explicitly whether more remains"
+  ).toBe("boolean");
+  const cursor = parsed[PAD_PAGE_CURSOR_FIELD];
+  if (eof === false) {
+    expect(
+      typeof cursor,
+      "a page that stopped short must report where to continue"
+    ).toBe("number");
+    expect(cursor as number).toBeGreaterThan(offset);
+  }
+  return {
+    raw,
+    content: content as string,
+    cursor: typeof cursor === "number" ? cursor : offset,
+    eof: eof === true,
+  };
+}
+
+/** Follow the continuation until EOF; a page that stops making progress fails. */
+function collectPadPages(
+  tool: AciToolDef,
+  taskId: string,
+  tmpPath: string,
+  maxPages = 40
+): { readonly content: string; readonly pages: readonly PadPage[] } {
+  const pages: PadPage[] = [];
+  let offset = 0;
+  for (let attempt = 0; attempt < maxPages; attempt += 1) {
+    const page = readPadPage(tool, taskId, tmpPath, offset);
+    pages.push(page);
+    if (page.eof) {
+      return { content: pages.map((p) => p.content).join(""), pages };
+    }
+    expect(page.cursor).toBeGreaterThan(offset);
+    offset = page.cursor;
+  }
+  throw new Error(`paged pad read did not reach EOF within ${maxPages} pages`);
+}
+
+const contractScratch: string[] = [];
+
+function makeContractSubagentsDir(): string {
+  const root = mkdtempSync(join(tmpdir(), "iknow-t4-contract-"));
+  contractScratch.push(root);
+  const subagentsDir = join(root, "subagents");
+  mkdirSync(subagentsDir, { recursive: true });
+  return subagentsDir;
+}
+
+afterEach(() => {
+  for (const path of contractScratch.splice(0)) {
+    rmSync(path, { recursive: true, force: true });
+  }
+});
+
+/**
+ * Real manager + on-disk pad (a fake queryBuffer cannot prove page contents).
+ * Same driver shape as `spawnSettled` above, parameterized by pad root so the
+ * new suites can each own a scratch directory.
+ */
+async function settleWithPadFiles(
+  subagentsDir: string,
+  files: ReadonlyArray<{ readonly name: string; readonly body: string }>,
+  envelope: { readonly summary: string; readonly result: string } = {
+    summary: "done",
+    result: "done",
+  }
+): Promise<{
+  readonly manager: SubAgentManager;
+  readonly tool: AciToolDef;
+  readonly taskId: string;
+  readonly pad: string;
+}> {
+  const child = makePadChild();
+  const manager = createSubAgentManager({
+    spawn: () => child as unknown as ChildProcess,
+    subagentsDir,
+  });
+  const { taskId } = manager.spawn({ task: "pad" });
+  const pad = workerFenceTmpPath(subagentsDir, taskId);
+  mkdirSync(pad, { recursive: true });
+  for (const file of files) {
+    writeFileSync(join(pad, file.name), file.body, "utf8");
+  }
+  emitPadEnvelope(child, {
+    status: "ok",
+    summary: envelope.summary,
+    result: envelope.result,
+  });
+  await flushPadTicks();
+  return { manager, tool: createSubAgentResultTool({ manager }), taskId, pad };
+}
+
+/**
+ * Two settled tasks under ONE real manager and ONE `subagent_result` tool:
+ * each spawn gets its own fake child and its own pad, so a second task_id is a
+ * real second worker rather than a routing stub.
+ */
+async function settleTwoPadTasks(
+  subagentsDir: string,
+  filesA: ReadonlyArray<{ readonly name: string; readonly body: string }>,
+  filesB: ReadonlyArray<{ readonly name: string; readonly body: string }>
+): Promise<{
+  readonly manager: SubAgentManager;
+  readonly tool: AciToolDef;
+  readonly taskIdA: string;
+  readonly taskIdB: string;
+  readonly padA: string;
+  readonly padB: string;
+}> {
+  const children = [makePadChild(), makePadChild()];
+  let nextChild = 0;
+  const manager = createSubAgentManager({
+    spawn: () => children[nextChild++] as unknown as ChildProcess,
+    subagentsDir,
+  });
+  const { taskId: taskIdA } = manager.spawn({ task: "pad A" });
+  const { taskId: taskIdB } = manager.spawn({ task: "pad B" });
+  const pads = [taskIdA, taskIdB].map((taskId) => {
+    const pad = workerFenceTmpPath(subagentsDir, taskId);
+    mkdirSync(pad, { recursive: true });
+    return pad;
+  });
+  for (const [index, files] of [filesA, filesB].entries()) {
+    for (const file of files) {
+      writeFileSync(join(pads[index]!, file.name), file.body, "utf8");
+    }
+  }
+  emitPadEnvelope(children[0]!, {
+    status: "ok",
+    summary: "done A",
+    result: "done A",
+  });
+  emitPadEnvelope(children[1]!, {
+    status: "ok",
+    summary: "done B",
+    result: "done B",
+  });
+  await flushPadTicks();
+  return {
+    manager,
+    tool: createSubAgentResultTool({ manager }),
+    taskIdA,
+    taskIdB,
+    padA: pads[0]!,
+    padB: pads[1]!,
+  };
+}
+
+describe("subagent_result — paged pad read (continuation contract)", () => {
+  let subagentsDir: string;
+
+  beforeEach(() => {
+    subagentsDir = makeContractSubagentsDir();
+  });
+
+  it("the public input schema accepts the continuation offset and stays closed to unknown keys", () => {
+    const schema = createSubAgentResultTool({
+      manager: makeFakeManager(),
+    }).inputSchema as {
+      required: string[];
+      additionalProperties: boolean;
+      properties: Record<string, { type?: string; minimum?: number }>;
+    };
+    // Existing frozen shape must survive: task_id required, no extra keys.
+    expect(schema.required).toEqual(["task_id"]);
+    expect(schema.additionalProperties).toBe(false);
+    expect(schema.properties.tmp_path).toBeDefined();
+    // The continuation argument — a non-negative integer, optional.
+    expect(schema.properties[PAD_PAGE_OFFSET_ARG]).toBeDefined();
+    expect(schema.properties[PAD_PAGE_OFFSET_ARG]?.type).toBe("integer");
+    expect(schema.properties[PAD_PAGE_OFFSET_ARG]?.minimum).toBe(0);
+  });
+
+  it("a call without a page argument keeps the current decorated first-window behavior and its 200-line cap", async () => {
+    const lines = Array.from({ length: 460 }, (_, i) => `P${i + 1}`);
+    const body = `${lines.join("\n")}\n`;
+    const { tool, taskId } = await settleWithPadFiles(subagentsDir, [
+      { name: "pages.txt", body },
+    ]);
+    const legacy = JSON.parse(
+      pollJson(tool, { task_id: taskId, tmp_path: "pages.txt" })
+    ) as { status: string; content: string; truncated: boolean };
+    expect(legacy.status).toBe("ok");
+    expect(legacy.truncated).toBe(true);
+    expect(legacy.content).toMatch(/^\s{5}1\tP1$/m);
+    expect(legacy.content).toMatch(/P200$/m);
+    expect(legacy.content).not.toMatch(/P201\b/);
+    expect(padLineCount(legacy.content)).toBe(PAD_ROSTER_LINE_LIMIT);
+  });
+
+  it("a report beyond the first 200 lines exposes a NEXT page holding the tail witness", async () => {
+    const lines = Array.from({ length: 460 }, (_, i) => `P${i + 1}`);
+    lines[459] = "P460 <<TAIL-WITNESS-PAGED>>";
+    const body = `${lines.join("\n")}\n`;
+    const { tool, taskId } = await settleWithPadFiles(subagentsDir, [
+      { name: "pages.txt", body },
+    ]);
+    expect(
+      lines.length,
+      "the fixture must exceed the pad's 200-line window, otherwise the first page already shows the tail"
+    ).toBeGreaterThan(PAD_ROSTER_LINE_LIMIT);
+
+    const first = readPadPage(tool, taskId, "pages.txt", 0);
+    expect(first.eof).toBe(false);
+    expect(first.content).not.toContain("<<TAIL-WITNESS-PAGED>>");
+    expect(padLineCount(first.content)).toBeLessThanOrEqual(
+      PAD_ROSTER_LINE_LIMIT
+    );
+
+    const { pages, content } = collectPadPages(tool, taskId, "pages.txt");
+    expect(pages.length).toBeGreaterThan(1);
+    expect(
+      pages.some((page) => page.content.includes("<<TAIL-WITNESS-PAGED>>"))
+    ).toBe(true);
+    expect(content).toContain("<<TAIL-WITNESS-PAGED>>");
+  });
+
+  it("successive pages concatenated reproduce the original file in order, exactly", async () => {
+    const lines = Array.from({ length: 460 }, (_, i) => `P${i + 1}`);
+    const body = `${lines.join("\n")}\n`;
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "pages.txt", body },
+    ]);
+    const { content, pages } = collectPadPages(tool, taskId, "pages.txt");
+    expect(content).toBe(readFileSync(join(pad, "pages.txt"), "utf8"));
+    expect(content).toBe(body);
+    // No page may reorder or repeat: order is line 1 first, line 460 last.
+    expect(pages[0]?.content.startsWith("P1")).toBe(true);
+    expect(pages[pages.length - 1]?.content).toContain("P460");
+    for (const page of pages) {
+      expect(padLineCount(page.content)).toBeLessThanOrEqual(
+        PAD_ROSTER_LINE_LIMIT
+      );
+    }
+  });
+
+  it("a decorated first window that truncates hands over a raw cursor", async () => {
+    const lines = Array.from({ length: 460 }, (_, i) => `P${i + 1}`);
+    const body = `${lines.join("\n")}\n`;
+    const { tool, taskId } = await settleWithPadFiles(subagentsDir, [
+      { name: "pages.txt", body },
+    ]);
+    const first = JSON.parse(
+      pollJson(tool, { task_id: taskId, tmp_path: "pages.txt" })
+    ) as {
+      status: string;
+      content: string;
+      truncated: boolean;
+      eof?: boolean;
+      next_offset?: number;
+    };
+    expect(first.truncated).toBe(true);
+    // The model-visible contract is "pass next_offset back as offset"; a
+    // truncated read without a cursor would strand the reader on page one.
+    expect(first.eof).toBe(false);
+    expect(typeof first.next_offset).toBe("number");
+
+    const second = readPadPage(tool, taskId, "pages.txt", first.next_offset!);
+    expect(second.content.startsWith("P201\n")).toBe(true);
+    expect(second.content).not.toContain("P200\n");
+    // The hand-off is gap-free: the cursor is exactly where the raw remainder
+    // begins, so no line is skipped and none is shown twice.
+    expect(first.next_offset).toBe(body.indexOf("P201\n"));
+  });
+
+  it("a complete decorated window reports no cursor because nothing remains", async () => {
+    const body = "one\ntwo\nthree\n";
+    const { tool, taskId } = await settleWithPadFiles(subagentsDir, [
+      { name: "short.txt", body },
+    ]);
+    const read = JSON.parse(
+      pollJson(tool, { task_id: taskId, tmp_path: "short.txt" })
+    ) as Record<string, unknown>;
+    expect(read.truncated).toBe(false);
+    expect("eof" in read).toBe(false);
+    expect("next_offset" in read).toBe(false);
+  });
+
+  it("an offset landing inside a surrogate pair opens the page on the next code point", async () => {
+    // One emoji is two UTF-16 units; an offset between them would otherwise
+    // hand back a lone low surrogate the consumer cannot render.
+    const body = `head🙂tail\n${"x".repeat(200)}\n`;
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "pair.txt", body },
+    ]);
+    const misaligned = body.indexOf("🙂") + 1;
+    expect(body.charCodeAt(misaligned)).toBeGreaterThanOrEqual(0xdc00);
+    const page = readPadPage(tool, taskId, "pair.txt", misaligned);
+    expect(hasLoneSurrogate(page.content)).toBe(false);
+    // The stray low half is snapped forward past, never emitted alone.
+    expect(page.content.startsWith("tail\n")).toBe(true);
+    expect(readFileSync(join(pad, "pair.txt"), "utf8")).toBe(body);
+  });
+
+  it("an invalid continuation offset is a typed input error, never a silent first page", async () => {
+    const body = `${Array.from({ length: 460 }, (_, i) => `P${i + 1}`).join("\n")}\n`;
+    const { tool, taskId } = await settleWithPadFiles(subagentsDir, [
+      { name: "pages.txt", body },
+    ]);
+    expect(() =>
+      tool.handler({
+        task_id: taskId,
+        tmp_path: "pages.txt",
+        [PAD_PAGE_OFFSET_ARG]: -1,
+      })
+    ).toThrow(ToolExecutionError);
+    expect(() =>
+      tool.handler({
+        task_id: taskId,
+        tmp_path: "pages.txt",
+        [PAD_PAGE_OFFSET_ARG]: 1.5,
+      })
+    ).toThrow(ToolExecutionError);
+
+    // An offset past the end has nothing to show: a typed rejection naming the
+    // cursor problem, never a fabricated full page or a silent restart at 0.
+    let beyond: string | undefined;
+    try {
+      beyond = pollJson(tool, {
+        task_id: taskId,
+        tmp_path: "pages.txt",
+        [PAD_PAGE_OFFSET_ARG]: Number.MAX_SAFE_INTEGER,
+      });
+    } catch (err) {
+      expect(err).toBeInstanceOf(ToolExecutionError);
+    }
+    if (beyond !== undefined) {
+      const parsed = JSON.parse(beyond) as {
+        status: string;
+        content?: string;
+        reason?: string;
+      };
+      expect(parsed.status).toBe("rejected");
+      expect(typeof parsed.reason).toBe("string");
+      expect(parsed.content).toBeUndefined();
+    }
+  });
+});
+
+// ── Concurrent readers on the pad ───────────────────────────────────────────
+//
+// `subagent_result` is declared concurrency-safe, so a parent may issue several
+// pad reads in one turn — repeat calls at the same cursor, two chains walking
+// the same file, or two tasks read side by side. The reader holds no per-file
+// cursor, so every one of those must be independent: a page is decided by its
+// own (task_id, tmp_path, offset) arguments alone, and each chain still
+// concatenates to its own file.
+
+/** One async batch: the calls run as separate tasks, interleaved at awaits. */
+function readConcurrently<T>(
+  thunks: ReadonlyArray<() => T>
+): Promise<Awaited<T>[]> {
+  return Promise.all(thunks.map((thunk) => Promise.resolve().then(thunk)));
+}
+
+function padPageContents(
+  tool: AciToolDef,
+  taskId: string,
+  tmpPath: string,
+  offset: number
+): string {
+  return readPadPage(tool, taskId, tmpPath, offset).content;
+}
+
+describe("subagent_result — concurrent pad readers", () => {
+  let subagentsDir: string;
+
+  beforeEach(() => {
+    subagentsDir = makeContractSubagentsDir();
+  });
+
+  it("repeated concurrent reads at the same task_id and offset return the same page", async () => {
+    const lines = Array.from({ length: 460 }, (_, i) => `P${i + 1}`);
+    const body = `${lines.join("\n")}\n`;
+    const { tool, taskId } = await settleWithPadFiles(subagentsDir, [
+      { name: "pages.txt", body },
+    ]);
+    const pages = await readConcurrently(
+      Array.from(
+        { length: 5 },
+        () => () => padPageContents(tool, taskId, "pages.txt", 0)
+      )
+    );
+    for (const page of pages) {
+      expect(page).toBe(pages[0]);
+    }
+    expect(pages[0].startsWith("P1\n")).toBe(true);
+    expect(hasLoneSurrogate(pages[0])).toBe(false);
+  });
+
+  it("two chains walking one file at different offsets stay independent when interleaved", async () => {
+    const lines = Array.from({ length: 660 }, (_, i) => `P${i + 1}`);
+    lines[659] = "P660 <<TAIL-WITNESS-CONCURRENT>>";
+    const body = `${lines.join("\n")}\n`;
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "pages.txt", body },
+    ]);
+    // Chain A from the start, chain B from the middle, advanced one step per
+    // round so the calls genuinely interleave rather than run to completion.
+    const collect = async (start: number): Promise<string> => {
+      let offset = start;
+      let acc = "";
+      for (let page = 0; page < 40; page += 1) {
+        const view = readPadPage(tool, taskId, "pages.txt", offset);
+        acc += view.content;
+        if (view.eof) return acc;
+        offset = view.cursor;
+        // Yield between pages: the other chain gets a turn at every step.
+        await Promise.resolve();
+      }
+      throw new Error("chain did not reach EOF");
+    };
+    const [fromZero, fromMiddle] = await Promise.all([
+      collect(0),
+      collect(body.indexOf("P201\n")),
+    ]);
+    expect(fromZero).toBe(readFileSync(join(pad, "pages.txt"), "utf8"));
+    const middle = body.slice(body.indexOf("P201\n"));
+    expect(fromMiddle).toBe(middle);
+    expect(fromZero).toContain("<<TAIL-WITNESS-CONCURRENT>>");
+    expect(fromMiddle).toContain("<<TAIL-WITNESS-CONCURRENT>>");
+  });
+
+  it("two distinct task_ids read their own files when paged concurrently", async () => {
+    const bodyA = `${Array.from({ length: 460 }, (_, i) => `A${i + 1}`).join("\n")}\n`;
+    const bodyB = `${Array.from({ length: 460 }, (_, i) => `B${i + 1}`).join("\n")}\n`;
+    const { tool, taskIdA, taskIdB, padA, padB } = await settleTwoPadTasks(
+      subagentsDir,
+      [{ name: "pages.txt", body: bodyA }],
+      [{ name: "pages.txt", body: bodyB }]
+    );
+    expect(taskIdA).not.toBe(taskIdB);
+    const [chainA, chainB] = await Promise.all([
+      Promise.resolve().then(() => collectPadPages(tool, taskIdA, "pages.txt")),
+      Promise.resolve().then(() => collectPadPages(tool, taskIdB, "pages.txt")),
+    ]);
+    // Each chain is independent: its own file, its own bytes, no cross-talk.
+    expect(chainA.content).toBe(readFileSync(join(padA, "pages.txt"), "utf8"));
+    expect(chainB.content).toBe(readFileSync(join(padB, "pages.txt"), "utf8"));
+    expect(chainA.content).toBe(bodyA);
+    expect(chainB.content).toBe(bodyB);
+    expect(chainB.content).not.toContain("A1\n");
+  });
+});
+
+describe("subagent_result — wide-report pages", () => {
+  let subagentsDir: string;
+
+  beforeEach(() => {
+    subagentsDir = makeContractSubagentsDir();
+  });
+
+  it("one line longer than the page budget still arrives complete, with no silently dropped tail", async () => {
+    const single = `${"W".repeat(50_000)}\n`;
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "wide.txt", body: single },
+    ]);
+    const { content, pages } = collectPadPages(tool, taskId, "wide.txt");
+    expect(pages.length).toBeGreaterThan(1);
+    expect(content).toBe(readFileSync(join(pad, "wide.txt"), "utf8"));
+    expect(content).toBe(single);
+  });
+
+  it("wide Unicode lines split across pages preserve CRLF endings and code points exactly", async () => {
+    const lines = Array.from(
+      { length: 40 },
+      (_, i) =>
+        `#${i + 1} ${"漢字".repeat(400)} ${"🙂".repeat(400)} e\u0301 combining ${i + 1}`
+    );
+    const body = `${lines.join("\r\n")}\r\n<<TAIL-WITNESS-WIDE>>\r\n`;
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "wide-lines.txt", body },
+    ]);
+    const { content, pages } = collectPadPages(tool, taskId, "wide-lines.txt");
+    expect(pages.length).toBeGreaterThan(1);
+    expect(content).toBe(readFileSync(join(pad, "wide-lines.txt"), "utf8"));
+    expect(content).toBe(body);
+    expect(content.includes("\r\n")).toBe(true);
+    for (const page of pages) {
+      expect(
+        hasLoneSurrogate(page.content),
+        "a page boundary may not split a surrogate pair"
+      ).toBe(false);
+      expect(page.content.includes("\uFFFD")).toBe(false);
+      expect(page.raw.length).toBeLessThanOrEqual(EXECUTOR_OUTPUT_HARD_CAP);
+    }
+    expect(Array.from(content).length).toBe(Array.from(body).length);
+  });
+});
+
+describe("subagent_result — failure surfaces at the public pad boundary", () => {
+  let subagentsDir: string;
+
+  beforeEach(() => {
+    subagentsDir = makeContractSubagentsDir();
+  });
+
+  it("empty or whitespace-only final text fabricates no final.md and reads as a typed rejection", async () => {
+    for (const result of ["", "   \n\t "]) {
+      const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [], {
+        summary: "done",
+        result,
+      });
+      expect(existsSync(join(pad, FINAL_TEXT_PAD_NAME))).toBe(false);
+      const listed = JSON.parse(pollJson(tool, { task_id: taskId })) as {
+        tmp_names?: string[];
+        output_path?: string;
+      };
+      expect(listed.output_path).toBeUndefined();
+      expect(listed.tmp_names ?? []).not.toContain(FINAL_TEXT_PAD_NAME);
+      const read = JSON.parse(
+        pollJson(tool, { task_id: taskId, tmp_path: FINAL_TEXT_PAD_NAME })
+      ) as { status: string; reason?: string; content?: string };
+      expect(read.status).toBe("rejected");
+      expect(typeof read.reason).toBe("string");
+      expect(read.content).toBeUndefined();
+    }
+  });
+
+  it("a pad file over the 1 MiB cap is a structured rejection with no raw fs text or host path", async () => {
+    const oversized = "A".repeat(READ_FILE_MAX_FILE_BYTES + 1);
+    expect(oversized.length).toBeGreaterThan(READ_FILE_MAX_FILE_BYTES);
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "huge.txt", body: oversized },
+    ]);
+    // The cap constrains a paged read exactly like a plain one (T4 keeps it).
+    for (const offset of [undefined, 0, 500]) {
+      const input: Record<string, unknown> = {
+        task_id: taskId,
+        tmp_path: "huge.txt",
+      };
+      if (offset !== undefined) input[PAD_PAGE_OFFSET_ARG] = offset;
+      const out = pollJson(tool, input);
+      const parsed = JSON.parse(out) as {
+        status: string;
+        reason?: string;
+        content?: string;
+      };
+      expect(parsed.status).toBe("rejected");
+      expect(typeof parsed.reason).toBe("string");
+      expect(parsed.content).toBeUndefined();
+      expect(out).not.toContain(pad);
+      expect(out).not.toMatch(/ENOENT|EACCES|EISDIR|ENOTDIR|Error:/);
+    }
+  });
+
+  it("a binary (NUL byte) pad file is a structured rejection, never raw bytes", async () => {
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "blob.bin", body: "head\u0000tail" },
+    ]);
+    const out = pollJson(tool, { task_id: taskId, tmp_path: "blob.bin" });
+    const parsed = JSON.parse(out) as {
+      status: string;
+      reason?: string;
+      content?: string;
+    };
+    expect(parsed.status).toBe("rejected");
+    expect(typeof parsed.reason).toBe("string");
+    expect(parsed.content).toBeUndefined();
+    expect(out).not.toContain("head");
+    expect(out).not.toContain(pad);
+  });
+
+  it("an unreadable pad file (EACCES) is a typed rejection, not a thrown stack or a host path", async () => {
+    // EACCES cannot be produced for uid 0, so the case is exercised only where
+    // the filesystem can actually deny the read (same environment precondition
+    // as tests/subagent/worker-identity-record.test.ts); it is not a way to skip
+    // the contract — the assertions run on any unprivileged runner.
+    if (typeof process.getuid === "function" && process.getuid() === 0) return;
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "locked.txt", body: "SECRET-PAD-BODY" },
+    ]);
+    chmodSync(join(pad, "locked.txt"), 0o000);
+    try {
+      const out = pollJson(tool, { task_id: taskId, tmp_path: "locked.txt" });
+      const parsed = JSON.parse(out) as {
+        status: string;
+        reason?: string;
+        content?: string;
+      };
+      expect(parsed.status).toBe("rejected");
+      expect(typeof parsed.reason).toBe("string");
+      expect(parsed.content).toBeUndefined();
+      expect(out).not.toContain("SECRET-PAD-BODY");
+      expect(out).not.toContain("EACCES");
+      expect(out).not.toContain(pad);
+      expect(out).not.toMatch(/at .*\.ts:\d+/);
+    } finally {
+      chmodSync(join(pad, "locked.txt"), 0o600);
+    }
+  });
+
+  it("a pad whose final.md could not be written stays a typed rejection at the read boundary", async () => {
+    const child = makePadChild();
+    const manager = createSubAgentManager({
+      spawn: () => child as unknown as ChildProcess,
+      subagentsDir,
+    });
+    const { taskId } = manager.spawn({ task: "pad write failed" });
+    const pad = workerFenceTmpPath(subagentsDir, taskId);
+    mkdirSync(join(pad, FINAL_TEXT_PAD_NAME), { recursive: true });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      emitPadEnvelope(child, {
+        status: "ok",
+        summary: "done",
+        result: "body that cannot land",
+      });
+      await flushPadTicks();
+      const tool = createSubAgentResultTool({ manager });
+      const out = pollJson(tool, {
+        task_id: taskId,
+        tmp_path: FINAL_TEXT_PAD_NAME,
+      });
+      const parsed = JSON.parse(out) as {
+        status: string;
+        reason?: string;
+        content?: string;
+      };
+      expect(parsed.status).toBe("rejected");
+      expect(typeof parsed.reason).toBe("string");
+      expect(out).not.toContain("body that cannot land");
+      expect(out).not.toContain(pad);
+    } finally {
+      warn.mockRestore();
+    }
+  });
+});
+
+describe("subagent_result — path privacy of the pad fence", () => {
+  let subagentsDir: string;
+  let sessionRoot: string;
+
+  beforeEach(() => {
+    sessionRoot = mkdtempSync(join(tmpdir(), "iknow-t4-outer-"));
+    contractScratch.push(sessionRoot);
+    subagentsDir = makeContractSubagentsDir();
+  });
+
+  it("absolute and `..` attempts stay typed rejects and echo no host path", async () => {
+    const secret = join(sessionRoot, "secret.txt");
+    writeFileSync(secret, "SESSION-SECRET-PRIVACY", "utf8");
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "inside.txt", body: "inside-pad" },
+    ]);
+    for (const attempt of [
+      secret,
+      "../secret.txt",
+      "inside.txt/../../secret.txt",
+      "./../secret.txt",
+    ]) {
+      const out = pollJson(tool, { task_id: taskId, tmp_path: attempt });
+      const parsed = JSON.parse(out) as {
+        status: string;
+        reason?: string;
+        content?: string;
+      };
+      expect(parsed.status).toBe("rejected");
+      expect(parsed.reason).toBe("path_escape");
+      expect(parsed.content).toBeUndefined();
+      expect(out).not.toContain("SESSION-SECRET-PRIVACY");
+      expect(out).not.toContain(sessionRoot);
+      expect(out).not.toContain(pad);
+    }
+    expect(readFileSync(secret, "utf8")).toBe("SESSION-SECRET-PRIVACY");
+  });
+
+  it("a symlink inside the pad pointing outside is a typed reject and its target is never read", async () => {
+    const secret = join(sessionRoot, "linked-secret.txt");
+    writeFileSync(secret, "SYMLINK-TARGET-SECRET", "utf8");
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "real.txt", body: "inside-pad" },
+    ]);
+    symlinkSync(secret, join(pad, "escape-link"));
+    const out = pollJson(tool, { task_id: taskId, tmp_path: "escape-link" });
+    const parsed = JSON.parse(out) as {
+      status: string;
+      reason?: string;
+      content?: string;
+    };
+    expect(parsed.status).toBe("rejected");
+    expect(parsed.reason).toBe("path_escape");
+    expect(parsed.content).toBeUndefined();
+    expect(out).not.toContain("SYMLINK-TARGET-SECRET");
+    expect(out).not.toContain(sessionRoot);
+    expect(readFileSync(join(pad, "real.txt"), "utf8")).toBe("inside-pad");
+  });
+
+  it("a pad root removed after the terminal write reads as a typed rejection, not a filesystem error", async () => {
+    const { tool, taskId, pad } = await settleWithPadFiles(subagentsDir, [
+      { name: "gone.txt", body: "was-here" },
+    ]);
+    rmSync(pad, { recursive: true, force: true });
+    const out = pollJson(tool, { task_id: taskId, tmp_path: "gone.txt" });
+    const parsed = JSON.parse(out) as {
+      status: string;
+      reason?: string;
+      content?: string;
+    };
+    expect(parsed.status).toBe("rejected");
+    expect(typeof parsed.reason).toBe("string");
+    expect(parsed.content).toBeUndefined();
+    expect(out).not.toContain("ENOENT");
+    expect(out).not.toContain(pad);
   });
 });

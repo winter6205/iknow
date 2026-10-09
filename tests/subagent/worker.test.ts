@@ -306,6 +306,88 @@ describe("subagent worker: runWorkerOnce 端到端 (stub-model + 全 deps)", () 
 });
 
 // ---------------------------------------------------------------------------
+// B1. T3 raw-report side channel. A folded ok report only reaches the host if
+//     the pre-fold body leaves the worker beside the envelope, so the sink's
+//     trigger surface is locked here: the genuine >20000 ok path only — never a
+//     short report (its envelope already carries the whole body), never a
+//     failed path (its result is empty).
+// ---------------------------------------------------------------------------
+
+describe("subagent worker: final_text side channel (T3)", () => {
+  const baseEnvelope: WorkerEnvelope = {
+    task: "report",
+    sandboxRoot: "/tmp/sb",
+  };
+
+  it("ok over 20000 → sink gets the pre-fold original, envelope stays folded", async () => {
+    const raw = `# report head\n${"y".repeat(25_000)}\n<<TAIL-WITNESS-WORKER>>\n`;
+    const sent: string[] = [];
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: [raw] })],
+    });
+    const env = await runWorkerOnce({
+      workerEnvelope: baseEnvelope,
+      deps: makeDeps(adapter),
+      emitFinalText: (text) => sent.push(text),
+    });
+    assert.deepEqual(
+      sent,
+      [raw],
+      "the raw body must be handed over byte-exact"
+    );
+    assert.equal(env.status, "ok");
+    assert.equal(env.truncated, true);
+    assert.equal(env.totalLength, raw.length);
+    assert.notEqual(env.result, raw, "the IPC envelope stays the folded copy");
+    assert.equal(env.result.includes("<<TAIL-WITNESS-WORKER>>"), false);
+  });
+
+  it("ok at or below 20000 → no side channel (the envelope body is complete)", async () => {
+    const body = "y".repeat(20_000);
+    const sent: string[] = [];
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: [body] })],
+    });
+    const env = await runWorkerOnce({
+      workerEnvelope: baseEnvelope,
+      deps: makeDeps(adapter),
+      emitFinalText: (text) => sent.push(text),
+    });
+    assert.deepEqual(sent, []);
+    assert.equal(env.result, body);
+    assert.equal(env.truncated, undefined);
+  });
+
+  it("failed run → no side channel", async () => {
+    const sent: string[] = [];
+    // stub queue exhausted → run() throws ProtocolError → failed envelope with
+    // an empty result: nothing to recover.
+    const adapter = createStubModel({ responses: [] });
+    const env = await runWorkerOnce({
+      workerEnvelope: baseEnvelope,
+      deps: makeDeps(adapter),
+      emitFinalText: (text) => sent.push(text),
+    });
+    assert.equal(env.status, "failed");
+    assert.equal(env.truncated, undefined);
+    assert.deepEqual(sent, []);
+  });
+
+  it("sink omitted (test seam / unit call) → folded envelope unchanged", async () => {
+    const adapter = createStubModel({
+      responses: [assistantResult({ texts: ["y".repeat(25_000)] })],
+    });
+    const env = await runWorkerOnce({
+      workerEnvelope: baseEnvelope,
+      deps: makeDeps(adapter),
+    });
+    assert.equal(env.status, "ok");
+    assert.equal(env.truncated, true);
+    assert.equal(env.totalLength, 25_000);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // B2. ADR-0111 — apiError routing of the protocolError convergence branch
 //     (Decision 2(a)) and subclass ordering of the run() escape catch
 //     (Decision 2(b)).

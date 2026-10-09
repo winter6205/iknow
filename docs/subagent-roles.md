@@ -4,6 +4,9 @@
 catalog. The catalog entry supplies the subagent's persona (system-prompt
 segment), optional `bashMode` restriction, and optional tool denylist.
 
+For the parent-side result lifecycle and the supported full-report retrieval
+call, see [Subagent output handoff](guides/subagent-output-handoff.md).
+
 ## Builtin roles
 
 | id                | Behavior                                                           |

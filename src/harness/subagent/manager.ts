@@ -18,6 +18,7 @@ import {
   shouldAttachProductRoster,
   parseParentEnvelope,
   parseReviewRequestFrame,
+  parseFinalTextFrame,
   frameTag,
   truncateEnvelopeResult,
   FINAL_TEXT_PAD_NAME,
@@ -220,7 +221,11 @@ export interface SubAgentManager {
    * `not_found` (same discriminant as queryBuffer). Optional on the
    * interface so poll-only fakes stay structural.
    */
-  readonly queryPad?: (taskId: string, tmpPath?: string) => PadQueryResult;
+  readonly queryPad?: (
+    taskId: string,
+    tmpPath?: string,
+    offset?: number
+  ) => PadQueryResult;
   /**
    * The third param `signal?: AbortSignal` — caller abort → rejects
    * SubAgentAbortError (typed apart from SubAgentWaitTimeoutError). The
@@ -676,6 +681,14 @@ interface Task {
   crashInFlight: boolean;
   /** Host path of this worker's fence `/tmp` pad when session layout exists. */
   padRoot?: string;
+  /**
+   * Raw final text buffered from a child→parent `final_text` frame, awaiting the
+   * terminal envelope line that follows it on the same wire. The host persists
+   * this instead of the envelope's copy, because that copy may already be the
+   * worker's fold. Latched cleared on a successful pad write so a later landing
+   * on the same task can never re-attach this text.
+   */
+  pendingFinalText?: string;
   /**
    * OS identity of the CURRENT spawn, captured right after the child exists.
    * Absent when no identity was recorded (no runtime persistence wired, or a
@@ -1360,12 +1373,16 @@ export function createSubAgentManager(opts: {
 
   /**
    * Locked sentence 2: host-side final-text landing. Writes the terminal
-   * assistant text (the `result` the host holds — already wire-folded by the
-   * worker when it exceeded 20000 chars) to the worker pad's stable relative
-   * path, and returns that pad-relative path for the envelope.
+   * assistant text to the worker pad's stable relative path and returns that
+   * pad-relative path for the envelope. Source of truth, in priority order:
+   *   1. the `final_text` frame the worker sent beside the envelope — the raw
+   *      pre-fold text, present when the worker's IPC condensation folded it;
+   *   2. otherwise the `result` of the envelope as received (unfolded, so
+   *      ≤ 20000 chars and complete; the host folds its own parent-visible copy
+   *      after this write, see the stdout dispatch loop).
    *
    * Failure modes (all degrade, never throw):
-   *   - no padRoot / empty-or-whitespace-only `result` → `undefined` (no file,
+   *   - no padRoot / empty-or-whitespace-only text → `undefined` (no file,
    *     no `output_path`; the timeout fallback envelope lands here);
    *   - pad write failure (ENOTDIR / EACCES / ENOSPC / …) → `undefined` +
    *     warn-once. A pad write is bookkeeping: it must not fail the task and
@@ -1383,8 +1400,8 @@ export function createSubAgentManager(opts: {
    * single call site (before the spawn try) plus an `existsSync` early
    * return — one warn per task is structural there, not latched.
    *
-   * Truncation is NOT a failure here — a `truncated: true` envelope still
-   * lands its (folded) text and keeps `status: "ok"`.
+   * Truncation is NOT a failure here — a folded report still lands its **raw**
+   * text and keeps `status: "ok"`.
    */
   const finalTextWriteWarned = new Set<string>();
   function writeFinalTextToPad(
@@ -1392,11 +1409,12 @@ export function createSubAgentManager(opts: {
     env: SubAgentEnvelope
   ): string | undefined {
     if (task.padRoot === undefined) return undefined;
+    const text = task.pendingFinalText ?? env.result;
     // Postel: empty / whitespace-only is "no final text", not an empty file.
-    if (env.result.trim().length === 0) return undefined;
+    if (text.trim().length === 0) return undefined;
     try {
       mkdirSync(task.padRoot, { recursive: true });
-      writeFileSync(join(task.padRoot, FINAL_TEXT_PAD_NAME), env.result);
+      writeFileSync(join(task.padRoot, FINAL_TEXT_PAD_NAME), text);
     } catch (err) {
       // EXIT: pad writing is a best-effort delivery channel; the short handoff
       // in the envelope remains the authoritative parent-visible result.
@@ -1409,14 +1427,27 @@ export function createSubAgentManager(opts: {
       }
       return undefined;
     }
+    // Single-use: the raw copy belongs to the envelope landing it came with. A
+    // later landing must not attach it to a different terminal state.
+    task.pendingFinalText = undefined;
     return FINAL_TEXT_PAD_NAME;
   }
 
-  function locateEnvelope(task: Task, env: SubAgentEnvelope): SubAgentEnvelope {
+  function locateEnvelope(
+    task: Task,
+    env: SubAgentEnvelope,
+    /**
+     * The envelope exactly as received, before the host's own fold. The pad is
+     * written from it so the persisted report is never a second-class copy,
+     * while the locator stamp and the roster stay judged on the parent-visible
+     * `env` (their existing contract).
+     */
+    preFold?: SubAgentEnvelope
+  ): SubAgentEnvelope {
     if (task.padRoot === undefined) return env;
     // The host is the writer: an `output_path` echoed by the worker is not
     // trusted, and the stamp always names a file this call actually wrote.
-    const outputPath = writeFinalTextToPad(task, env);
+    const outputPath = writeFinalTextToPad(task, preFold ?? env);
     const located = attachParentVisibleTmp(env, {
       task_id: task.id,
       tmp_root: task.padRoot,
@@ -2232,6 +2263,75 @@ export function createSubAgentManager(opts: {
     }
   }
 
+  /**
+   * Dispatch one complete stdout line of a running worker. The wire is closed:
+   * a known frame tag is relayed/buffered, anything else must validate as the
+   * terminal envelope, and a validation failure is a protocol error — never a
+   * silently dropped line.
+   */
+  function handleStdoutLine(task: Task, line: string): void {
+    try {
+      // ADR-0127: tagged control frames ride the same newline-JSON wire
+      // beside the terminal envelope. An *unknown* tag falls through to
+      // envelope validation and dies as protocolError (the frame grammar
+      // is closed — new frames must be schema members).
+      if (frameTag(line) === "review_request") {
+        relayReviewRequest(task, line);
+        return;
+      }
+      // The raw-report side channel: buffered for the terminal envelope that
+      // follows on this same wire. Without a pad root there is nowhere to
+      // land it — discard rather than let report text leak into a
+      // parent-visible envelope. Validation still runs, so a malformed frame
+      // stays a ProtocolError.
+      if (frameTag(line) === "final_text") {
+        const { text } = parseFinalTextFrame(line);
+        task.pendingFinalText = task.padRoot === undefined ? undefined : text;
+        return;
+      }
+      // Land the pad from the pristine copy FIRST (a `final_text` frame body
+      // if one arrived, else this envelope's unfolded `result`), then fold the
+      // parent-visible copy: the pad keeps the original while the stored
+      // envelope stays bounded with a truthful truncated/totalLength.
+      const received = parseParentEnvelope(line);
+      const env = locateEnvelope(
+        task,
+        truncateEnvelopeResult(received),
+        received
+      );
+      task.envelope = env;
+      // State migration + stop event (single-emit is guarded by the
+      // stoppedEmitted flag inside emitStop; repeated triggers from later
+      // exit/error paths are no-ops).
+      if (env.status === "ok") {
+        emitStateChange(task, "completed");
+        emitStop(task, "completed", { summary: env.summary });
+        return;
+      }
+      emitStateChange(task, "failed", {
+        reason: env.reason ?? "protocolError",
+      });
+      emitStop(task, "failed", {
+        reason: env.reason ?? "protocolError",
+        summary: env.summary,
+      });
+    } catch (err) {
+      // Envelope validation failure = protocol error.
+      const errMsg = err instanceof Error ? err.message : String(err);
+      task.envelope = locateEnvelope(task, {
+        status: "failed",
+        reason: "protocolError",
+        summary: `subagent envelope protocol error: ${errMsg}`,
+        result: "",
+      });
+      emitStateChange(task, "failed", { reason: "protocolError" });
+      emitStop(task, "failed", {
+        reason: "protocolError",
+        summary: `subagent envelope protocol error: ${errMsg}`,
+      });
+    }
+  }
+
   function launchWorker(
     def: SubAgentDefinition,
     id: string
@@ -2413,7 +2513,8 @@ export function createSubAgentManager(opts: {
     // route: legacy shape, end() immediately after writing.
     primeWorkerStdin(task, child, payload);
 
-    // stdout newline-JSON → parse → truncate → completed. With multiple envelopes the last one wins.
+    // stdout newline-JSON → decode → split complete lines → dispatch per line.
+    // With multiple envelopes the last one wins.
     let stdoutBuf = "";
     child.stdout?.on("data", (chunk: Buffer) => {
       stdoutBuf += chunk.toString("utf8");
@@ -2422,50 +2523,7 @@ export function createSubAgentManager(opts: {
         const line = stdoutBuf.slice(0, idx);
         stdoutBuf = stdoutBuf.slice(idx + 1);
         if (line.trim().length === 0) continue;
-        try {
-          // ADR-0127: tagged control frames ride the same newline-JSON wire
-          // beside the terminal envelope. An *unknown* tag falls through to
-          // envelope validation and dies as protocolError (the frame grammar
-          // is closed — new frames must be schema members).
-          if (frameTag(line) === "review_request") {
-            relayReviewRequest(task, line);
-            continue;
-          }
-          const env = locateEnvelope(
-            task,
-            truncateEnvelopeResult(parseParentEnvelope(line))
-          );
-          task.envelope = env;
-          // State migration + stop event (single-emit is guarded by the
-          // stoppedEmitted flag inside emitStop; repeated triggers from later
-          // exit/error paths are no-ops).
-          if (env.status === "ok") {
-            emitStateChange(task, "completed");
-            emitStop(task, "completed", { summary: env.summary });
-          } else {
-            emitStateChange(task, "failed", {
-              reason: env.reason ?? "protocolError",
-            });
-            emitStop(task, "failed", {
-              reason: env.reason ?? "protocolError",
-              summary: env.summary,
-            });
-          }
-        } catch (err) {
-          // Envelope validation failure = protocol error.
-          const errMsg = err instanceof Error ? err.message : String(err);
-          task.envelope = locateEnvelope(task, {
-            status: "failed",
-            reason: "protocolError",
-            summary: `subagent envelope protocol error: ${errMsg}`,
-            result: "",
-          });
-          emitStateChange(task, "failed", { reason: "protocolError" });
-          emitStop(task, "failed", {
-            reason: "protocolError",
-            summary: `subagent envelope protocol error: ${errMsg}`,
-          });
-        }
+        handleStdoutLine(task, line);
       }
     });
 
@@ -2772,10 +2830,14 @@ export function createSubAgentManager(opts: {
     };
   }
 
-  function queryPad(taskId: string, tmpPath?: string): PadQueryResult {
+  function queryPad(
+    taskId: string,
+    tmpPath?: string,
+    offset?: number
+  ): PadQueryResult {
     const task = tasks.get(taskId);
     if (!task) return { status: "not_found" };
-    return inspectWorkerPad(task.padRoot, tmpPath);
+    return inspectWorkerPad(task.padRoot, tmpPath, offset);
   }
 
   function waitFor(

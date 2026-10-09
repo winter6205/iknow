@@ -58,6 +58,25 @@ function parseTmpPath(raw: unknown): string | undefined {
   return raw.length > 0 ? raw : undefined;
 }
 
+/**
+ * Continuation offset for a paged pad read: a non-negative integer code-unit
+ * index into the decoded file, or undefined for the decorated first window.
+ * Validated here (not only by the schema) because the handler is a public
+ * boundary; a negative or fractional offset throws rather than silently
+ * falling back to page 0.
+ */
+function parsePadOffset(raw: unknown): number | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw !== "number" || !Number.isInteger(raw) || raw < 0) {
+    // EXIT: typed throw → aci-executor `execution_failed`; never a silent
+    // fallback to page 0 (a model that lost its cursor must see it lost).
+    throw new ToolExecutionError(
+      "subagent_result: `offset` must be a non-negative integer"
+    );
+  }
+  return raw;
+}
+
 function serializePadOrPoll(
   result: ReturnType<SubAgentManager["queryBuffer"]>,
   pad: PadQueryResult,
@@ -75,6 +94,10 @@ function serializePadOrPoll(
       tmp_path: tmpPath,
       content: pad.content,
       truncated: pad.truncated,
+      ...(pad.eof !== undefined ? { eof: pad.eof } : {}),
+      ...(pad.next_offset !== undefined
+        ? { next_offset: pad.next_offset }
+        : {}),
     });
   }
   return JSON.stringify({
@@ -89,7 +112,7 @@ export function createSubAgentResultTool(
   return Object.freeze({
     name: "subagent_result",
     description:
-      "Poll a sub-agent that was spawned with wait:false (or re-check after a wait:true completion); sync non-blocking, call again later to re-poll. Returns one JSON object whose parent-visible short handoff centers on `status`, `summary`, changed paths (`fileRefs`), and `stop_reason` when available: `status` ∈ `not_found` (no such task — unknown or expired id) / `running` / `completed` / `failed` (failed reports `reason` and `summary`). With only `task_id`, also lists top-level names on that worker's fence `/tmp` pad (`tmp_names`). Optional relative `tmp_path` reads one pad file (truncation same as read_file); `..` or pad escape is a typed reject.",
+      "Poll a sub-agent that was spawned with wait:false (or re-check after a wait:true completion); sync non-blocking, call again later to re-poll. Returns one JSON object whose parent-visible short handoff centers on `status`, `summary`, changed paths (`fileRefs`), and `stop_reason` when available: `status` ∈ `not_found` (no such task — unknown or expired id) / `running` / `completed` / `failed` (failed reports `reason` and `summary`). With only `task_id`, also lists top-level names on that worker's fence `/tmp` pad (`tmp_names`). Optional relative `tmp_path` reads one pad file; a file longer than the window returns a first page with `truncated` and, when paging, `eof` plus `next_offset` — pass that back as `offset` to fetch the next bounded page. `..` or pad escape is a typed reject.",
     inputSchema: {
       type: "object",
       properties: {
@@ -101,6 +124,12 @@ export function createSubAgentResultTool(
           type: "string",
           description:
             "Optional path relative to that worker's fence /tmp pad. Omit to list top-level names; pass to read one file.",
+        },
+        offset: {
+          type: "integer",
+          minimum: 0,
+          description:
+            "Continuation offset (code-unit index) for a paged pad read; pass a prior page's `next_offset` to fetch the next bounded page. Omit for the decorated first window.",
         },
       },
       required: ["task_id"],
@@ -125,6 +154,7 @@ export function createSubAgentResultTool(
         );
       }
       const tmpPath = parseTmpPath(obj.tmp_path);
+      const offset = parsePadOffset(obj.offset);
       // sync and non-blocking: queryBuffer + queryPad only (no waitFor / drain).
       const result = deps.manager.queryBuffer(taskId);
       if (result.status === "not_found") {
@@ -132,7 +162,11 @@ export function createSubAgentResultTool(
       }
       const queryPad = deps.manager.queryPad;
       if (queryPad !== undefined) {
-        return serializePadOrPoll(result, queryPad(taskId, tmpPath), tmpPath);
+        return serializePadOrPoll(
+          result,
+          queryPad(taskId, tmpPath, offset),
+          tmpPath
+        );
       }
       return JSON.stringify(serializePoll(result));
     },

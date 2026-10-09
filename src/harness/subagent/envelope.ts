@@ -21,7 +21,13 @@
  * Parent-visible projection: the handoff the parent model sees is a short
  * summary, paths and stop reason — not the full final text. `truncated` is
  * set (report folded, task not failed) when the original is longer than the
- * handoff or exceeds 20000 chars; status/reason stay unchanged.
+ * handoff or exceeds 20000 chars; status/reason stay unchanged. Re-projecting
+ * an already folded envelope is idempotent: the first (raw) `totalLength` and
+ * `truncated: true` survive, the handoff is not cut a second time.
+ *
+ * One stdout wire, two line kinds: the single terminal envelope plus closed
+ * tagged frames (`review_request`, `final_text`) dispatched by `frameTag`; the
+ * envelope schemas themselves are untouched by any frame.
  */
 import Ajv from "ajv";
 import addFormats from "ajv-formats";
@@ -272,7 +278,12 @@ export interface SubAgentEnvelope {
  */
 export const FINAL_TEXT_PAD_NAME = "final.md";
 
-const TRUNCATION_LIMIT = 20000;
+/**
+ * IPC fold threshold in UTF-16 code units (ADR-0006 capacity, not a task
+ * verdict). Exported as the SSOT the pad page budget and the handoff fixtures
+ * bound against — the value is a production contract, not a test detail.
+ */
+export const TRUNCATION_LIMIT = 20000;
 /** Parent-visible summary cap (handoff + crashed stderr tail). */
 export const SUMMARY_LIMIT = 2000;
 const TRUNCATION_MARKER = (total: number) =>
@@ -507,7 +518,15 @@ export const REVIEW_REQUEST_FRAME_SCHEMA: Record<string, unknown> = {
     detail: { type: "string", minLength: 1 },
     input_digest: { type: "string" },
   },
-  required: ["type", "request_id", "tool", "summary_hint", "cause", "span", "detail"],
+  required: [
+    "type",
+    "request_id",
+    "tool",
+    "summary_hint",
+    "cause",
+    "span",
+    "detail",
+  ],
   additionalProperties: false,
 };
 
@@ -530,6 +549,37 @@ export const REVIEW_BROKER_READY_FRAME_SCHEMA: Record<string, unknown> = {
     type: { type: "string", enum: ["review_broker_ready"] },
   },
   required: ["type"],
+  additionalProperties: false,
+};
+
+/**
+ * child→parent raw final-text side-channel frame — same tagged-frame grammar
+ * as `review_request` above (`parseFramedLine`; the envelope schemas stay
+ * byte-identical).
+ *
+ * Why a frame instead of an envelope field: the worker folds an over-limit
+ * `result` before the terminal envelope rides stdout, so the envelope the host
+ * receives is not a faithful copy of the report. This frame carries the
+ * **pre-fold** text beside that envelope on the same wire, so the host can
+ * persist the original while the parent-visible IPC copy stays folded and
+ * bounded. Adding the text to the envelope instead would break every stamped
+ * envelope under `PARENT_SCHEMA`'s `additionalProperties: false`.
+ */
+export interface FinalTextFrame {
+  readonly type: "final_text";
+  readonly text: string;
+}
+
+/** child→parent raw final-text frame schema (closed, tagged). */
+export const FINAL_TEXT_FRAME_SCHEMA: Record<string, unknown> = {
+  type: "object",
+  properties: {
+    type: { type: "string", enum: ["final_text"] },
+    // The raw report body, deliberately unbounded — this frame exists exactly
+    // because the envelope fold dropped that body.
+    text: { type: "string" },
+  },
+  required: ["type", "text"],
   additionalProperties: false,
 };
 
@@ -579,6 +629,14 @@ export function parseReviewBrokerReadyFrame(
     "review_broker_ready",
     reviewBrokerReadyValidate
   );
+}
+
+/**
+ * Parse + validate a child→parent raw final-text frame line.
+ * Failure modes same as parseReviewRequestFrame (throw ProtocolError).
+ */
+export function parseFinalTextFrame(input: string): FinalTextFrame {
+  return parseFramedLine(input, "final_text", finalTextValidate);
 }
 
 function parseFramedLine<T>(
@@ -752,39 +810,89 @@ export function attachParentVisibleTmp(
   };
 }
 
-export function projectParentVisibleEnvelope(
-  env: SubAgentEnvelope
-): SubAgentEnvelope {
-  const summary =
-    env.status === "failed" &&
+/**
+ * The ORIGINAL report length a projection must state truthfully. An
+ * already-projected envelope carries `totalLength` and its own `result` is the
+ * condensed copy, so the total is the larger of the two — never the copy alone.
+ */
+function originalResultLength(env: SubAgentEnvelope): number {
+  return env.totalLength === undefined
+    ? env.result.length
+    : Math.max(env.result.length, env.totalLength);
+}
+
+/**
+ * Fit `handoff` into the space the limit leaves after `markerLength`, ellipsizing
+ * it when it overflows. The separator is decided from the ORIGINAL handoff because
+ * that is what the fold marker gets appended to.
+ */
+function fitHandoffBeforeMarker(
+  handoff: string,
+  markerLength: number
+): { readonly body: string; readonly separator: string } {
+  const separator = handoff.length > 0 ? "\n\n" : "";
+  const available = TRUNCATION_LIMIT - markerLength - separator.length;
+  if (handoff.length <= available) return { body: handoff, separator };
+  return {
+    body: `${handoff.slice(0, Math.max(0, available - 1))}…`,
+    separator,
+  };
+}
+
+/** Condensed parent-visible body: bounded handoff plus the truthful total marker. */
+function foldWithMarker(handoff: string, originalLen: number): string {
+  const marker = TRUNCATION_MARKER(originalLen);
+  const { body, separator } = fitHandoffBeforeMarker(handoff, marker.length);
+  return `${body}${separator}${marker}`;
+}
+
+/** Failed-with-no-summary gets the reason wording; otherwise the short summary. */
+function parentVisibleSummary(env: SubAgentEnvelope): string {
+  return env.status === "failed" &&
     env.summary.length === 0 &&
     env.reason !== "timeout"
-      ? failedSummary(env)
-      : shortSummary(env.summary, env.result);
-  const handoff = shortHandoff(summary, env.fileRefs, env.stop_reason);
-  const originalLen = env.result.length;
-  const needsFoldMarker = originalLen > TRUNCATION_LIMIT;
-  let result = handoff;
-  if (needsFoldMarker) {
-    const marker = TRUNCATION_MARKER(originalLen);
-    const separator = handoff.length > 0 ? "\n\n" : "";
-    const available = TRUNCATION_LIMIT - marker.length - separator.length;
-    const boundedHandoff =
-      handoff.length <= available
-        ? handoff
-        : `${handoff.slice(0, Math.max(0, available - 1))}…`;
-    result = `${boundedHandoff}${separator}${marker}`;
-  }
-  const truncated = needsFoldMarker || originalLen > result.length;
-  if (
+    ? failedSummary(env)
+    : shortSummary(env.summary, env.result);
+}
+
+/**
+ * A projection that would restate every field it already holds (and adds no
+ * truncation) is identity — returning the input keeps re-projection free of a
+ * fresh object on the hot path.
+ */
+function isIdentityProjection(
+  env: SubAgentEnvelope,
+  summary: string,
+  result: string,
+  truncated: boolean
+): boolean {
+  return (
     env.summary === summary &&
     env.result === result &&
     env.truncated === undefined &&
     env.totalLength === undefined &&
     !truncated
-  ) {
-    return env;
-  }
+  );
+}
+
+export function projectParentVisibleEnvelope(
+  env: SubAgentEnvelope
+): SubAgentEnvelope {
+  const summary = parentVisibleSummary(env);
+  const handoff = shortHandoff(summary, env.fileRefs, env.stop_reason);
+  const originalLen = originalResultLength(env);
+  const needsFoldMarker = env.result.length > TRUNCATION_LIMIT;
+  // Idempotent re-projection: an already-projected envelope keeps its own body
+  // (restating from that condensed copy would shrink the truthful total, and
+  // re-cutting an already-bounded handoff a second time is not idempotent).
+  const result = needsFoldMarker
+    ? foldWithMarker(handoff, originalLen)
+    : env.totalLength === undefined
+      ? handoff
+      : env.result;
+  const truncated =
+    needsFoldMarker || originalLen > result.length || env.truncated === true;
+  if (isIdentityProjection(env, summary, result, truncated)) return env;
   return {
     ...env,
     summary,
@@ -822,3 +930,4 @@ const reviewResponseValidate = compileEnvelopeAjv(REVIEW_RESPONSE_FRAME_SCHEMA);
 const reviewBrokerReadyValidate = compileEnvelopeAjv(
   REVIEW_BROKER_READY_FRAME_SCHEMA
 );
+const finalTextValidate = compileEnvelopeAjv(FINAL_TEXT_FRAME_SCHEMA);

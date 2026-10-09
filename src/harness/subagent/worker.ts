@@ -6,6 +6,8 @@
  *   - stdin  one JSON line = WorkerEnvelope (parseWorkerEnvelope, schema frozen);
  *   - the worker process runs its own run() (independent registry, no parent registry);
  *   - stdout one JSON line = SubAgentEnvelope (condensed result, truncateEnvelopeResult before emit);
+ *     a folded ok report also emits one `final_text` frame line with the pre-fold
+ *     text immediately before that envelope (the host persists the raw copy);
  *   - stderr is logs only (never pollute the wire).
  *
  * Key disciplines:
@@ -123,6 +125,7 @@ import {
   parseReviewBrokerReadyFrame,
   frameTag,
   truncateEnvelopeResult,
+  type FinalTextFrame,
   type ReviewRequestFrame,
   type SkillIndexSnapshotEntry,
   type SubAgentEnvelope,
@@ -1622,6 +1625,48 @@ export function mapStopReasonToEnvelope(
 }
 
 /**
+ * Fold a settled envelope for IPC and forward the raw pre-fold body through the
+ * side channel when — and only when — the fold actually cut it. `totalLength`
+ * must stay the raw UTF-16 length and a folded body is only recoverable if it
+ * rode the frame; an unfolded envelope already carries the whole report, so
+ * emitting it twice would be redundant traffic.
+ */
+function settleAndForward(
+  settled: SubAgentEnvelope,
+  emitFinalText?: (raw: string) => void
+): SubAgentEnvelope {
+  const folded = truncateEnvelopeResult(settled);
+  if (folded.truncated === true) emitFinalText?.(settled.result);
+  return folded;
+}
+
+/**
+ * SIGTERM-settled timeout envelope: the graceful epilogue summary (when it
+ * produced one) replaces the generic timeout wording, so the parent's drain
+ * sees real progress. Never forwarded through the raw-report side channel — a
+ * failed envelope is not a report.
+ */
+async function settleTimeoutEnvelope(
+  result: import("../model-adapter/types.js").RunResult,
+  runDeps: LoopEngineDeps,
+  observability: EnvelopeObservabilityOpts
+): Promise<SubAgentEnvelope> {
+  const summary = await runTimeoutEpilogue(runDeps, result.messages);
+  log(
+    `run() cancelled by SIGTERM (subagent-timeout); epilogue summary=${
+      summary ? `${summary.length} chars` : "<empty>"
+    }`
+  );
+  return truncateEnvelopeResult(
+    toFailedEnvelope(
+      "timeout",
+      summary.length > 0 ? summary : "",
+      observabilityFields(result, observability)
+    )
+  );
+}
+
+/**
  * Test seam (exported for tests only): envelope → run → truncateEnvelopeResult.
  *
  * Splits out the stdin envelope read → parseWorkerEnvelope → run → derive
@@ -1691,6 +1736,14 @@ export async function runWorkerOnce(opts: {
    * byte-identical to before.
    */
   readonly transcriptIo?: WorkerTranscriptIOFactory;
+  /**
+   * Raw-report side channel (production passes the stdout frame sink; test
+   * seams omit it). Called with the pre-fold `result` **only** when this run's
+   * ok envelope got folded, so the host can persist the original while the IPC
+   * envelope stays bounded. Absent → no side channel: the folded envelope is
+   * all the host ever gets, exactly as before.
+   */
+  readonly emitFinalText?: (raw: string) => void;
 }): Promise<SubAgentEnvelope> {
   const { workerEnvelope: env, deps } = opts;
   const observability: EnvelopeObservabilityOpts =
@@ -1769,25 +1822,18 @@ export async function runWorkerOnce(opts: {
       result.stopReason === "cancelled" &&
       isSubagentTimeoutAbort(controller.signal)
     ) {
-      const summary = await runTimeoutEpilogue(runDeps, result.messages);
-      log(
-        `run() cancelled by SIGTERM (subagent-timeout); epilogue summary=${
-          summary ? `${summary.length} chars` : "<empty>"
-        }`
-      );
-      return truncateEnvelopeResult(
-        toFailedEnvelope(
-          "timeout",
-          summary.length > 0 ? summary : "",
-          observabilityFields(result, observability)
-        )
-      );
+      return await settleTimeoutEnvelope(result, runDeps, observability);
     }
-    return truncateEnvelopeResult(
+    // Capture the pre-fold text: `totalLength` must stay the raw UTF-16 length,
+    // and a folded body is only recoverable if it rides the side channel. A
+    // failed envelope converges on an empty `result`, so it never folds and
+    // never emits — only a genuine over-limit ok report does.
+    return settleAndForward(
       mapStopReasonToEnvelope(result, {
         sawInvisibleStallResend,
         observability,
-      })
+      }),
+      opts.emitFinalText
     );
   } catch (err) {
     // Escaped-throw type → reason mapping goes through SSOT (escapeFailureReason).
@@ -2220,39 +2266,73 @@ export async function runSubagentWorker(
   const route = (await reviewControl.waitForBrokerReady())
     ? reviewControl.createRoute()
     : undefined;
-  const phase = await runWorkerPhase(
-    workerEnvelope,
+  const phase = await runWorkerPhase(workerEnvelope, {
     transcriptIo,
     preimageCaptureFactory,
-    route
-  );
+    securityReview: route,
+    emitFinalText: createFinalTextSink((line) => {
+      process.stdout.write(line);
+    }),
+  });
   // Single stdout wire: success and run-phase escapes share one write point;
   // the exit code is decided by the phase containment. review_request frames
   // (line-delimited JSON) ride the same wire beside the terminal envelope —
-  // the parent dispatches by the `type` tag.
+  // the parent dispatches by the `type` tag. So does the `final_text` frame,
+  // written by the sink above while the run settles, i.e. always before this
+  // one envelope line.
   process.stdout.write(JSON.stringify(phase.envelope) + "\n");
   process.exit(phase.exitCode);
+}
+
+/**
+ * Build the production `final_text` sink over a stdout line writer (same
+ * injection shape as `createWorkerReviewControl`, so the wire form is testable
+ * without spawning a child).
+ *
+ * A side-channel write failure is swallowed by design: the terminal envelope is
+ * the authoritative channel, and losing the raw copy must not turn a completed
+ * run into an escape. The host then degrades to persisting the folded copy it
+ * received — the pre-T3 behavior.
+ */
+export function createFinalTextSink(
+  writeLine: (line: string) => void
+): (raw: string) => void {
+  return (raw: string) => {
+    const frame: FinalTextFrame = { type: "final_text", text: raw };
+    try {
+      writeLine(JSON.stringify(frame) + "\n");
+    } catch {
+      // EXIT: no side channel; the folded envelope still lands.
+    }
+  };
+}
+
+/**
+ * The per-run worker ports. Bundled rather than positional because they are a
+ * set of injected seams, not a sequence: adding one (the `final_text` sink is
+ * the latest) previously forced every intermediate layer to restate the whole
+ * list. `emitFinalText` is required because the production entry always builds
+ * the stdout sink; absence would silently drop folded reports.
+ */
+interface WorkerRunPorts {
+  readonly transcriptIo?: WorkerTranscriptIOFactory;
+  readonly preimageCaptureFactory?: WorkerPreimageCaptureFactory;
+  readonly securityReview?: SecurityReviewRoute;
+  readonly emitFinalText: (raw: string) => void;
 }
 
 /** The full run phase after parse: errors are always contained as
  *  (envelope, exitCode), never rethrown. */
 async function runWorkerPhase(
   workerEnvelope: WorkerEnvelope,
-  transcriptIo: WorkerTranscriptIOFactory | undefined,
-  preimageCaptureFactory: WorkerPreimageCaptureFactory | undefined,
-  securityReview: SecurityReviewRoute | undefined
+  ports: WorkerRunPorts
 ): Promise<{
   readonly envelope: SubAgentEnvelope;
   readonly exitCode: number;
 }> {
   try {
     return {
-      envelope: await assembleAndRunWorker(
-        workerEnvelope,
-        transcriptIo,
-        preimageCaptureFactory,
-        securityReview
-      ),
+      envelope: await assembleAndRunWorker(workerEnvelope, ports),
       exitCode: WORKER_EXIT_OK,
     };
   } catch (err) {
@@ -2271,10 +2351,14 @@ async function runWorkerPhase(
 /** Assembly → runWorkerOnce (the envelope is the process-level form of the return value). */
 async function assembleAndRunWorker(
   workerEnvelope: WorkerEnvelope,
-  transcriptIo: WorkerTranscriptIOFactory | undefined,
-  preimageCaptureFactory: WorkerPreimageCaptureFactory | undefined,
-  securityReview: SecurityReviewRoute | undefined
+  ports: WorkerRunPorts
 ): Promise<SubAgentEnvelope> {
+  const {
+    transcriptIo,
+    preimageCaptureFactory,
+    securityReview,
+    emitFinalText,
+  } = ports;
   const env = loadIknowEnv();
   const { deps, catalog } = await createWorkerRuntime({
     env,
@@ -2366,5 +2450,6 @@ async function assembleAndRunWorker(
     deps,
     writeToolNames: writeToolNamesFrom(catalog),
     transcriptIo,
+    emitFinalText,
   });
 }
