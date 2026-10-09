@@ -131,8 +131,8 @@ describe("chromeReserveRows is not touched by yolo (zero cost in the line budget
     inputRows: 1,
   };
 
-  test("baseline stays 7 (the red marker rides the existing mode row, no new bottom-bar row)", () => {
-    expect(chromeReserveRows(baseOpts)).toBe(7);
+  test("baseline stays 6 (the red marker rides the existing mode row, no new bottom-bar row)", () => {
+    expect(chromeReserveRows(baseOpts)).toBe(6);
   });
 
   test("the confirmation modal bills through the existing modalRows slot (rows + marginBottom 1, no new slot)", () => {

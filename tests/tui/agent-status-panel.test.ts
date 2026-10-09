@@ -365,9 +365,8 @@ describe("no second todo ledger: src/tui 不读 todos.md", () => {
 
 // ---------------------------------------------------------------------------
 // Line-ledger linkage: agentStatusLines projection ↔ chromeReserveRows.
-// The "default → baseline 7 unchanged" invariant is pinned by its SSOT home
-// chrome-budget.test.ts (not duplicated here; only "projected rows ==
-// accounted rows" linkage is tested).
+// chrome-budget.test.ts owns the baseline; the cases below re-pin that same
+// absolute value as the anchor for "projected rows == accounted rows".
 // ---------------------------------------------------------------------------
 
 describe("chromeReserveRows: agentStatusRows 投影联动", () => {
@@ -387,20 +386,20 @@ describe("chromeReserveRows: agentStatusRows 投影联动", () => {
       80
     ).length;
     expect(rows).toBe(1);
-    expect(chromeReserveRows({ ...base, agentStatusRows: rows })).toBe(7 + 1);
+    expect(chromeReserveRows({ ...base, agentStatusRows: rows })).toBe(6 + 1);
   });
 
   test("无未勾项的现势 = 投影 0 行 → 入账不增", () => {
     const snapshot = { lastTool: "idle", openTodoLines: [] as const };
     const rows = agentStatusLines(snapshot, 80).length;
     expect(rows).toBe(0);
-    expect(chromeReserveRows({ ...base, agentStatusRows: rows })).toBe(7);
+    expect(chromeReserveRows({ ...base, agentStatusRows: rows })).toBe(6);
   });
 
   test("尚无快照(null)→ 投影 0 行 → 入账不增(app 预算口径同款联动)", () => {
     const rows = agentStatusLines(null, 80).length;
     expect(rows).toBe(0);
-    expect(chromeReserveRows({ ...base, agentStatusRows: rows })).toBe(7);
+    expect(chromeReserveRows({ ...base, agentStatusRows: rows })).toBe(6);
   });
 });
 

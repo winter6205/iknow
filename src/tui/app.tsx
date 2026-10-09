@@ -486,20 +486,28 @@ export function noticeRenderRows(
  * Bottom chrome line account (SSOT, unit-testable). Itemized; any new bottom
  * row must update this function:
  *
- *   - ChatView marginTop headroom (1 row)
+ *   - bottom breathing-room margin (BOTTOM_MARGIN_ROWS; the trailing spacer
+ *     under the last chrome row renders the same constant the ledger books,
+ *     which keeps the prompt off the screen edge without an unclaimed row)
  *   - permission mode indicator row, 1 row
  *   - input box rounded frame (inputRows content rows + 2 border rows;
  *     dynamic — more input rows shrink the view budget instead of pushing
  *     history messages out)
  *   - ContextBar usage bar, 1 row
  *   - agent current-status (single unfinished-todo line, agentStatusRows; above mode row)
- *   - ask slot 1 row (ChatView tail always reserved)
+ *   - the ask line takes no row: TranscriptTail renders it inside the ChatView
+ *     scrollbox, which scrolls on its own — reserving a chrome row for it
+ *     would shrink the viewport without buying a bottom row
  *   - slash candidate rows (inputValue.trim().startsWith("/") ? … : 0)
  *   - notice body + its own marginBottom=1
  *   - modal body + its own marginBottom=1
  *   - thinking-picker panel + its own marginBottom=1 (pickerRows follows the modalRows convention)
  *   - compact progress panel + its own marginBottom=1 (compactRows same convention)
- *   - subagent status panel (second slot below ContextBar, NOT counted in chrome rows to avoid pushing the input box up)
+ *   - subagent panel below the location row: `panelRows` books its folded
+ *     rows (SSOT cap SUBAGENT_PANEL_MAX_ROWS); only the retired identity
+ *     strip slot `subagentRows` stays 0 — specs/tui-subagent-transcript-live.md
+ *   - shell-parser degrade notice (degradeRows, 0/1; above the input, shares
+ *     its predicate with the render slot via shellParseDegradeNoticeShown)
  *   - background-run marker row (present when running-bg sessions exist)
  */
 /**
@@ -1196,6 +1204,15 @@ function runPermissionsSlashCommand(
   setNotice({ lines: [res.text] });
 }
 
+/**
+ * Bottom breathing-room margin (SSOT, shared by both sides of the ledger):
+ * chromeReserveRows books this many rows and the chat render tree emits a
+ * trailing spacer of exactly this height, so the prompt never sits flush
+ * against the screen edge while reserve and rendered rows stay equal.
+ * Pinned by tests/tui/chrome-footer-order.test.tsx (frame row indices).
+ */
+export const BOTTOM_MARGIN_ROWS = 1;
+
 export function chromeReserveRows(opts: {
   readonly noticeRows: number;
   readonly inputHintRows: number;
@@ -1224,6 +1241,12 @@ export function chromeReserveRows(opts: {
   readonly verifyRows?: number;
   /** run_graph chrome single row (0 or 1). Default 0 → no rows without a snapshot. */
   readonly graphRows?: number;
+  /**
+   * shell-parser degrade notice row (0 or 1): shellParseDegradeNotice renders
+   * it above the input whenever the parse foundation reports UNAVAILABLE.
+   * Default 0 → no rows while the parser answers normally.
+   */
+  readonly degradeRows?: number;
   /** Compact progress panel rows (compactProgressRows(), 6). Default 0 → no rows when the panel is closed (legacy callers / non-compaction paths unaffected). */
   readonly compactRows?: number;
 }): number {
@@ -1247,16 +1270,18 @@ export function chromeReserveRows(opts: {
       opts.envPaneRows,
       opts.verifyRows,
       opts.graphRows,
+      opts.degradeRows,
     ]) +
     (opts.bgLine ? 1 : 0); // background-run marker row
   return (
-    1 + // top headroom
+    BOTTOM_MARGIN_ROWS + // bottom breathing-room margin — the trailing spacer
+    // below renders exactly this many rows; an unclaimed reserve is the
+    // double-count class this function's old `ask slot` term belonged to
     1 + // mode indicator row
     inputContentRows + // input box content rows
     2 + // input box rounded border (top/bottom lines)
     opts.inputHintRows +
     1 + // ContextBar
-    1 + // ask slot
     tailRows
   );
 }
@@ -2068,8 +2093,17 @@ function applyAskShortcut(
  * plain function so the arm mounts at the input box, never in a wrapper that
  * could stay unmounted.
  */
+/**
+ * One predicate for two consumers: the render slot below and the
+ * chromeReserveRows `degradeRows` ledger. They must agree, or the row
+ * overflows the budget and Yoga crushes the mode row into the input border.
+ */
+export function shellParseDegradeNoticeShown(view: TuiView): boolean {
+  return view === "chat" && parseFoundationState() === "UNAVAILABLE";
+}
+
 function shellParseDegradeNotice(view: TuiView): ReactNode {
-  if (view !== "chat" || parseFoundationState() !== "UNAVAILABLE") {
+  if (!shellParseDegradeNoticeShown(view)) {
     return null;
   }
   return (
@@ -4710,7 +4744,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // ChatView sizes itself). Banner and messages share the scrollbox, so the
   // banner is no longer deducted separately.
   // Chrome is budgeted item by item (chromeReserveRows SSOT): input 3 + mode
-  // 1 + ContextBar 1 + ask slot 1 + headroom 1 + slash suggestions + notice /
+  // 1 + ContextBar 1 + bottom margin 1 + slash suggestions + notice /
   // modal wrapped rows + bgLine.
   // Budget only what can actually render: PromptInput windows the list to
   // HINT_MAX_ROWS rows, so a bare "/" (16 candidates) reserves 8, not 16 —
@@ -4864,6 +4898,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         envPaneRows: envPaneRowBudget,
         verifyRows: verifyRowBudget,
         graphRows: graphChromeRows(graphProgress),
+        degradeRows: shellParseDegradeNoticeShown(view) ? 1 : 0,
       })
   );
   // List view (ListView): only the notice occupies the bottom, plus 2 headroom rows.
@@ -5244,6 +5279,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           <text fg={pal.dim}>{bgStatusLine(bgSession.messages)}</text>
         </box>
       )}
+      {/* Bottom breathing room: emits exactly the rows chromeReserveRows
+          books as BOTTOM_MARGIN_ROWS — the ledger and the render move
+          together, so no reserve row is ever unclaimed. */}
+      {view === "chat" && <box height={BOTTOM_MARGIN_ROWS} flexShrink={0} />}
     </box>
   );
 }

@@ -17,7 +17,7 @@
  *   - Degraded states project fixed placeholders per degradeReason:
  *     `(cwd unavailable)` / `(not a git repo)` / `(git unavailable)`.
  *   - Line accounting: envSnapshotLines row count → chromeReserveRows.envPaneRows
- *     (SSOT, same linkage as agentStatusRows; baseline 7 unchanged).
+ *     (SSOT, same linkage as agentStatusRows; baseline 6 unchanged).
  *   - Negative contract: src/tui/environment-pane.tsx contains zero matches of
  *     `agent_status` (parallel independent stream, never rides the agent_status
  *     render path).
@@ -249,18 +249,18 @@ describe("chromeReserveRows: envPaneRows 投影联动", () => {
     inputRows: 1,
   };
 
-  test("envPaneRows 缺省(undefined) = 0,不占底部行账(基线 7 不变)", () => {
+  test("envPaneRows 缺省(undefined) = 0,不占底部行账(基线 6 不变)", () => {
     const a = chromeReserveRows({ ...base });
     const b = chromeReserveRows({ ...base, envPaneRows: undefined });
     expect(b).toBe(a);
-    expect(a).toBe(7);
+    expect(a).toBe(6);
   });
 
   test("envPaneRows=2 → 预算 +2;与其他项叠加", () => {
     const rows = envSnapshotLines(makeSnapshot(), 80).length;
     expect(rows).toBeGreaterThanOrEqual(2);
     const withEnv = chromeReserveRows({ ...base, envPaneRows: rows });
-    expect(withEnv - 7).toBe(rows);
+    expect(withEnv - 6).toBe(rows);
   });
 
   test("退化态(1 行)→ 预算 +1", () => {
@@ -274,13 +274,13 @@ describe("chromeReserveRows: envPaneRows 投影联动", () => {
     };
     const rows = envSnapshotLines(degraded, 80).length;
     expect(rows).toBe(1);
-    expect(chromeReserveRows({ ...base, envPaneRows: rows })).toBe(8);
+    expect(chromeReserveRows({ ...base, envPaneRows: rows })).toBe(7);
   });
 
   test("null snapshot → 0 行 → 预算不增", () => {
     const rows = envSnapshotLines(null, 80).length;
     expect(rows).toBe(0);
-    expect(chromeReserveRows({ ...base, envPaneRows: rows })).toBe(7);
+    expect(chromeReserveRows({ ...base, envPaneRows: rows })).toBe(6);
   });
 });
 
@@ -464,7 +464,7 @@ describe("app.tsx 位置行挂载契约（D7 / SC6）", () => {
         inputRows: 1,
         envPaneRows: rows,
       })
-    ).toBe(7 + 1);
+    ).toBe(6 + 1);
   });
 });
 

@@ -98,13 +98,13 @@ describe("chromeReserveRows — graphRows", () => {
     inputRows: 1,
   } as const;
 
-  test("缺省 / 0 → baseline 7 不变", () => {
-    expect(chromeReserveRows(base)).toBe(7);
-    expect(chromeReserveRows({ ...base, graphRows: 0 })).toBe(7);
+  test("缺省 / 0 → baseline 6 不变", () => {
+    expect(chromeReserveRows(base)).toBe(6);
+    expect(chromeReserveRows({ ...base, graphRows: 0 })).toBe(6);
   });
 
   test("graphRows=1 → 预算 +1", () => {
-    expect(chromeReserveRows({ ...base, graphRows: 1 })).toBe(8);
+    expect(chromeReserveRows({ ...base, graphRows: 1 })).toBe(7);
   });
 });
 

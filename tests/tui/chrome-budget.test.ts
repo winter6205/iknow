@@ -5,8 +5,8 @@
  * (the line-accounting SSOT). They own the per-item budget logic for
  * viewportRows; any new bottom line must be accounted here.
  *
- *  - chromeReserveRows: headroom 1 + mode 1 + input box (dynamic
- *    inputRows) + hint + ContextBar 1 + ask 1 + notice (rows + 1) + modal
+ *  - chromeReserveRows: bottom margin 1 + mode 1 + input box (dynamic
+ *    inputRows) + hint + ContextBar 1 + notice (rows + 1) + modal
  *    (rows + 1) + bgLine; plus agentStatusRows (live agent status, 0-6 rows
  *    dynamic, default 0 — zero impact on baseline cases; see
  *    agent-status-panel.test.ts).
@@ -43,14 +43,14 @@ function userMsg(text: string): AnthropicNativeMessage {
 }
 
 describe("chromeReserveRows", () => {
-  test("最小场景：no notice / no hint / no bg / no modal = 7 行（headroom+mode+input+ctx+ask）", () => {
+  test("最小场景：no notice / no hint / no bg / no modal = 6 行（底部留白+mode+input+ctx）", () => {
     const rows = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
       inputRows: 1,
     });
-    expect(rows).toBe(1 + 1 + 3 + 0 + 1 + 1);
+    expect(rows).toBe(1 + 1 + 3 + 0 + 1);
   });
 
   test("有 bg：+1 行", () => {
@@ -126,7 +126,7 @@ describe("chromeReserveRows", () => {
       inputRows: 1,
       modalRows: 5,
     });
-    expect(rows).toBe(1 + 1 + 3 + 3 + 1 + 1 + 3 + 6 + 1);
+    expect(rows).toBe(1 + 1 + 3 + 3 + 1 + 3 + 6 + 1);
   });
 
   test("modalRows 缺省（undefined）= 0，行为同未传", () => {
@@ -158,7 +158,7 @@ describe("chromeReserveRows", () => {
       bgLine: false,
       inputRows: 1,
     });
-    expect(a).toBe(7);
+    expect(a).toBe(6);
     expect(a).toBe(b);
   });
 
@@ -192,7 +192,7 @@ describe("chromeReserveRows", () => {
       inputRows: 20,
     });
     expect(capped).toBe(beyond);
-    expect(capped - 7).toBe(7); // 8 + 2 − 3
+    expect(capped - 6).toBe(7); // 8 + 2 − 3
   });
 });
 
@@ -414,7 +414,7 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
       bgLine: false,
       inputRows: 1,
     });
-    expect(base).toBe(7);
+    expect(base).toBe(6);
     const withThinking = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
@@ -460,7 +460,7 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
       bgLine: false,
       inputRows: 1,
     });
-    expect(base).toBe(7);
+    expect(base).toBe(6);
     const explicit = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
@@ -471,14 +471,14 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
     expect(explicit).toBe(base);
   });
 
-  test("panelRows=4 → 预算 +4（底线基准 7 + 4 = 11）", () => {
+  test("panelRows=4 → 预算 +4（底线基准 6 + 4 = 10）", () => {
     const base = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
       bgLine: false,
       inputRows: 1,
     });
-    expect(base).toBe(7);
+    expect(base).toBe(6);
     const withPanel = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
@@ -507,7 +507,7 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
   // Agent status line-count accounting (same shape as panelRows: default
   // takes no rows, explicit values are accounted; the component has no
   // marginBottom). Projection cases live in agent-status-panel.test.ts.
-  test("agentStatusRows 缺省（undefined）= 0，不占底部行账（基线 7 不变）", () => {
+  test("agentStatusRows 缺省（undefined）= 0，不占底部行账（基线 6 不变）", () => {
     const base = chromeReserveRows({
       noticeRows: 0,
       inputHintRows: 0,
@@ -530,7 +530,7 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
     });
     expect(explicit).toBe(base);
     expect(explicitZero).toBe(base);
-    expect(base).toBe(7);
+    expect(base).toBe(6);
   });
 
   test("agentStatusRows=2（last_tool 行 + 1 未勾项）→ 预算 +2；与其他项叠加", () => {
@@ -556,7 +556,30 @@ describe("thinkingPickerRows（design-25 面板行账）", () => {
       panelRows: 4,
       agentStatusRows: 2,
     });
-    expect(stacked).toBe(7 + 2 + 4 + 1);
+    expect(stacked).toBe(6 + 2 + 4 + 1);
+  });
+
+  // The degrade notice renders above the input (outside the scrollbox), so it
+  // needs its own row: with the phantom `ask slot` reserve gone, an
+  // unbudgeted row here overflows the terminal and Yoga crushes the mode row
+  // into the input border (pinned end-to-end by shell-parse-degrade.test.tsx).
+  test("degradeRows 缺省 / 0 → 基线 6 不变；=1 → +1", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    expect(base).toBe(6);
+    expect(
+      chromeReserveRows({
+        noticeRows: 0,
+        inputHintRows: 0,
+        bgLine: false,
+        inputRows: 1,
+        degradeRows: 1,
+      })
+    ).toBe(7);
   });
 });
 
@@ -610,7 +633,7 @@ describe("compactProgressRows（compact 进度面板行账）", () => {
       inputRows: 1,
       compactRows: compactProgressRows(),
     });
-    expect(base).toBe(7);
+    expect(base).toBe(6);
     expect(withCompact - base).toBe(7);
   });
 
@@ -659,7 +682,7 @@ describe("configPickerRows（/config 设置面板行账）", () => {
       inputRows: 1,
       pickerRows: configPickerRows(),
     });
-    expect(base).toBe(7);
+    expect(base).toBe(6);
     expect(withConfig - base).toBe(8);
   });
 

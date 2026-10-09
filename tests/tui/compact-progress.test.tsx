@@ -664,7 +664,7 @@ describe("compactRows 行账（chromeReserveRows 入账）", () => {
       inputRows: 1,
       compactRows: 0,
     });
-    expect(base).toBe(7);
+    expect(base).toBe(6);
     expect(explicitZero).toBe(base);
   });
 
@@ -677,6 +677,6 @@ describe("compactRows 行账（chromeReserveRows 入账）", () => {
       pickerRows: 5,
       compactRows: 6,
     });
-    expect(stacked).toBe(7 + 6 + 7);
+    expect(stacked).toBe(6 + 6 + 7);
   });
 });

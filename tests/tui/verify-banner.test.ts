@@ -10,7 +10,7 @@
  *    ("verification result unavailable") + typed-error detail rendering
  *    (code-quality.md typed-error rendering contract: recognize `kind`,
  *    `${kind}: ${conversation_id}`, err.message fallback forbidden);
- *  - row accounting wired into chromeReserveRows.verifyRows (baseline 7 unchanged);
+ *  - row accounting wired into chromeReserveRows.verifyRows (baseline 6 unchanged);
  *  - bridge postMessage passes the verify DTO through on TuiPostResult (bwrap-guarded);
  *  - app.tsx wiring guard (grep): import + chromeReserveRows call passes verifyRows.
  *
@@ -435,7 +435,7 @@ describe("describeVerifyErrorDetail — typed-error 渲染契约 (code-quality.m
 });
 
 // =============================================================================
-// chromeReserveRows row accounting (baseline 7 unchanged + verifyRows=1 → +1)
+// chromeReserveRows row accounting (baseline 6 unchanged + verifyRows=1 → +1)
 // =============================================================================
 describe("chromeReserveRows — verifyRows 行账联动", () => {
   const base = {
@@ -445,14 +445,14 @@ describe("chromeReserveRows — verifyRows 行账联动", () => {
     inputRows: 1,
   } as const;
 
-  test("verifyRows 缺省 / undefined / 0 → baseline 7 不变", () => {
-    expect(chromeReserveRows(base)).toBe(7);
-    expect(chromeReserveRows({ ...base, verifyRows: undefined })).toBe(7);
-    expect(chromeReserveRows({ ...base, verifyRows: 0 })).toBe(7);
+  test("verifyRows 缺省 / undefined / 0 → baseline 6 不变", () => {
+    expect(chromeReserveRows(base)).toBe(6);
+    expect(chromeReserveRows({ ...base, verifyRows: undefined })).toBe(6);
+    expect(chromeReserveRows({ ...base, verifyRows: 0 })).toBe(6);
   });
 
-  test("verifyRows=1 → 预算 +1(8 行)", () => {
-    expect(chromeReserveRows({ ...base, verifyRows: 1 })).toBe(8);
+  test("verifyRows=1 → 预算 +1(7 行)", () => {
+    expect(chromeReserveRows({ ...base, verifyRows: 1 })).toBe(7);
   });
 
   test("verifyRows 与其它 chrome 项正交叠加", () => {
@@ -463,8 +463,8 @@ describe("chromeReserveRows — verifyRows 行账联动", () => {
       panelRows: 4,
       verifyRows: 1,
     });
-    // baseline 7 + notice(2+1) + bg(1) + panel(4) + verify(1)
-    expect(stacked).toBe(7 + 3 + 1 + 4 + 1);
+    // baseline 6 + notice(2+1) + bg(1) + panel(4) + verify(1)
+    expect(stacked).toBe(6 + 3 + 1 + 4 + 1);
   });
 });
 
