@@ -691,7 +691,8 @@ export const MessageBlocks = memo(function MessageBlocks(props: {
   readonly resultTextMap?: ReadonlyMap<string, string>;
   /** toolUseId → two-line subagent card projection (produced by
    *  `subagentCardLinesMap`). Hit and not failed → the spawn card renders its
-   *  title + the activity slot (dim in-flight tool name, green `✓ Done` once
+   *  title + the activity slot (dim `tool name · argument summary` of the call
+   *  issued most recently, green `✓ Done` once
    *  completed); absent → byte-identical to before. */
   readonly subagentCards?: ReadonlyMap<string, SubagentCardLines>;
   readonly thinkingExpanded?: boolean;

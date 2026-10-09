@@ -7,8 +7,10 @@
  * (`SubagentInfo.title`) while a list describes it, else from the settled
  * block's own input (`settledSpawnCardFromBlock`, the durable copy), and
  * identical while the worker runs and once it completes; line 2 is a single
- * activity slot — the dim name of the tool that worker is executing now, or the
- * literal green `✓ Done` once it completes. The card is exactly two lines in
+ * activity slot — the dim `tool name · argument summary` of the tool that worker
+ * issued most recently (wording from the shared tool-summary formatter, so the
+ * slot and the transcript's own tool lines cannot drift), or the literal green
+ * `✓ Done` once it completes. The card is exactly two lines in
  * every state: `taskPreview` is not on the card (it stays on `SubagentInfo` and
  * in `SubagentPanel`). The join key is
  * `SubagentInfo.toolUseId` (the tool_use id of that spawn — the same id space as
@@ -40,17 +42,22 @@
  *     over column aesthetics, and the host's `wrapMode="none"` clips edges;
  *   - concurrent: pure function — each projection reads the arguments at call
  *     time with no history residue; two live workers each take their own title
- *     and their own `inFlightTool`; on duplicate `toolUseId` the first eligible
+ *     and their own `activity`; on duplicate `toolUseId` the first eligible
  *     entry in list order wins (deterministic);
  *   - exception: `startedAt` / `endedAt` / `summary` / `taskPreview` are never
- *     read (invalid ISO cannot affect the projection); `inFlightTool` absent
- *     (no reader injected / first read pending) or `""` (nothing in flight) →
- *     the slot holds an empty-string placeholder so the row count never
+ *     read (invalid ISO cannot affect the projection); `activity` absent
+ *     (no reader injected / first read pending) or `null` (no call issued yet)
+ *     → the slot holds an empty-string placeholder so the row count never
  *     collapses.
  */
-import type { SubagentInfo } from "../harness/subagent/manager.js";
+import type {
+  SubagentActivity,
+  SubagentInfo,
+} from "../harness/subagent/manager.js";
 import { clipOneLineVisual } from "./tool-summary.js";
 import {
+  TOOL_SUMMARIES,
+  formatToolStatusLine,
   resolveSubagentRoleFromInput,
   SUBAGENT_ROLE_FALLBACK,
 } from "../shared/tool-line.js";
@@ -64,7 +71,7 @@ import {
 export const IDENTITY_FALLBACK_ROLE = SUBAGENT_ROLE_FALLBACK;
 
 /** Completed card's activity slot: this literal green `✓ Done` replaces the
- *  in-flight tool name (the name is not kept). A geometric glyph like the
+ *  retained issued-tool name (the name is not kept). A geometric glyph like the
  *  panel's `●` / `✓` (no emoji). */
 const DONE_MARKER = "✓ Done";
 
@@ -163,10 +170,12 @@ export interface SubagentCardLines {
    *  carried none. Identical while live and once completed; no progress
    *  suffix. */
   readonly titleLine: string;
-  /** Line 2: the activity slot. Live → the in-flight tool name (empty string
-   *  = placeholder row when that worker has no call waiting on a result);
-   *  completed → the literal `✓ Done`, which the host draws in
-   *  tuiPalette.add. Truncated to cols except for that fixed literal. */
+  /** Line 2: the activity slot. Live → `tool name · argument summary` of the
+   *  tool that worker issued most recently (an unregistered name degrades to
+   *  the bare name, never raw input JSON; empty string = placeholder row when
+   *  that worker has no call read yet / none issued); completed → the literal
+   *  `✓ Done`, which the host draws in tuiPalette.add. Truncated to cols except
+   *  for that fixed literal. */
   readonly detailLine: string;
   /** Completion flag: the host colours line 2 with tuiPalette.add when true
    *  and with tuiPalette.dim while live. */
@@ -184,6 +193,49 @@ function normalizeCorrelator(toolUseId: string | undefined): string | null {
   return trimmed.length > 0 ? trimmed : null;
 }
 
+/**
+ * Activity-slot text for one live card: the shared tool-status-line assembly
+ * (`formatToolStatusLine`) on the retained call, so the slot and the
+ * transcript's own tool lines are one wording SSOT and this module invents no
+ * template of its own.
+ *
+ * `status: "ok"` selects the neutral name-and-summary branch ONLY — the
+ * projected value carries no settlement field, so the slot cannot tell a call
+ * still in flight from one whose `tool_result` landed and asserts neither
+ * success nor progress. Past-tense summaries ("Wrote", "Edited") therefore name
+ * the *requested* operation; success belongs to `✓ Done`, failure to that card's
+ * overlay.
+ *
+ * A name with no `TOOL_SUMMARIES` entry keeps the bare tool name on purpose:
+ * the shared formatter answers an unknown tool with the `(name)` placeholder,
+ * and joining that would print `Bash · (Bash)`. `Object.hasOwn` rather than a
+ * truthiness probe because a tool name is model-supplied — an inherited key
+ * (`toString`, `__proto__`) would otherwise reach the formatter as a bogus
+ * declaration. Input JSON never reaches the card either way.
+ *
+ * The two subagent tools are registered, so they inherit the formatter's own
+ * detail-only shape here (`explore` / `Poll abc`) — glyph and identity live on
+ * line 1 and in SubagentPanel — not a `name · detail` restatement. Nothing is
+ * special-cased for them.
+ */
+function activitySlotText(activity: SubagentActivity, budget: number): string {
+  if (!Object.hasOwn(TOOL_SUMMARIES, activity.toolName)) {
+    return clipOneLineVisual(activity.toolName, budget);
+  }
+  // The formatter already fits its own detail to `cols`; the outer clamp is the
+  // card's invariant (line 2 is one row at the card width whatever the joined
+  // text costs), kept from the name-only slot.
+  return clipOneLineVisual(
+    formatToolStatusLine({
+      toolName: activity.toolName,
+      input: activity.toolInput,
+      status: "ok",
+      cols: budget,
+    }),
+    budget
+  );
+}
+
 /** Single-card assembly (live / completed). The caller guarantees state !== "failed". */
 function buildCard(info: SubagentInfo, budget: number): SubagentCardLines {
   // A spawn that carried no title (a direct manager spawn, or one recorded
@@ -194,16 +246,17 @@ function buildCard(info: SubagentInfo, budget: number): SubagentCardLines {
     budget
   );
   if (info.state === "completed") {
-    // The slot becomes the literal `✓ Done` and the last tool name is dropped;
-    // no width clamp on that literal (host wrapMode="none" edge-cuts it).
+    // The slot becomes the literal `✓ Done` and the retained activity is
+    // dropped; no width clamp on that literal (host wrapMode="none" edge-cuts
+    // it).
     return { titleLine, detailLine: DONE_MARKER, done: true };
   }
-  // `inFlightTool` absent = no reader injected / first read still pending, and
-  // `""` = live with nothing in flight: both draw the empty placeholder, so the
-  // card keeps its two rows either way.
+  // `activity` absent = no reader injected / first read still pending, and
+  // `null` = live with no call issued yet: both draw the empty placeholder, so
+  // the card keeps its two rows either way.
   return {
     titleLine,
-    detailLine: clipOneLineVisual(info.inFlightTool ?? "", budget),
+    detailLine: info.activity ? activitySlotText(info.activity, budget) : "",
     done: false,
   };
 }
@@ -279,19 +332,23 @@ export function projectSubagentCardLines(
  * (MessageBlocks) below would rebuild their whole element tree likewise
  * (same class of regression as history-rerender-cost). The signature fields
  * are exactly everything the projection reads (`toolUseId` / `state` / `role`
- * / `title` / `inFlightTool`); omitting one would let the cache serve stale
- * cards — `inFlightTool` is the field the 1Hz poll
- * actually moves, so leaving it out would freeze line 2. `taskPreview` is
- * deliberately absent: the card stopped drawing it, and the panel reads it
- * straight off the list.
+ * / `title` / `activity`); omitting one would let the cache serve stale
+ * cards — `activity` is the field the 1Hz poll
+ * actually moves, so leaving it out would freeze line 2 (whose summary now
+ * comes from the recorded input, hence the whole call, not just its name).
+ * `taskPreview` is deliberately absent: the card stopped drawing it, and the
+ * panel reads it straight off the list.
  *
  * Encoding is JSON.stringify over nested arrays: any character inside a
  * field (quotes / commas / control chars) is escaped, and the tuple→signature
  * map is injective. Hand-joined delimiters cannot achieve that — role (the
- * `subagent_type` input) and the activity name are arbitrary strings that
+ * `subagent_type` input) and the activity tool name are arbitrary strings that
  * could collide into the same signature across a delimiter and serve stale
- * cards. JSON also keeps literal control bytes out of the source (a literal
- * NUL would make git treat this file as binary and blind both diff and rg).
+ * cards. Because the whole activity object is serialized, the signature tracks
+ * the complete projected call (name and input together), so a call whose input
+ * changed cannot be masked by a matching name. JSON also keeps literal control
+ * bytes out of the source (a literal NUL would make git treat this file as
+ * binary and blind both diff and rg).
  */
 export function subagentCardsKey(
   subagents: ReadonlyArray<SubagentInfo>
@@ -302,10 +359,12 @@ export function subagentCardsKey(
       info.state,
       info.role ?? "",
       info.title ?? null,
-      // Absent and `""` both draw the placeholder, but they are different
-      // reads (no reader yet vs. read completed); keep them distinguishable so
-      // the first real read repaints.
-      info.inFlightTool ?? null,
+      // Absent and `null` both draw the placeholder and are both "nothing to
+      // show yet", so the old absent-vs-"" split (which meant "no reader wired"
+      // vs "read completed with nothing waiting") carries no rendering
+      // difference any more and is collapsed. What must repaint is the arrival
+      // of a real activity object, which serializes distinctly from either.
+      info.activity ?? null,
     ])
   );
 }

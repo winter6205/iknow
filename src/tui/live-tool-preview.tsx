@@ -292,7 +292,8 @@ export function liveToolRunsBox(
  *
  *  `card` (specs/subagent-card-title.md): on a hit this spawn card
  *  draws `SubagentCardView`'s two rows (row 1 the card's title, row 2 the
- *  dim in-flight tool name / green `✓ Done`); the whole card no longer goes
+ *  dim `tool name · argument summary` of the call issued most recently / green
+ *  `✓ Done`); the whole card no longer goes
  *  through the existing title + preview combination; a failed card never takes
  *  the card (the failure cross-cut holds at the box layer too). */
 export function liveToolPreviewBox(

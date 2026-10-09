@@ -7,8 +7,9 @@
  * earlier and stays out of the chrome budget (`subagentRowBudget` is constant
  * 0); this file pins that plus the card's physical two lines per
  * specs/subagent-card-title.md: line 1 the operator title, line 2 the
- * activity slot (dim in-flight tool name while live, green `✓ Done` once
- * completed) — no `running...` suffix, no `taskPreview` row. Formerly this
+ * activity slot (`name · argument summary` of the tool issued most recently
+ * while live, dim; the literal `✓ Done` once completed) — no `running...`
+ * suffix, no `taskPreview` row. Formerly this
  * file asserted the superseded three-line shape (`{role} running...` + dim
  * preview + `✓ Done`); re-pinned at the new contract's truth, keeping the
  * original regression fingerprint: the two lines must never weld together
@@ -143,14 +144,17 @@ function frameLines(setup: TestRendererSetup): string[] {
 }
 
 describe("SubagentCardView（两行渲染面）", () => {
-  test("live：第1行 title、第2行紧随其后的 dim 在飞工具名，互不粘连、无 running...", async () => {
+  test("live：第1行 title、第2行紧随其后的 dim 最近发出的工具名，互不粘连、无 running...", async () => {
+    // Fixture note (unchanged under T2): `Bash` is not a registry key (the
+    // registered name is lowercase `bash`), so this slot stays the bare
+    // unknown-tool name. The summarized shape has its own case below.
     const card = projectSubagentCardLines(
       [
         makeSubagent({
           role: "explore",
           toolUseId: "toolu_live",
           title: "整理报告",
-          inFlightTool: "Bash",
+          activity: { toolName: "Bash", toolInput: {} },
         }),
       ],
       "toolu_live",
@@ -177,7 +181,7 @@ describe("SubagentCardView（两行渲染面）", () => {
         makeSubagent({
           role: "explore",
           toolUseId: "toolu_dim",
-          inFlightTool: "Bash",
+          activity: { toolName: "Bash", toolInput: {} },
         }),
       ],
       "toolu_dim",
@@ -193,14 +197,59 @@ describe("SubagentCardView（两行渲染面）", () => {
     await setup.renderer.destroy();
   });
 
-  test('空槽位（inFlightTool 缺席 / ""）→ 仍占一行，卡片不塌缩', async () => {
-    for (const inFlight of [undefined, ""] as const) {
+  test("live：槽位带 `工具名 · 参数摘要` 时仍是 dim 的一行，不粘连、无 running", async () => {
+    // The slot text itself is the pure projection's contract
+    // (tests/tui/subagent-card-lines.test.ts). What this case owns is the render
+    // surface: a longer line 2 must stay dim, must stay exactly one row below the
+    // title, and must not be decorated with a running label or an emoji.
+    const card = projectSubagentCardLines(
+      [
+        makeSubagent({
+          role: "explore",
+          toolUseId: "toolu_sum",
+          title: "整理报告",
+          activity: {
+            toolName: "read_file",
+            toolInput: { path: "src/a.ts" },
+          },
+        }),
+      ],
+      "toolu_sum",
+      80
+    );
+    expect(card).not.toBeNull();
+    expect(card!.detailLine).toBe("read_file · Read src/a.ts");
+    const setup = await renderCard(card!);
+    const lines = frameLines(setup).filter((l) => l.length > 0);
+    // Exactly two rows, in order — the summary adds no third row.
+    expect(lines).toEqual(["整理报告", "read_file · Read src/a.ts"]);
+    expect(lines.indexOf("read_file · Read src/a.ts")).toBe(
+      lines.indexOf("整理报告") + 1
+    );
+    expect(lines.some((l) => l.includes("running"))).toBe(false);
+    // No welding (the original regression fingerprint of this file).
+    expect(
+      lines.some((l) => l.includes("整理报告") && l.includes("read_file"))
+    ).toBe(false);
+    const titleSpan = spanWithText(setup, "整理报告");
+    const detailSpan = spanWithText(setup, "read_file · Read src/a.ts");
+    expect(titleSpan).toBeDefined();
+    expect(detailSpan).toBeDefined();
+    expect(rgbaEq(detailSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(true);
+    expect(rgbaEq(titleSpan!.fg, RGBA.fromHex(tuiPalette.dim))).toBe(false);
+    // Summary bytes come from the worker's recorded input: still no emoji.
+    expect(/[\u{1F300}-\u{1FAFF}]/u.test(setup.captureCharFrame())).toBe(false);
+    await setup.renderer.destroy();
+  });
+
+  test("空槽位（activity 缺席 / null）→ 仍占一行，卡片不塌缩", async () => {
+    for (const activity of [undefined, null] as const) {
       const card = projectSubagentCardLines(
         [
           makeSubagent({
             role: "explore",
             toolUseId: "toolu_slot",
-            ...(inFlight === undefined ? {} : { inFlightTool: inFlight }),
+            ...(activity === undefined ? {} : { activity }),
           }),
         ],
         "toolu_slot",
@@ -222,7 +271,8 @@ describe("SubagentCardView（两行渲染面）", () => {
         taskPreview: "查找文档",
         toolUseId: "toolu_done",
         endedAt: iso(500),
-        inFlightTool: "Bash", // stale read must not survive into the done card
+        // A retained call must not survive into the done card.
+        activity: { toolName: "Bash", toolInput: {} },
       }),
     ];
     const map = subagentCardLinesMap(subagents, 80);
@@ -264,7 +314,7 @@ describe("SubagentCardView（两行渲染面）", () => {
           role: "explore",
           toolUseId: "toolu_emoji",
           title: "查找文档并整理结果",
-          inFlightTool: "Read",
+          activity: { toolName: "Read", toolInput: {} },
         }),
       ],
       80
@@ -304,14 +354,14 @@ async function renderLiveBox(
 }
 
 describe("liveToolPreviewBox — spawn 卡的两行宿主", () => {
-  test("card 命中 → 卡上两行（title + dim 在飞工具名），不再走单行标题", async () => {
+  test("card 命中 → 卡上两行（title + dim 最近发出的工具名），不再走单行标题", async () => {
     const card = projectSubagentCardLines(
       [
         makeSubagent({
           role: "explore",
           toolUseId: "toolu_tail",
           title: "整理报告",
-          inFlightTool: "Bash",
+          activity: { toolName: "Bash", toolInput: {} },
         }),
       ],
       "toolu_tail",
@@ -342,7 +392,7 @@ describe("liveToolPreviewBox — spawn 卡的两行宿主", () => {
           role: "explore",
           toolUseId: "toolu_tail",
           title: "整理报告",
-          inFlightTool: "Bash",
+          activity: { toolName: "Bash", toolInput: {} },
         }),
       ],
       "toolu_tail",

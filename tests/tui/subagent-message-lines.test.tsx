@@ -162,7 +162,7 @@ describe("卡级投影的组合面 — 无 title 时第 1 行与 join 键（SC1 
     const other = makeSubagent({
       toolUseId: "toolu_other",
       role: "explore",
-      inFlightTool: "Bash",
+      activity: { toolName: "Bash", toolInput: {} },
     });
     expect(projectSubagentCardLines([other], undefined, 80)).toBeNull();
     expect(projectSubagentCardLines([other], "  ", 80)).toBeNull();
@@ -193,7 +193,7 @@ describe("卡级投影的组合面 — 无 title 时第 1 行与 join 键（SC1 
         makeSubagent({
           role: "a".repeat(100),
           toolUseId: "toolu_narrow",
-          inFlightTool: "b".repeat(100),
+          activity: { toolName: "b".repeat(100), toolInput: {} },
         }),
       ],
       "toolu_narrow",

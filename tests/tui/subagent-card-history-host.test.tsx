@@ -87,7 +87,7 @@ function rgbaEq(a: RGBA, b: RGBA): boolean {
 }
 
 describe("MessageBlocks 历史卡宿主 — subagentCards 链接通（SC2/SC3）", () => {
-  test("命中 live 卡 → 两行：title + dim 在飞工具名，不画单行标题", async () => {
+  test("命中 live 卡 → 两行：title + dim 活动槽（最近发出的工具调用），不画单行标题", async () => {
     const cards = new Map<string, SubagentCardLines>([
       [SPAWN_ID, { titleLine: "整理报告", detailLine: "Bash", done: false }],
     ]);

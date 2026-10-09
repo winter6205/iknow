@@ -168,7 +168,7 @@ import type {
   SecurityInterruptionRecord,
 } from "./store/index.js";
 import { resolveConversationTraceFilePath } from "./store/index.js";
-import { readWorkerInFlightToolName } from "./store/index.js";
+import { readWorkerActivity } from "./store/index.js";
 import {
   appendCheckpoint,
   CURRENT_SCHEMA_VERSION,
@@ -4986,7 +4986,7 @@ export class SessionHub {
       // worker-ledger codec (this layer), so the hub injects the reader and
       // build-engine threads it to the manager as an opaque seam — the harness
       // never imports the store.
-      subagentActivityReader: readWorkerInFlightToolName,
+      subagentActivityReader: readWorkerActivity,
       // ADR-0136 §3: the one binder this hub built, handed to the subagent
       // manager (worker facts) and the graph tool (node facts) so a worker's
       // progress reaches the same store as the loop's boundaries.
@@ -5165,7 +5165,7 @@ export class SessionHub {
       projectDir: this.store.getProjectDir(),
       // Same as the per-root path above: the activity projection reader is
       // injected from the layer that owns the worker-ledger codec.
-      subagentActivityReader: readWorkerInFlightToolName,
+      subagentActivityReader: readWorkerActivity,
       // ADR-0136 §3: same one binder as the per-root path above.
       runtimePersistence: this.runtimePersistence,
       ...(this.traceOut !== undefined

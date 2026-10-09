@@ -1,30 +1,29 @@
 /**
  * Read-only activity projection over a worker transcript (specs/subagent-card-title.md).
  *
- * Question answered: "which tool is this worker executing right now?" — the
- * latest `tool_use` in that worker's own ledger with no matching `tool_result`
- * later in the same ledger. This is observable because the loop commits the
- * assistant turn (with its `tool_use`) *before* the tool phase runs
- * (src/harness/loop-engine.ts), so an unpaired `tool_use` really is the call
- * in flight.
+ * Question answered: "which tool did this worker issue most recently?" — the
+ * last `tool_use` in that worker's own ledger, kept visible through its
+ * `tool_result` until a later `tool_use` replaces it. The slot describes the
+ * most recently issued call, not whether it is still running or succeeded.
  *
  * Why this is a separate module from `worker-transcript.ts`: that file's load
  * path is a *conversation* projection and deliberately runs
  * `closeoutOrphanToolUses` so every consumer gets an API-valid chain — the
- * synthesis erases exactly the unpaired `tool_use` this reader exists to
+ * synthesis erases exactly the trailing `tool_use` this reader exists to
  * report. The two reads therefore need different projections of the same
  * append-only ledger; the codec (`parseSessionJsonl` / `projectSessionLog`) is
  * reused, not copied (SSOT is jsonl.ts).
  *
- * Reading has two in-vocabulary empties — the ledger does not exist yet, and
- * every `tool_use` in it is settled — and one class of fault that must not
- * pretend to be either: an unreadable path or a ledger that fails to decode.
- * The caller renders a card slot and must never see a throw, so a fault also
- * resolves to `""`, but it is named on stderr once per ledger (the TUI gates
- * stderr and replays it on exit, so this stays a single line per worker).
+ * Reading has two in-vocabulary empties — the ledger does not exist yet, and it
+ * holds no `tool_use` — and one class of fault that must not pretend to be
+ * either: an unreadable path or a ledger that fails to decode. The caller
+ * renders a card slot and must never see a throw, so a fault also resolves to
+ * `null`, but it is named on stderr once per ledger (the TUI gates stderr and
+ * replays it on exit, so this stays a single line per worker).
  */
 import { readFile } from "node:fs/promises";
 import type { AnthropicNativeMessage } from "../../harness/index.js";
+import type { SubagentActivity } from "../../harness/subagent/manager.js";
 import { parseSessionJsonl, projectSessionLog } from "./jsonl.js";
 import type { WorkerTranscriptLocation } from "./worker-transcript.js";
 
@@ -39,7 +38,7 @@ function renderFault(taskId: string, cause: string): void {
     if (oldest !== undefined) reportedFaults.delete(oldest);
   }
   reportedFaults.add(taskId);
-  console.warn(`worker-activity: ${taskId} in-flight read failed — ${cause}`);
+  console.warn(`worker-activity: ${taskId} activity read failed — ${cause}`);
 }
 
 /**
@@ -71,13 +70,13 @@ function missingLedgerCause(err: unknown): string | undefined {
 }
 
 /**
- * Name of the tool the worker is executing right now, or `""` when the ledger
- * is missing / unreadable / unparsable, or when every `tool_use` it holds is
- * already settled. Never throws, never rejects.
+ * The tool the worker issued most recently, with its recorded input, or `null`
+ * when the ledger is missing / unreadable / unparsable, or holds no `tool_use`.
+ * Never throws, never rejects.
  */
-export async function readWorkerInFlightToolName(
+export async function readWorkerActivity(
   loc: WorkerTranscriptLocation
-): Promise<string> {
+): Promise<SubagentActivity | null> {
   let raw: string;
   try {
     raw = await readFile(loc.transcriptPath, "utf8");
@@ -85,49 +84,43 @@ export async function readWorkerInFlightToolName(
     // EXIT: no ledger yet — a worker writes its first record only after its
     // loop starts, so absence is the expected reading for a young task.
     const cause = missingLedgerCause(err);
-    if (cause === undefined) return "";
+    if (cause === undefined) return null;
     renderFault(loc.taskId, cause);
-    return "";
+    return null;
   }
   try {
-    return inFlightToolName(projectSessionLog(parseSessionJsonl(raw)).messages);
+    return latestIssuedToolCall(
+      projectSessionLog(parseSessionJsonl(raw)).messages
+    );
   } catch (err) {
     renderFault(loc.taskId, jsonlFaultCause(err));
-    return "";
+    return null;
   }
 }
 
 /**
- * Pure projection: walk the ledger in order and keep the name of the last
- * `tool_use` that no later `tool_result` answers. Pairing is positional, not
- * set membership, so a `tool_result` recorded *before* its `tool_use` (which
- * only a malformed or hand-edited ledger can produce) does not settle it.
+ * Pure projection: the last `tool_use` block in ledger order, with its recorded
+ * input. Settling is not consulted — the slot is the most recently issued call,
+ * which survives its `tool_result` until a later `tool_use` replaces it.
  */
-function inFlightToolName(
+function latestIssuedToolCall(
   messages: ReadonlyArray<AnthropicNativeMessage>
-): string {
-  const settledAt = new Map<string, number>();
-  const open: Array<{
-    readonly id: string;
-    readonly name: string;
-    readonly at: number;
-  }> = [];
-  let cursor = 0;
+): SubagentActivity | null {
+  let latest: SubagentActivity | null = null;
   for (const message of messages) {
     for (const block of message.content) {
-      cursor += 1;
-      if (block.type === "tool_use") {
-        open.push({ id: block.id, name: block.name, at: cursor });
-      } else if (block.type === "tool_result") {
-        settledAt.set(block.tool_use_id, cursor);
-      }
+      if (block.type !== "tool_use") continue;
+      latest = { toolName: block.name, toolInput: coerceInput(block.input) };
     }
   }
-  let name = "";
-  // `open` is already in ledger order, so the last unsettled call wins.
-  for (const call of open) {
-    const answeredAt = settledAt.get(call.id);
-    if (answeredAt === undefined || answeredAt < call.at) name = call.name;
-  }
-  return name;
+  return latest;
+}
+
+/** A `tool_use` input is an object; anything else (legacy or malformed) reads
+ *  as empty, so the card falls back to the bare tool name and never renders raw
+ *  JSON. */
+function coerceInput(input: unknown): Record<string, unknown> {
+  return typeof input === "object" && input !== null
+    ? (input as Record<string, unknown>)
+    : {};
 }

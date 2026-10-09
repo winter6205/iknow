@@ -106,6 +106,16 @@ export type QueryBufferResult =
     };
 
 /**
+ * The worker's most-recently-issued tool call. `toolInput` is the recorded
+ * input the display layer summarizes, and it is part of this value so the card
+ * memo tracks the complete call rather than a name the input could contradict.
+ */
+export interface SubagentActivity {
+  readonly toolName: string;
+  readonly toolInput: Record<string, unknown>;
+}
+
+/**
  * What the injected activity reader is asked for: one live worker's own
  * ledger, addressed by the manager's task identity (never by a path the
  * caller invented).
@@ -116,14 +126,15 @@ export interface SubagentActivityQuery {
 }
 
 /**
- * Injection seam for the in-flight tool name. The manager holds no transcript
- * codec (the worker ledger belongs to the store layer, and `src/harness/**`
- * must not reach into it), so the host that owns the codec wires a reader
- * here. Contract: resolve with the tool name, or `""` when the worker has no
- * call waiting on a result — and never throw, never reject, because the
- * caller reads it from a synchronous list's background refresh. A ledger that
- * is merely absent is one of the `""` readings; a fault is the reader's own to
- * report, since the manager cannot tell the two apart and must not throw.
+ * Injection seam for the worker's most-recently-issued tool call. The manager
+ * holds no transcript codec (the worker ledger belongs to the store layer, and
+ * `src/harness/**` must not reach into it), so the host that owns the codec
+ * wires a reader here. Contract: resolve with the projected call, or `null`
+ * when the worker has issued no call yet / the ledger is absent — and never
+ * throw, never reject, because the caller reads it from a synchronous list's
+ * background refresh. A ledger that is merely absent is one of the `null`
+ * readings; a fault is the reader's own to report, since the manager cannot
+ * tell the two apart and must not throw.
  *
  * Cost is bounded by the caller, not by this signature: at most one read is
  * outstanding per live task, and a pass over the list queues at most one per
@@ -131,7 +142,7 @@ export interface SubagentActivityQuery {
  */
 export type SubagentActivityReader = (
   query: SubagentActivityQuery
-) => Promise<string>;
+) => Promise<SubagentActivity | null>;
 
 /**
  * Minimal state surface for the Session API read-only projection.
@@ -172,17 +183,19 @@ export interface SubagentInfo {
    */
   readonly foreground?: boolean;
   /**
-   * The tool this live worker is executing right now — the name of the latest
-   * `tool_use` on its ledger with no matching `tool_result` yet (projected by
-   * the injected `readInFlightTool` reader; `""` = read completed, nothing
-   * waiting). Surfaces only while the task is `starting` / `running`.
+   * The tool this live worker issued most recently, with its input; projected
+   * by the injected `readActivity` reader. `null` = the read completed and the
+   * worker has issued no call yet. The value stays visible through its
+   * `tool_result` until a later call replaces it — the slot describes the
+   * issued call, not whether it is running or succeeded. Surfaces only while
+   * the task is `starting` / `running`.
    *
    * Two things it is NOT: not ADR-0028 `lastTool` (that is the last *successful*
    * tool of the main loop, feeding the model status bar), and not a field on
    * the parent-visible handoff envelope (worker stdout stays one terminal
    * envelope — SC6).
    */
-  readonly inFlightTool?: string;
+  readonly activity?: SubagentActivity | null;
   /**
    * The short operator label the parent filed on its `spawn_subagent` call
    * (`def.title`), which the session card draws as line 1. Parent-only: it is
@@ -1194,10 +1207,10 @@ export function createSubAgentManager(opts: {
    * manager owns the task identity and the ledger *path*, never the ledger
    * *codec*, so the store-layer reader comes in here as an opaque function —
    * the same injection-not-import discipline `spawn` / `traceFactory` use.
-   * Absent → `SubagentInfo.inFlightTool` never appears, so every existing
+   * Absent → `SubagentInfo.activity` never appears, so every existing
    * consumer of the list stays byte-for-byte identical.
    */
-  readonly readInFlightTool?: SubagentActivityReader;
+  readonly readActivity?: SubagentActivityReader;
   /**
    * ADR-0127 parent-owned security-review route — the host's end-to-end
    * interactive path to a human (TTY prompt / TUI modal / serve queue).
@@ -1212,13 +1225,13 @@ export function createSubAgentManager(opts: {
 }): SubAgentManager {
   const tasks = new Map<string, Task>();
   /**
-   * Last in-flight tool name read for each live task (`""` = the read
-   * completed and nothing is waiting). Declared with `tasks` because a Task
+   * Last activity read for each live task (`null` = the read completed and the
+   * worker has issued no call yet). Declared with `tasks` because a Task
    * record's birth point clears its entry.
    */
-  const inFlightToolCache = new Map<string, string>();
+  const activityCache = new Map<string, SubagentActivity | null>();
   /** Tasks with a read outstanding — the guard that keeps one refresh per task. */
-  const inFlightToolRefreshes = new Set<string>();
+  const activityRefreshes = new Set<string>();
   /** The injected reader breaks its never-throw contract at most once per
    *  assembly before the wiring bug is worth shouting about. */
   let readerContractReported = false;
@@ -2240,10 +2253,11 @@ export function createSubAgentManager(opts: {
     }
     tasks.set(id, task);
     // A new Task record under an existing external taskId (the `resumeTask`
-    // arm) must not inherit the previous hop's cached activity name: the ledger
-    // is being appended to, but the previous round's last read says nothing
-    // about this process. The read-only list re-derives it on the next pass.
-    inFlightToolCache.delete(id);
+    // arm) must not inherit the previous hop's cached activity read: the
+    // ledger is being appended to, but the previous round's last read says
+    // nothing about this process. The read-only list re-derives it on the next
+    // pass.
+    activityCache.delete(id);
 
     let child: ChildProcess;
     // Write meta.json once (attempted on both success and failure paths) —
@@ -3046,34 +3060,35 @@ export function createSubAgentManager(opts: {
   }
 
   /**
-   * `SubagentInfo.inFlightTool`, derived (never a second copy of the truth:
+   * `SubagentInfo.activity`, derived (never a second copy of the truth:
    * the ledger is the truth, this is one cached read of it).
    */
-  function inFlightToolInfoField(task: Task): {
-    readonly inFlightTool?: string;
+  function activityInfoField(task: Task): {
+    readonly activity?: SubagentActivity | null;
   } {
-    const reader = opts.readInFlightTool;
+    const reader = opts.readActivity;
     // Not injected (tests, manager-direct construction, ask surface) → the
     // whole key stays absent, byte-identical to the pre-feature projection.
     if (reader === undefined) return {};
     if (task.state !== "starting" && task.state !== "running") {
-      // Terminal: that card slot becomes `✓ Done`, so a stale name must not
+      // Terminal: that card slot becomes `✓ Done`, so a stale activity must not
       // surface. Dropping the entry here also means a later `resumeTask` (same
       // external taskId, brand-new Task record) starts unburdened.
-      inFlightToolCache.delete(task.id);
+      activityCache.delete(task.id);
       return {};
     }
     // No ledger address at all (assembly without subagentsDir / projectDir) →
     // nothing to read, so nothing to surface and no refresh to queue.
     const dir = resolveSubagentsDirForDef(task.def);
     if (dir === undefined) return {};
-    if (!inFlightToolRefreshes.has(task.id)) {
-      kickInFlightToolRead(reader, task, workerTranscriptPath(dir, task.id));
+    if (!activityRefreshes.has(task.id)) {
+      kickActivityRead(reader, task, workerTranscriptPath(dir, task.id));
     }
-    const cached = inFlightToolCache.get(task.id);
-    // Absent ≠ "": the first pass after a spawn has not looked at the ledger
-    // yet, and reporting "no call in flight" before the read would be a lie.
-    return cached === undefined ? {} : { inFlightTool: cached };
+    const cached = activityCache.get(task.id);
+    // Absent ≠ null: the first pass after a spawn has not looked at the ledger
+    // yet, so it has no read to report; `null` is a completed read that found
+    // no call. Only the second one may claim "nothing issued".
+    return cached === undefined ? {} : { activity: cached };
   }
 
   /**
@@ -3085,47 +3100,47 @@ export function createSubAgentManager(opts: {
     if (readerContractReported) return;
     readerContractReported = true;
     console.warn(
-      "subagent: the injected in-flight tool reader threw or rejected; " +
+      "subagent: the injected subagent activity reader threw or rejected; " +
         "the card's activity slot stays empty"
     );
   }
 
   /**
    * Queue one read and cache what it says. A reader that breaks its contract
-   * (throws / rejects) degrades to `""`: this runs off a host's 1 Hz read-only
+   * (throws / rejects) degrades to `null`: this runs off a host's 1 Hz read-only
    * projection, and the spec's exception row for the activity projection is
    * "empty placeholder, a non-throw". The break is still named — once per
    * manager — because it is a wiring bug, not a worker state.
    */
-  function kickInFlightToolRead(
+  function kickActivityRead(
     reader: SubagentActivityReader,
     task: Task,
     transcriptPath: string
   ): void {
-    inFlightToolRefreshes.add(task.id);
-    const settle = (name: string): void => {
-      inFlightToolRefreshes.delete(task.id);
+    activityRefreshes.add(task.id);
+    const settle = (activity: SubagentActivity | null): void => {
+      activityRefreshes.delete(task.id);
       // A read landing after the task turned terminal — or after a resume
       // replaced the record under the same taskId — is stale by construction.
       if (tasks.get(task.id) !== task) return;
       if (task.state !== "starting" && task.state !== "running") return;
-      inFlightToolCache.set(task.id, name);
+      activityCache.set(task.id, activity);
     };
-    let pending: Promise<string>;
+    let pending: Promise<SubagentActivity | null>;
     try {
       pending = reader({ taskId: task.id, transcriptPath });
     } catch {
       // EXIT: reader threw synchronously — contract break, empty placeholder.
       reportReaderContractBreak();
-      settle("");
+      settle(null);
       return;
     }
     void Promise.resolve(pending).then(
-      (name) => settle(name),
+      (activity) => settle(activity),
       () => {
         // EXIT: reader rejected — contract break, empty placeholder.
         reportReaderContractBreak();
-        settle("");
+        settle(null);
       }
     );
   }
@@ -3181,7 +3196,7 @@ export function createSubAgentManager(opts: {
           ? { toolUseId: task.def.toolUseId }
           : {}),
         ...ownershipInfoFields(task.def),
-        ...inFlightToolInfoField(task),
+        ...activityInfoField(task),
       };
       out.push(item);
     }

@@ -8,10 +8,17 @@
  *
  * Invariant: line 1 is the operator `title` carried on that worker's spawn
  * record (`SubagentInfo.title`), identical while live and once completed; line
- * 2 is one activity slot — the joined worker's in-flight tool name while live,
- * the literal `✓ Done` once completed, nothing when failed (that card's failure
+ * 2 is one activity slot — the joined worker's most recently issued tool
+ * **name plus its argument summary** (`toolName · summary`, the shared
+ * `formatToolStatusLine` wording) while live, the literal `✓ Done` once
+ * completed, nothing when failed (that card's failure
  * overlay owns it). The card is exactly two lines in every state: `taskPreview`
  * left the card (it stays on `SubagentInfo` / `SubagentPanel`).
+ *
+ * Slot wording is never the card's own invention: it comes from the shared
+ * tool-summary formatter, so the transcript's tool lines and this slot cannot
+ * drift. `status: "ok"` there is a neutral name-and-summary assembly, not a
+ * success claim (see the T2 describe below).
  *
  * Join key = `SubagentInfo.toolUseId`; a missing join key produces no card and
  * never borrows another worker's title or tool name.
@@ -30,7 +37,10 @@ import {
   subagentCardsKey,
 } from "../../src/tui/subagent-message-lines.js";
 import { visualWidth } from "../../src/tui/tool-summary.js";
-import type { SubagentInfo } from "../../src/harness/subagent/manager.js";
+import type {
+  SubagentActivity,
+  SubagentInfo,
+} from "../../src/harness/subagent/manager.js";
 
 const T0 = Date.parse("2026-09-07T12:00:00.000Z");
 
@@ -101,20 +111,25 @@ describe("projectSubagentCardLines — join 键的 EXIT 面（不借别的 worke
   });
 });
 
-describe("SC2 — live 卡：第 1 行 title，第 2 行 in-flight 工具名", () => {
-  test("starting / running 都是 live：title + 工具名，done=false，且只有两行", () => {
+describe("SC2 — live 卡：第 1 行 title，第 2 行最近发出的工具名 · 摘要", () => {
+  test("starting / running 都是 live：title + 工具名 · 摘要，done=false，且只有两行", () => {
     for (const state of ["starting", "running"] as const) {
       const info = makeSubagent({
         state,
         role: "explore",
         toolUseId: "toolu_live",
         title: "查文档",
-        inFlightTool: "read_file",
+        activity: { toolName: "read_file", toolInput: {} },
       });
       const card = projectSubagentCardLines([info], "toolu_live", 80);
+      // Original regression fingerprint (kept): line 2 is THIS worker's own
+      // issued call, never another worker's, and the card is exactly two lines.
+      // Re-pinned for T2: the slot is `toolName · 摘要`, so a registered tool
+      // whose input carries no `path` shows the registry's own "?" fallback
+      // instead of the bare name T1 asserted.
       expect(card).toEqual({
         titleLine: "查文档",
-        detailLine: "read_file",
+        detailLine: "read_file · Read ?",
         done: false,
       });
       // The card is exactly two lines: no third (done) line exists while live.
@@ -131,7 +146,7 @@ describe("SC2 — live 卡：第 1 行 title，第 2 行 in-flight 工具名", (
       toolUseId: "toolu_prev",
       title: "跑测试",
       taskPreview: "这是一段很长的任务正文，不该出现在卡上",
-      inFlightTool: "bash",
+      activity: { toolName: "bash", toolInput: {} },
     });
     const card = projectSubagentCardLines([info], "toolu_prev", 80)!;
     expect(card.titleLine).toBe("跑测试");
@@ -139,7 +154,7 @@ describe("SC2 — live 卡：第 1 行 title，第 2 行 in-flight 工具名", (
     expect(card.titleLine + card.detailLine).not.toContain("任务正文");
   });
 
-  test('无 in-flight（字段缺席或 ""）→ 第 2 行空占位，卡仍是两行', () => {
+  test("无活动读数（字段缺席或 null）→ 第 2 行空占位，卡仍是两行", () => {
     const absent = projectSubagentCardLines(
       [makeSubagent({ toolUseId: "toolu_no", title: "等待中" })],
       "toolu_no",
@@ -155,7 +170,7 @@ describe("SC2 — live 卡：第 1 行 title，第 2 行 in-flight 工具名", (
         makeSubagent({
           toolUseId: "toolu_em",
           title: "等待中",
-          inFlightTool: "",
+          activity: null,
         }),
       ],
       "toolu_em",
@@ -171,7 +186,7 @@ describe("SC2 — live 卡：第 1 行 title，第 2 行 in-flight 工具名", (
         makeSubagent({
           toolUseId: "toolu_sfx",
           title: "查引用",
-          inFlightTool: "grep",
+          activity: { toolName: "grep", toolInput: {} },
         }),
       ],
       "toolu_sfx",
@@ -201,14 +216,14 @@ describe("SC3 — completed 卡：同一行 1，槽位换成 `✓ Done`", () => 
     });
   });
 
-  test("终态即使带着陈旧 in-flight 名也只画 `✓ Done`（槽位不并存）", () => {
+  test("终态即使带着陈旧活动名也只画 `✓ Done`（槽位不并存）", () => {
     const card = projectSubagentCardLines(
       [
         makeSubagent({
           state: "completed",
           toolUseId: "toolu_stale",
           endedAt: iso(100),
-          inFlightTool: "read_file",
+          activity: { toolName: "read_file", toolInput: {} },
         }),
       ],
       "toolu_stale",
@@ -247,27 +262,30 @@ describe("SC3 — completed 卡：同一行 1，槽位换成 `✓ Done`", () => 
   });
 });
 
-describe("SC4 — 两个并发 worker：标题与工具名各自独立，永不串行", () => {
-  test("两张卡只吃自己 join 的那条 in-flight 名与自己 spawn record 的 title", () => {
+describe("SC4 — 两个并发 worker：标题与活动名各自独立，永不串行", () => {
+  test("两张卡只吃自己 join 的那条活动名与自己 spawn record 的 title", () => {
     const subs = [
       makeSubagent({
         toolUseId: "toolu_A",
         role: "explore",
         title: "找调用点",
-        inFlightTool: "grep",
+        activity: { toolName: "grep", toolInput: {} },
       }),
       makeSubagent({
         toolUseId: "toolu_B",
         role: "general-purpose",
         title: "跑测试",
-        inFlightTool: "bash",
+        activity: { toolName: "bash", toolInput: {} },
       }),
     ];
     const cardA = projectSubagentCardLines(subs, "toolu_A", 80)!;
     const cardB = projectSubagentCardLines(subs, "toolu_B", 80)!;
     expect(cardA.titleLine).toBe("找调用点");
     expect(cardB.titleLine).toBe("跑测试");
-    expect(cardA.detailLine).toBe("grep");
+    // Re-pinned for T2 (original fingerprint kept: each card shows only its own
+    // worker's issued call, never the other's): `grep` is registered, so its
+    // missing `pattern` falls back to the registry's "?" instead of a bare name.
+    expect(cardA.detailLine).toBe("grep · Search ?");
     expect(cardB.detailLine).toBe("bash");
     // Crossed text must not appear on either card.
     expect(cardA.titleLine + cardA.detailLine).not.toContain("跑测试");
@@ -289,6 +307,367 @@ describe("SC4 — 两个并发 worker：标题与工具名各自独立，永不�
     const cardB = projectSubagentCardLines(subs, "toolu_B", 80)!;
     expect(cardA.titleLine).toBe("只属于 A");
     expect(cardB.titleLine).toBe("general-purpose");
+  });
+});
+
+// ============================================================================
+// T2 — 第 2 行的槽位文字：`toolName · 参数摘要`，措辞取自共享 formatter
+// (src/shared/tool-line.ts / formatToolStatusLine, status "ok")。卡上不另写
+// 模板，未知工具回落裸名，槽位恒为一行。
+// ============================================================================
+
+/** Every slot below is read through the single public projection, so the same
+ *  literals are what both hosts (live tail / history) render. */
+function slotOf(
+  activity: SubagentActivity,
+  cols = 80,
+  state: SubagentInfo["state"] = "running"
+): string {
+  const card = projectSubagentCardLines(
+    [makeSubagent({ toolUseId: "toolu_slot", state, activity })],
+    "toolu_slot",
+    cols
+  )!;
+  return card.detailLine;
+}
+
+describe("T2 槽位 — 已注册工具拼出 `toolName · 参数摘要`", () => {
+  // cols=80 keeps these fixtures inside the shared formatter's own detail budget
+  // (CHROME_RESERVE=12 leaves ≥ 59 columns), so the literals below are the
+  // formatter's bytes with no width clipping applied.
+  test("读 / 搜 / shell / 写 / 改：摘要逐字取自注册表，槽位不再是裸工具名", () => {
+    const cases: ReadonlyArray<readonly [SubagentActivity, string]> = [
+      [
+        { toolName: "read_file", toolInput: { path: "src/a.ts" } },
+        "read_file · Read src/a.ts",
+      ],
+      [
+        { toolName: "grep", toolInput: { pattern: "foo" } },
+        "grep · Search foo",
+      ],
+      [{ toolName: "bash", toolInput: { command: "ls -la" } }, "bash · ls -la"],
+      [
+        {
+          toolName: "write_file",
+          toolInput: { path: "p.ts", content: "a\nb" },
+        },
+        "write_file · Wrote p.ts (2 lines)",
+      ],
+      [
+        {
+          toolName: "edit_file",
+          toolInput: { path: "a.ts", old_str: "x", new_str: "y\nz" },
+        },
+        "edit_file · Edited a.ts (1 → 2 lines)",
+      ],
+    ];
+    for (const [activity, expected] of cases) {
+      const slot = slotOf(activity);
+      expect(slot).toBe(expected);
+      // Both halves of the contract at once: the summary really arrived (T1 drew
+      // the bare name only), and the card did not invent its own wording — it
+      // stays `<registry name> · <registry detail>`.
+      expect(slot).not.toBe(activity.toolName);
+      expect(slot.startsWith(`${activity.toolName} · `)).toBe(true);
+    }
+  });
+
+  test("入参字段缺席 → 注册表自身的 `?` 兜底照样拼进槽位", () => {
+    expect(slotOf({ toolName: "read_file", toolInput: {} })).toBe(
+      "read_file · Read ?"
+    );
+  });
+
+  test("摘要为空 → 裸工具名，不留悬空分隔符（`bash` 无 command）", () => {
+    const slot = slotOf({ toolName: "bash", toolInput: {} });
+    expect(slot).toBe("bash");
+    expect(slot.includes("·")).toBe(false);
+  });
+
+  test("CJK 摘要按视觉宽度保留（宽列下逐字，不预先截半）", () => {
+    expect(
+      slotOf({
+        toolName: "read_file",
+        toolInput: { path: "查找文档并整理结果.ts" },
+      })
+    ).toBe("read_file · Read 查找文档并整理结果.ts");
+  });
+
+  test("两张卡的入参不同 → 各画各的摘要（同名工具也不串摘要）", () => {
+    const subs = [
+      makeSubagent({
+        toolUseId: "toolu_IA",
+        title: "甲",
+        activity: { toolName: "read_file", toolInput: { path: "a.ts" } },
+      }),
+      makeSubagent({
+        toolUseId: "toolu_IB",
+        title: "乙",
+        activity: { toolName: "read_file", toolInput: { path: "b.ts" } },
+      }),
+    ];
+    const cardA = projectSubagentCardLines(subs, "toolu_IA", 80)!;
+    const cardB = projectSubagentCardLines(subs, "toolu_IB", 80)!;
+    expect(cardA.detailLine).toBe("read_file · Read a.ts");
+    expect(cardB.detailLine).toBe("read_file · Read b.ts");
+    expect(cardA.detailLine).not.toBe(cardB.detailLine);
+    // The recorded input is per-worker data: B's path must not appear on A.
+    expect(cardA.detailLine.includes("b.ts")).toBe(false);
+    expect(cardB.detailLine.includes("a.ts")).toBe(false);
+  });
+});
+
+describe("T2 槽位 — 未注册工具名回落裸名（永不出现原始 JSON）", () => {
+  test("mcp 命名空间名 + 结构化入参 → 槽位就是那个名字", () => {
+    expect(
+      slotOf({
+        toolName: "mcp__serena__find_symbol",
+        toolInput: { symbol_name: "X", relation: "children" },
+      })
+    ).toBe("mcp__serena__find_symbol");
+  });
+
+  test("`Bash`（大写）≠ 已注册的 `bash` → 裸名；共享 formatter 的 `(name)` 占位符不拼接", () => {
+    // The registry key is lowercase/snake/kebab. Joining the shared formatter's
+    // unknown-tool placeholder would print `Bash · (Bash)` — the slot stays the
+    // bare name instead.
+    const slot = slotOf({ toolName: "Bash", toolInput: { command: "ls" } });
+    expect(slot).toBe("Bash");
+    expect(slot.includes("(")).toBe(false);
+    expect(slot.includes("·")).toBe(false);
+  });
+
+  test("入参的字段名 / 嵌套结构 / 引号都不进槽位", () => {
+    const slot = slotOf({
+      toolName: "unknown_tool",
+      toolInput: { secret_path: "/tmp/whatever", nested: { a: 1 } },
+    });
+    expect(slot).toBe("unknown_tool");
+    for (const leak of ["secret_path", "nested", "{", '"', "1"]) {
+      expect(slot.includes(leak)).toBe(false);
+    }
+  });
+});
+
+describe("T2 槽位 — 两个子代理工具继承共享 formatter 自己声明的形状", () => {
+  // Deliberate inheritance, not an accidental pass: `formatToolStatusLine`
+  // returns **detail only** for spawn_subagent / subagent_result (the glyph and
+  // identity live on line 1 / SubagentPanel), so a worker whose most recently
+  // issued call was one of these shows that detail — never `name · detail`.
+  test("spawn_subagent → 槽位是角色名，不带 `spawn_subagent · ` 前缀", () => {
+    const slot = slotOf({
+      toolName: "spawn_subagent",
+      toolInput: { subagent_type: "explore", task: "t", title: "x" },
+    });
+    expect(slot).toBe("explore");
+    expect(slot.includes("spawn_subagent")).toBe(false);
+    // status "ok" is what keeps this a role, not a progress claim.
+    expect(slot.includes("running")).toBe(false);
+  });
+
+  test("subagent_result → 槽位是 `Poll <task_id>`", () => {
+    expect(
+      slotOf({ toolName: "subagent_result", toolInput: { task_id: "abc" } })
+    ).toBe("Poll abc");
+  });
+
+  test("spawn 无 subagent_type → 沿用与第 1 行同源的 catalog 兜底角色", () => {
+    expect(slotOf({ toolName: "spawn_subagent", toolInput: {} })).toBe(
+      IDENTITY_FALLBACK_ROLE
+    );
+  });
+});
+
+describe("T2 槽位 — status `ok` 只是中性「名 + 摘要」，不表示成功", () => {
+  test("同一 name+input：调用在途与已结算 → 槽位逐字相同（槽位读不出结算）", () => {
+    // T1's retention is why these two are indistinguishable: the projected value
+    // carries no "settled" field at all, so a call whose `tool_result` landed and
+    // one still waiting for it reach the card as the same bytes. The past-tense
+    // wording ("Wrote") therefore names the REQUESTED operation.
+    const issued: SubagentActivity = {
+      toolName: "write_file",
+      toolInput: { path: "p.ts", content: "a\nb" },
+    };
+    const settledSameCall: SubagentActivity = {
+      toolName: "write_file",
+      toolInput: { path: "p.ts", content: "a\nb" },
+    };
+    const whileIssued = slotOf(issued, 80, "starting");
+    const whileSettled = slotOf(settledSameCall, 80, "running");
+    expect(whileIssued).toBe("write_file · Wrote p.ts (2 lines)");
+    expect(whileSettled).toBe(whileIssued);
+  });
+
+  test("槽位永不含成功 / 失败断言词（那两个信号归 `✓ Done` 与 failure overlay）", () => {
+    const activities: ReadonlyArray<SubagentActivity> = [
+      { toolName: "write_file", toolInput: { path: "p.ts", content: "a\nb" } },
+      {
+        toolName: "edit_file",
+        toolInput: { path: "p.ts", old_str: "a", new_str: "b" },
+      },
+      { toolName: "bash", toolInput: { command: "ls -la" } },
+      { toolName: "spawn_subagent", toolInput: { subagent_type: "explore" } },
+      { toolName: "subagent_result", toolInput: { task_id: "abc" } },
+    ];
+    for (const activity of activities) {
+      const slot = slotOf(activity);
+      expect(slot.includes("✓")).toBe(false);
+      expect(slot.includes("Done")).toBe(false);
+      expect(slot.includes("[失败]")).toBe(false);
+      expect(slot.toLowerCase().includes("fail")).toBe(false);
+    }
+  });
+});
+
+describe("T2 槽位 — 生命周期照旧（空槽 / completed / failed 都不被摘要改动）", () => {
+  test("completed 丢弃整份活动值：带输入的完整调用也不与 `✓ Done` 并存", () => {
+    const card = projectSubagentCardLines(
+      [
+        makeSubagent({
+          state: "completed",
+          toolUseId: "toolu_done_sum",
+          title: "写文件",
+          endedAt: iso(100),
+          activity: {
+            toolName: "write_file",
+            toolInput: { path: "p.ts", content: "a\nb" },
+          },
+        }),
+      ],
+      "toolu_done_sum",
+      80
+    )!;
+    expect(card.detailLine).toBe("✓ Done");
+    expect(card.detailLine.includes("Wrote")).toBe(false);
+    expect(card.detailLine.includes("write_file")).toBe(false);
+    expect(card.done).toBe(true);
+  });
+
+  test("failed 带着完整活动值仍不出卡（map 也不为该键占位）", () => {
+    const subs = [
+      makeSubagent({
+        state: "failed",
+        toolUseId: "toolu_f_sum",
+        endedAt: iso(-500),
+        reason: "crashed",
+        activity: { toolName: "read_file", toolInput: { path: "src/a.ts" } },
+      }),
+    ];
+    expect(projectSubagentCardLines(subs, "toolu_f_sum", 80)).toBeNull();
+    expect(subagentCardLinesMap(subs, 80).size).toBe(0);
+  });
+
+  test("activity 缺席 / null → 空槽仍是空串，卡仍是两行（摘要层不得编造文字）", () => {
+    const absent = projectSubagentCardLines(
+      [makeSubagent({ toolUseId: "toolu_absent_sum", title: "等待中" })],
+      "toolu_absent_sum",
+      80
+    )!;
+    const nullish = projectSubagentCardLines(
+      [
+        makeSubagent({
+          toolUseId: "toolu_null_sum",
+          title: "等待中",
+          activity: null,
+        }),
+      ],
+      "toolu_null_sum",
+      80
+    )!;
+    for (const card of [absent, nullish]) {
+      expect(card.detailLine).toBe("");
+      expect(Object.keys(card).sort()).toEqual([
+        "detailLine",
+        "done",
+        "titleLine",
+      ]);
+    }
+  });
+
+  test("历史卡（settled block 无 live worker）第 2 行仍是空槽：摘要只属于 live", () => {
+    const card = settledSpawnCardFromBlock({
+      name: "spawn_subagent",
+      input: { subagent_type: "explore", task: "t", title: "整理报告" },
+      settled: true,
+      cols: 80,
+    })!;
+    expect(card.titleLine).toBe("整理报告");
+    expect(card.detailLine).toBe("");
+  });
+});
+
+describe("T2 槽位 — 恒为一行：按 cols 视觉宽度收口", () => {
+  const wideActivities: ReadonlyArray<SubagentActivity> = [
+    {
+      toolName: "read_file",
+      toolInput: { path: `${"deep/".repeat(40)}index.ts` },
+    },
+    {
+      toolName: "bash",
+      toolInput: {
+        command: 'find . -name "*.tsx" -exec grep -l placeholder {} ;'.repeat(
+          4
+        ),
+      },
+    },
+    {
+      toolName: "grep",
+      toolInput: {
+        pattern: "查找中文模式串并且很长的一段描述性文字用于压窄列宽",
+      },
+    },
+    {
+      toolName: "mcp__serena__find_symbol",
+      toolInput: { symbol_name: "X".repeat(120) },
+    },
+  ];
+
+  test("长摘要 / CJK 摘要 / 超长未注册名：任意 cols 下 ≤ max(1, cols) 且无换行", () => {
+    // `clipDetail` reserves CHROME_RESERVE=12 columns, so at narrow widths the
+    // assembled `name · detail` is longer than the budget before the card clips
+    // it — pin the one-line property, not an exact string.
+    for (const activity of wideActivities) {
+      for (const cols of [1, 4, 8, 12, 20, 30, 40, 60, 80, 120]) {
+        const slot = slotOf(activity, cols);
+        expect(slot.includes("\n")).toBe(false);
+        expect(visualWidth(slot)).toBeLessThanOrEqual(Math.max(1, cols));
+      }
+    }
+  });
+
+  test("入参里的换行 / 制表符压成一行（第 2 行不把两行的卡撑成三行）", () => {
+    const slot = slotOf(
+      {
+        toolName: "grep",
+        toolInput: { pattern: "第一行\n第二行\t制表" },
+      },
+      80
+    );
+    expect(slot).toBe("grep · Search 第一行 第二行 制表");
+    expect(slot.includes("\n")).toBe(false);
+    expect(slot.includes("\t")).toBe(false);
+    expect(visualWidth(slot)).toBeLessThanOrEqual(80);
+  });
+
+  test("窄 cols 下第 1 行不受摘要牵连（两行各自收口）", () => {
+    const card = projectSubagentCardLines(
+      [
+        makeSubagent({
+          toolUseId: "toolu_narrow",
+          title: "整理报告",
+          activity: {
+            toolName: "read_file",
+            toolInput: { path: `${"deep/".repeat(40)}index.ts` },
+          },
+        }),
+      ],
+      "toolu_narrow",
+      12
+    )!;
+    expect(visualWidth(card.titleLine)).toBeLessThanOrEqual(12);
+    expect(visualWidth(card.detailLine)).toBeLessThanOrEqual(12);
+    expect(card.titleLine.includes("read_file")).toBe(false);
+    expect(card.detailLine.includes("整理报告")).toBe(false);
   });
 });
 
@@ -342,7 +721,7 @@ describe("overflow — 两行各按 cols 视觉宽度收口，永不换行", () 
         makeSubagent({
           toolUseId: "toolu_o",
           title: "a".repeat(100),
-          inFlightTool: "b".repeat(100),
+          activity: { toolName: "b".repeat(100), toolInput: {} },
         }),
       ],
       "toolu_o",
@@ -373,7 +752,7 @@ describe("overflow — 两行各按 cols 视觉宽度收口，永不换行", () 
       makeSubagent({
         toolUseId: "toolu_zero",
         title: "读文件",
-        inFlightTool: "read_file",
+        activity: { toolName: "read_file", toolInput: {} },
       }),
     ];
     for (const cols of [0, -1, -80]) {
@@ -415,7 +794,7 @@ describe("subagentCardLinesMap — 逐卡 map（key = toolUseId）", () => {
           toolUseId: "toolu_live",
           state: "running",
           title: "进行中",
-          inFlightTool: "grep",
+          activity: { toolName: "grep", toolInput: {} },
         }),
         makeSubagent({
           toolUseId: "toolu_done",
@@ -427,9 +806,12 @@ describe("subagentCardLinesMap — 逐卡 map（key = toolUseId）", () => {
       80
     );
     expect(map.size).toBe(2);
+    // Re-pinned for T2 (fingerprint kept: both live and completed enter the
+    // map, each with exactly its own two lines): `grep` is registered, so the
+    // absent `pattern` shows the registry's "?" summary.
     expect(map.get("toolu_live")).toEqual({
       titleLine: "进行中",
-      detailLine: "grep",
+      detailLine: "grep · Search ?",
       done: false,
     });
     expect(map.get("toolu_done")).toEqual({
@@ -475,20 +857,23 @@ describe("subagentCardLinesMap — 逐卡 map（key = toolUseId）", () => {
         makeSubagent({
           toolUseId: "toolu_dup",
           role: "explore",
-          inFlightTool: "grep",
+          activity: { toolName: "grep", toolInput: {} },
         }),
         makeSubagent({
           toolUseId: "toolu_dup",
           role: "general-purpose",
-          inFlightTool: "bash",
+          activity: { toolName: "bash", toolInput: {} },
         }),
       ],
       80
     );
     expect(map.size).toBe(1);
+    // Re-pinned for T2 (fingerprint kept: the FIRST eligible entry wins, so the
+    // loser's `bash` never reaches the slot): the winner is a registered `grep`
+    // whose absent `pattern` shows the registry's "?" summary.
     expect(map.get("toolu_dup")).toEqual({
       titleLine: "explore",
-      detailLine: "grep",
+      detailLine: "grep · Search ?",
       done: false,
     });
   });
@@ -498,7 +883,7 @@ describe("subagentCardLinesMap — 逐卡 map（key = toolUseId）", () => {
       makeSubagent({
         toolUseId: "toolu_src",
         title: "同源",
-        inFlightTool: "read_file",
+        activity: { toolName: "read_file", toolInput: {} },
       }),
     ];
     const projected = projectSubagentCardLines(subs, "toolu_src", 30);
@@ -535,7 +920,7 @@ describe("subagentCardLinesMap — 逐卡 map（key = toolUseId）", () => {
       makeSubagent({
         toolUseId: "toolu_p1",
         title: "一",
-        inFlightTool: "grep",
+        activity: { toolName: "grep", toolInput: {} },
       }),
       makeSubagent({
         toolUseId: "toolu_p2",
@@ -573,7 +958,7 @@ describe("subagentCardsKey — useMemo 依赖签名（1Hz 轮询要真的重绘�
         toolUseId: "toolu_k2",
         role: "explore",
         title: "甲",
-        inFlightTool: "grep",
+        activity: { toolName: "grep", toolInput: {} },
       }),
     ];
     const fields: ReadonlyArray<Partial<SubagentInfo>> = [
@@ -581,7 +966,7 @@ describe("subagentCardsKey — useMemo 依赖签名（1Hz 轮询要真的重绘�
       { state: "completed" },
       { role: "general-purpose" },
       { title: "乙" },
-      { inFlightTool: "bash" },
+      { activity: { toolName: "bash", toolInput: {} } },
     ];
     for (const patch of fields) {
       expect(
@@ -590,10 +975,92 @@ describe("subagentCardsKey — useMemo 依赖签名（1Hz 轮询要真的重绘�
     }
   });
 
-  test('in-flight 名从「缺席」到 ""（读取完成、无调用在飞）也要换签名', () => {
+  test("缺席 / null 都是空槽（不强制重绘），真实活动对象必须换签名", () => {
+    // Retired distinction: the old absent-vs-"" split existed because "" meant
+    // "read completed, nothing waiting" while absent meant "no read yet". Under
+    // retention both render one identical empty slot, so repainting between
+    // them would rebuild the element tree for nothing. What must repaint is the
+    // arrival of a real activity object.
     const pending = [makeSubagent({ toolUseId: "toolu_k5" })];
-    const settled = [makeSubagent({ toolUseId: "toolu_k5", inFlightTool: "" })];
-    expect(subagentCardsKey(settled)).not.toBe(subagentCardsKey(pending));
+    const nothingIssued = [
+      makeSubagent({ toolUseId: "toolu_k5", activity: null }),
+    ];
+    const issued = [
+      makeSubagent({
+        toolUseId: "toolu_k5",
+        activity: { toolName: "bash", toolInput: {} },
+      }),
+    ];
+    expect(subagentCardsKey(issued)).not.toBe(subagentCardsKey(pending));
+    expect(subagentCardsKey(issued)).not.toBe(subagentCardsKey(nothingIssued));
+  });
+
+  test("T2：toolName 不变、toolInput 变化 → 签名必须变（否则摘要被冻住）", () => {
+    // The slot now renders the recorded input, so a signature that only moved
+    // with the tool name would keep serving the previous summary: the 1 Hz poll
+    // replaces the activity value with an equal-named call and the memo would
+    // consider the card unchanged. The whole activity object is serialized, so
+    // any input difference — flat or nested — is a new signature.
+    const first = [
+      makeSubagent({
+        toolUseId: "toolu_kin",
+        activity: { toolName: "read_file", toolInput: { path: "a.ts" } },
+      }),
+    ];
+    const sameNameNewPath = [
+      makeSubagent({
+        toolUseId: "toolu_kin",
+        activity: { toolName: "read_file", toolInput: { path: "b.ts" } },
+      }),
+    ];
+    const nestedChanged = [
+      makeSubagent({
+        toolUseId: "toolu_kin",
+        activity: {
+          toolName: "read_file",
+          toolInput: { path: "a.ts", range: { start: 2 } },
+        },
+      }),
+    ];
+    const emptyInput = [
+      makeSubagent({
+        toolUseId: "toolu_kin",
+        activity: { toolName: "read_file", toolInput: {} },
+      }),
+    ];
+    expect(subagentCardsKey(sameNameNewPath)).not.toBe(subagentCardsKey(first));
+    expect(subagentCardsKey(nestedChanged)).not.toBe(subagentCardsKey(first));
+    expect(subagentCardsKey(emptyInput)).not.toBe(subagentCardsKey(first));
+    // The stale signature would really have been stale: the two cards differ.
+    expect(
+      subagentCardLinesMap(sameNameNewPath, 80).get("toolu_kin")!.detailLine
+    ).not.toBe(subagentCardLinesMap(first, 80).get("toolu_kin")!.detailLine);
+    // Deep-equal input written in a different key order is the same call: the
+    // signature is order-sensitive (JSON.stringify), so that case costs at most
+    // one extra repaint — what must not happen is any visible text drift.
+    const reordered = [
+      makeSubagent({
+        toolUseId: "toolu_kin",
+        activity: {
+          toolName: "edit_file",
+          toolInput: { path: "a.ts", old_str: "x" },
+        },
+      }),
+    ];
+    const reorderedOther = [
+      makeSubagent({
+        toolUseId: "toolu_kin",
+        activity: {
+          toolName: "edit_file",
+          toolInput: { old_str: "x", path: "a.ts" },
+        },
+      }),
+    ];
+    expect(
+      subagentCardLinesMap(reordered, 80).get("toolu_kin")!.detailLine
+    ).toBe(
+      subagentCardLinesMap(reorderedOther, 80).get("toolu_kin")!.detailLine
+    );
   });
 
   test("taskPreview 不在签名里：卡不再读它，面板另有数据源（不留无消费者的失效面）", () => {
@@ -614,7 +1081,7 @@ describe("subagentCardsKey — useMemo 依赖签名（1Hz 轮询要真的重绘�
   });
 
   test("单射：分隔符 / 引号 / 反斜杠注入不撞签名（手拼分隔符会撞的那组）", () => {
-    // role (the `subagent_type` argument) and inFlightTool (a tool name) are
+    // role (the `subagent_type` argument) and the activity tool name are
     // arbitrary strings. If the signature were joined with a literal separator,
     // the two **different** tuples below would serialize to one string → the
     // memo would return the previous worker's card. JSON escaping makes field
@@ -622,10 +1089,18 @@ describe("subagentCardsKey — useMemo 依赖签名（1Hz 轮询要真的重绘�
     const seps = ["\\u0000", "\\u0001", " ", "|", '"', "\\", "\n", "[]"];
     for (const sep of seps) {
       const left = [
-        makeSubagent({ toolUseId: "tu", role: `a${sep}b`, inFlightTool: "c" }),
+        makeSubagent({
+          toolUseId: "tu",
+          role: `a${sep}b`,
+          activity: { toolName: "c", toolInput: {} },
+        }),
       ];
       const right = [
-        makeSubagent({ toolUseId: "tu", role: "a", inFlightTool: `b${sep}c` }),
+        makeSubagent({
+          toolUseId: "tu",
+          role: "a",
+          activity: { toolName: `b${sep}c`, toolInput: {} },
+        }),
       ];
       const leftKey = subagentCardsKey(left);
       expect(leftKey).not.toBe(subagentCardsKey(right));

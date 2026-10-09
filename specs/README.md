@@ -50,7 +50,7 @@ One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 sta
 - `tui-activity-block.md` — activity blocks (thinking and quiet tools share one body slot; blocks cut per message and appended)
 - `tui-skill-slash-catalog.md` — TUI skill slash → harness SkillCatalog
 - `tui-subagent-transcript-live.md` — live sub-agent's two lines land on the session spawn card (line content superseded by `subagent-card-title.md`; position, panel, and `subagent_result` exclusions hold)
-- `subagent-card-title.md` — spawn card line 1 = required operator `title`, line 2 = one activity slot (in-flight tool name from the worker ledger → green `✓ Done`)
+- `subagent-card-title.md` — spawn card line 1 = required operator `title`, line 2 = one activity slot (the worker ledger's latest issued call — name + argument summary, kept through its `tool_result` until replaced → green `✓ Done`)
 
 ### IM bridge
 

@@ -111,7 +111,7 @@ export {
   readWorkerSpawnToolUseId,
   type WorkerTranscriptLocation,
 } from "./worker-transcript.js";
-export { readWorkerInFlightToolName } from "./worker-activity.js";
+export { readWorkerActivity } from "./worker-activity.js";
 export {
   resolveConversationDir,
   resolveConversationTraceFilePath,

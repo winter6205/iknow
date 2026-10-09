@@ -2,8 +2,8 @@
  * Activity-reader wiring in the TUI assembly layer (`src/tui/deps.ts`) —
  * specs/subagent-card-title.md.
  *
- * The spawn card's line-2 in-flight tool name only exists if the manager got
- * its reader: `readInFlightTool` absent → `SubagentInfo.inFlightTool` never
+ * The spawn card's line-2 activity only exists if the manager got
+ * its reader: `readActivity` absent → `SubagentInfo.activity` never
  * appears and every live card stays on its placeholder slot forever. The TUI
  * builds its engine through build-engine directly (not the CLI wrapper), so
  * the wiring must be pinned at this assembly point.
@@ -20,7 +20,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const mockState = vi.hoisted(() => ({
-  capturedReadInFlightTool: undefined as unknown,
+  capturedReadActivity: undefined as unknown,
 }));
 
 vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
@@ -32,7 +32,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
   return {
     ...actual,
     createSubAgentManager: vi.fn((opts: Parameters<typeof realCreate>[0]) => {
-      mockState.capturedReadInFlightTool = opts.readInFlightTool;
+      mockState.capturedReadActivity = opts.readActivity;
       return realCreate(opts);
     }),
   };
@@ -40,7 +40,7 @@ vi.mock("../../src/harness/subagent/manager.ts", async (importActual) => {
 
 import { buildTuiDeps } from "../../src/tui/deps.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
-import { readWorkerInFlightToolName } from "../../src/session-api/store/index.ts";
+import { readWorkerActivity } from "../../src/session-api/store/index.ts";
 import type { RuntimeBundle } from "../../src/cli/runtime.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 
@@ -73,7 +73,7 @@ let fixtureRoot: string;
 let shutdown: (() => Promise<void>) | undefined;
 
 beforeEach(() => {
-  mockState.capturedReadInFlightTool = undefined;
+  mockState.capturedReadActivity = undefined;
   fixtureRoot = mkdtempSync(join(tmpdir(), "iknow-tui-reader-"));
 });
 
@@ -95,6 +95,6 @@ describe("buildTuiDeps — subagent activity reader 接线 (card line 2)", () =>
     });
     shutdown = deps.shutdown;
 
-    expect(mockState.capturedReadInFlightTool).toBe(readWorkerInFlightToolName);
+    expect(mockState.capturedReadActivity).toBe(readWorkerActivity);
   });
 });
