@@ -219,7 +219,6 @@ Configuration: `.env.local` + API keys in environment variables (see `docs/llm-c
 | ------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
 | `specs/README.md`                     | live index of active module specs (SSOT; active specs only; add/archive entries only here)                     |
 | `docs/architecture.md`                | runtime capability split                                                                                       |
-| `docs/coding-agent-capability-gap.md` | coding-agent capability-gap assessment (gap matrix + priorities; the input SSOT for the capability workstream) |
 | `docs/CONTEXT.md`                     | domain terms                                                                                                   |
 | `CHANGELOG.md`                        | version changes                                                                                                |
 | this file, `docs/STATUS.md`           | **implemented / not implemented / outlook**                                                                    |

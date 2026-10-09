@@ -1348,8 +1348,8 @@ describe("compactSession", () => {
 
   // Mid-flight opts.signal abort → runFullCompact returns signal_aborted →
   // hub takes the keep-state path (no fallback truncation, no persist, no
-  // updatedAt bump) and the response carries cancelled:true. Aligned with
-  // Claude Code cancellation semantics.
+  // updatedAt bump) and the response carries cancelled:true — cancel = no
+  // change.
   it("opts.signal 中途 abort → compacted=false, cancelled=true,会话保持原样", async () => {
     // 4 turns × 2 msgs = 8 → triggers splitForCompaction (dropped ≠ []),
     // taking the runFullCompact path. stub-model defaults to delayMs=0, no

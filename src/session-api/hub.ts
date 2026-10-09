@@ -3158,7 +3158,7 @@ export class SessionHub {
    * `opts.signal` / `opts.onStream` are threaded into runFullCompact so the
    * host sees the full event set during compaction (compaction_started /
    * completed / failed / cancelled + compaction_text_delta) and can cancel
-   * mid-flight. Cancellation matches Claude Code: aborting opts.signal yields
+   * mid-flight. Cancel = no change: aborting opts.signal yields
    * the signal_aborted outcome → no fallback truncation, session kept as-is,
    * updatedAt not bumped, returns { compacted: false, cancelled: true } (an
    * additive field, distinguishing it from "nothing to compact"). Host
@@ -3235,7 +3235,7 @@ export class SessionHub {
         // opts.signal / opts.onStream thread into runFullCompact so the host
         // sees the full compaction event set and can cancel mid-flight; the
         // signal_aborted outcome takes the keep-state path (no fallback
-        // truncation, no save, cancelled:true) to match Claude Code.
+        // truncation, no save, cancelled:true) — cancel = no change.
         let nextMessages: ReadonlyArray<AnthropicNativeMessage> | undefined;
         let cancelled = false;
         const hubAdapter = this.cachedDeps?.adapter;
@@ -3271,7 +3271,7 @@ export class SessionHub {
                 ...composed.slice(1),
               ];
             } else if (outcome.kind === "signal_aborted") {
-              // Claude Code cancellation semantics: keep the session as-is,
+              // Cancel = no change: keep the session as-is,
               // no fallback truncation, no updatedAt bump; cancelled:true
               // distinguishes this from plain compacted=false ("nothing to
               // compact") for web/TUI rendering.

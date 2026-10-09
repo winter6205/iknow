@@ -1,6 +1,6 @@
 /** @jsxImportSource @opentui/react */
 /**
- * Design 4 — minimal flat (close to Claude Code / Linear flavor).
+ * Design 4 — minimal flat (one accent colour, no ornament).
  *
  * Visual discipline:
  *  - Nearly no decoration: monochrome `pal.text` (body) + `pal.running`

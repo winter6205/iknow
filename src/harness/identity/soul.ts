@@ -9,8 +9,8 @@
  * Locked constraint: deleting this segment = still iknow but unpredictable
  * behavior. Test: "after deleting it, is the agent still iknow?" yes → soul.
  * The two output-style rules inside Vibe (markdown rendering notice +
- * forced structuring) are adapted from Claude Code's official system prompt
- * (reverse-extracted, rewritten) to fix crammed no-instruction output.
+ * forced structuring) exist because the terminal renders raw text and the
+ * model otherwise compresses several points into one unbroken block.
  * Future persona/boundary tweaks go in this file (code), never in the user
  * workspace. This const is the SSOT — referenced at assembly time, never
  * copied or sliced (drift prevention).

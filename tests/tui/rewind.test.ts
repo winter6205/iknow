@@ -692,7 +692,7 @@ describe("rewindPickerContent（picker 渲染形状）", () => {
     expect(content.hint).toContain("↑↓");
   });
 
-  test("确认态有 head：desc 引用锚点消息 + 之前（Claude Code before-this-message）", () => {
+  test("确认态有 head：desc 引用锚点消息 + 之前（before-this-message）", () => {
     const targets = buildRewindTargets(sampleFile());
     const content = rewindPickerContent(targets, 1, true);
     expect(content.description).toContain("q2");

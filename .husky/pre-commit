@@ -8,14 +8,13 @@
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_COMMON_DIR
 
 npx lint-staged
-npm run lint:s5:staged
 
 # docs-only 快速路径：vitest --changed 只按"与 HEAD 有差异的代码文件"挑相关测试，
 # staged diff 里一个代码文件都没有时（纯文档提交）它会退化成跑全量套件——5 个
 # markdown 的提交实测耗几分钟。纯文档改动既不影响类型也不影响测试结果，
 # typecheck + test:changed 没有可校验的对象，这里直接放行。
-# 注意：lint-staged（prettier 要格式化 markdown）与 lint:s5:staged（无代码文件时
-# 自行跳过）仍在上面照常执行；quotePath=false 是为了中文文件名不被转义成
+# Note: lint-staged (including Prettier formatting for Markdown) still runs above;
+# quotePath=false prevents non-ASCII filenames from being escaped as
 # "docs/\346\226\207..." 而漏判。git 失败时置空 → 退回全量路径（保守）。
 staged=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR) || staged=""
 if [ -n "$staged" ]; then

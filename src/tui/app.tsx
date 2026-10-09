@@ -4162,7 +4162,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           // Backstop: the pre-aborted signal path never fires the observer → use response.cancelled.
           if (compactResult.cancelled) cancelledByUser = true;
           if (cancelledByUser) {
-            // Cancel semantics (Claude Code style): the session is left
+            // Cancel = no change: the session is left
             // untouched — no sessionCompacted projection (updatedAt /
             // messages unchanged), only the user gets a notice.
             settleCompactPanelFor(targetId, "cancelled");

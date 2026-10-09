@@ -405,8 +405,8 @@ describe("runFullCompact", () => {
     assert.deepEqual(events, []);
   });
 
-  it("无默认 client-side 超时:timeoutMs 缺席 → 无 timer,adapter settle 即出 outcome(Claude Code 语义)", async () => {
-    // Claude Code semantics: compaction waits for the model to finish naturally
+  it("无默认 client-side 超时:timeoutMs 缺席 → 无 timer,adapter settle 即出 outcome", async () => {
+    // Compaction waits for the model to finish naturally
     // with no tight timeout; the ceiling is the SDK's default HTTP timeout plus
     // the user signal. With timeoutMs absent no timer may be armed — verified by
     // a slow adapter (80ms; the old 25s semantics would have fired a timeout)
@@ -448,11 +448,11 @@ describe("runFullCompact", () => {
     assert.ok(aborted, "注入 timeoutMs 必须 abort 真实 adapter 调用");
   });
 
-  // Wait logic follows Claude Code: compaction lifecycle events pass through.
+  // Wait logic: compaction lifecycle events pass through.
   // The host renders a "Compacting…" indicator and shows summary-generation
   // progress from them (the adapter's streaming text_delta arm is forwarded
   // via request.onStream).
-  describe("wait logic 事件生命周期 (Claude Code UX)", () => {
+  describe("wait logic 事件生命周期", () => {
     it("summarized:emits compaction_started + compaction_completed, observer 错误被吞咽", async () => {
       const events: { type: string; payload?: unknown }[] = [];
       const throwing = (): void => {
@@ -599,7 +599,7 @@ describe("runFullCompact", () => {
     });
 
     it("中途 abort:opts.signal 中途 abort → signal_aborted,emit compaction_started 但不 emit completed/failed", async () => {
-      // Claude Code feel: Esc/Ctrl+C mid-compaction = immediate exit, session kept as-is.
+      // Esc/Ctrl+C mid-compaction = immediate exit, session kept as-is.
       // runFullCompact must map mid-flight cancellation to signal_aborted (so the
       // caller skips fallback truncation), and must not emit compaction_completed /
       // compaction_failed — completed would mislead the host into thinking success,

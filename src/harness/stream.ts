@@ -47,7 +47,7 @@ export type HarnessStreamEvent =
   // may show a progress indicator, cleared by any terminal event
   // (completed / failed / cancelled; cancelled = user cancelled during the
   // wait, not an error — Esc mid-compaction keeps the conversation as-is
-  // with no failure presentation, aligned with Claude Code). Shapes stay
+  // with no failure presentation). Shapes stay
   // minimal: only fields the host needs for rendering / logging.
   | { type: "compaction_started"; droppedCount: number }
   | { type: "compaction_completed"; summaryLen: number; durationMs: number }

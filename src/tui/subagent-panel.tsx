@@ -12,7 +12,7 @@
  * (app.tsx passing the subagents array + cols + time source) is the caller's
  * job; this module owns only "projection → line text" and rendering.
  *
- * Visibility semantics (aligned with Claude Code's done-state behaviour):
+ * Visibility semantics (finished rows must not crowd out live ones):
  *   1. Active lines (starting/running): always shown, one line per subagent;
  *   2. Failed lines: shown only while endedAt is within
  *      FAILED_VISIBLE_WINDOW_S of now, then dropped;

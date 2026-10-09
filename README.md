@@ -1,93 +1,77 @@
 # iknow
 
-Local **coding agent** for a tool-calling LLM: a loop engine, sandboxed tools, and three surfaces (CLI, TUI, web) on the same runtime.
+A local coding agent for tool-calling LLMs, with a shared runtime for the CLI, terminal UI, and web interface. It can work in a selected workspace, run sandboxed shell commands, use tools such as LSP and MCP, and verify work with tests and evidence.
 
-iknow can read and edit a workspace, run shell commands under a sandbox, search the repo, talk to LSP servers, load skills and MCP tools, spawn subagents, and treat **verification** (tests / evidence) as the completion signal — not the model saying it is done.
+![iknow terminal UI](docs/assets/iknow-tui.png)
 
-> Built from scratch; design informed by the coding-agent landscape (Claude Code and peers). Not affiliated with or endorsed by Anthropic.
+**Status:** Alpha. Features and workflows are still evolving.
 
 ## Features
 
-- **Harness** — ReAct loop with explicit stop reasons, permission checks per tool call, context compression, and a verify loop
-- **Tools** — bash (foreground + background, same bwrap fence), filesystem, grep/glob, web fetch/search, LSP, skills, MCP, memory, subagents
-- **Parallel tools** — consecutive `isConcurrencySafe` calls overlap in one turn; unsafe calls stay serial
-- **Surfaces** — interactive `chat`, OpenTUI `tui`, one-shot `ask` (JSON for scripts), `serve` (Session HTTP + Vite SPA + trace panel), `trace` (JSONL trace inspection)
-- **Instruction channels** — outbound projection separates sources: tool results can't impersonate host frames, and subagent constitutions stay code-locked
+- **LSP client:** symbol navigation and editing, hover, diagnostics, and call hierarchy where supported by the language server. Built-in routing covers TypeScript/JavaScript, Python, YAML, JSON, and Dockerfile.
+- Workspace file tools and code search, plus permission-checked shell commands in a bubblewrap sandbox.
+- A tool-calling agent loop with context compression and a verification workflow.
+- MCP server tools and resources over stdio.
+- Bounded-concurrency subagents with result collection and stop/continue controls.
+- Checkpointed sessions that can resume or rewind, with optional workspace-file restoration.
+- File-backed memory with BM25 keyword retrieval, plus on-demand skills.
+- CLI, multi-session TUI, and web interfaces share a runtime; JSONL traces make agent runs inspectable.
 
 ## Requirements
 
-- Node.js >= 20 and npm (`chat` / `ask` / `serve` / `trace` run on Node)
-- [Bun](https://bun.sh) on your PATH for the TUI (`tui` re-execs the same CLI file under Bun when launched from Node) and for the TUI test slice of `npm test`
-- `bwrap` (bubblewrap, >= 0.11.1) for sandboxed shell execution: the bash tool probes `bwrap --version` and fails with an install hint when it is missing
-- Platform status: the TUI is verified on Linux/WSL2; macOS/Windows are unverified
+- Node.js 24 is recommended, with npm. The current development dependencies require Node.js 22.22.1 or newer.
+- [Bun](https://bun.sh) to run the TUI.
+- [bubblewrap](https://github.com/containers/bubblewrap) 0.11.1 or newer for sandboxed shell commands.
+- The TUI is verified on Linux and WSL2; other platforms have not been verified.
 
-## Setup (from source)
-
-iknow is not published to npm yet — install from a clone:
+## Quick start
 
 ```bash
-npm install
-cp .env.example .env.local        # optional env layer for ${VAR} placeholders; never commit
+git clone https://github.com/winter6205/iknow.git
+cd iknow
+npm ci
+npm run build
+```
+
+Before the first run, configure your model and API key, and set a custom endpoint if needed. See the [LLM configuration guide](docs/llm-config-quickstart.md).
+
+Start the TUI:
+
+```bash
+npm run dev:tui
+```
+
+To start the interactive CLI instead:
+
+```bash
+npx tsx src/cli.ts chat
+```
+
+To build and run the web interface:
+
+```bash
+npm run web:build
+node dist/cli.js serve
+```
+
+## Development
+
+```bash
+npm run typecheck
 npm test
 ```
 
-LLM configuration (model + key) lives in exactly one place: the user-layer `~/.iknow/settings.json` (`llm.model`, `llm.apiKey` as a literal or a `${VAR}` placeholder resolved from `.env.local`). See [`docs/llm-config-quickstart.md`](docs/llm-config-quickstart.md).
-
-## Usage
-
-```bash
-npx tsx src/cli.ts -h
-
-npx tsx src/cli.ts              # TTY -> chat
-npx tsx src/cli.ts chat         # interactive REPL
-npx tsx src/cli.ts ask "..."    # one-shot, JSON output for scripts
-npx tsx src/cli.ts tui          # OpenTUI multi-session terminal UI (needs Bun)
-npx tsx src/cli.ts serve        # http://127.0.0.1:8787  (API + SPA + /trace)
-npx tsx src/cli.ts trace        # probes serve health, prints the /trace URL
-```
-
-On a TTY, bare invocation opens chat; piped / non-TTY with no args prints usage. The workspace root defaults to the launch cwd and can be overridden with `--workspace-root <dir>`; project settings (`.iknow/settings.json`, `.env.local`) are read from the launch cwd.
-
-`package.json` declares an `iknow` bin pointing at `dist/cli.js` (produced by `npm run build`); it is meant for a future npm release and is not wired up as a global install yet.
-
-## Search engine (ripgrep, from the lockfile)
-
-The grep/glob tools run on a pinned ripgrep binary that arrives with the dependencies: `@vscode/ripgrep` carries a prebuilt `rg` per platform as its own `optionalDependencies`, so `npm install` / `npm ci` provisions the engine for the machine it runs on. There is no download step and no committed binary.
-
-When the engine is unavailable (e.g. the per-platform package was skipped), grep falls back to a built-in Node scan; the fallback walks files with JavaScript RegExp and may answer differently from ripgrep.
-
-## Sandbox
-
-The bash tool executes commands inside a bwrap fence: read-only system mounts, tmpfs, a cleared environment, and constant network isolation (`--unshare-net` — there is no direct host-network mode). Outbound HTTP is a separate opt-in egress proxy seam (settings `isolation.network`): sandbox traffic is relayed over a unix socket to a host-side proxy, and a relay failure runs the command under plain isolation fail-closed instead of silently granting access. Foreground and background commands share the same fence parameters.
-
-## Layout
-
-| Path               | Role                                                |
-| ------------------ | --------------------------------------------------- |
-| `src/harness/`     | Loop, adapter, executor, ACI tools, sandbox, verify |
-| `src/cli/`         | `chat` / `ask` / `serve` / `tui` / `trace` entry    |
-| `src/tui/`         | OpenTUI terminal UI                                 |
-| `src/session-api/` | HTTP sessions + static SPA                          |
-| `src/traceserver/` | Read-only trace inspection (JSONL query API)        |
-| `web/`             | Vite React console (`web/dist` served by `serve`)   |
-| `specs/`           | Live module specs ([index](specs/README.md))        |
-| `docs/`            | Architecture, ADRs, guides, status                  |
-
 ## Documentation
 
-| Doc                                                                          | What it is                                     |
-| ---------------------------------------------------------------------------- | ---------------------------------------------- |
-| [`docs/architecture.md`](docs/architecture.md)                               | Runtime modules                                |
-| [`docs/STATUS.md`](docs/STATUS.md)                                           | What ships vs what does not                    |
-| [`docs/llm-config-quickstart.md`](docs/llm-config-quickstart.md)             | Provider / model / key configuration           |
-| [`docs/guides/user-hooks.md`](docs/guides/user-hooks.md)                     | Declared deny-only hooks (`settings.hooks`)    |
-| [`docs/guides/prompt-development.md`](docs/guides/prompt-development.md)     | Prompt development guide                       |
-| [`docs/guides/skill-authoring.md`](docs/guides/skill-authoring.md)           | Skill author contract (body vs `references/`)  |
-| [`docs/trace-mcp-server.md`](docs/trace-mcp-server.md)                       | Trace MCP read server (`iknow-trace-mcp` bin)  |
-| [`docs/coding-agent-capability-gap.md`](docs/coding-agent-capability-gap.md) | Honest gap list vs a full coding-agent harness |
-| [`specs/README.md`](specs/README.md)                                         | Active specs index                             |
-| [`docs/adr/`](docs/adr/)                                                     | Architecture decisions                         |
-| [`CHANGELOG.md`](CHANGELOG.md)                                               | Version history                                |
+- [Project status](docs/STATUS.md)
+- [Architecture](docs/architecture.md)
+- [LLM configuration](docs/llm-config-quickstart.md)
+- [Active specs](specs/README.md)
+- [Changelog](CHANGELOG.md)
+
+## Acknowledgments
+
+Design references are listed in [ATTRIBUTION.md](ATTRIBUTION.md).
 
 ## License
 

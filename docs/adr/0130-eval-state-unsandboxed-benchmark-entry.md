@@ -41,7 +41,7 @@ The credential read mask is a fence-layer artifact, so in eval state it is gone,
 
 Every number produced in eval state is published with the state named in the same artifact. An eval-state score is not evidence about the fence, and the fence is not what it measures. Naming the entry separately exists precisely so this sentence can always be written.
 
-**Precedent worth recording:** Harbor's codex adapter runs with `--dangerously-bypass-approvals-and-sandbox` as a fixed runtime argument — one flag switching off both its own per-command sandbox (landlock/seccomp on Linux) and its approvals. Codex is the closest built-in peer to our shape, and it does not attempt to keep its isolation inside a task container; across the ~35 built-in adapters, none does. The container is the sandbox, so the benchmark measures the agent, not the agent's private sandbox.
+**Precedent worth recording:** one of the benchmark's built-in agent adapters — the one whose shape is closest to ours — runs with a fixed runtime flag that switches off both its per-command sandbox (landlock/seccomp on Linux) and its approvals; across the ~35 built-in adapters, none attempts to keep private isolation inside a task container. The container is the sandbox, so the benchmark measures the agent, not the agent's private sandbox.
 
 **Evidence:** `src/harness/sandbox/yolo.ts:79` (the typed non-TUI refusal this ADR declines to widen); `docs/CONTEXT.md` entries 沙箱纪律, yolo mode, 全局档, hard-wall, effect boundary. Measurements 2026-09-29: Harbor 0.23.0 oracle pilot on `terminal-bench/terminal-bench-2-1` scored reward 1.0 with 0 exceptions; `IKNOW_PERMISSION_MODE=full_auto` on `ask` performed a real write; container egress to the model endpoint returned 301 without any proxy injection.
 

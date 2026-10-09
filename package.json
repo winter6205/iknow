@@ -24,9 +24,6 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint:s5": "node $HOME/.claude/plugins/marketplaces/arthurpower-local/plugins/arthurpower/scripts/s5-complexity/check.mjs --changed",
-    "lint:s5:staged": "node $HOME/.claude/plugins/marketplaces/arthurpower-local/plugins/arthurpower/scripts/s5-complexity/check.mjs --changed --staged",
-    "lint:s5:all": "node $HOME/.claude/plugins/marketplaces/arthurpower-local/plugins/arthurpower/scripts/s5-complexity/check.mjs src",
     "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
     "typecheck:tui-tests": "tsc -p tsconfig.tui-test.json --noEmit",
     "typecheck:web-tests": "tsc -p tsconfig.web-test.json --noEmit",

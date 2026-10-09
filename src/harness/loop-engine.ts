@@ -1565,7 +1565,7 @@ async function closeoutInFlightStop(opts: {
  *      response → various outcomes);
  *   3. `summarized` → `buildCompactedMessages`:
  *      [summary user message, (optional boundaryAttr), ...kept];
- *   4. `signal_aborted` (Claude Code-like semantics: cancelling during
+ *   4. `signal_aborted` (cancel = no change: cancelling during
  *      compaction keeps the session as-is, no fallback truncation —
  *      different from timeout / adapter_failed) → return state unchanged;
  *   5. all other outcomes → fall back to the existing `compactMessages` +
@@ -1612,7 +1612,7 @@ async function applyCompactAttachment(
   const endedAt = new Date().toISOString();
   const durationMs = performance.now() - startMono;
 
-  // Claude Code-like wait semantics: cancel mid-compaction (Esc/Ctrl+C) →
+  // Cancel = no change: cancel mid-compaction (Esc/Ctrl+C) →
   // keep the session as-is, no fallback truncation (truncation would lose
   // messages on the summary-failure path, conflicting with the
   // "cancel = no change" semantics). The caller decides the follow-up
@@ -1702,7 +1702,7 @@ async function applyCompactAttachment(
  *     `compactedState.messages !== state.messages` check keeps
  *     `lastCompactTurn` from updating, the next step re-enters the gate
  *     and retries (no dead loop).
- *   - signal_aborted → state unchanged (Claude Code cancel semantics).
+ *   - signal_aborted → state unchanged (cancel = no change).
  *
  * `opts.signal` / `opts.onStream`: semantics identical to
  * `applyCompactAttachment` — the reactive site passes `opts.signal`
@@ -1737,7 +1737,7 @@ async function applyFullCompactSummary(
   const endedAt = new Date().toISOString();
   const durationMs = performance.now() - startMono;
 
-  // Claude Code cancel semantics: mid-way signal abort → state unchanged
+  // Cancel = no change: mid-way signal abort → state unchanged
   // (same guard as applyCompactAttachment; see that helper's comment).
   if (outcome.kind === "signal_aborted") return state;
 
