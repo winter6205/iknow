@@ -1,16 +1,25 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, it } from "vitest";
 
 import { ToolExecutionError } from "../../../../src/harness/errors.ts";
 import { createBashTool } from "../../../../src/harness/aci/tools/bash.ts";
+import { isReadonlyBashConcurrencySafe } from "../../../../src/harness/aci/tools/bash-concurrency.ts";
 import { createSecretRegistry } from "../../../../src/harness/secret-roundtrip/index.ts";
-import { waitForPidFile, waitForProcessExit } from "./spawn-test-utils.ts";
+import {
+  uniqueProcessMarker,
+  waitForMarkerGone,
+  waitForMarkerProcess,
+} from "./spawn-test-utils.ts";
 
 const scratchPaths: string[] = [];
+/**
+ * Host pids of fenced processes observed by a case, killed in teardown whatever
+ * the verdict: a RED run leaves real sleeps on the host otherwise.
+ */
+const liveFenceStrays: number[] = [];
 
 async function makeScratch(prefix: string): Promise<string> {
   const path = await mkdtemp(join(tmpdir(), prefix));
@@ -19,6 +28,13 @@ async function makeScratch(prefix: string): Promise<string> {
 }
 
 afterEach(async () => {
+  for (const pid of liveFenceStrays.splice(0)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already gone — the assertion under test passed */
+    }
+  }
   await Promise.all(
     scratchPaths
       .splice(0)
@@ -66,6 +82,11 @@ describe("createBashTool — schema and metadata", () => {
     assert.deepEqual(tool.aci, {
       category: "execute",
       isConcurrencySafe: false,
+      // #D2: the tool-level flag stays false (most bash calls mutate the
+      // filesystem); the per-call predicate is the narrower question the
+      // wave splitter asks for a SPECIFIC call. It is pinned by reference,
+      // so the metadata cannot drift onto another function.
+      isConcurrencySafeForInput: isReadonlyBashConcurrencySafe,
       interruptBehavior: "cancel",
       // ADR-0134 moved Bash's clock from the ACI tier into the handler: the
       // validated `timeout_ms` (or the 10 s default) is enforced in the
@@ -129,6 +150,17 @@ describe("bash — execution", () => {
     assert.equal(result.code, 0);
     assert.equal(result.stdout.trim(), cwd);
   });
+
+  it("runs a literal cd chain at its exact quoted path", async () => {
+    const cwd = await makeScratch("bash-cd-exact-cwd-");
+    const target = join(cwd, "space path");
+    await mkdir(target);
+
+    const result = await runBash(cwd, `cd '${target}' && pwd`);
+
+    assert.equal(result.code, 0);
+    assert.equal(result.stdout, `${target}\n`);
+  });
 });
 
 describe("bash — permission gates", () => {
@@ -182,13 +214,21 @@ describe("bash — output limits", () => {
 describe("bash — cancellation", () => {
   it("kills the detached command process tree when the execution signal aborts", async () => {
     const cwd = await makeScratch("bash-cancel-");
-    const pidFile = join(cwd, "child.pid");
+    // ADR-0142: the fence unshares the pid namespace, so a pid written from
+    // inside is a NAMESPACE pid the host cannot probe. The fixture instead
+    // renames the grandchild to a host-findable argv marker, and the assertion
+    // resolves the real host pid for it.
+    const marker = uniqueProcessMarker("cancel-tree");
     await writeFile(
       join(cwd, "tree.cjs"),
       [
         'const { spawn } = require("node:child_process");',
         'const { writeFileSync } = require("node:fs");',
-        'const child = spawn("sleep", ["30"], { stdio: "ignore" });',
+        // The grandchild renames ITSELF to the marker: argv[0] is what the
+        // host-side pgrep anchors on, so the process whose survival matters is
+        // found by marker rather than by the pid it writes (which is
+        // namespace-local under ADR-0142 and unprobeable from the host).
+        'const child = spawn("bash", ["-c", `exec -a "${process.env.MARKER}" sleep 30`], { stdio: "ignore" });',
         'writeFileSync("child.pid", String(child.pid));',
         'child.once("exit", () => process.exit(0));',
         "setInterval(() => {}, 1000);",
@@ -197,17 +237,21 @@ describe("bash — cancellation", () => {
     const controller = new AbortController();
     const tool = createBashTool(cwd);
     const execution = tool.handler(
-      { command: "node tree.cjs" },
+      { command: `MARKER=${marker} node tree.cjs` },
       { signal: controller.signal }
     );
-    const childPid = await waitForPidFile(pidFile);
-    assert.doesNotThrow(() => process.kill(childPid, 0));
+    const childPids = await waitForMarkerProcess(marker);
+    for (const pid of childPids) liveFenceStrays.push(pid);
+    assert.ok(childPids.length > 0);
 
     controller.abort();
     await execution;
 
-    await waitForProcessExit(childPid);
-  }, 5_000);
+    assert.ok(
+      await waitForMarkerGone(marker),
+      `the process tree under ${marker} survived the abort`
+    );
+  }, 10_000);
 
   /**
    * Pinned invariant: a pipe-free, SIGTERM-immune descendant must not survive a cancelled call.
@@ -224,71 +268,47 @@ describe("bash — cancellation", () => {
    * so the abort always lands while the call is genuinely in flight; the descendant
    * installs its SIGTERM handler before writing the pid file, so waitForPidFile doubles
    * as the "handler installed" barrier (no fixed sleep).
+   *
+   * ADR-0142: the descendant is located by a host-visible argv marker rather
+   * than by the pid it writes — inside the fence a pid is namespace-local and
+   * unprobeable from the host, so probing it would pass for the wrong reason.
    */
   it("leaves no surviving descendant after an abort, when the descendant ignores SIGTERM and holds no pipe", async () => {
     const cwd = await makeScratch("bash-cancel-escapee-");
-    const pidFile = join(cwd, "desc.pid");
+    const marker = uniqueProcessMarker("cancel-escapee");
     const controller = new AbortController();
     const tool = createBashTool(cwd);
     const execution = tool.handler(
       {
         command: [
-          // SIGTERM-immune + holds no stdio pipe + installs handler before writing the pid file.
-          'node -e \'process.on("SIGTERM",()=>{});require("fs").writeFileSync("desc.pid",String(process.pid));setInterval(()=>{},1000)\' > /dev/null 2>&1 &',
+          // SIGTERM-immune, holds no stdio pipe, and renames ITSELF to the
+          // marker: `exec -a` keeps this same process alive under a new argv[0],
+          // so the host-side marker lookup observes exactly the descendant whose
+          // survival is under test — not a stand-in that merely happens to be a
+          // TERM-able sleep.
+          `bash -c 'trap "" TERM; exec -a ${marker} sleep 300' > /dev/null 2>&1 &`,
           "wait",
         ].join("\n"),
       },
       { signal: controller.signal }
     );
-    const descendantPid = await waitForPidFile(pidFile);
-    assert.equal(
-      await descendantRunning(descendantPid),
-      true,
+    const descendantPids = await waitForMarkerProcess(marker);
+    liveFenceStrays.push(...descendantPids);
+    assert.ok(
+      descendantPids.length > 0,
       "fixture must have a live, SIGTERM-immune descendant before the abort"
     );
 
     controller.abort();
     await execution;
 
-    // The call has returned — the descendant must be gone (or on its way). Still alive at the polling cap fails;
-    // Z (zombie: killed by the kernel, awaiting reap) counts as dead.
-    assert.equal(
-      await waitForDescendantGone(descendantPid),
-      true,
-      `descendant ${descendantPid} survived the cancelled call`
+    // The call has returned — the descendant must be gone (or on its way).
+    assert.ok(
+      await waitForMarkerGone(marker),
+      `the SIGTERM-immune descendant ${marker} survived the cancelled call`
     );
   }, 15_000);
 });
-
-/** Liveness check: Z (zombie) and ESRCH / missing /proc entry all count as "not running". */
-async function descendantRunning(pid: number): Promise<boolean> {
-  const state = readProcState(pid);
-  return state !== undefined && state !== "Z";
-}
-
-/**
- * Bounded polling for descendant disappearance (every 20ms, capped at 5s). No fixed sleep:
- * process-group signalling and reaping are async, so a fixed wait is either falsely green
- * (too long) or flaky (too short).
- */
-async function waitForDescendantGone(pid: number): Promise<boolean> {
-  const deadline = Date.now() + 5_000;
-  while (Date.now() < deadline) {
-    if (!(await descendantRunning(pid))) return true;
-    await new Promise((resolve) => setTimeout(resolve, 20));
-  }
-  return false;
-}
-
-/** state field of /proc/<pid>/stat (3rd field; comm may contain spaces, so skip past the closing paren first). */
-function readProcState(pid: number): string | undefined {
-  try {
-    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
-    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0];
-  } catch {
-    return undefined;
-  }
-}
 
 interface BashResult {
   readonly code: number;

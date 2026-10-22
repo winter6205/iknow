@@ -644,11 +644,18 @@ describe("classifyCall", () => {
     );
   });
 
-  // Guard: the readonly bash-mode SSOT is a separate consumer with
-  // deliberately stricter semantics (no `>` at all, no background `&`). The
-  // gate's workspace-write classifier must not relax that table.
-  it("validateReadonlyCommand still rejects 'ls 2>&1' (bash readonly mode unchanged)", () => {
-    expect(() => validateReadonlyCommand("ls 2>&1")).toThrow();
+  // Guard: the readonly bash-mode SSOT is a separate consumer. Numeric fd
+  // duplication is allowed (ADR-0037 amendment 2026-10-10); output redirection
+  // and background `&` stay denied. The gate's classifier must not become
+  // that table.
+  it("validateReadonlyCommand allows 'ls 2>&1' and still rejects redirect and background", () => {
+    expect(() => validateReadonlyCommand("ls 2>&1")).not.toThrow();
+    expect(() => validateReadonlyCommand("ls > /tmp/out")).toThrow(
+      ReadonlyViolationError
+    );
+    expect(() => validateReadonlyCommand("ls &")).toThrow(
+      ReadonlyViolationError
+    );
   });
 
   // The gate reuses `validateSegmentPolicy` (the shared allowlist + flag

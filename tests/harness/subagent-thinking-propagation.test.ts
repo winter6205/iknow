@@ -204,3 +204,94 @@ describe("parent thinking propagation through the assembled harness executor", (
     }
   });
 });
+
+describe("parent model route propagation through the assembled harness executor", () => {
+  it("carries the conversation's route to the worker payload through every wrapper", async () => {
+    const root = await mkdtemp(join(tmpdir(), "iknow-route-propagation-"));
+    const taskRoot = join(root, ".iknow", "worktrees", "conv-1");
+    await mkdir(taskRoot, { recursive: true });
+
+    const launches: CapturedLaunch[] = [];
+    const manager = createSubAgentManager({
+      sandboxRoot: taskRoot,
+      subagentsDir: join(root, "subagents"),
+      spawn: (definition, taskId, payload) => {
+        const child = makeFakeWorkerChild();
+        launches.push({ definition, taskId, payload, child });
+        return child as unknown as ChildProcess;
+      },
+    });
+    const env = makeEnv();
+    let built: Awaited<ReturnType<typeof buildHarnessEngine>> | undefined;
+
+    try {
+      built = await buildHarnessEngine({
+        env,
+        askUser: createNoAskUser(),
+        surface: "chat",
+        cwd: taskRoot,
+        sandboxRoot: taskRoot,
+        workspaceRoot: taskRoot,
+        productRoot: root,
+        projectIdentityRoot: root,
+        userHome: join(root, "home"),
+        settings: { isolation: { worktreeOnMutate: true } },
+        subagentManager: manager,
+        worktreeIsolation: {
+          provision: async () => taskRoot,
+        },
+        skipCountTokens: true,
+        mcpFirstTurnReadyTimeoutMs: 10,
+      });
+
+      // Hosts that never reach the session hub still carry the engine's own route.
+      expect(built.deps.parentModelRoute).toBe(env.llm.model);
+      // The session hub overrides the route per turn; the executor chain must
+      // carry that value down to the worker envelope.
+      const turnDeps = { ...built.deps, parentModelRoute: "conv/conv-model" };
+      const model = createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [
+              {
+                id: "toolu-spawn",
+                name: "spawn_subagent",
+                input: {
+                  title: "inspect implementation",
+                  task: "inspect the implementation",
+                  subagent_type: "general-purpose",
+                  wait: false,
+                },
+              },
+            ],
+          }),
+          assistantResult({ texts: ["done"], supplierStop: "success" }),
+        ],
+      });
+      const engine = createLoopEngine({
+        ...turnDeps,
+        adapter: model,
+        executor: wrapWithViolationHook({
+          inner: turnDeps.executor,
+          onKill: () => undefined,
+        }),
+        conversationId: "conv-1",
+      });
+
+      const { result } = await engine.run("delegate a task");
+
+      expect(result.stopReason).toBe("completed");
+      expect(launches).toHaveLength(1);
+      assert.equal(launches[0]!.payload.parentModelRoute, "conv/conv-model");
+      assert.equal(launches[0]!.definition.parentModelRoute, "conv/conv-model");
+    } finally {
+      for (const launch of launches) {
+        await finishWorker(manager, launch);
+      }
+      if (built !== undefined) await built.shutdown?.();
+      else await manager.shutdown();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+});

@@ -8,6 +8,15 @@ either today's answer, restated, or a parity demonstration in
 `tests/harness/permission/shell-parse-segmentation-parity.test.ts` and
 `tests/harness/permission/shell-parse-facts-c.test.ts`.
 
+**Later edits are marked and layered, not folded back.** The Stage-4a framing
+above, the census counts, and the "zero behavior change" close remain the
+historical record of that preparation. Where **#1188** has since changed a
+roster member or a fact's meaning, the change is added in place with that
+label rather than rewriting the Stage-4a numbers — see the `vetoed` routing
+note for `validateReadonlyCommand`, the `isAllowedCommand` prototype row, and
+the escape-parity paragraph in the newline-fact section. A Stage-4a
+measurement is not re-stated as a post-#1188 one.
+
 ## The closed set
 
 `SecurityParseResult` (`shell-parse.ts:200`) is a closed verdict set: `ok`,
@@ -33,8 +42,20 @@ declarations, as SC-S4-1 states them and as this preparation honors them:
   (`docs/adr/0124-parse-verdict-contract.md:33`); a `unknown-syntax` → refusal
   arm was explicitly abandoned and would breach this consumer's no-new-throw
   contract. The gate's own text rules keep their answers — those are throws of
-  *recognition*, not of verdict (e.g. `echo\ test` throws because the command
-  word collapses to `''`; `echo a & ls` throws on the background operator).
+  *recognition*, not of verdict (`echo a & ls` throws on the background
+  operator). Any `vetoed` answer still reaches the same text path, because
+  `validateReadonlyCommand` routes every non-`ok` verdict to
+  `validateReadonlyTextPath` unchanged (`bash-readonly.ts:221-232`).
+  **The backslash+whitespace representative for this consumer changed with
+  #1188:** `echo\ test` is no longer a representative at all — escaped U+0020
+  in a complete, maximal unquoted word is now an admitted spelling that never
+  reaches this gate's denial path (ADR-0124 Amendment 2026-10-04). The
+  retained representatives are the shapes whose Bash behavior still
+  disagrees: unquoted backslash+TAB (`a\` TAB `b`, one Bash argument vs. two
+  modeled words) and the mid-word LF continuation (`a\` LF `b`, one Bash
+  argument `ab` vs. two modeled words). Both keep answering `vetoed` /
+  `backslash-whitespace` and therefore keep this gate's existing answer; the
+  consumer's own rules are untouched by the roster amendment.
 - **`extractSingleReadPath` (`bash-read-extract.ts:783`) — record nothing.**
   All five verdicts and the `vetoed` arm → `undefined`. A ledger record is an
   affordance, not a refusal, so recording nothing is always the stricter side.
@@ -61,6 +82,47 @@ allowlisting is considered, and the closed non-`ok` set keeps today's
 refusal (`false`) — see the parity battery's census, which grades each
 non-`ok` row against exactly that answer.
 
+## Known #1188 residual: `isAllowedCommand` on an admitted continuation
+
+**This is the one place where the admitted spelling's semantics and a shared
+consumer still disagree, and it is a deliberate, bounded deviation rather than an
+oversight.** Recorded here rather than silently narrowed.
+
+`isAllowedCommand("cat -n \\` LF ` b.ts")` answers `false` while its
+equivalent `cat -n b.ts` answers `true`. Mechanism: the admitted parse
+publishes no newline fact for the escaped LF, so `parseBoundedUnits` keeps the
+command as one unit whose raw text still contains the byte, and
+`isSegmentAllowed`'s metachar roster still refuses a unit carrying `\n`
+(`hard-walls.ts:3372`, roster at `:3389`).
+
+Direction and bounds:
+
+- **Fail-closed only.** Measured across eight continuation placements — split
+  destructive flags, split `rmdir` flags, a destructive command after a
+  continuation, a sensitive operand, a redirect to a sensitive path, a pipe into a
+  destructive command, a nested command substitution, and a destructive command
+  after `&&` — plus the escaped-space spelling: **zero** admitted forms are less
+  restrictive than their equivalent. Where the answers differ, the continuation is the *stricter* one
+  (`false` against `true`). `findDangerousPattern` keeps matching on the facts,
+  so `rm \` LF ` -rf /tmp/x` still returns `destructive-rm` even though the
+  parse admits it.
+- **Not a regression.** While the shape was `vetoed` the same text fold denied
+  it, so #1188 moved this input from a hard denial to an ask, never the reverse.
+- **Not fixed in #1188, deliberately.** `isSegmentAllowed` is an *allow* gate.
+  Aligning it turns a refusal into an allow — a security-direction change in the
+  central wall module. The amendment fixes a false refusal by admitting a
+  measured spelling; it does not grant the authority to loosen an allowlist
+  whose deny direction is the safe one. The parity rule that would be needed
+  there (skip an LF/CR escaped by an odd-parity run) is the same rule the fact
+  layer now applies in `bareLineBreaks`, so a follow-up can share one
+  definition rather than re-deriving it.
+- **Consumer scope.** `extractSingleReadPath` had the same disagreement and DID
+  get fixed, because it is a ledger affordance rather than an authorizer and
+  Bash's line-continuation semantics are unambiguous: `stepEscape`
+  (`bash-read-extract.ts`) now drops both bytes of a backslash-newline instead
+  of appending the escaped byte, so `cat -n \` LF ` b.ts` books `b.ts` exactly
+  as `cat -n b.ts` does. Its 143-test suite and the readonly suite are green.
+
 ## The newline / carriage-return fact: the derived-fact arm
 
 The Open Question at `specs/hard-wall-ast-migration.md:139` asks T22 to
@@ -80,6 +142,20 @@ newlines are absent from the lists; CRLF yields both offsets. The keep itself
 (`isAllowedCommand("echo a\nls") === false`, `isAllowedCommand("echo a\rb")
 === false`) is asserted two-sided in the parity battery so the fact and the
 answer are wired, not just the fact.
+
+**Escape parity is now part of this fact (in force since #1188).** The two
+lists name **bare** statement separators, so a `\n` / `\r` preceded by an
+**odd-parity** backslash run is an escaped line break and is **absent** from
+both; only an even-parity (unescaped) line break is reported. This changes
+what the fact means for the admitted separator continuation: `a \` LF ` b`
+reaches the fact layer and its LF is absent from `bareNewlineOffsets`, so it
+does not present as a bare statement separator to `isAllowedCommand`,
+`declarative.ts`'s cuts (`src/harness/permission/declarative.ts:528-529`),
+readonly validation, or read-path extraction. Testing only the previous
+character is insufficient — parity is what distinguishes an escaped break from
+a bare one, and both spellings of the run must be covered. The Stage-4a comment
+that assumed escaped line breaks never reached this scan (`…:1673-1677` at
+`2523c1497`) is retired by the roster amendment.
 
 ## Security-review attribution is preserved, never flattened
 
@@ -114,9 +190,16 @@ byte-identical to the oracle on the whole population.
   effective-cuts replica of `splitCommandSegments`.
 - `isAllowedCommand` facts prototype: 499 / 503 agree; the 4 divergences are
   pinned rows whose refusal today rests on inert quote/comment punctuation
-  (`[[ a == b ]]`, `echo hi &&`, the trailing-backslash PowerShell row,
-  `echo\ test`) — three are non-`ok` census rows, one is quote-blind
-  punctuation — and each keeps today's `false` via the census route instead.
+  (`[[ a == b ]]`, `echo hi &&`, the trailing-backslash PowerShell row, and
+  the unquoted backslash+TAB row `a\` TAB `b`) — three are non-`ok` census
+  rows, one is quote-blind punctuation — and each keeps today's `false` via
+  the census route instead. **The fourth row was `echo\ test` at Stage 4a;
+  since #1188 that spelling is admitted, so it is replaced here by a
+  genuinely retained representative** (unquoted backslash+TAB), which keeps
+  the row's original role — a shape whose Bash argument structure still
+  disagrees with the modeled one. The mid-word LF continuation `a\` LF `b`
+  (Bash: one argument `ab`; facade: two words) is the second retained
+  representative if a further row is needed.
 - role-substitution prototype: 503 / 503 identical (pipeline tails flagged,
   substitution bodies exempt — `echo $(grep x f)` → `undefined` both ways).
 - readonly strictenings (SC-S4-1 rules 1a/1b/1c): 502 / 503; the single

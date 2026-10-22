@@ -67,7 +67,11 @@ import type { RegistryImpl } from "./tools/registry.js";
 import type { ValidateFunction } from "ajv";
 import { homedir } from "node:os";
 import path from "node:path";
-import type { AskUser, PostToolUseHook } from "./permission/types.js";
+import type {
+  AskUser,
+  AskUserOutcome,
+  PostToolUseHook,
+} from "./permission/types.js";
 import {
   createSecretsGuardHook,
   type HookErrorEvent,
@@ -85,6 +89,7 @@ import {
   type IknowSettings,
 } from "../config/settings.js";
 import { createEgressPolicyFactory } from "./sandbox/egress/assembly.js";
+import { createEgressAgent } from "./sandbox/egress/agent.js";
 import {
   resolveSessionFenceTmp,
   snapshotIdentityScratchRoot,
@@ -324,6 +329,32 @@ export type BuildEngineOpts = {
    */
   readonly mcpFirstTurnReadyTimeoutMs?: number;
   /**
+   * TUI startup-readiness seam (plan T2): when true, the two OPTIONAL
+   * first-turn integrations stop being awaited by assembly —
+   *   - `mcpManager.start({ firstTurnReadyTimeoutMs })` (the ADR-0043
+   *     first-turn-ready window), and
+   *   - the two `adapter.countTokens` measurements (overflow-governance
+   *     retirement + index demotion), which call the model gateway over HTTP
+   *     with no assembly-level bound;
+   * both move into one background task. Assembly returns as soon as the local
+   * parts are ready, so a hanging MCP server, an unreachable gateway or an
+   * auth-refusing gateway can no longer delay the TUI's first render.
+   *
+   * Constancy (ADR-0043 is preserved, only the point moves): the task's
+   * result is applied at exactly ONE point — the first `deps.system()`
+   * resolution (the first turn's prompt assembly) — and only when it has
+   * settled by then. The name directory, the retired-builtin list and the
+   * demoted skill index are frozen at that instant; a result arriving later is
+   * dropped, and nothing is applied after shutdown. When the task has not
+   * settled, the freeze point degrades exactly like the documented skip path
+   * (window-absent servers / countTokens-failed: no retirement, no demotion,
+   * directory = whatever is connected at that instant).
+   *
+   * Other surfaces omit the field → byte-identical eager assembly (chat /
+   * serve / ask keep awaiting as before).
+   */
+  readonly deferFirstTurnOptionalWork?: boolean;
+  /**
    * ADR-0043: bypass switch for the assembly-time countTokens seam. When
    * `countTokens` is absent the assembly falls back to `adapter.countTokens`
    * — a real SDK call against an unreachable test baseUrl burns ~2.5s per
@@ -490,15 +521,15 @@ export type BuildEngineOpts = {
    */
   readonly fsMode?: import("./sandbox/fs-mode.js").FsModeContext;
   /**
-   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder — same shape as
+   * ADR-0141: the derived fence posture — same shape as
    * `fsMode` (constructed once at assembly, held at runtime, each consumer
    * re-reads after a flip; the engine is not rebuilt). Passed through four
    * places: the main-chain registry (the bash factory reads per call), subagent
    * spawn (re-read each spawn → `IKNOW_YOLO` env wire), the ask-path registry,
-   * and the worker-derived registry. Absent → non-yolo (fail-closed keeps the
+   * and the worker-derived registry. Absent → fenced (fail-closed keeps the
    * fence, V1 baseline byte-for-byte unchanged).
    */
-  readonly yolo?: import("./sandbox/yolo.js").YoloContext;
+  readonly fenceRetired?: import("./sandbox/yolo.js").FenceRetirementReader;
   /**
    * Runtime subagent concurrency-cap holder — when present,
    *
@@ -747,6 +778,18 @@ export type BuiltEngine = EngineBundle & {
 const SECURITY_REVIEW_HINT_DETAIL_CAP = 300;
 
 /**
+ * Collapse an askUser answer to the boolean the seam callers accept: only a
+ * bare `true` or a typed `approved` ending counts as approval; declined /
+ * timeout / cancelled all collapse to false (fail-closed).
+ */
+function askAnswerApproved(answer: boolean | AskUserOutcome): boolean {
+  return (
+    answer === true ||
+    (typeof answer === "object" && answer.kind === "approved")
+  );
+}
+
+/**
  * ADR-0127 host adapter — wraps an entry's AskUser inlet as a
  * SecurityReviewRoute, carrying the typed cause + span detail into the human
  * hint. LEGITIMATE ONLY for inlets that actually reach a human (TTY prompt /
@@ -759,20 +802,46 @@ const SECURITY_REVIEW_HINT_DETAIL_CAP = 300;
 export function securityReviewRouteFromAsk(ask: AskUser): SecurityReviewRoute {
   return {
     interactive: true,
-    request: (req: SecurityReviewRequest) => {
+    request: async (req: SecurityReviewRequest) => {
       const detail =
         req.requirement.detail.length > SECURITY_REVIEW_HINT_DETAIL_CAP
           ? req.requirement.detail.slice(0, SECURITY_REVIEW_HINT_DETAIL_CAP) +
             "…"
           : req.requirement.detail;
-      return ask({
+      const answer = await ask({
         tool: req.tool,
         input: req.input,
         summaryHint: `[security-review ${req.requirement.cause} span ${req.requirement.span.start}-${req.requirement.span.end}] ${req.summaryHint} — ${detail}`,
         signal: req.signal,
+        toolUseId: req.requestId,
       });
+      return askAnswerApproved(answer);
     },
   };
+}
+
+/**
+ * The credential roster the egress agent's profile mints from: the roster the
+ * assembly's policy factory already assembled (one assembly, one settings
+ * read — the agent never assembles a second one). The projection lives in a
+ * helper so the engine body keeps no extra branch (the S5 gate counts every
+ * optional chain per function).
+ */
+function egressRosterOf(
+  policy: import("./sandbox/index.js").EgressPolicyInput | undefined
+): import("./sandbox/index.js").EgressPolicyInput["credentials"] {
+  return policy?.credentials;
+}
+
+/**
+ * The engine's shutdown presence condition: an engine exposes a shutdown when
+ * it owns at least one disposable layer — the mcp / subagent / background /
+ * auto-memory managers and the session-resident egress agent. The condition
+ * lives in a helper so the engine body keeps no extra branch (the S5 gate
+ * counts every logical operator per function).
+ */
+function hasDisposableLayer(...layers: readonly unknown[]): boolean {
+  return layers.some((layer) => layer !== undefined);
 }
 
 /**
@@ -1144,16 +1213,17 @@ export async function buildHarnessEngine(
             // the holder singleton means a runtime panel flip affects the
             // next spawn.
             worktreeGate: worktreeOnMutateSource,
-            // ADR-0119 / specs/yolo-mode.md: the yolo holder crosses the process
-            // boundary too — a subagent's bash fence must match the parent
-            // session (spec §6 four-route parity), otherwise children spawned in
-            // a yolo session still run inside the fence. Same shape as fsMode:
-            // the holder object itself is passed (not a `.get()` snapshot), and
-            // the spawn factory reads it **on every spawn** — a runtime `/yolo`
-            // flip affects the next spawn. Absent (tests / unwired entry) → the
-            // `IKNOW_YOLO` key is not written, child env byte-unchanged (spawn.ts
-            // checks holder.get() strictly equals true).
-            yolo: opts.yolo,
+            // ADR-0141: the derived fence posture crosses the process boundary
+            // too — a subagent's bash fence must match the parent session (spec
+            // §6 four-route parity), otherwise children spawned in a
+            // retired-fence session still run inside the fence. Same shape as
+            // fsMode: the reader object itself is passed (not a `.get()`
+            // snapshot), and the spawn factory reads it **on every spawn** — a
+            // runtime preset flip affects the next spawn. Absent (tests /
+            // unwired entry) → the `IKNOW_FENCE_RETIRED` key is not written,
+            // child env byte-unchanged (spawn.ts checks the reading strictly
+            // equals true).
+            fenceRetired: opts.fenceRetired,
           }),
           // The manager's parent-sandboxRoot ceiling follows the live root
           // too — same logic: the getter lets buildWorkerPayload read the
@@ -1254,6 +1324,25 @@ export async function buildHarnessEngine(
     userHome,
     projectIdentityRoot
   );
+  // ADR-0097: ONE egress agent per engine assembly (the session-resident
+  // agent). The agent owns the session-level half of the seam — relay
+  // resolution, durable CA + trust bundle, credential mint — and hands out one
+  // per-call endpoint per call. The main registry, the ask registry, the
+  // worker base-tools registry and the background manager all open their
+  // endpoints from THIS instance, so the expensive half is paid once per
+  // engine instead of once per call. The engine's shutdown disposes it (the
+  // agent closes its still-live endpoints before releasing the credential
+  // layer they borrow).
+  //
+  // The credential roster comes from the SAME policy factory the registries
+  // use: one assembly, one settings read — never a second roster build.
+  const egressPolicyFactory = createEgressPolicyFactory({
+    settings,
+    commandLabel: "bash",
+  });
+  const egressAgent = createEgressAgent({
+    credentials: egressRosterOf(egressPolicyFactory()),
+  });
   // The old `stateAnchor` is no longer the anchor for tasks / memory (the
   // per-root sharding was dismantled).
   // (ADR-0088 ADR-0099)
@@ -1262,6 +1351,9 @@ export async function buildHarnessEngine(
       ? createBackgroundTaskManager({
           tasksDir,
           spawn: defaultBackgroundSpawn,
+          // The same agent the registries use — a background task opens its
+          // per-task endpoint from it (the session-level half is shared).
+          egressAgent,
         })
       : undefined;
   // Startup stale sweep, all surfaces (ask included): reap background task
@@ -1338,12 +1430,16 @@ export async function buildHarnessEngine(
   // Output-mask backstop: in roundtrip mode write the registry-tracked secret
   // values into the active extras slot (jsonl / format / stream-draft / hub
   // call `currentSecretValues()` with no arguments, so this covers them).
-  // Block mode must clear the slot so a previous roundtrip engine's extras
-  // can't leak into a block engine within the same process.
+  // The owner key is this build's root under the `root:` namespace, so it
+  // cannot collide with a route owner (`route:<id>`) in the shared map — a
+  // second build in the same process cannot drop the first build's values out
+  // of the mask. Block mode clears only this build's own slot; another
+  // build's extras stay masked.
+  const maskOwner = `root:${workspaceRoot}`;
   if (secretsMode !== "block") {
-    setActiveExtraSecrets(secretRegistry!.values());
+    setActiveExtraSecrets(maskOwner, secretRegistry!.values());
   } else {
-    clearActiveExtraSecrets();
+    clearActiveExtraSecrets(maskOwner);
   }
   // MCP resources conditional assembly: the registry must see mcpManager,
   // but createMcpManager needs `reg.registerExternal` (the dynamic mcp__*
@@ -1459,16 +1555,20 @@ export async function buildHarnessEngine(
       // AskUser into `(host) => Promise<boolean>`: interactive entries ask
       // once on first sight of a new domain; worker / hub-less entries never
       // build this and stay fail-closed.
-      egressPolicyFactory: createEgressPolicyFactory({
-        settings,
-        commandLabel: "bash",
-      }),
-      askApproval: (host) =>
-        askUser({
-          tool: "egress-domain-approval",
-          input: { host },
-          summaryHint: `允许沙箱内访问域 ${host}?`,
-        }),
+      egressPolicyFactory,
+      // The session-resident egress agent (one per engine assembly): the bash
+      // factory opens each call's endpoint from it, so the session-level half
+      // (relay / CA / credential mint) is loaded once per engine.
+      egressAgent,
+      askApproval: async (host) =>
+        askAnswerApproved(
+          await askUser({
+            tool: "egress-domain-approval",
+            input: { host },
+            summaryHint: `允许沙箱内访问域 ${host}?`,
+            toolUseId: `egress:${host}`,
+          })
+        ),
       // Pass the live taskRoot cell to the write_file / edit_file factories.
       // Gate unfliipped ⇒ cell initial = sandboxRoot, byte-identical to
       // today; handlers read a snapshot via cell.read(). Stable roots don't
@@ -1481,9 +1581,9 @@ export async function buildHarnessEngine(
       // the userHome seam would change settings / persona / state but not
       // the workspace-mode fence's home ro-bind source.
       fsMode: opts.fsMode,
-      // ADR-0119 / specs/yolo-mode.md: the yolo holder is threaded to the bash
+      // ADR-0141: the derived fence posture is threaded to the bash
       // factory on the same path (read per call, the same holder as fsMode).
-      yolo: opts.yolo,
+      fenceRetired: opts.fenceRetired,
       homeRoot: userHome,
       // UNBOUND_FENCE holder for the bash factory (the singleton, see above).
       worktreeOnMutate: worktreeOnMutateSource,
@@ -1601,64 +1701,27 @@ export async function buildHarnessEngine(
           }
         : {}),
     });
-    // ADR-0043: assembly awaits `manager.start({firstTurnReadyTimeoutMs})`.
-    // Servers connected within the window join first-turn assembly; the rest
-    // are absent for the session (no auto retry), stepping back to manual
-    // reconnect (`onManualReconnect`). Window length comes from the
-    // module-level production constant, overridable only via the
-    // `opts.mcpFirstTurnReadyTimeoutMs` test seam — same polling path, length
-    // only. Ordering critical: `reg` must exist before
-    // `await mcpManager.start()` or the registerExternal closure throws on
-    // the undefined registry and marks the boot slot failed.
-    try {
-      await mcpManager.start({
-        firstTurnReadyTimeoutMs: resolveFirstTurnReadyTimeoutMs(
-          opts.mcpFirstTurnReadyTimeoutMs
-        ),
-      });
-    } catch (err) {
-      // The internal void allSettled never rejects; this catch is a backstop
-      // for a future timeout closeout, currently warn-only. Assembly emits
-      // the first turn as usual, absent servers treated as session-absent.
-      console.warn(
-        `[build-engine] MCP manager start window error: ${errorMessage(err)}`
-      );
-    }
-    // ADR-0043: the name directory is frozen at the first turn and constant
-    // within the session — after the firstTurnReady window resolves,
-    // connected services + tool names freeze into a session-level snapshot
-    // that deps.system's mcp seam reads. A late connection of a window-
-    // absent server (flip-back) no longer leaks into the directory;
-    // otherwise adjacent rounds' system bytes would drift and break the
-    // constancy assertion (observed: a late connection once introduced a new
-    // server mid-session). Successful manual reconnects update the
-    // directory via onManualReconnect → a notification appended to messages
-    // (never a directory rewrite).
-    mcpNameDirectorySnapshot = mcpManager
-      .status()
-      .map((server) => {
-        const prefix = `mcp__${server.name}__`;
-        const tools: McpToolSummary[] = [];
-        for (const def of reg!.catalog.all()) {
-          if (!def.name.startsWith(prefix)) continue;
-          // Absent/empty description → the tool row carries none (a
-          // contract-allowed state, see the mcpNameDirectorySegment
-          // comment). toAciToolDef already maps tool.description ?? "" into
-          // ToolDef.description, so an empty string here means "no description".
-          tools.push({
-            name: def.name,
-            ...(def.description.length > 0
-              ? { description: def.description }
-              : {}),
-          });
-        }
-        return {
-          name: server.name,
-          state: server.state,
-          tools,
-        } satisfies McpServiceSummary;
-      })
-      .filter((s) => s.state === "connected");
+    // ADR-0043: eager surfaces await `manager.start({firstTurnReadyTimeoutMs})`
+    // here and freeze the name directory immediately. Servers connected within
+    // the window join first-turn assembly; the rest are absent for the session
+    // (no auto retry), stepping back to manual reconnect (`onManualReconnect`).
+    // Window length comes from the module-level production constant,
+    // overridable only via the `opts.mcpFirstTurnReadyTimeoutMs` test seam.
+    // Ordering critical: `reg` must exist before the start call or the
+    // registerExternal closure throws on the undefined registry and marks the
+    // boot slot failed.
+    //
+    // TUI readiness seam (`deferFirstTurnOptionalWork`): the same windowed
+    // start runs inside the deferred first-turn task instead (see
+    // `planFirstTurnOptionalWork` below) — assembly does not wait for it, and
+    // the snapshot stays undefined until that task's result is frozen at the
+    // first turn (or the freeze-time fallback is taken).
+    mcpNameDirectorySnapshot = await startMcpFirstTurn(
+      mcpManager,
+      reg!.catalog,
+      opts.deferFirstTurnOptionalWork === true,
+      resolveFirstTurnReadyTimeoutMs(opts.mcpFirstTurnReadyTimeoutMs)
+    );
   } else {
     // ask path: no mcpManager, reg built once, no manager tools, no start.
     reg = createDefaultAciRegistry({
@@ -1669,15 +1732,20 @@ export async function buildHarnessEngine(
       // factory. Holder absent → global mode (V1 baseline); homeRoot takes
       // this layer's `userHome` as in the main construction path.
       fsMode: opts.fsMode,
-      // ADR-0119 / specs/yolo-mode.md (ask path): the yolo holder is threaded
+      // ADR-0141 (ask path): the derived fence posture is threaded
       // to the bash factory on the same path — a non-TUI entry never carries
       // `--yolo` (typed rejection at parse time), so in production this is
       // always undefined; kept here to mirror the main chain and not drop the
       // assembly-surface field.
-      yolo: opts.yolo,
+      fenceRetired: opts.fenceRetired,
       homeRoot: userHome,
       // UNBOUND_FENCE holder (ask path, same singleton as the main build).
       worktreeOnMutate: worktreeOnMutateSource,
+      // The session-resident egress agent (the same instance the main chain
+      // uses). The ask path carries no egress policy factory, so the bash
+      // tool there opens no endpoint — the agent is threaded for one
+      // ownership story, not to start a seam on a surface without a policy.
+      egressAgent,
       ...(isolationEnabled ? { projectIdentityRoot } : {}),
       ...(graphAssembly ? { graphAssembly } : {}),
       ...(opts.liveGraphLedger
@@ -1737,143 +1805,87 @@ export async function buildHarnessEngine(
     });
   }
 
-  // ADR-0043: overflow governance is judged once at assembly (first round),
-  // frozen for the session. The judgment point is after `mcpManager.start()`
-  // (or right after reg construction on the ask path): MCP schemas count in
-  // the measured total but MCP entries are already lazy — only the 5
-  // deferrable built-ins participate in retiring. `runOverflowJudge` (pure
-  // logic in aci/tool-overflow.ts) owns the pool / count / retire ladder;
-  // this file owns the wiring. countTokens priority: explicit opts > real
-  // adapter call; both absent → skip the session. System text is a
-  // simplified static snapshot (`assembleStaticSystemPrompt` + an identity
-  // stub): the judgment measures the tool-surface area (95%+ of tokens), not
-  // system-text nuances, so the full resolver chain is not re-assembled.
-  const overflowSystemText = await assembleStaticSystemPrompt({
-    projectIdentityRoot,
-    userHome,
-    workspaceRoot,
-  });
-  const overflowInput = {
-    system:
-      "## Identity\n" +
-      // A stub of the identity constants (no import chain needed; quantity
-      // is small and irrelevant to the threshold).
-      "iknow harness identity.\n\n" +
-      overflowSystemText,
-  };
-  const countTokensFn = selectCountTokensFn(adapter, opts);
-  // First-round judgment, runs once (constant within the session).
-  // Failure/absent = skip + warn (all deferrable built-ins stay resident);
-  // over threshold = retire per the ordered list, stamp lazy:true.
-  let deferredRetireNames: ReadonlyArray<string> = [];
-  if (countTokensFn !== undefined) {
-    // Must re-measure after each retire, so it re-reads the visible set.
-    const sampleTools = (): ReadonlyArray<unknown> => reg.visibleSchemas();
-    try {
-      const result = await runOverflowJudge({
-        tools: reg.catalog.all(),
-        // Threshold = contextWindow * 0.1 (env.compress.contextWindow SSOT).
+  // ADR-0043 / ADR-0046: overflow governance and index demotion are judged
+  // once (first round) and frozen for the session. The judgment point follows
+  // the MCP directory (MCP schemas count in the measured total but MCP entries
+  // are already lazy — only the 5 deferrable built-ins participate in
+  // retiring). `runOverflowJudge` (pure logic in aci/tool-overflow.ts) owns the
+  // pool / count / retire ladder; this file owns the wiring. countTokens
+  // priority: explicit opts > real adapter call; both absent → skip the
+  // session. System text is a simplified static snapshot
+  // (`assembleStaticSystemPrompt` + an identity stub): the judgment measures
+  // the tool-surface area (95%+ of tokens), not system-text nuances, so the
+  // full resolver chain is not re-assembled.
+  //
+  // TUI readiness seam (`deferFirstTurnOptionalWork`): the two measurements are
+  // optional startup work (they call the model gateway over HTTP). Deferred
+  // mode starts them in one background task and freezes its settled result —
+  // or the documented skip-path fallback — at the first `deps.system()`
+  // resolution (see `planFirstTurnOptionalWork`); eager surfaces keep
+  // awaiting here, byte-identical.
+  //
+  // The two holders below start as exactly the documented skip-path fallback.
+  // Those declarations are the only deferred-mode initialization; `apply` is
+  // the sole writer of a final surface (eager: once, right after the
+  // measurement; deferred: once, at the first-turn freeze). Retirement rows
+  // carry each tool's description at retire time (SSOT = registry;
+  // `retireBuiltin` only flips `aci.lazy`); a name missing from the catalog
+  // renders as a bare-name row.
+  let deferredInternalToolsList: ReadonlyArray<DeferredInternalToolSummary> =
+    [];
+  let skillIndexList: ReadonlyArray<SkillSummary> =
+    projectSkillIndex(skillCatalog);
+  const firstTurnOptional = await planFirstTurnOptionalWork({
+    defer: opts.deferFirstTurnOptionalWork === true,
+    initialSkills: skillIndexList,
+    // Eager: the windowed start and the directory snapshot already ran inside
+    // the MCP block above. Deferred: the same start runs inside the task.
+    eagerMeasure: () =>
+      judgeFirstTurnSurface({
+        adapter,
+        opts,
+        catalog: reg!.catalog,
+        visibleSchemas: () => reg!.visibleSchemas(),
         threshold: env.compress.contextWindow * 0.1,
-        countTokens: async () => {
-          const v = await countTokensFn({
-            tools: sampleTools(),
-            system: overflowInput.system,
-            messages: FIRST_TURN_STAND_IN_MESSAGES,
-          });
-          return v.inputTokens;
-        },
-      });
-      if (result.reason === "retired") {
-        deferredRetireNames = result.retire;
-        reg.retireBuiltin([...result.retire]);
-      } else if (result.reason === "countTokens_failed") {
-        // Failure/absent → skip this session; all deferrable built-ins stay
-        // resident; one warn, no throw, no retry.
-        console.warn(
-          `[build-engine] overflow judge skipped: countTokens failed: ${errorMessage(
-            result.cause
-          )}`
-        );
-      }
-      // reason === "no_overflow" → zero action (all stay resident)
-    } catch (err) {
-      // runOverflowJudge never throws (SDK errors fold into the
-      // countTokens_failed branch); this catch is defensive — assembly must
-      // never block.
-      console.warn(
-        `[build-engine] overflow judge unexpected error: ${errorMessage(err)}`
-      );
-    }
-  }
-  // Session-constant retirement list (holder; the system resolver closure
-  // reads it every round). Carries each tool's description at retire time
-  // (SSOT = registry; `retireBuiltin` only flips `aci.lazy`); a name missing
-  // from the catalog renders as a bare-name row.
-  const deferredInternalToolsList: ReadonlyArray<DeferredInternalToolSummary> =
-    deferredRetireNames.map((name) => {
-      const def = reg.catalog.get(name);
-      return def?.description
-        ? { name, description: def.description }
-        : { name };
-    });
-
-  // ADR-0046: index demotion — when the MCP directory + `<available_skills>`
-  // together exceed 10% of the endpoint window, strip descriptions from the
-  // largest entries down, keeping names only. Timing = the same
-  // assembly-time first-round judgment as built-in schema retirement (retire
-  // first, then look at the index), no mid-session recompute: the verdict
-  // lands in holders that `deps.system` reads, so adjacent rounds' system
-  // stays deep-equal. Deliberately not merged into `runOverflowJudge`'s
-  // countTokens call: the ladder measures the whole first-request surface
-  // while this gate measures the two index sections — one measurement can't
-  // yield both, and merging would silently change the gate.
-  // `<deferred_internal_tools>` is not an input here (retired built-ins keep
-  // their rendering path). Failure (throw / non-finite) or an absent
-  // countTokens → skip this session + one warn; both sections keep their
-  // descriptions (same skip contract as the retirement pass).
-  let skillIndexList: ReadonlyArray<SkillSummary> = skillCatalog
-    .available()
-    .map((entry) => ({
-      name: entry.name,
-      description: entry.description ?? "",
-      ...(entry.whenToUse !== undefined ? { whenToUse: entry.whenToUse } : {}),
-      ...(entry.disabled ? { disabled: true } : {}),
-    }));
-  if (countTokensFn !== undefined) {
-    try {
-      const demotion = await runIndexDemotion({
-        mcp: mcpNameDirectorySnapshot ?? [],
+        projectIdentityRoot,
+        userHome,
+        workspaceRoot,
+        mcpDirectory: mcpNameDirectorySnapshot,
         skills: skillIndexList,
+        isSealed: neverSealed,
+      }),
+    deferredMeasure: (isSealed) =>
+      runDeferredFirstTurnWork({
+        mcpManager,
+        adapter,
+        opts,
+        catalog: reg!.catalog,
+        visibleSchemas: () => reg!.visibleSchemas(),
+        windowMs: resolveFirstTurnReadyTimeoutMs(
+          opts.mcpFirstTurnReadyTimeoutMs
+        ),
         threshold: env.compress.contextWindow * 0.1,
-        countTokens: async (indexText) => {
-          // Measured surface = exactly the two text sections the model sees;
-          // tools omitted (the schema area was judged by the ladder above).
-          const v = await countTokensFn({
-            system: indexText,
-            messages: FIRST_TURN_STAND_IN_MESSAGES,
-          });
-          return v.inputTokens;
-        },
-      });
-      if (demotion.reason === "demoted") {
-        mcpNameDirectorySnapshot = demotion.mcp;
-        skillIndexList = demotion.skills;
-      } else if (demotion.reason === "countTokens_failed") {
-        console.warn(
-          `[build-engine] index demotion skipped: countTokens failed: ${errorMessage(
-            demotion.cause
-          )}`
-        );
-      }
-      // no_index / no_overflow → zero action (both sections keep descriptions)
-    } catch (err) {
-      // runIndexDemotion never throws (folded into countTokens_failed);
-      // defensive catch — assembly must never block.
-      console.warn(
-        `[build-engine] index demotion unexpected error: ${errorMessage(err)}`
+        projectIdentityRoot,
+        userHome,
+        workspaceRoot,
+        initialSkills: skillIndexList,
+        isSealed,
+      }),
+    fallbackDirectory: () => currentMcpNameDirectory(mcpManager, reg!.catalog),
+    apply: (surface) => {
+      // Sole application point (eager assembly or the first-turn freeze): the
+      // directory snapshot, the retirement index, the skill index and the
+      // registry's lazy flags change together, before the system resolver and
+      // the prompt tools read them.
+      mcpNameDirectorySnapshot = surface.mcpDirectory;
+      deferredInternalToolsList = summarizeDeferredInternalTools(
+        surface.retireNames,
+        reg!.catalog
       );
-    }
-  }
+      skillIndexList = surface.skills;
+      reg!.retireBuiltin(surface.retireNames);
+    },
+  });
 
   // With the graph overlay wired, this is the single assembly-time snapshot:
   // (ADR-0030)
@@ -1893,13 +1905,18 @@ export async function buildHarnessEngine(
     lspCtx,
     ...(workspaceRoot !== undefined ? { workspaceRoot } : {}),
     fsMode: opts.fsMode,
-    // ADR-0119: the yolo holder threads to the worker-derived bash factory in
-    // the same shape as the parent session (worker surface derives from the
-    // same registry factory — byte-identical assembly, only the deny-list
-    // differs).
-    yolo: opts.yolo,
+    // ADR-0141: the derived fence posture threads to the worker-derived bash
+    // factory in the same shape as the parent session (worker surface derives
+    // from the same registry factory — byte-identical assembly, only the
+    // deny-list differs).
+    fenceRetired: opts.fenceRetired,
     homeRoot: userHome,
     worktreeOnMutate: worktreeOnMutateSource,
+    // The session-resident egress agent (the same instance the parent
+    // session uses) — the worker surface carries no egress policy factory,
+    // so its bash tool opens no endpoint (the agent is threaded for one
+    // ownership story, not to start a seam on a surface without a policy).
+    egressAgent,
   }).catalog.all();
   // Dynamic registry wrapper so the executor resolves registerExternal mcp__
   // tools (see createDynamicExecutorRegistry for the contract).
@@ -2184,6 +2201,10 @@ export async function buildHarnessEngine(
     executor: loopExecutor,
     registry: registryTools,
     parentThinking: Object.freeze(buildThinkingParams(env.llm)),
+    // The conversation's model route. Hosts that never reach the session hub
+    // (ask / oneshot) run on the engine's own route; the session hub overrides
+    // it per turn (ADR-0145 §8).
+    parentModelRoute: env.llm.model,
     // Inject secretRegistry so roundtrip mode can placeholder-replace user
     // text in run(); absent under block mode → recognition skipped.
     ...(secretRegistry ? { secretRegistry } : {}),
@@ -2228,73 +2249,80 @@ export async function buildHarnessEngine(
     // projection) applies to all surfaces — even ask: if skill tools are
     // present the model should know the available skills; the resolver
     // filters disabled entries before rendering <available_skills>.
-    system: createIknowSystemResolver({
-      // ADR-0037: the "Project path" section reads the stable
-      // projectIdentityRoot — the assembly no longer uses the cwd seam. The
-      // live taskRoot reaches the human-readable view only via the envSnapshot
-      // section below (after rebind the readable view follows the live root
-      // while system prompt bytes stay stable, preserving the KV-cache
-      // contract), so cwd is not passed.
-      projectIdentityRoot,
-      userHome,
-      workspaceRoot,
-      surface,
-      memoryEnabled: memoryToolsEnabled,
-      ...(memorySystemResolver ? { memoryResolver: memorySystemResolver } : {}),
-      // Skills index = the frozen holder taken after the first-turn judgment
-      // (`skillIndexList`) — demotion strips descriptions above the threshold
-      // and the renderer emits bare-name lines by data shape (single SSOT, no
-      // second judgment inside the section function). Under threshold the
-      // holder is a verbatim projection of `catalog.available()`. Constant
-      // within the session → adjacent-turn system deep-equal.
-      skills: () => skillIndexList,
-      // ADR-0043: MCP name-directory section injection seam (progressive
-      // disclosure "index resident tier") — injected only when mcpManager
-      // exists (chat/tui/serve); ask has no manager → seam absent → section
-      // absent (byte-level zero change, KV-cache stability contract). The
-      // directory is a session-level snapshot (see the
-      // mcpNameDirectorySnapshot freeze point above): finalized once the
-      // firstTurnReady window resolves, deep-equal across turns; servers that
-      // connect late never leak back in, and directory deltas from manual
-      // reconnect go through a tail append notification (not a rewrite).
-      ...(mcpNameDirectorySnapshot
-        ? {
-            mcp: () => mcpNameDirectorySnapshot,
-          }
-        : {}),
-      // ADR-0043: overflow-governance retired-tool index section (optional) —
-      // frozen after the first-turn judgment, constant in session (holder
-      // defined above). Empty list (nothing over threshold / failure) → the
-      // closure returns [] → section absent; non-empty renders
-      // <deferred_internal_tools> (one `- name: description` line per entry,
-      // stable alphabetical; missing description degrades to bare name). Same
-      // shape as the MCP name directory, additive section not touching
-      // IKNOW_ASSEMBLY_ORDER. ask reaches this seam too (no MCP but possibly
-      // retired builtins); failed governance → empty list → section absent.
-      deferredInternalTools: () => deferredInternalToolsList,
-      // Default paths stop injecting the coordinator section — guidance lives
-      // in the spawn_subagent tool description (SSOT). The seam stays: callers
-      // may pass coordinatorText explicitly to have it rendered.
-      // Agent-status read-rule section gate — derived from the same
-      // agentStatusTodoDir expression as deps.agentStatus below (only surfaces
-      // carrying the bar assemble the reading-rule sentence).
-      ...(agentStatusTodoDir ? { agentStatusReadRule: true } : {}),
-      // Git block injection seam: cwd = `projectIdentityRoot` (stable root,
-      // decoupled from session rebind); one synchronous snapshot at assembly,
-      // frozen in session. Degenerate states (not a git repo / git unusable /
-      // cwd unresolvable) → provider returns undefined → section absent, no error.
-      git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
-      // Git work-discipline section: same live source as isolationOnLive
-      // (host present ∧ holder.get()). ON → injected for chat/tui/serve;
-      // OFF → field evaluates false each system() call (segment absent).
-      // ask is blocked again inside createIknowSystemResolver; worker
-      // createWorkerDeps bypasses this layer entirely.
-      gitWorkDiscipline: isolationOnLive,
-      // The `orchestration` system section was retired — its content moved
-      // into the graph mode-switch hints (loop-engine tail append, see the
-      // graphModeChange seam below). The graph assembly snapshot is now a
-      // single point for loop-engine on/off judgment against its own last snapshot.
-    }),
+    // TUI readiness seam: in deferred mode the wrapper freezes the optional
+    // first-turn work (MCP directory / retirement / demotion) here, i.e. the
+    // single first-turn point; eager mode passes the resolver through
+    // unchanged.
+    system: withFirstTurnFreeze(
+      createIknowSystemResolver({
+        // ADR-0037: the "Project path" section reads the stable
+        // projectIdentityRoot — the assembly no longer uses the cwd seam. The
+        // live taskRoot reaches the human-readable view only via the envSnapshot
+        // section below (after rebind the readable view follows the live root
+        // while system prompt bytes stay stable, preserving the KV-cache
+        // contract), so cwd is not passed.
+        projectIdentityRoot,
+        userHome,
+        workspaceRoot,
+        surface,
+        memoryEnabled: memoryToolsEnabled,
+        ...(memorySystemResolver
+          ? { memoryResolver: memorySystemResolver }
+          : {}),
+        // Skills index = the frozen holder taken after the first-turn judgment
+        // (`skillIndexList`) — demotion strips descriptions above the threshold
+        // and the renderer emits bare-name lines by data shape (single SSOT, no
+        // second judgment inside the section function). Under threshold the
+        // holder is a verbatim projection of `catalog.available()`. Constant
+        // within the session → adjacent-turn system deep-equal.
+        skills: () => skillIndexList,
+        // ADR-0043: MCP name-directory section injection seam (progressive
+        // disclosure "index resident tier") — injected only when mcpManager
+        // exists (chat/tui/serve); ask has no manager → seam absent → section
+        // absent (byte-level zero change, KV-cache stability contract). The
+        // directory is a session-level snapshot (see the
+        // mcpNameDirectorySnapshot freeze point above): finalized once the
+        // firstTurnReady window resolves (eager) or at the first-turn freeze
+        // (deferred), deep-equal across turns; servers that connect late never
+        // leak back in, and directory deltas from manual reconnect go through a
+        // tail append notification (not a rewrite).
+        ...mcpDirectorySeam(mcpManager, () => mcpNameDirectorySnapshot),
+        // ADR-0043: overflow-governance retired-tool index section (optional) —
+        // frozen after the first-turn judgment, constant in session (holder
+        // defined above). Empty list (nothing over threshold / failure) → the
+        // closure returns [] → section absent; non-empty renders
+        // <deferred_internal_tools> (one `- name: description` line per entry,
+        // stable alphabetical; missing description degrades to bare name). Same
+        // shape as the MCP name directory, additive section not touching
+        // IKNOW_ASSEMBLY_ORDER. ask reaches this seam too (no MCP but possibly
+        // retired builtins); failed governance → empty list → section absent.
+        deferredInternalTools: () => deferredInternalToolsList,
+        // Default paths stop injecting the coordinator section — guidance lives
+        // in the spawn_subagent tool description (SSOT). The seam stays: callers
+        // may pass coordinatorText explicitly to have it rendered.
+        // Agent-status read-rule section gate — derived from the same
+        // agentStatusTodoDir expression as deps.agentStatus below (only surfaces
+        // carrying the bar assemble the reading-rule sentence).
+        ...(agentStatusTodoDir ? { agentStatusReadRule: true } : {}),
+        // Git block injection seam: cwd = `projectIdentityRoot` (stable root,
+        // decoupled from session rebind); the provider closure owns the capture
+        // (see `createGitSnapshotProvider` in identity/git-snapshot.ts).
+        // Degenerate states → provider returns undefined → section absent, no
+        // error.
+        git: createGitSnapshotProvider({ cwd: projectIdentityRoot }),
+        // Git work-discipline section: same live source as isolationOnLive
+        // (host present ∧ holder.get()). ON → injected for chat/tui/serve;
+        // OFF → field evaluates false each system() call (segment absent).
+        // ask is blocked again inside createIknowSystemResolver; worker
+        // createWorkerDeps bypasses this layer entirely.
+        gitWorkDiscipline: isolationOnLive,
+        // The `orchestration` system section was retired — its content moved
+        // into the graph mode-switch hints (loop-engine tail append, see the
+        // graphModeChange seam below). The graph assembly snapshot is now a
+        // single point for loop-engine on/off judgment against its own last snapshot.
+      }),
+      firstTurnOptional.barrier
+    ),
     // env.compress passthrough → deps.compress (optional LoopEngineDeps seam).
     // IknowCompressEnv fields are required (contextWindow / thresholdTokens);
     // compression off when absent is backstopped by the loop-engine field-
@@ -2500,9 +2528,21 @@ export async function buildHarnessEngine(
     // server on every assembly in tests/multi-engine setups); termination +
     // latch happen only at host-process exit seams (TUI shutdownExtensions /
     // chat exit), see client.ts shutdownDefaultLspPool.
-    ...(mcpManager || subagentManager || backgroundManager || autoMemory
+    ...(hasDisposableLayer(
+      mcpManager,
+      subagentManager,
+      backgroundManager,
+      autoMemory,
+      egressAgent,
+      firstTurnOptional.barrier
+    )
       ? {
           shutdown: async (): Promise<void> => {
+            // TUI readiness seam: close the deferred first-turn task first —
+            // from here on its result can never be applied, and any still
+            // pending measurement sees the seal and stops instead of starting
+            // new gateway calls.
+            closeFirstTurnBarrier(firstTurnOptional.barrier);
             await Promise.all([
               mcpManager?.shutdown(),
               subagentManager?.shutdown(),
@@ -2513,6 +2553,12 @@ export async function buildHarnessEngine(
               // completed-turn gate stays authoritative.
               autoMemory?.onExit?.(),
             ]);
+            // The egress agent is released LAST: the background manager's
+            // shutdown releases the per-task endpoints it still owns, and an
+            // endpoint must not outlive the agent that owns the credential
+            // layer it borrows. The agent's own dispose closes whatever is
+            // still live (idempotent).
+            await egressAgent.dispose();
           },
         }
       : {}),
@@ -3128,6 +3174,469 @@ function selectCountTokensFn(
   };
 }
 
+// ---------------------------------------------------------------------------
+// TUI startup-readiness seam (`deferFirstTurnOptionalWork`): the ADR-0043 /
+// ADR-0046 first-turn judgments are optional work — an MCP server that never
+// becomes first-turn ready, and a gateway that is unreachable, refuses auth or
+// hangs, must not delay the local readiness (usable input + quit). Eager
+// surfaces keep the assembly-blocking contract; the TUI moves the same work to
+// one background task whose settled result is applied at a single point — the
+// first `deps.system()` resolution — and dropped if it arrives later
+// (first-turn constancy, ADR-0043 preserved: only the freeze point moves).
+// ---------------------------------------------------------------------------
+
+/** The optional surface one first-turn judgment produces (frozen atomically). */
+interface FirstTurnSurface {
+  readonly mcpDirectory: ReadonlyArray<McpServiceSummary> | undefined;
+  readonly retireNames: ReadonlyArray<string>;
+  readonly skills: ReadonlyArray<SkillSummary>;
+}
+
+/** Freeze / close handle of the deferred first-turn task. */
+interface FirstTurnBarrier {
+  /** Idempotent. Applies the settled surface, else the freeze-time fallback. */
+  readonly freeze: () => void;
+  /** Idempotent. From here on nothing is applied (shutdown / teardown). */
+  readonly close: () => void;
+}
+
+/** Never-sealed predicate for eager surfaces (no barrier exists there). */
+function neverSealed(): boolean {
+  return false;
+}
+
+/**
+ * Internal control-flow throw: the deferred task was sealed between two
+ * measurements. Both judges fold a countTokens throw into their
+ * `countTokens_failed` skip and the sealed caller suppresses the warn, so this
+ * aborts the remaining ladder / demotion without a gateway call or a message.
+ */
+class FirstTurnOptionalWorkSealedError extends Error {
+  override readonly name = "FirstTurnOptionalWorkSealedError";
+  /** Stable discriminator (never parse the message). */
+  readonly code = "first_turn_optional_work_sealed";
+  constructor() {
+    super("first-turn optional work sealed");
+  }
+}
+
+/** ADR-0043 directory projection: connected servers × registered mcp__* tools. */
+function projectMcpNameDirectory(
+  manager: McpManager,
+  catalog: AciCatalog
+): ReadonlyArray<McpServiceSummary> {
+  return manager
+    .status()
+    .map((server) => {
+      const prefix = `mcp__${server.name}__`;
+      const tools: McpToolSummary[] = [];
+      for (const def of catalog.all()) {
+        if (!def.name.startsWith(prefix)) continue;
+        // Absent/empty description → the tool row carries none (a
+        // contract-allowed state, see the mcpNameDirectorySegment comment).
+        // toAciToolDef already maps tool.description ?? "" into
+        // ToolDef.description, so an empty string here means "no description".
+        tools.push({
+          name: def.name,
+          ...(def.description.length > 0
+            ? { description: def.description }
+            : {}),
+        });
+      }
+      return {
+        name: server.name,
+        state: server.state,
+        tools,
+      } satisfies McpServiceSummary;
+    })
+    .filter((s) => s.state === "connected");
+}
+
+/** Freeze-time directory snapshot; no manager (ask) → seam absent. */
+function currentMcpNameDirectory(
+  manager: McpManager | undefined,
+  catalog: AciCatalog
+): ReadonlyArray<McpServiceSummary> | undefined {
+  return manager === undefined
+    ? undefined
+    : projectMcpNameDirectory(manager, catalog);
+}
+
+/**
+ * ADR-0043: await the first-turn-ready window (the caller projects the name
+ * directory afterwards). Window length comes from the production constant (or
+ * the test seam) — this function never invents a latency bound. A sealed task
+ * (first turn already frozen / engine shut down) stops before recording a warn
+ * nobody can see.
+ */
+async function awaitMcpFirstTurnReady(
+  manager: McpManager,
+  windowMs: number,
+  isSealed: () => boolean
+): Promise<void> {
+  try {
+    await manager.start({ firstTurnReadyTimeoutMs: windowMs });
+  } catch (err) {
+    // The internal void allSettled never rejects; this catch is a backstop
+    // for a future timeout closeout, currently warn-only. Assembly emits
+    // the first turn as usual, absent servers treated as session-absent.
+    if (!isSealed()) {
+      console.warn(
+        `[build-engine] MCP manager start window error: ${errorMessage(err)}`
+      );
+    }
+  }
+}
+
+/**
+ * Eager MCP phase: await the window and freeze the directory at assembly.
+ * Deferred mode returns `undefined` WITHOUT starting — the background task
+ * owns the same windowed start (one bootstrapAll, the ADR-0043 window still
+ * decides which servers join the first turn; only the awaiting moves off the
+ * readiness path).
+ */
+async function startMcpFirstTurn(
+  manager: McpManager,
+  catalog: AciCatalog,
+  defer: boolean,
+  windowMs: number
+): Promise<ReadonlyArray<McpServiceSummary> | undefined> {
+  if (defer) return undefined;
+  await awaitMcpFirstTurnReady(manager, windowMs, neverSealed);
+  return projectMcpNameDirectory(manager, catalog);
+}
+
+/** Pre-demotion skills index projection (also the deferred initial holder). */
+function projectSkillIndex(catalog: SkillCatalog): ReadonlyArray<SkillSummary> {
+  return catalog.available().map((entry) => ({
+    name: entry.name,
+    description: entry.description ?? "",
+    ...(entry.whenToUse !== undefined ? { whenToUse: entry.whenToUse } : {}),
+    ...(entry.disabled ? { disabled: true } : {}),
+  }));
+}
+
+/** Session-constant retirement index rows (holder read by deps.system). */
+function summarizeDeferredInternalTools(
+  names: ReadonlyArray<string>,
+  catalog: AciCatalog
+): ReadonlyArray<DeferredInternalToolSummary> {
+  return names.map((name) => {
+    const def = catalog.get(name);
+    return def?.description ? { name, description: def.description } : { name };
+  });
+}
+
+/**
+ * The two optional measurements (ADR-0043 retirement ladder + ADR-0046 index
+ * demotion). Pure measurement: the verdict is NOT applied here — the caller
+ * applies it at exactly one point (assembly for eager surfaces, the first-turn
+ * freeze for the TUI readiness seam), so the model-visible surface never
+ * changes mid-session.
+ */
+async function judgeFirstTurnSurface(input: {
+  readonly adapter: LoopEngineDeps["adapter"];
+  readonly opts: Pick<BuildEngineOpts, "countTokens" | "skipCountTokens">;
+  readonly catalog: AciCatalog;
+  readonly visibleSchemas: () => ReadonlyArray<unknown>;
+  readonly threshold: number;
+  readonly projectIdentityRoot: string;
+  readonly userHome: string;
+  readonly workspaceRoot: string | undefined;
+  readonly mcpDirectory: ReadonlyArray<McpServiceSummary> | undefined;
+  readonly skills: ReadonlyArray<SkillSummary>;
+  readonly isSealed: () => boolean;
+}): Promise<FirstTurnSurface> {
+  // System text is a simplified static snapshot (`assembleStaticSystemPrompt`
+  // + an identity stub): the judgment measures the tool-surface area (95%+ of
+  // tokens), not system-text nuances, so the full resolver chain is not
+  // re-assembled.
+  const overflowSystemText = await assembleStaticSystemPrompt({
+    projectIdentityRoot: input.projectIdentityRoot,
+    userHome: input.userHome,
+    workspaceRoot: input.workspaceRoot,
+  });
+  const overflowInput = {
+    system:
+      "## Identity\n" +
+      // A stub of the identity constants (no import chain needed; quantity
+      // is small and irrelevant to the threshold).
+      "iknow harness identity.\n\n" +
+      overflowSystemText,
+  };
+  const countTokensFn = selectCountTokensFn(input.adapter, input.opts);
+  if (countTokensFn === undefined) {
+    return {
+      mcpDirectory: input.mcpDirectory,
+      retireNames: [],
+      skills: input.skills,
+    };
+  }
+  // A sealed task stops before spending new gateway calls: the caller drops
+  // the result anyway, and shutdown must not start new HTTP work.
+  const measure = async (measurement: {
+    readonly tools?: ReadonlyArray<unknown>;
+    readonly system?: string;
+    readonly messages?: ReadonlyArray<AnthropicNativeMessage>;
+  }): Promise<number> => {
+    if (input.isSealed()) throw new FirstTurnOptionalWorkSealedError();
+    return (await countTokensFn(measurement)).inputTokens;
+  };
+  // First-round judgment, runs once (constant within the session).
+  // Failure/absent = skip + warn (all deferrable built-ins stay resident);
+  // over threshold = retire per the ordered list, stamp lazy:true.
+  let retireNames: ReadonlyArray<string> = [];
+  if (!input.isSealed()) {
+    // Must re-measure after each retire, so it re-reads the visible set.
+    try {
+      const result = await runOverflowJudge({
+        tools: input.catalog.all(),
+        // Threshold = contextWindow * 0.1 (env.compress.contextWindow SSOT).
+        threshold: input.threshold,
+        countTokens: () =>
+          measure({
+            tools: input.visibleSchemas(),
+            system: overflowInput.system,
+            messages: FIRST_TURN_STAND_IN_MESSAGES,
+          }),
+      });
+      if (result.reason === "retired") {
+        retireNames = result.retire;
+      } else if (result.reason === "countTokens_failed" && !input.isSealed()) {
+        // Failure/absent → skip this session; all deferrable built-ins stay
+        // resident; one warn, no throw, no retry.
+        console.warn(
+          `[build-engine] overflow judge skipped: countTokens failed: ${errorMessage(
+            result.cause
+          )}`
+        );
+      }
+      // reason === "no_overflow" → zero action (all stay resident)
+    } catch (err) {
+      // runOverflowJudge never throws (SDK errors fold into the
+      // countTokens_failed branch); this catch is defensive — assembly must
+      // never block.
+      if (!input.isSealed()) {
+        console.warn(
+          `[build-engine] overflow judge unexpected error: ${errorMessage(err)}`
+        );
+      }
+    }
+  }
+  // ADR-0046: index demotion — when the MCP directory + `<available_skills>`
+  // together exceed 10% of the endpoint window, strip descriptions from the
+  // largest entries down, keeping names only. Timing = the same first-round
+  // judgment as built-in schema retirement (retire first, then look at the
+  // index), no mid-session recompute: the verdict lands in holders that
+  // `deps.system` reads, so adjacent rounds' system stays deep-equal.
+  // Deliberately not merged into `runOverflowJudge`'s countTokens call: the
+  // ladder measures the whole first-request surface while this gate measures
+  // the two index sections — one measurement can't yield both, and merging
+  // would silently change the gate. `<deferred_internal_tools>` is not an
+  // input here (retired built-ins keep their rendering path). Failure (throw /
+  // non-finite) or an absent countTokens → skip this session + one warn; both
+  // sections keep their descriptions (same skip contract as the ladder).
+  let mcpDirectory = input.mcpDirectory;
+  let skills = input.skills;
+  if (!input.isSealed()) {
+    try {
+      const demotion = await runIndexDemotion({
+        mcp: mcpDirectory ?? [],
+        skills,
+        threshold: input.threshold,
+        countTokens: (indexText) =>
+          // Measured surface = exactly the two text sections the model sees;
+          // tools omitted (the schema area was judged by the ladder above).
+          measure({
+            system: indexText,
+            messages: FIRST_TURN_STAND_IN_MESSAGES,
+          }),
+      });
+      if (demotion.reason === "demoted") {
+        mcpDirectory = demotion.mcp;
+        skills = demotion.skills;
+      } else if (
+        demotion.reason === "countTokens_failed" &&
+        !input.isSealed()
+      ) {
+        console.warn(
+          `[build-engine] index demotion skipped: countTokens failed: ${errorMessage(
+            demotion.cause
+          )}`
+        );
+      }
+      // no_index / no_overflow → zero action (both sections keep descriptions)
+    } catch (err) {
+      // runIndexDemotion never throws (folded into countTokens_failed);
+      // defensive catch — assembly must never block.
+      if (!input.isSealed()) {
+        console.warn(
+          `[build-engine] index demotion unexpected error: ${errorMessage(err)}`
+        );
+      }
+    }
+  }
+  return { mcpDirectory, retireNames, skills };
+}
+
+/**
+ * Deferred first-turn task body: the ADR-0043 window (background) followed by
+ * the two optional measurements. Returns the surface the freeze point may
+ * apply; a sealed task returns the documented skip-path shape (no retirement,
+ * no demotion) without spending more gateway calls.
+ */
+async function runDeferredFirstTurnWork(input: {
+  readonly mcpManager: McpManager | undefined;
+  readonly adapter: LoopEngineDeps["adapter"];
+  readonly opts: Pick<BuildEngineOpts, "countTokens" | "skipCountTokens">;
+  readonly catalog: AciCatalog;
+  readonly visibleSchemas: () => ReadonlyArray<unknown>;
+  readonly windowMs: number;
+  readonly threshold: number;
+  readonly projectIdentityRoot: string;
+  readonly userHome: string;
+  readonly workspaceRoot: string | undefined;
+  readonly initialSkills: ReadonlyArray<SkillSummary>;
+  readonly isSealed: () => boolean;
+}): Promise<FirstTurnSurface> {
+  const skipped: FirstTurnSurface = {
+    mcpDirectory: undefined,
+    retireNames: [],
+    skills: input.initialSkills,
+  };
+  // Only the MCP window is manager-gated: without a manager (ask) there is
+  // nothing to await, but the two measurements do not depend on MCP and still
+  // run, so the deferred no-MCP path judges exactly like its eager twin.
+  if (input.mcpManager !== undefined) {
+    await awaitMcpFirstTurnReady(
+      input.mcpManager,
+      input.windowMs,
+      input.isSealed
+    );
+  }
+  if (input.isSealed()) return skipped;
+  return judgeFirstTurnSurface({
+    adapter: input.adapter,
+    opts: input.opts,
+    catalog: input.catalog,
+    visibleSchemas: input.visibleSchemas,
+    threshold: input.threshold,
+    projectIdentityRoot: input.projectIdentityRoot,
+    userHome: input.userHome,
+    workspaceRoot: input.workspaceRoot,
+    mcpDirectory: currentMcpNameDirectory(input.mcpManager, input.catalog),
+    skills: input.initialSkills,
+    isSealed: input.isSealed,
+  });
+}
+
+/**
+ * One background task → exactly one application. The settled surface is kept
+ * only while the barrier is open; `freeze()` applies it (or the freeze-time
+ * fallback) once, `close()` discards it forever.
+ */
+function createFirstTurnBarrier(input: {
+  readonly run: (isSealed: () => boolean) => Promise<FirstTurnSurface>;
+  readonly fallback: () => FirstTurnSurface;
+  readonly apply: (surface: FirstTurnSurface) => void;
+}): FirstTurnBarrier {
+  let settled: FirstTurnSurface | undefined;
+  let frozen = false;
+  let closed = false;
+  const isSealed = (): boolean => frozen || closed;
+  void input.run(isSealed).then(
+    (surface) => {
+      if (isSealed()) return;
+      settled = surface;
+    },
+    (err) => {
+      if (isSealed()) return;
+      // Defensive: the measurements fold their own failures into results.
+      console.warn(
+        `[build-engine] first-turn optional work failed: ${errorMessage(err)}`
+      );
+    }
+  );
+  return {
+    freeze: () => {
+      if (isSealed()) return;
+      frozen = true;
+      const surface = settled ?? input.fallback();
+      settled = undefined;
+      input.apply(surface);
+    },
+    close: () => {
+      closed = true;
+      settled = undefined;
+    },
+  };
+}
+
+/** Eager plan vs deferred barrier — the one branch the seam adds. */
+async function planFirstTurnOptionalWork(input: {
+  readonly defer: boolean;
+  readonly initialSkills: ReadonlyArray<SkillSummary>;
+  readonly eagerMeasure: () => Promise<FirstTurnSurface>;
+  readonly deferredMeasure: (
+    isSealed: () => boolean
+  ) => Promise<FirstTurnSurface>;
+  readonly fallbackDirectory: () =>
+    ReadonlyArray<McpServiceSummary> | undefined;
+  readonly apply: (surface: FirstTurnSurface) => void;
+}): Promise<{ readonly barrier?: FirstTurnBarrier }> {
+  if (!input.defer) {
+    // Eager: measure, then apply once — the only write of the final surface.
+    input.apply(await input.eagerMeasure());
+    return {};
+  }
+  // Deferred: the caller's holders already hold the documented fallback, so
+  // no surface is written until the freeze point.
+  return {
+    barrier: createFirstTurnBarrier({
+      run: input.deferredMeasure,
+      fallback: () => ({
+        mcpDirectory: input.fallbackDirectory(),
+        retireNames: [],
+        skills: input.initialSkills,
+      }),
+      apply: input.apply,
+    }),
+  };
+}
+
+function closeFirstTurnBarrier(barrier: FirstTurnBarrier | undefined): void {
+  barrier?.close();
+}
+
+/**
+ * `deps.system` wrapper — the single first-turn point. Freezing before the
+ * resolver reads the holders guarantees the model-visible surface (directory,
+ * retirement index, skill index) is decided before the first model call and
+ * never changes afterwards. Eager mode returns the resolver untouched.
+ */
+function withFirstTurnFreeze(
+  system: () => Promise<string | undefined>,
+  barrier: FirstTurnBarrier | undefined
+): () => Promise<string | undefined> {
+  if (barrier === undefined) return system;
+  return async () => {
+    barrier.freeze();
+    return system();
+  };
+}
+
+/**
+ * ADR-0043 MCP directory seam. Presence keys on the manager, not on the
+ * snapshot: in deferred mode the snapshot is filled at the first-turn freeze,
+ * while the closure shape (undefined → section absent) stays identical.
+ */
+function mcpDirectorySeam(
+  manager: McpManager | undefined,
+  directory: () => ReadonlyArray<McpServiceSummary> | undefined
+): { readonly mcp?: () => ReadonlyArray<McpServiceSummary> | undefined } {
+  return manager === undefined ? {} : { mcp: directory };
+}
+
 /**
  * tasksDir source selection (extracted so the assembly body keeps a single
  *
@@ -3137,6 +3646,7 @@ function selectCountTokensFn(
  *
  * Host injection wins (explicitly derived by the three entries); absent →
  * fall back to the **pool-root** default `~/.iknow` (the `resolveServeDataDir`
+
  * default, with the `userHome` test seam honored) — never fall back to
  *
  // (ADR-0087)

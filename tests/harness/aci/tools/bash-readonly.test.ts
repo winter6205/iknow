@@ -419,6 +419,27 @@ describe("validateReadonlyCommand — SC-S4-1 parse-facts pins (T23)", () => {
       expectReject(cmd, "background operator");
   });
 
+  it("does not read fd duplication N>&M as a background operator", () => {
+    // `2>&1` duplicates stderr onto stdout. The same shape with other small
+    // fds (`1>&2`) is the same operator. It is not a background job and not
+    // an output-file redirect. The ok-parse path and the non-ok text fold
+    // must agree.
+    assert.equal(parseForSecurity("echo hi 2>&1").kind, "ok");
+    expectAllow("echo hi 2>&1");
+    assert.equal(parseForSecurity("echo hi 2>&1 | head").kind, "ok");
+    expectAllow("echo hi 2>&1 | head");
+    assert.equal(parseForSecurity("echo hi 1>&2").kind, "ok");
+    expectAllow("echo hi 1>&2");
+    assert.equal(parseForSecurity("echo hi 2>&1 &&").kind, "malformed");
+    expectAllow("echo hi 2>&1 &&");
+  });
+
+  it("denies a file redirect after an fd dup as redirection, not background", () => {
+    expectReject("echo hi 2>&1 > out", "output redirection");
+    expectReject("ls &> out.txt", "background operator");
+    expectReject("ls >& out.txt", "background operator");
+  });
+
   it("answers a non-ok shape through the text fold exactly as before", () => {
     // `ls &&` is `malformed` for the parse; the fold's answer is today's:
     // splitShellSegments consumed the `&&` and the single `ls` segment

@@ -42,6 +42,7 @@ import { workerStderrPath } from "../../src/harness/sandbox/fence-tmp.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import { createSubAgentContinueTool } from "../../src/harness/subagent/subagent-continue-tool.ts";
 import {
+  DEFAULT_OWNER,
   clearActiveExtraSecrets,
   setActiveExtraSecrets,
 } from "../../src/harness/sandbox/env-isolation.ts";
@@ -184,7 +185,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       join(tmpdir(), "iknow-subagent-diagnostics-")
     );
     const secret = "T2_FAKE_SECRET_9f8e7d6c";
-    setActiveExtraSecrets([secret]);
+    setActiveExtraSecrets(DEFAULT_OWNER, [secret]);
     try {
       // ADR-0071 per-agent layout: once subagentsDir is injected into the
       // manager, lifecycle / content trace lands in
@@ -237,7 +238,7 @@ describe("subagent-chain: manager ↔ 子进程 spawn 协议集成", () => {
       assert.equal(typeof stop?.stderr_bytes, "number");
       await mgr.shutdown();
     } finally {
-      clearActiveExtraSecrets();
+      clearActiveExtraSecrets(DEFAULT_OWNER);
       rmSync(diagnosticsDir, { recursive: true, force: true });
     }
   });

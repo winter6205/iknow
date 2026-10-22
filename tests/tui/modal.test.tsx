@@ -153,6 +153,38 @@ describe("selectModalRows（modal 行账 SSOT）", () => {
     expect(permissionModalRows({ tool: "bash", summaryHint: "" }, 100)).toBe(7);
   });
 
+  test("call id：描述点名被询问的调用（前 12 字符），行账不变式保持", () => {
+    const ask = {
+      tool: "bash",
+      summaryHint: "ls -la",
+      toolUseId: "toolu_01abcdefghijklmnop",
+    };
+    const content = permissionModalContent(ask);
+    // The summary hint line is kept; the short id is appended after ` · `.
+    expect(content.title).toBe("允许执行 bash？");
+    expect(content.description).toBe("ls -la · call toolu_01abcd");
+    expect(content.description).not.toContain("toolu_01abcdefghijklmnop");
+    // Empty summary hint → the call id is the only description part.
+    expect(
+      permissionModalContent({
+        tool: "bash",
+        summaryHint: "",
+        toolUseId: ask.toolUseId,
+      }).description
+    ).toBe("call toolu_01abcd");
+    // Without an id the description stays exactly the summary hint.
+    expect(
+      permissionModalContent({ tool: "bash", summaryHint: "ls -la" })
+        .description
+    ).toBe("ls -la");
+    // Row accounting reads the same content: rendering + prediction cannot drift.
+    for (const cols of [100, 44]) {
+      expect(permissionModalRows(ask, cols)).toBe(
+        selectModalRows(permissionModalContent(ask), cols)
+      );
+    }
+  });
+
   test("窄终端：标题 / 描述按视觉宽度折行入账（CJK 占 2 列）", () => {
     const longHint =
       "rm -rf /some/very/long/path/that/wraps/on/narrow/terminals";

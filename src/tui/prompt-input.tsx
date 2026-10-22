@@ -40,6 +40,7 @@ import type {
   TextareaRenderable,
 } from "@opentui/core";
 import { SLASH_HINT_DESCRIPTIONS, type SlashCandidate } from "./slash.js";
+import type { ComposerDraft } from "./composer-draft.js";
 import { clipOneLineVisual, visualWidth } from "./tool-summary.js";
 import { tuiPalette } from "./theme.js";
 
@@ -152,12 +153,19 @@ export interface PromptInputProps {
   readonly hintSuggestions?: ReadonlyArray<SlashCandidate>;
   /** Command history (in-memory, valid within the session, not persisted). Only effective while hints are hidden. */
   readonly history?: ReadonlyArray<string>;
+  /** Folded-unit table behind the composer. When present, a label adjacent to
+   *  the cursor is deleted as one whole unit, and Ctrl+G toggles the unit under
+   *  the cursor between its summary and its exact text. */
+  readonly draft?: ComposerDraft;
   /**
    * Leaving the input falls onto graph chrome: Tab with no completion, or
    * single-line Down while not browsing history. Return true = handled, do
    * not run the default Tab/Down.
    */
   readonly onLeaveToChrome?: () => boolean;
+  /** Up on an empty live buffer. True = the newest unread queued draft was
+   *  written back and this key must not walk history. */
+  readonly onRecallQueued?: () => boolean;
 }
 
 /** Imperative handle: the app-layer paste path writes the buffer directly —
@@ -165,8 +173,24 @@ export interface PromptInputProps {
  *  last-writer-wins race between state-first paste and buffer-first keypress;
  *  see tests/tui/input-interleave-race.test.tsx). */
 export interface PromptInputHandle {
+  /** Whether an imperative buffer write would land right now: the composer is
+   *  mounted and not disabled. `insertText` / `replaceBuffer` drop their write
+   *  in exactly these cases without saying so, so a caller that spends draft
+   *  state on the write (an `[image#N]` label, a folded `[paste#N]`) checks
+   *  here first rather than paying for a payload nothing can display. */
+  readonly isEditable: () => boolean;
   /** Insert text at the current cursor (synchronous native-buffer write + immediate onChange report). */
   readonly insertText: (text: string) => void;
+  /** Full-buffer replacement with the cursor placed at `caret` (the folded
+   *  paste / image-label paths need a specific position; `setText` alone would
+   *  leave it at the end). */
+  readonly replaceBuffer: (text: string, caret: number) => void;
+  /** Caret position in the live buffer as a UTF-16 character index — the same
+   *  caliber `replaceBuffer` takes; the native buffer itself counts cells. */
+  readonly getCursorOffset: () => number;
+  /** Selected text, or null when the editor has no selection. Live buffer
+   *  state, unlike the renderer's cached selection. */
+  readonly getSelection: () => string | null;
 }
 
 export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
@@ -215,9 +239,11 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
     const syncValueRef = useRef<string | null>(null);
     // The textarea has no value setter — the controlled value rebuilds the
     // buffer via ref.setText. onContentChange is the sole content-change
-    // signal for user input; programmatic writes (history/tab / submit clear)
-    // go through the sync effect below, which setTexts whenever buffer and
-    // props.value disagree.
+    // signal for user input. Programmatic writes (history/tab) go through the
+    // sync effect below, which setTexts whenever buffer and props.value
+    // disagree. A non-empty Enter clears the native buffer itself
+    // (submitLiveBuffer): when state never left "" the submit's setState("")
+    // is a bailout, so that effect would not run.
     const textareaRef = useRef<TextareaRenderable | null>(null);
     // In-flight report (echo in-flight): handleContentChange records v before
     // each onChange(v); cleared once the commit consumes it (props.value
@@ -229,9 +255,127 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
     // rollback → the new segment is swallowed). Discrimination rule:
     // echoPending === buffer = state merely lags behind the buffer, skip
     // setText and wait for catch-up; otherwise it is a genuine programmatic
-    // write (history/tab/rewind/submit — state-first, buffer untouched, so
-    // echoPending differs from buffer), setText syncs as usual.
+    // write (history/tab/rewind — state-first, buffer untouched, so
+    // echoPending differs from buffer), setText syncs as usual. Enter's
+    // clear is the exception: it setTexts "" before onSubmit and records
+    // that write in syncValueRef.
     const echoPendingRef = useRef<string | null>(null);
+    // The label Ctrl+G expanded, so a second Ctrl+G can collapse what the user
+    // just revealed even though the caret no longer sits on a label.
+    const foldTargetRef = useRef<string | null>(null);
+
+    // Programmatic full-buffer write with the caret placed deliberately
+    // (setText alone lands the cursor at the end). Marked in navValueRef so
+    // the replay handleContentChange sees is recognized as non-user input,
+    // same contract as the Tab-completion write.
+    //
+    // `cursorOffset` counts terminal cells (CJK 2, `\n` 1) while draft carets
+    // are UTF-16 indices; the raw index lands inside a wide cell, where the
+    // native deleteCharBackward silently deletes nothing.
+    function cellOffsetOf(text: string, charIndex: number): number {
+      let cells = 0;
+      for (const ch of text.slice(0, charIndex)) {
+        cells += ch === "\n" ? 1 : visualWidth(ch);
+      }
+      return cells;
+    }
+
+    // Inverse of cellOffsetOf (same width source, so the pair is self-consistent):
+    // a cell that falls inside a wide character resolves to that character's
+    // start, the one rounding that keeps charIndex -> cell -> charIndex an
+    // identity at every boundary a caret can reach. Cells outside the text's
+    // cell span clamp to its first / last character index.
+    function charIndexOf(text: string, cellOffset: number): number {
+      let cells = 0;
+      let charIndex = 0;
+      for (const ch of text) {
+        const width = ch === "\n" ? 1 : visualWidth(ch);
+        if (cells + width > cellOffset) break;
+        cells += width;
+        charIndex += ch.length;
+      }
+      return charIndex;
+    }
+
+    function applyBuffer(text: string, caret: number): boolean {
+      const ta = textareaRef.current;
+      if (!ta) return false;
+      navValueRef.current = text;
+      // Same echo the keystroke path records: a render that still holds the
+      // previous value must not setText that stale string over this write.
+      echoPendingRef.current = text;
+      ta.setText(text);
+      ta.cursorOffset = cellOffsetOf(
+        text,
+        Math.max(0, Math.min(caret, text.length))
+      );
+      props.onChange(text);
+      return true;
+    }
+
+    function toggleFoldAtCursor(): void {
+      const ta = textareaRef.current;
+      const draft = props.draft;
+      if (!ta || !draft) return;
+      const buffer = ta.plainText;
+      const pending = foldTargetRef.current;
+      if (pending !== null) {
+        foldTargetRef.current = null;
+        const collapsed = draft.refold(buffer, pending);
+        if (collapsed !== buffer) {
+          applyBuffer(collapsed, collapsed.indexOf(pending));
+          return;
+        }
+      }
+      const caret = charIndexOf(buffer, ta.cursorOffset);
+      const span = draft
+        .knownLabels(buffer)
+        .find((s) => caret >= s.start && caret <= s.end);
+      if (span === undefined) return;
+      const expanded = draft.unfold(buffer, span.label);
+      if (expanded === buffer) return;
+      foldTargetRef.current = span.label;
+      applyBuffer(expanded, span.start + (draft.text(span.label)?.length ?? 0));
+    }
+
+    function deleteUnitAtCursor(direction: "backward" | "forward"): boolean {
+      const ta = textareaRef.current;
+      const draft = props.draft;
+      if (!ta || !draft) return false;
+      const result = draft.deleteLabelUnit(
+        ta.plainText,
+        charIndexOf(ta.plainText, ta.cursorOffset),
+        direction
+      );
+      if (!result.removed) return false;
+      foldTargetRef.current = null;
+      return applyBuffer(result.buffer, result.caret);
+    }
+
+    // Key gates of handleKeyDown, one function per feature so a new gate costs
+    // the dispatch chain a single branch. True = handleKeyDown stops here.
+
+    /** Ctrl+G is the composer's own fold toggle (unbound in the textarea), so it
+     *  is claimed before the other Ctrl/Meta keys are yielded untouched to the
+     *  app-layer useKeyboard. */
+    function handleCtrlKeys(e: KeyEvent): boolean {
+      if (e.ctrl && e.name === "g") {
+        e.preventDefault();
+        toggleFoldAtCursor();
+        return true;
+      }
+      return e.ctrl || e.meta;
+    }
+
+    /** A folded unit is one deletion: a label adjacent to the cursor goes whole,
+     *  and only then does the key stop reaching the native buffer. */
+    function handleDeletionKeys(e: KeyEvent): boolean {
+      if (e.name !== "backspace" && e.name !== "delete") return false;
+      if (!deleteUnitAtCursor(e.name === "backspace" ? "backward" : "forward"))
+        return false;
+      e.preventDefault();
+      return true;
+    }
 
     // Imperative paste entry: buffer-first like keypress (insertText writes the
     // native buffer → synchronous content-changed emit → handleContentChange
@@ -240,17 +384,34 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
     // setState. The content-changed replay during insertText is guarded by
     // syncValueRef (after insertText, buffer != syncValueRef → judged a real
     // edit, path straight to onChange).
-    useImperativeHandle(
-      ref,
-      (): PromptInputHandle => ({
+    useImperativeHandle(ref, (): PromptInputHandle => {
+      // One predicate for the two writes below: a disabled composer drops an
+      // imperative write *silently*, so callers that would have spent a draft
+      // label for that dropped write ask first.
+      const editable = (): boolean =>
+        textareaRef.current !== null && !props.disabled;
+      return {
+        isEditable: editable,
         insertText: (text: string): void => {
           const ta = textareaRef.current;
           if (!ta || props.disabled) return;
           ta.insertText(text);
         },
-      }),
-      [props.disabled]
-    );
+        replaceBuffer: (text: string, caret: number): void => {
+          if (props.disabled) return;
+          applyBuffer(text, caret);
+        },
+        getCursorOffset: (): number => {
+          const ta = textareaRef.current;
+          return ta ? charIndexOf(ta.plainText, ta.cursorOffset) : 0;
+        },
+        getSelection: (): string | null => {
+          const ta = textareaRef.current;
+          if (!ta || !ta.hasSelection()) return null;
+          return ta.getSelectedText();
+        },
+      };
+    }, [props.disabled]);
 
     useEffect(() => {
       // Echo consumption: state has caught up with the in-flight report →
@@ -343,6 +504,26 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
       props.onChange(v);
     }
 
+    function submitLiveBuffer(): void {
+      const ta = textareaRef.current;
+      const live = ta?.plainText ?? props.value;
+      // Keystrokes and a following Enter can share one stdin read.
+      // The native buffer already holds the line; props.value is still
+      // the previous commit, often "". Submitting that sends nothing.
+      // The keystroke content-changed events are also still queued, and
+      // because state never left "" the submit's setState("") is a
+      // bailout — the sync effect does not run, and those queued
+      // events would leave the line on screen. Clear the buffer here.
+      // syncValueRef swallows the setText replay and any queued
+      // content-changed that still observes the empty buffer.
+      echoPendingRef.current = null;
+      if (ta !== null && ta.plainText.length > 0) {
+        syncValueRef.current = "";
+        ta.setText("");
+      }
+      props.onSubmit(live);
+    }
+
     function handleKeyDown(e: KeyEvent): void {
       // The disabled state blurs via focused={false}, detaching the
       // keypressHandler; this branch is only reachable in the re-render race
@@ -352,8 +533,8 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
         return;
       }
 
-      // Yield global keys (Ctrl+C / Ctrl+O / Shift+Tab are handled by the app layer).
-      if (e.ctrl || e.meta) return;
+      // Ctrl+G is claimed here, before the global-key yield (see handleCtrlKeys).
+      if (handleCtrlKeys(e)) return;
       if (e.shift && e.name === "tab") return;
 
       if (e.name === "return") {
@@ -368,7 +549,7 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
             const cmd = suggestions[idx];
             if (cmd !== undefined) props.onSelectHint(cmd);
           } else {
-            props.onSubmit(props.value);
+            submitLiveBuffer();
           }
           e.preventDefault();
         }
@@ -395,11 +576,12 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
 
       // ↑/↓ priority:
       //   1) hints visible → hint cursor;
-      //   2) multiline input (logical \n lines or wrap-visual lines) → call
+      //   2) empty live buffer → pull the newest unread queued draft back;
+      //   3) multiline input (logical \n lines or wrap-visual lines) → call
       //      ta.moveCursorUp/Down explicitly (visual-line movement); only at
       //      the boundary (already on the visual first/last line, so the move
       //      is a no-op) fall back to history;
-      //   3) single line → history recall / draft restore.
+      //   4) single line → history recall / draft restore.
       // The multiline test keys off `props.value` (controlled state; the
       // submit/programmatic-write backend is authoritative) — not
       // `ta.plainText`, because at the submit instant the textarea buffer is
@@ -423,44 +605,57 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
       const totalVisualRowsOf = (t: NonNullable<TextareaRenderable>): number =>
         t.editorView.getTotalVirtualLineCount();
 
-      if (e.name === "up") {
+      function pullQueuedDraft(): boolean {
+        const live = ta?.plainText ?? props.value;
+        if (live.length > 0) return false;
+        if (props.onRecallQueued?.() !== true) return false;
+        e.preventDefault();
+        return true;
+      }
+
+      function recallHistoryEntry(): void {
+        if (history.length === 0) return;
+        if (historyCursor === -1) draftRef.current = props.value;
+        const next =
+          historyCursor === -1
+            ? history.length - 1
+            : Math.max(0, historyCursor - 1);
+        const target = history[next];
+        if (target !== undefined) {
+          navValueRef.current = target;
+          setHistoryCursor(next);
+          props.onChange(target);
+        }
+        e.preventDefault();
+      }
+
+      function moveVisualUp(): void {
+        if (ta === null) return;
+        // Already on the visual first line: history. Otherwise one visual
+        // line up. An empty history still moves (a no-op at row 0).
+        if (visualRowOf(ta) <= 0 && history.length > 0) {
+          recallHistoryEntry();
+          return;
+        }
+        ta.moveCursorUp();
+        e.preventDefault();
+      }
+
+      function handleUpKey(): void {
         if (hasHint) {
           setHintCursor((c) => Math.max(0, c - 1));
-        } else if (isMultiline && ta !== null) {
-          // Multiline: call native moveCursorUp (visual line up); if the
-          // cursor is already on the visual first line (visualRow === 0),
-          // moveCursorUp no-ops there → boundary → history recall.
-          if (visualRowOf(ta) <= 0 && history.length > 0) {
-            if (historyCursor === -1) draftRef.current = props.value;
-            const next =
-              historyCursor === -1
-                ? history.length - 1
-                : Math.max(0, historyCursor - 1);
-            const target = history[next];
-            if (target !== undefined) {
-              navValueRef.current = target;
-              setHistoryCursor(next);
-              props.onChange(target);
-            }
-          } else {
-            ta.moveCursorUp();
-          }
-          e.preventDefault();
-        } else if (history.length > 0) {
-          // Single line: history recall (original logic).
-          if (historyCursor === -1) draftRef.current = props.value;
-          const next =
-            historyCursor === -1
-              ? history.length - 1
-              : Math.max(0, historyCursor - 1);
-          const target = history[next];
-          if (target !== undefined) {
-            navValueRef.current = target;
-            setHistoryCursor(next);
-            props.onChange(target);
-          }
-          e.preventDefault();
+          return;
         }
+        if (pullQueuedDraft()) return;
+        if (isMultiline && ta !== null) {
+          moveVisualUp();
+          return;
+        }
+        recallHistoryEntry();
+      }
+
+      if (e.name === "up") {
+        handleUpKey();
         return;
       }
 
@@ -524,9 +719,12 @@ export const PromptInput = forwardRef<PromptInputHandle, PromptInputProps>(
         return;
       }
 
-      // All other keys (printable chars / backspace / left-right etc.) pass
-      // through: the textarea handles them natively and reports full content
-      // via onContentChange.
+      // A folded unit deletes as one, ahead of the pass-through tail below.
+      if (handleDeletionKeys(e)) return;
+
+      // All other keys (printable chars / left-right etc.) pass through: the
+      // textarea handles them natively and reports full content via
+      // onContentChange.
     }
 
     // The input stays border-only (operator feedback 2026-09-07): the fill

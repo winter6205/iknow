@@ -41,9 +41,11 @@ import {
 import Anthropic from "@anthropic-ai/sdk";
 import {
   loadIknowEnv,
+  resolveLlmEnvForRoute,
   wireModelFromRoute,
   DEFAULT_MAX_OUTPUT_TOKENS,
   type IknowEnv,
+  type LlmEnv,
   type SubagentModelEnv,
 } from "../../config/env.js";
 import { loadIknowSettings } from "../../config/settings.js";
@@ -59,11 +61,10 @@ import {
   type FsModeContext,
 } from "../sandbox/fs-mode.js";
 import {
-  YOLO_ENV_KEY,
-  createYoloContext,
+  FENCE_RETIRED_ENV_KEY,
+  fenceRetiredSpread,
   parseYoloFlag,
-  yoloHolderSpread,
-  type YoloContext,
+  type FenceRetirementReader,
 } from "../sandbox/yolo.js";
 import {
   createRealAnthropicAdapter,
@@ -257,6 +258,11 @@ export interface CreateWorkerDepsOptions {
   readonly sandboxRoot: string;
   /** Parent turn's effective thinking snapshot, when supplied by the envelope. */
   readonly parentThinking?: ThinkingParams;
+  /**
+   * The parent conversation's model route (`provider/model`), when supplied by
+   * the envelope. The worker resolves it and runs on that route.
+   */
+  readonly parentModelRoute?: string;
   /** Test seam: inject a stub model (createStubModel) in place of the real Anthropic adapter. */
   readonly model?: LoopEngineDeps["adapter"];
   /** Test seam: custom skill catalog (default = worker's own scan). */
@@ -320,18 +326,20 @@ export interface CreateWorkerDepsOptions {
    */
   readonly worktreeOnMutate?: WorktreeGateReader;
   /**
-   * ADR-0119 / specs/yolo-mode.md: yolo holder (per-call snapshot), passed to
+   * ADR-0141: the derived fence posture (per-call snapshot), passed to
    * the worker's bash factory. Holder absent → the fence is present (V1
    * baseline).
    *
-   * The production entry's holder is built by `yoloOptionFromEnv(process.env)`
-   * from the parent-written `IKNOW_YOLO` — the same env wire as `fsMode`, the
+   * The production entry's reader is built by `yoloOptionFromEnv(process.env)`
+   * from the parent-written `IKNOW_FENCE_RETIRED` (ADR-0141 renamed the wire;
+   * the reader function kept its name because it still answers "is the fence
+   * retired") — the same env wire as `fsMode`, the
    * same "rebuild the holder in this process after the value crosses the
    * boundary" shape. The worker exposes no `/yolo` command face, so there is no
    * second in-place-flip entry; the holder shape is kept for the bash factory's
    * existing opt contract.
    */
-  readonly yolo?: YoloContext;
+  readonly fenceRetired?: FenceRetirementReader;
   /**
    * Seam copy of envelope.role (passed through by runSubagentWorker).
    * The worker queries the catalog at assembly time for the body and injects
@@ -527,21 +535,22 @@ export function worktreeGateOptionFromEnv(
 }
 
 /**
- * `IKNOW_YOLO` (written by the parent) → the worker bash factory's `yolo`
+ * `IKNOW_FENCE_RETIRED` (written by the parent) → the worker bash factory's
+ * `fenceRetired`
  * holder.
  *
  * Same shape as `fsModeOptionFromEnv` (the value crosses the boundary, then the
  * holder is rebuilt in this process). The parent normalizes the key when its
  * holder is wired (`"1"` / `"0"` both written, and an ambient inherited value is
  * scrubbed — see `buildSubAgentChildEnv` in `spawn.ts`); either way this reader
- * stays fail-closed: only a `parseYoloFlag` hit produces a holder, `"0"` /
+ * stays fail-closed: only a `parseYoloFlag` hit produces a reader, `"0"` /
  * absent / garbage → **empty object** (fence present, the pre-wire shape).
  */
 export function yoloOptionFromEnv(
   env: Readonly<Record<string, string | undefined>>
-): { readonly yolo?: YoloContext } {
-  return parseYoloFlag(env[YOLO_ENV_KEY])
-    ? { yolo: createYoloContext(true) }
+): { readonly fenceRetired?: FenceRetirementReader } {
+  return parseYoloFlag(env[FENCE_RETIRED_ENV_KEY])
+    ? { fenceRetired: { get: () => true } }
     : {};
 }
 
@@ -591,8 +600,40 @@ function todoLedgerRegistryOpts(
 }
 
 /**
+ * The llm arm the worker's transport is built from (ADR-0145 §8).
+ *
+ * Three-way winner: `settings.subagent.model` wins (an explicit operator
+ * setting for sub-agents) and is handed to the client / budget helpers as the
+ * route; otherwise the parent conversation's route (`parentModelRoute` on the
+ * envelope) is resolved against the provider registry the env carries; otherwise
+ * the process default stays.
+ *
+ * The parent route is resolved ONLY when it differs from `env.llm.model` — the
+ * env already IS that route, so that path returns the env unchanged and never
+ * touches the provider registry. Resolving a differing route needs the env's
+ * registry (`LlmEnv.providers`), so a registry-less hand-made env keeps working
+ * only while the route equals `env.llm.model`. A route that does not resolve
+ * throws the typed `LlmProviderConfigError`: a silent fallback to the process
+ * default would run the child on a model its parent never chose.
+ *
+ * A named mount point rather than inline, for the same reason as
+ * createWorkerAnthropicClient below: createWorkerRuntime already sits at the
+ * S5 ceiling, so new branches must land in a new function.
+ */
+function resolveWorkerRouteLlm(
+  env: IknowEnv,
+  workerRoute: SubagentModelEnv | undefined,
+  parentModelRoute: string | undefined
+): LlmEnv {
+  if (workerRoute !== undefined) return env.llm;
+  const route = parentModelRoute?.trim();
+  if (!route || route === env.llm.model) return env.llm;
+  return resolveLlmEnvForRoute(env, route).llm;
+}
+
+/**
  * The worker child's Anthropic client. Header pass-through matches
- * build-engine's `createAdapterFromEnv` — when `env.llm.headers` has values it
+ * build-engine's `createAdapterFromEnv` — when `llm.headers` has values it
  * becomes the SDK `defaultHeaders`; absent → **the key is not passed**
  * (conditional spread), so client options stay byte-identical (no explicit
  * `undefined` / `{}` leaking in).
@@ -603,16 +644,16 @@ function todoLedgerRegistryOpts(
  * "env → client" boundary anyway.
  */
 function createWorkerAnthropicClient(
-  env: IknowEnv,
+  llm: LlmEnv,
   route?: SubagentModelEnv
 ): Anthropic {
   // A resolved worker route supplies the whole transport triple — when it is
   // present but carries no headers, defaultHeaders stays unset rather than
   // borrowing the main-session headers (which would mix two providers).
-  const headers = route === undefined ? env.llm.headers : route.headers;
+  const headers = route === undefined ? llm.headers : route.headers;
   return new Anthropic({
-    apiKey: route?.apiKey ?? env.llm.apiKey,
-    baseURL: route?.baseUrl ?? env.llm.baseUrl,
+    apiKey: route?.apiKey ?? llm.apiKey,
+    baseURL: route?.baseUrl ?? llm.baseUrl,
     ...(headers !== undefined ? { defaultHeaders: headers } : {}),
   });
 }
@@ -629,11 +670,11 @@ function createWorkerAnthropicClient(
  * S5 ceiling, so its budget branch must land in a new function.
  */
 function resolveWorkerMaxTokens(
-  env: IknowEnv,
+  llm: LlmEnv,
   workerRoute?: SubagentModelEnv
 ): number {
   const routeBudget =
-    workerRoute === undefined ? env.llm.routeMaxTokens : workerRoute.maxTokens;
+    workerRoute === undefined ? llm.routeMaxTokens : workerRoute.maxTokens;
   return routeBudget ?? DEFAULT_MAX_OUTPUT_TOKENS;
 }
 
@@ -726,18 +767,27 @@ export async function createWorkerRuntime(
   const askUser = createNoAskUser();
 
   const workerRoute = env.subagent?.model;
+  // The llm arm the worker's transport comes from: `settings.subagent.model`
+  // wins; otherwise the parent conversation's route; otherwise the process
+  // default (ADR-0145 §8).
+  const routeLlm = resolveWorkerRouteLlm(
+    env,
+    workerRoute,
+    opts.parentModelRoute
+  );
   const thinking = resolveWorkerThinking(env, opts.parentThinking);
   const adapter =
     opts.model ??
     withTransportRetry(
       createRealAnthropicAdapter({
         // A resolved `settings.subagent.model` route supplies the wire model and
-        // the provider triple (client); absent → the main-session llm transport.
+        // the provider triple (client); absent → the parent conversation's route
+        // when it has one, else the main-session llm transport.
         // thinking / temperature stay the MAIN llm values even when the route
         // differs (ADR-0093 host-level sampling).
-        client: createWorkerAnthropicClient(env, workerRoute),
-        model: wireModelFromRoute(workerRoute?.model ?? env.llm.model),
-        maxTokens: resolveWorkerMaxTokens(env, workerRoute),
+        client: createWorkerAnthropicClient(routeLlm, workerRoute),
+        model: wireModelFromRoute(workerRoute?.model ?? routeLlm.model),
+        maxTokens: resolveWorkerMaxTokens(routeLlm, workerRoute),
         temperature: env.llm.temperature,
         thinking,
         stream: env.llm.stream === "on",
@@ -852,7 +902,7 @@ export async function createWorkerRuntime(
     // not call `homedir()` again — same as the main chain: the test seam must
     // be able to steer the fence source.
     fsMode: opts.fsMode,
-    ...yoloHolderSpread(opts.yolo),
+    ...fenceRetiredSpread(opts.fenceRetired),
     homeRoot: userHome,
     // Switch holder threaded to the worker bash factory (absent = no segment).
     ...(opts.worktreeOnMutate !== undefined
@@ -969,14 +1019,12 @@ export async function createWorkerRuntime(
   // Judge workers must not inherit the full iknow soul / assistant voice.
   // Catalog lookup is skipped so "unknown role"
   // fallback does not re-attach the iknow base.
-  // The worker gets the same git snapshot as the parent agent.
-  // At assembly time the worker synchronously takes one
-  // createGitSnapshotProvider (with the stable projectIdentityRoot as cwd);
-  // the result is frozen in the closure → byte-constant within the worker
-  // process, injected into the resolver's `git` seam → sharing the same git
-  // block text with the parent agent. Degenerate states (not a git repo / git
-  // unavailable / cwd unresolvable) → undefined → segment absent, no
-  // assembly error.
+  // The worker gets the same git snapshot as the parent agent: it starts one
+  // createGitSnapshotProvider (stable projectIdentityRoot as cwd) and injects
+  // it into the resolver's `git` seam; taking it is no longer synchronous, so
+  // worker startup is not blocked by the git read (the capture contract lives
+  // on `createGitSnapshotProvider`). Degenerate states → undefined → segment
+  // absent, no assembly error.
   const baseSystem = isJudge
     ? async () => undefined
     : (opts.system ??
@@ -2366,6 +2414,9 @@ async function assembleAndRunWorker(
     disallowedTools: workerEnvelope.disallowedTools,
     ...(workerEnvelope.parentThinking !== undefined
       ? { parentThinking: workerEnvelope.parentThinking }
+      : {}),
+    ...(workerEnvelope.parentModelRoute !== undefined
+      ? { parentModelRoute: workerEnvelope.parentModelRoute }
       : {}),
     // envelope.role is threaded to the createWorkerDeps seam — when absent,
     // the key is omitted (V1 baseline, byte-stable). ADR-0112: envelope.systemPrompt

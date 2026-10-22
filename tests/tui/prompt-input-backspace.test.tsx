@@ -49,15 +49,23 @@
  *  (e) programmatic write (history recall ↑) → caret at end (setText-to-zero regression);
  *  (f) programmatic write (Tab completion) → caret at end (setText-to-zero regression);
  *  (g) single-line programmatic write → caret also at end (no regression; polling wait reduces parallel flakiness);
- *  (h) programmatic write (multiline paste append) → caret at end (usePaste
- *      setState triggers setText; pasteBracketedText keeps \n with
- *      tail-append semantics, plainText = "ab历\n史\n回\n退");
+ *  (h) programmatic write (multiline paste, then Ctrl+G expand) → caret at end
+ *      in both states (usePaste folds to `[paste#1 · 4 lines · 7 chars]`, the
+ *      expand writes the payload back; pasteBracketedText keeps \n with
+ *      tail-append semantics, expanded plainText = "ab历\n史\n回\n退");
  *  (i) programmatic write (anchor refill, long multiline) → caret at end
  *      (component-level setState emulates app.tsx, since rewind end-to-end
  *      needs session+checkpoint+picker UI wiring; unit-level verification of
  *      the controlled sync effect is equivalent);
  *  (j) submit clear (Enter) → setInputValue("") → setText("") + gotoBufferEnd
  *      no-op → offset 0, text 0, no crash.
+ *  (k)-(p) cell/character caliber of the composer caret: the native buffer
+ *      counts terminal cells (CJK 2, `\n` 1) while every draft caret is a UTF-16
+ *      index, so writes convert up (k) and reads convert back — the fold-span
+ *      lookup (l), the deletion unit (m), the whole Ctrl+G → Ctrl+G → Backspace
+ *      sequence on a paste label (o), an `[image#N]` label with the payload
+ *      dropped on deletion (p); (n) pins the programmatic-write over-delete
+ *      defect that survives the caliber fix (native 8 chars, programmatic 7).
  *
  * Observation method: walk renderer.root to find the textarea renderable
  * (plainText + visualCursor) and read `offset`/`visualCol` directly — the
@@ -75,7 +83,14 @@ import { join } from "node:path";
 import { useState } from "react";
 import { testRender } from "@opentui/react/test-utils";
 import type { TestRendererSetup } from "@opentui/core/testing";
-import { PromptInput } from "../../src/tui/prompt-input.js";
+import {
+  PromptInput,
+  type PromptInputHandle,
+} from "../../src/tui/prompt-input.js";
+import {
+  createComposerDraft,
+  type ComposerDraft,
+} from "../../src/tui/composer-draft.js";
 import { TuiApp, createToolEventSink } from "../../src/tui/app.js";
 import {
   createInflightRegistry,
@@ -86,8 +101,10 @@ import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
+import { emptyClipboardImageReader } from "./_fixtures.js";
 
 interface TaSnapshot {
+  text: string;
   textLen: number;
   offset: number;
   visualCol: number;
@@ -123,6 +140,7 @@ function taSnapshot(setup: TestRendererSetup): TaSnapshot[] {
       t as unknown as { visualCursor: { offset: number; visualCol: number } }
     ).visualCursor;
     return {
+      text: t.plainText as string,
       textLen: (t.plainText as string).length,
       offset: vc.offset,
       visualCol: vc.visualCol,
@@ -187,6 +205,9 @@ async function mount(): Promise<MountCtx> {
       dataDir={dataDir}
       permissionMode={createPermissionModeContext("default")}
       sessionGrants={createSessionGrants()}
+      // (h) drives a real bracketed paste; keep the clipboard seam stubbed at
+      // its boundary even though a multiline fold never reaches the reader.
+      clipboardImageReader={emptyClipboardImageReader}
       onQuit={() => {
         if (setupRef && !setupRef.renderer.isDestroyed)
           setupRef.renderer.destroy();
@@ -209,6 +230,52 @@ async function mount(): Promise<MountCtx> {
     destroy: async () => {
       if (!setup.renderer.isDestroyed) setup.renderer.destroy();
     },
+  };
+}
+
+/**
+ * Component-level PromptInput wired to a real draft table: `write` is the
+ * programmatic buffer+caret entry (`replaceBuffer`, caret = UTF-16 index) and
+ * `caret` reads back the handle's cursor contract. Deliberately not app-level:
+ * the read direction under test is prompt-input's own conversion, not the
+ * app's paste plumbing (which (h) covers).
+ */
+async function mountDraftInput(draft: ComposerDraft): Promise<{
+  setup: TestRendererSetup;
+  write: (text: string, caret: number) => void;
+  caret: () => number;
+}> {
+  const inputRef: { current: PromptInputHandle | null } = { current: null };
+  let write: ((text: string, caret: number) => void) | null = null;
+  function Harness() {
+    const [v, setV] = useState("");
+    write = (text: string, caret: number) =>
+      inputRef.current?.replaceBuffer(text, caret);
+    return (
+      <PromptInput
+        ref={inputRef}
+        value={v}
+        cols={80}
+        active
+        draft={draft}
+        onChange={setV}
+        onSubmit={() => {}}
+      />
+    );
+  }
+  const setup = await testRender(<Harness />, {
+    width: 80,
+    height: 10,
+    exitOnCtrlC: false,
+    consoleMode: "disabled",
+    kittyKeyboard: true,
+  });
+  await new Promise((r) => setTimeout(r, 100));
+  await setup.renderOnce();
+  return {
+    setup,
+    write: (text: string, caret: number) => write!(text, caret),
+    caret: () => inputRef.current?.getCursorOffset() ?? -1,
   };
 }
 
@@ -393,31 +460,414 @@ describe("输入框 backspace 光标不跳头（2026-08-15 用户反馈）", () 
     }
   }, 30_000);
 
-  test("(h) 程序写入（paste 多行追加）→ 光标在末尾（usePaste setState 触发 setText 回归）", async () => {
+  test("(h) 程序写入（paste 多行折叠 + Ctrl+G 展开）→ 两种状态光标都在末尾", async () => {
     const app = await mount();
     try {
       // real paste event (pasteBracketedText emits the bracketed-paste
-      // sequence, reaching app.tsx usePaste setInputValue(prev => prev + text) setState).
-      // Measured: \n preserved, plainText = "ab历\n史\n回\n退", tail-append semantics.
+      // sequence, reaching app.tsx usePaste).
       await app.setup.mockInput.typeText("ab", 0);
       await settle(app.setup);
       expect(taSnapshot(app.setup)[0].offset).toBe(2);
 
+      // A multiline paste now folds: the buffer carries the summary label and
+      // the payload waits in the draft table. What this case pins — the caret
+      // position after a programmatic buffer write — is unchanged by that.
       await app.setup.mockInput.pasteBracketedText("历\n史\n回\n退");
-      const after = await waitUntil(
+      const folded = await waitUntil(
+        app.setup,
+        (snaps) => snaps[0]?.textLen === 31,
+        "(h) 多行 paste 折叠为摘要"
+      );
+      expect(folded[0].text).toBe("ab[paste#1 · 4 lines · 7 chars]");
+      // ASCII-only label on one visual line: end-of-text offset == text width.
+      expect(folded[0].offset).toBe(31);
+
+      // Expanding puts the exact payload back (9 chars: 2 ASCII + 4 CJK + 3 \n).
+      app.setup.mockInput.pressKey("g", { ctrl: true });
+      const expanded = await waitUntil(
         app.setup,
         (snaps) => snaps[0]?.textLen === 9,
-        "(h) paste 多行追加后光标在末尾"
+        "(h) Ctrl+G 展开回原文"
       );
-      const snap = after[0];
-      // content "ab历\n史\n回\n退": 9 chars (2 ASCII + 4 CJK + 3 \n).
-      expect(snap.textLen).toBe(9);
-      // end offset = 2(ab) + 2+1+2+1+2+1+2 (width of "历\n史\n回\n退") = 13 cols; not 0.
-      expect(snap.offset).toBe(13);
-      // first column of the last visual row ("退" CJK width 2) — caret is truly at the last line's end.
-      expect(snap.visualCol).toBe(2);
+      expect(expanded[0].text).toBe("ab历\n史\n回\n退");
+      // Measured: the caret write is cell-caliber on the native side, so the
+      // UTF-16 index 9 lands on column 13 (1+1+2+1+2+1+2+1+2) at visual column
+      // 2 of the last line — both states sit at text end, not at buffer start.
+      expect(expanded[0].offset).toBe(13);
+      expect(expanded[0].visualCol).toBe(2);
+
+      // Backspace also proves the caret sits at the end behaviorally: a caret
+      // left inside the wide cell would delete nothing. Length 7, not 8: the
+      // programmatic write path deletes the last grapheme AND its newline
+      // (native typing keeps the newline) — measured in (n), where the same
+      // over-delete reproduces on an ASCII buffer through the sync effect's own
+      // setText + gotoBufferEnd, so it is that path's defect, not this caret's.
+      app.setup.mockInput.pressBackspace();
+      const afterBackspace = await waitUntil(
+        app.setup,
+        (snaps) => snaps[0]?.textLen === 7,
+        "(h) 展开后光标在末尾（backspace 吃掉末字）"
+      );
+      expect(afterBackspace[0].text).toBe("ab历\n史\n回");
     } finally {
       await app.destroy();
+    }
+  }, 30_000);
+
+  test("(k) 程序写入宽字符缓冲：光标按终端列落位，下一次 backspace 删掉末字符", async () => {
+    // `cursorOffset` counts terminal cells (CJK 2 columns, `\n` 1) while every
+    // caret this module computes is a UTF-16 index: "a历b" ends at cell 4, so
+    // passing the raw index 3 parks the caret before "b" (inside the wide "历")
+    // and the next backspace deletes the wrong character. Component-level on
+    // purpose — (h) also depends on the app's controlled-write ordering.
+    const inputRef: { current: PromptInputHandle | null } = { current: null };
+    let write: ((text: string, caret: number) => void) | null = null;
+    function Harness() {
+      const [v, setV] = useState("");
+      write = (text: string, caret: number) =>
+        inputRef.current?.replaceBuffer(text, caret);
+      return (
+        <PromptInput
+          ref={inputRef}
+          value={v}
+          cols={80}
+          active
+          onChange={setV}
+          onSubmit={() => {}}
+        />
+      );
+    }
+    const setup = await testRender(<Harness />, {
+      width: 80,
+      height: 10,
+      exitOnCtrlC: false,
+      consoleMode: "disabled",
+      kittyKeyboard: true,
+    });
+    try {
+      await new Promise((r) => setTimeout(r, 100));
+      await setup.renderOnce();
+
+      write!("a历b", 3);
+      const after = await waitUntil(
+        setup,
+        (snaps) => snaps[0]?.textLen === 3,
+        "(k) 宽字符缓冲写入完成"
+      );
+      // Cell caliber: 'a' 1 + '历' 2 + 'b' 1 → end of text is column 4.
+      expect(after[0].offset).toBe(4);
+
+      setup.mockInput.pressBackspace();
+      const deleted = await waitUntil(
+        setup,
+        (snaps) => snaps[0]?.textLen === 2,
+        "(k) backspace 删掉末字符 b"
+      );
+      expect(deleted[0].text).toBe("a历");
+
+      // Round trip identity at the handle boundary: a character index written
+      // with replaceBuffer reads back through getCursorOffset as the same
+      // character index, never as the cell count the native buffer stores.
+      const WIDE = "测试a历b\nc";
+      for (let k = 0; k <= WIDE.length; k++) {
+        write!(WIDE, k);
+        expect(inputRef.current?.getCursorOffset()).toBe(k);
+      }
+    } finally {
+      if (!setup.renderer.isDestroyed) setup.renderer.destroy();
+    }
+  }, 15_000);
+
+  test("(l) 宽字符段在折叠标签前：Ctrl+G 展开光标所在的标签", async () => {
+    // The read side of the same caliber gap: cursorOffset is terminal cells
+    // while draft label spans are UTF-16 indices. "测试[paste#1 · 4 lines · 7
+    // chars]" ends at cell 33 / char 31, so an unconverted caret reads past
+    // the span end and Ctrl+G finds no label to expand.
+    const draft = createComposerDraft();
+    const { label } = draft.foldPaste("历\n史\n回\n退");
+    const buffer = `测试${label}`;
+    const input = await mountDraftInput(draft);
+    try {
+      input.write(buffer, buffer.length);
+      const placed = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.textLen === buffer.length,
+        "(l) 宽字符折叠缓冲写入完成"
+      );
+      expect(placed[0].text).toBe(buffer);
+      // Cell caliber on the native side, character caliber on the handle.
+      expect(placed[0].offset).toBe(33);
+      expect(input.caret()).toBe(buffer.length);
+
+      input.setup.mockInput.pressKey("g", { ctrl: true });
+      const expanded = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.text === "测试历\n史\n回\n退",
+        "(l) Ctrl+G 展开光标所在标签"
+      );
+      expect(expanded[0].textLen).toBe(9);
+    } finally {
+      if (!input.setup.renderer.isDestroyed) input.setup.renderer.destroy();
+    }
+  }, 15_000);
+
+  test("(m) 宽字符段在折叠标签前：Backspace 把标签当一个删除单元", async () => {
+    // Same caret, same span, read direction: unconverted, deleteLabelUnit is
+    // handed cell 33 against the span end 31, matches nothing, and the key
+    // falls through to the native buffer — one bracket character instead of
+    // the whole folded unit.
+    const draft = createComposerDraft();
+    const { label } = draft.foldPaste("历\n史\n回\n退");
+    const buffer = `测试${label}`;
+    const input = await mountDraftInput(draft);
+    try {
+      input.write(buffer, buffer.length);
+      await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.textLen === buffer.length,
+        "(m) 宽字符折叠缓冲写入完成"
+      );
+
+      input.setup.mockInput.pressBackspace();
+      const collapsed = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.text === "测试",
+        "(m) Backspace 整块删除标签"
+      );
+      // Caret lands at the start of the removed span: char 2 = cell 4.
+      expect(collapsed[0].offset).toBe(4);
+      expect(input.caret()).toBe(2);
+      expect(draft.text(label)).toBeUndefined();
+    } finally {
+      if (!input.setup.renderer.isDestroyed) input.setup.renderer.destroy();
+    }
+  }, 15_000);
+
+  test("(n) 末行只有一个字符时 backspace：程序写入比原生多删一个（已知缺陷）", async () => {
+    // Native typing deletes one grapheme; the same buffer reached by a
+    // programmatic write deletes the grapheme AND its newline, while both
+    // report the identical caret. The ASCII phase below reproduces it with the
+    // sync effect's own setText + gotoBufferEnd, so the cause is the programmatic
+    // write path, not the cell/character caliber. Pinned as measured.
+    const input = await mountDraftInput(createComposerDraft());
+    const setup = input.setup;
+    try {
+      await setup.mockInput.typeText("ab历", 0);
+      for (const line of ["史", "回", "退"]) {
+        setup.mockInput.pressEnter({ shift: true });
+        await setup.renderOnce();
+        await setup.mockInput.typeText(line, 0);
+      }
+      const nativeBefore = taSnapshot(setup)[0];
+      expect(nativeBefore.text).toBe("ab历\n史\n回\n退");
+      expect(nativeBefore.offset).toBe(13);
+      setup.mockInput.pressBackspace();
+      await settle(setup);
+      expect(taSnapshot(setup)[0].text).toBe("ab历\n史\n回\n");
+
+      input.write("ab历\n史\n回\n退", 9);
+      const refilled = await waitUntil(
+        setup,
+        (snaps) => snaps[0]?.textLen === 9,
+        "(n) 程序写入同样缓冲"
+      );
+      // The caret really sits at text end in both paths: same cell, same column.
+      expect(refilled[0].offset).toBe(13);
+      expect(refilled[0].visualCol).toBe(2);
+      setup.mockInput.pressBackspace();
+      await settle(setup);
+      const programmatic = taSnapshot(setup)[0];
+      expect(programmatic.text).toBe("ab历\n史\n回");
+      expect(programmatic.textLen).toBe(7);
+
+      const ta = walk(
+        setup.renderer.root,
+        (r) => "plainText" in r && "visualCursor" in r
+      )[0] as unknown as {
+        setText: (text: string) => void;
+        gotoBufferEnd: () => void;
+      };
+      ta.setText("ab\nk");
+      ta.gotoBufferEnd();
+      await settle(setup);
+      expect(taSnapshot(setup)[0].offset).toBe(4);
+      setup.mockInput.pressBackspace();
+      await settle(setup);
+      expect(taSnapshot(setup)[0].text).toBe("ab");
+
+      // Native-typing control on the same ASCII shape: backspace removes the
+      // single grapheme and keeps its newline. Both paths report offset 4 / the
+      // same caret, so the over-delete is the programmatic write path's own
+      // defect and no cell/character caliber is involved.
+      input.write("", 0);
+      await settle(setup);
+      await setup.mockInput.typeText("xy", 0);
+      setup.mockInput.pressEnter({ shift: true });
+      await setup.renderOnce();
+      await setup.mockInput.typeText("z", 0);
+      const nativeAscii = taSnapshot(setup)[0];
+      expect(nativeAscii.text).toBe("xy\nz");
+      expect(nativeAscii.offset).toBe(4);
+      setup.mockInput.pressBackspace();
+      await settle(setup);
+      expect(taSnapshot(setup)[0].text).toBe("xy\n");
+    } finally {
+      if (!setup.renderer.isDestroyed) setup.renderer.destroy();
+    }
+  }, 15_000);
+
+  test("(o) 宽字符前缀的 paste 标签：Ctrl+G 展开、折回后 Backspace 仍按标签整块删", async () => {
+    // One mount, both read sites in sequence, on a buffer whose cell caliber runs
+    // 2 columns ahead of the character caliber: the native caret must be
+    // converted before the span lookup (toggleFold), the adjacency test
+    // (deleteLabelUnit) and the boundary check at the label's left edge.
+    const draft = createComposerDraft();
+    const { label } = draft.foldPaste("历\n史\n回\n退");
+    const buffer = `测试${label}`;
+    expect(buffer.length).toBe(31);
+    const input = await mountDraftInput(draft);
+    try {
+      // Character caliber in, character caliber out, at both ends of the label
+      // and through its interior (the cell caliber would be 2 columns higher).
+      for (const k of [0, 2, 3, 15, 30, 31]) {
+        input.write(buffer, k);
+        expect(input.caret()).toBe(k);
+      }
+
+      input.write(buffer, buffer.length);
+      const placed = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.textLen === buffer.length,
+        "(o) 折叠缓冲写入完成"
+      );
+      expect(placed[0].offset).toBe(33);
+
+      input.setup.mockInput.pressKey("g", { ctrl: true });
+      const expanded = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.text === "测试历\n史\n回\n退",
+        "(o) Ctrl+G 展开"
+      );
+      // Caret goes to the payload end: char 9 = cell 15 (4 for "测试" + 2+1 × 3
+      // + 2 for "退"), still text end, not buffer start.
+      expect(expanded[0].offset).toBe(15);
+      expect(input.caret()).toBe(9);
+
+      // The second Ctrl+G collapses what was just revealed (the label is no
+      // longer under the caret, so only the remembered target can refold it);
+      // applyBuffer parks the caret at the label's left edge — char 2, cell 4.
+      input.setup.mockInput.pressKey("g", { ctrl: true });
+      const refolded = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.text === buffer,
+        "(o) 第二次 Ctrl+G 折回"
+      );
+      expect(refolded[0].offset).toBe(4);
+      expect(input.caret()).toBe(2);
+
+      // At span.start the label sits to the caret's right, outside the backward
+      // adjacency window (span.start < caret), so Backspace deletes only the
+      // preceding wide character. The unconverted cell 4 would read as char 4 —
+      // inside the span — and swallow the whole label instead.
+      input.setup.mockInput.pressBackspace();
+      const oneChar = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.text === `测${label}`,
+        "(o) 标签左边缘 backspace 只删一个字符"
+      );
+      expect(oneChar[0].textLen).toBe(30);
+      expect(input.caret()).toBe(1);
+
+      // Same label, now one wide character shorter and with the caret on its
+      // right edge: the folded unit goes as a whole.
+      input.write(`测${label}`, 30);
+      const repositioned = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.offset === 31,
+        "(o) 光标移到标签右端"
+      );
+      expect(repositioned[0].textLen).toBe(30);
+      expect(input.caret()).toBe(30);
+      input.setup.mockInput.pressBackspace();
+      const whole = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.text === "测",
+        "(o) Backspace 整块删除标签"
+      );
+      expect(whole[0].offset).toBe(2);
+      expect(input.caret()).toBe(1);
+      expect(draft.text(label)).toBeUndefined();
+    } finally {
+      if (!input.setup.renderer.isDestroyed) input.setup.renderer.destroy();
+    }
+  }, 30_000);
+
+  test("(p) 宽字符前缀的 image 标签：读方向按字符取中，Backspace 整块删并丢附件", async () => {
+    // The app layer inserts `[image#N]` at the live cursor (getCursorOffset is
+    // its entry), so a nine-cell label behind CJK must resolve at both ends in
+    // character caliber, and the native caret landing inside a wide glyph has
+    // one deterministic reading.
+    const draft = createComposerDraft();
+    const image = draft.addImage({
+      mediaType: "image/png",
+      data: "iVBORw0KGgo=",
+    });
+    const buffer = `测试${image}`;
+    expect(buffer.length).toBe(11);
+    const input = await mountDraftInput(draft);
+    try {
+      for (const k of [0, 2, 9, 10, 11]) {
+        input.write(buffer, k);
+        expect(input.caret()).toBe(k);
+      }
+      input.write(buffer, buffer.length);
+      const placed = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.textLen === buffer.length,
+        "(p) image 标签缓冲写入完成"
+      );
+      // Cell caliber: 4 for "测试" + 9 ASCII → char 11 reads back as char 11.
+      expect(placed[0].offset).toBe(13);
+      expect(input.caret()).toBe(11);
+
+      // An image label has no text to reveal: Ctrl+G must leave buffer and caret
+      // alone rather than expanding to an empty payload.
+      input.setup.mockInput.pressKey("g", { ctrl: true });
+      await settle(input.setup);
+      expect(taSnapshot(input.setup)[0].text).toBe(buffer);
+      expect(input.caret()).toBe(11);
+
+      input.setup.mockInput.pressBackspace();
+      const removed = await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.text === "测试",
+        "(p) Backspace 整块删除 image 标签"
+      );
+      expect(removed[0].offset).toBe(4);
+      expect(input.caret()).toBe(2);
+      // Deleting the display label drops the payload authority with it.
+      expect(draft.image(image)).toBeUndefined();
+
+      // Rounding at the handle: cell 3 falls inside the double-width "试" (cells
+      // 2-3) and reads back as that character's start. A cell the text cannot
+      // hold never reaches this conversion — the library's own setter
+      // normalizes it first (measured: 99 lands at 0, and a cell past the last
+      // glyph of a single line lands at that glyph's start), so this is the one
+      // out-of-boundary reading the component can observe.
+      input.write("测试", 2);
+      await waitUntil(
+        input.setup,
+        (snaps) => snaps[0]?.text === "测试" && snaps[0]?.offset === 4,
+        "(p) 探测前刷新缓冲"
+      );
+      const ta = walk(
+        input.setup.renderer.root,
+        (r) => "plainText" in r && "visualCursor" in r
+      )[0] as unknown as { cursorOffset: number };
+      ta.cursorOffset = 3;
+      expect(input.caret()).toBe(1);
+    } finally {
+      if (!input.setup.renderer.isDestroyed) input.setup.renderer.destroy();
     }
   }, 30_000);
 

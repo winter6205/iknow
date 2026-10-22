@@ -25,7 +25,11 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createRequire } from "node:module";
 import { resolve } from "node:path";
-import { YOLO_ENV_KEY, type YoloContext } from "../sandbox/yolo.js";
+import {
+  FENCE_RETIRED_ENV_KEY,
+  LEGACY_YOLO_ENV_KEY,
+  type FenceRetirementReader,
+} from "../sandbox/yolo.js";
 import {
   FS_MODE_ENV_KEY,
   PRODUCT_ROOT_ENV_KEY,
@@ -186,22 +190,22 @@ export interface DefaultSubAgentSpawnOpts {
    */
   readonly fsMode?: FsModeContext;
   /**
-   * ADR-0119 / specs/yolo-mode.md: the parent session's yolo holder → child's
-   * `IKNOW_YOLO` (the same "parent writes, worker reads" env wire as `fsMode`;
-   * the envelope is an untrusted input face and does not carry this field). The
-   * value is read from the holder **on every spawn** — the same spawn-time
-   * discipline as `fsMode`, per-spawn semantics.
+   * ADR-0141: the parent session's derived fence posture → the child's
+   * `IKNOW_FENCE_RETIRED` (the same "parent writes, worker reads" env wire as
+   * `fsMode`; the envelope is an untrusted input face and does not carry this
+   * field). The value is read from the reader **on every spawn** — the same
+   * spawn-time discipline as `fsMode`, per-spawn semantics.
    *
-   * The key is always normalized like `IKNOW_WORKTREE_GATE_ON`: holder
-   * present → `"1"` / `"0"` both written; and an inherited `IKNOW_YOLO` from
-   * the ambient env is always scrubbed from the child env (see
-   * `buildSubAgentChildEnv`), so the worker's yolo posture derives only from
-   * this parent's holder — never from a stray host env or a stale inherited
-   * wire (fail-closed, code-review H2). Holder absent → key stays absent
+   * The key is always normalized like `IKNOW_WORKTREE_GATE_ON`: reader
+   * present → `"1"` / `"0"` both written; and an inherited value of either
+   * spelling is always scrubbed from the child env (see
+   * `buildSubAgentChildEnv`), so the worker's fence posture derives only from
+   * this parent's reader — never from a stray host env or a stale inherited
+   * wire (fail-closed, code-review H2). Reader absent → key stays absent
    * (legacy wire; the worker-side `yoloOptionFromEnv` reads absent as
    * "fence present").
    */
-  readonly yolo?: YoloContext;
+  readonly fenceRetired?: FenceRetirementReader;
   /**
    * Parent session's worktree-on-mutate live switch holder → child's
    * `IKNOW_WORKTREE_GATE_ON` (same spawn-time read as fsMode: a panel flip
@@ -217,24 +221,35 @@ export interface DefaultSubAgentSpawnOpts {
  * Holder readings arrive pre-resolved by the caller so every read happens at
  * spawn time (mirrors the `sessionRoot` getter discipline).
  *
- * ADR-0119 fail-closed ruling (code-review H2): `IKNOW_YOLO` is stripped from
- * the inherited env before the wire value is laid down. The worker's yolo
- * posture therefore derives only from this parent's holder — an ambient
- * `IKNOW_YOLO=1` on the host (or a leftover from a yolo ancestor process) can
- * never silently retire the fence of a child spawned by a non-yolo parent.
- * Holder present → `"1"` / `"0"` both written (same normalization as
- * `IKNOW_WORKTREE_GATE_ON`); holder absent → the key stays absent (legacy
+ * ADR-0119 fail-closed ruling (code-review H2): both spellings are stripped
+ * from the inherited env before the wire value is laid down. The worker's fence
+ * posture therefore derives only from this parent's reader — an ambient
+ * `IKNOW_YOLO=1` on the host (or a leftover from a retired-fence ancestor
+ * process) can never silently retire the fence of a child spawned by a fenced
+ * parent. Reader present → `"1"` / `"0"` both written (same normalization as
+ * `IKNOW_WORKTREE_GATE_ON`); reader absent → the key stays absent (legacy
  * wire).
+ *
+ * Exported so the measurement tool (scripts/perf/subagent-spawn.ts) can build
+ * the child env through THIS builder instead of a hand-rolled copy — the
+ * scrub and the wire keys must not drift. No behavior change.
  */
-function buildSubAgentChildEnv(readings: {
+export function buildSubAgentChildEnv(readings: {
   readonly traceDir: string;
   readonly workspaceRoot: string | undefined;
   readonly projectIdentityRoot: string | undefined;
   readonly fsModeToken: string | undefined;
   readonly worktreeGateOn: boolean | undefined;
-  readonly yolo: YoloContext | undefined;
+  readonly fenceRetired: FenceRetirementReader | undefined;
 }): NodeJS.ProcessEnv {
-  const { [YOLO_ENV_KEY]: _ambientYolo, ...inheritedEnv } = process.env;
+  // ADR-0141: both spellings are scrubbed before the write, so neither an
+  // ambient host value nor a leftover from an ancestor process can retire a
+  // child's fence.
+  const {
+    [FENCE_RETIRED_ENV_KEY]: _ambientFenceRetired,
+    [LEGACY_YOLO_ENV_KEY]: _ambientLegacyYolo,
+    ...inheritedEnv
+  } = process.env;
   return {
     ...inheritedEnv,
     IKNOW_TRACE_OUT: readings.traceDir,
@@ -250,8 +265,11 @@ function buildSubAgentChildEnv(readings: {
     ...(readings.worktreeGateOn !== undefined
       ? { [WORKTREE_GATE_ON_ENV_KEY]: readings.worktreeGateOn ? "1" : "0" }
       : {}),
-    ...(readings.yolo !== undefined
-      ? { [YOLO_ENV_KEY]: readings.yolo.get() === true ? "1" : "0" }
+    ...(readings.fenceRetired !== undefined
+      ? {
+          [FENCE_RETIRED_ENV_KEY]:
+            readings.fenceRetired.get() === true ? "1" : "0",
+        }
       : {}),
   };
 }
@@ -266,7 +284,7 @@ export function createDefaultSubAgentSpawn(
     installRoot,
     fsMode,
     worktreeGate,
-    yolo,
+    fenceRetired,
   } = opts;
   const resolvedTraceDir = resolveSubagentTraceDir(opts.traceDir);
   return (_def, _taskId, _stdinPayload) => {
@@ -275,8 +293,8 @@ export function createDefaultSubAgentSpawn(
     // build-engine can turn a build-time decision into a spawn-time closure.
     const cwd = typeof sessionRoot === "function" ? sessionRoot() : sessionRoot;
     // All three holders are read at spawn time (mirroring sessionRoot's
-    // spawn-time read): a mid-session `/config` flip (ADR-0092) or `/yolo`
-    // flip (ADR-0119) takes effect for the next spawn; the env-wire contract
+    // spawn-time read): a mid-session `/config` flip (ADR-0092) or a preset
+    // flip (ADR-0141) takes effect for the next spawn; the env-wire contract
     // per key (always-write vs absent) lives in buildSubAgentChildEnv.
     const env = buildSubAgentChildEnv({
       traceDir: resolvedTraceDir,
@@ -284,7 +302,7 @@ export function createDefaultSubAgentSpawn(
       projectIdentityRoot,
       fsModeToken: fsMode?.get(),
       worktreeGateOn: worktreeGate?.get(),
-      yolo,
+      fenceRetired,
     });
     const child = spawn(
       process.execPath,

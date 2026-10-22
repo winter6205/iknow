@@ -17,6 +17,9 @@ import type {
   StopReason,
   TokenUsage,
 } from "../harness/model-adapter/types.js";
+import { occupancyFromUsage } from "../harness/compress/occupancy.js";
+import type { OccupancyReading } from "../harness/compress/projection.js";
+import type { HarnessStreamEvent } from "../harness/stream.js";
 import { isAgentStatusText } from "../harness/agent-status.js";
 import { isGraphModeText } from "../harness/graph/notification.js";
 import { isSubagentDrainText } from "../harness/subagent/host-drain.js";
@@ -61,8 +64,31 @@ export interface TuiSessionState {
   readonly runState: SessionRunState;
   /** Stop reason of the latest turn (display only). */
   readonly lastStopReason: StopReason | undefined;
-  /** Token usage of the latest turn (context-usage display; runtime receipts only). */
+  /** Token usage of the latest turn (context-usage display; runtime receipts only).
+   *  The CONFIRMED reading: written only from `pre_call` / `post_call`
+   *  `context_usage` beats, which carry the API `usage`. A projected beat
+   *  never lands here (ADR-0008 D6). */
   readonly lastUsage: TokenUsage | null;
+  /**
+   * Plan A T4 / 2026-10-22 confirmed-only amendment: the bar-facing occupancy
+   * reading (UI-only).
+   *
+   * The display shows CONFIRMED input-side occupancy only — a `measured`
+   * reading built from `occupancyFromUsage(usage)` on a `pre_call` /
+   * `post_call` beat. A `projected` beat must not repaint the bar, and
+   * `projectedNext` on a measured beat is ignored for display: outputTokens
+   * are not guaranteed to be replayed into the next request by every
+   * provider, so showing them first and correcting later made the bar rise
+   * and fall by thousands of tokens every call (worst on long image / vision
+   * calls). Projections stay on the wire as the image-bearing gate's input
+   * only.
+   *
+   * `lastUsage` stays the confirmed usage of the beat; this slot is the
+   * number the bar renders. Never persisted, never serialized into the
+   * session file, and reset to null on attach: a reopened session shows the
+   * confirmed `lastUsage` until the first measured beat arrives.
+   */
+  readonly displayOccupancy: OccupancyReading | null;
   /**
    * ADR-0037: the session's current working root (the task-worktree path
    * persisted on rebind). undefined = unbound (feature OFF / no mutation
@@ -100,6 +126,17 @@ export interface TuiSessionState {
    * never leaks into it.
    */
   readonly recovery?: TuiSessionRecovery;
+  /**
+   * ADR-0145: the conversation's OWN model route (`provider/model`) — the
+   * route every model call made for THIS conversation uses. A conversation
+   * owns its route; `settings.llm.model` is only the default for
+   * conversations started later.
+   *
+   * undefined = this conversation has no route yet (a draft, or a session
+   * file written before the route existed): the display then falls back to
+   * the default model.
+   */
+  readonly model?: string;
 }
 
 /** What the TUI keeps of one session-ENTRY recovery (ADR-0136 §4).
@@ -129,6 +166,8 @@ export function createDraftSession(): TuiSessionState {
     runState: "idle",
     lastStopReason: undefined,
     lastUsage: null,
+    // No call beat yet: the bar idles at 0% (confirmed fallback only).
+    displayOccupancy: null,
     workspaceRoot: undefined,
     // A draft has no thinkingMs; fold-cluster sums count 0.
     thinkingMs: undefined,
@@ -164,14 +203,43 @@ export function attachSession(
     // that ever had a successful usage never reopens at 0%. Missing field
     // (legacy file / never-successful session) → null → 0% (never chars/N).
     lastUsage: file.lastUsage ?? null,
+    // Plan A T4 / 2026-10-22: the confirmed display reading is UI-only — the
+    // session file carries no such field, so a reopen starts from the
+    // confirmed `lastUsage` above and switches to the first measured beat's
+    // confirmed input-side reading (projections never reach this slot).
+    displayOccupancy: null,
     // ADR-0037: the rebound task-worktree root is restored with the session file (still current after restart).
     workspaceRoot: file.workspaceRoot,
     // Carry the persisted parallel array into session state — fold lines
     // read it from here (replacing the deleted in-memory thinking-seconds side channel).
     thinkingMs: file.thinkingMs,
+    // ADR-0145: the route this conversation owns. Absent (a file written
+    // before the route existed) → the display falls back to the default.
+    model: file.model,
     ...(outputLimitNotice !== undefined ? { outputLimitNotice } : {}),
     ...(recovery !== undefined ? { recovery } : {}),
   });
+}
+
+/**
+ * ADR-0145: the conversation's route as the TUI knows it.
+ *
+ * Every point where the TUI learns a route goes through here: the hub's own
+ * route for a conversation it just created, the route a persisted file
+ * carries, and the route an act just set. The display then follows the
+ * route, not the default — the change is visible immediately, without
+ * waiting for the next env publish.
+ *
+ * `route` undefined = the conversation owns no route yet (a draft, or a
+ * session file written before the route existed) → the state is unchanged
+ * and the display falls back to the default model.
+ */
+export function withSessionRoute(
+  session: TuiSessionState,
+  route: string | undefined
+): TuiSessionState {
+  if (route === undefined) return session;
+  return Object.freeze({ ...session, model: route });
 }
 
 /** `1 item` / `2 items` — recovery copy names counts, never bare numerals. */
@@ -328,6 +396,13 @@ export interface TurnFinishedInput {
    * THIS turn's outcome, so a turn without one clears the previous turn's.
    */
   readonly outputLimitNotice?: string;
+  /**
+   * ADR-0145: the conversation's route as the persisted file carries it (the
+   * hub stamps the conversation's own route into the file it saves, a
+   * backfilled one included). Absent (a file written before conversations
+   * owned a route) → keep the current value, never clear it by mistake.
+   */
+  readonly model?: string;
 }
 
 /**
@@ -383,6 +458,9 @@ export function turnFinished(
     // The notice describes THIS turn's outcome, so an absent one clears the
     // previous turn's rather than keeping it (unlike the two fields above).
     outputLimitNotice: input.outputLimitNotice,
+    // ADR-0145: the route the persisted file carries is the conversation's
+    // own route; an absent one keeps the current value.
+    model: input.model ?? session.model,
   });
 }
 
@@ -397,6 +475,103 @@ export function withLastUsage(
   usage: TokenUsage
 ): TuiSessionState {
   return Object.freeze({ ...session, lastUsage: usage });
+}
+
+/**
+ * Plan A T4: replace the bar-facing occupancy reading mid-run.
+ *
+ * UI-only, and deliberately separate from `withLastUsage`: the confirmed
+ * usage keeps its own slot (the only reading that reaches the session file
+ * and `/info`), while this one carries the number the bar renders — a
+ * `measured` reading from a confirmed beat. A projected beat carries no
+ * `usage` at all, so it can never become `lastUsage` (ADR-0008 D6), and the
+ * 2026-10-22 amendment makes it never reach this slot either (see
+ * `withContextUsageBeat`). The component still renders a `projected` reading
+ * as `~NN%` when a caller hands one in directly.
+ *
+ * Whole-replacement freeze discipline, like every other reducer here.
+ */
+export function withOccupancy(
+  session: TuiSessionState,
+  reading: OccupancyReading
+): TuiSessionState {
+  return Object.freeze({ ...session, displayOccupancy: reading });
+}
+
+/** The `context_usage` beats the TUI consumes (measured + projected). */
+export type ContextUsageEvent = Extract<
+  HarnessStreamEvent,
+  { readonly type: "context_usage" }
+>;
+
+/**
+ * Plan A T4 / 2026-10-22 confirmed-only amendment: the bar-facing reading of
+ * one `context_usage` beat, or `null` when the beat must not repaint the bar.
+ *
+ *  - a `projected` beat → `null`: gate-only, never a display reading;
+ *  - a measured beat (`pre_call` / `post_call`) → the confirmed input-side
+ *    occupancy `{ tokens: occupancyFromUsage(usage), source: "measured" }`.
+ *
+ * `projectedNext` is ignored for display entirely: the projection adds the
+ * call's outputTokens, which the NEXT measured input is not guaranteed to
+ * include (observed vision runs followed a multi-thousand-token output with
+ * a next input+cache that grew by only a few hundred tokens), so showing
+ * them and then correcting made the bar flicker by thousands of tokens per
+ * call. The confirmed value still lands in `lastUsage`; `projectedNext`
+ * remains on the wire for the image-bearing gate only.
+ */
+export function contextUsageDisplayReading(
+  event: ContextUsageEvent
+): OccupancyReading | null {
+  if (event.phase === "projected") return null;
+  return { tokens: occupancyFromUsage(event.usage), source: "measured" };
+}
+
+/** Field-equal confirmed-usage check (null `a` never equals a real `b`);
+ *  cache fields normalize null/undefined to null so a JSON round-trip does
+ *  not read as a change. */
+function sameUsage(a: TokenUsage | null, b: TokenUsage): boolean {
+  if (a === null) return false;
+  return (
+    a.inputTokens === b.inputTokens &&
+    a.outputTokens === b.outputTokens &&
+    (a.cacheCreationInputTokens ?? null) ===
+      (b.cacheCreationInputTokens ?? null) &&
+    (a.cacheReadInputTokens ?? null) === (b.cacheReadInputTokens ?? null)
+  );
+}
+
+/**
+ * Plan A T4 / 2026-10-22 confirmed-only amendment: apply one `context_usage`
+ * beat to a session.
+ *  - a `projected` beat leaves the session UNCHANGED (same object identity):
+ *    it is a gate input, never a bar repaint, and carries no `usage`;
+ *  - a measured beat writes the confirmed usage into `lastUsage` (the only
+ *    reading that reaches the session file and `/info`) and the confirmed
+ *    input occupancy into `displayOccupancy`;
+ *  - an unchanged measured beat (same confirmed usage AND same display
+ *    tokens) also returns the same object identity, so app.tsx can skip the
+ *    whole-tree re-render.
+ */
+export function withContextUsageBeat(
+  session: TuiSessionState,
+  event: ContextUsageEvent
+): TuiSessionState {
+  const reading = contextUsageDisplayReading(event);
+  // The `reading === null` leg and the `event.phase === "projected"` leg
+  // coincide (a projected beat is the only one that yields null); the phase
+  // check is here so TS narrows `event` to the measured variant (the only one
+  // carrying `usage`) before it is touched below.
+  if (reading === null || event.phase === "projected") {
+    return session; // EXIT: projected beat — gate-only, never repaints the bar
+  }
+  if (
+    sameUsage(session.lastUsage, event.usage) &&
+    session.displayOccupancy?.tokens === reading.tokens
+  ) {
+    return session; // EXIT: identical confirmed beat — same identity, no re-render
+  }
+  return withOccupancy(withLastUsage(session, event.usage), reading);
 }
 
 /** Foreground interrupt guard (consumed by Esc): only running-fg can be interrupted. */

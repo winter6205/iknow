@@ -1,5 +1,5 @@
 // Configurable via env, with hard validation threshold < window.
-// The default gate is now a ratio (95%) of the **policy budget window**
+// The default gate is now a ratio (90%) of the **policy budget window**
 // (ADR-0100). The old formula `window - MAX_OUTPUT_TOKENS_FOR_SUMMARY -
 // AUTOCOMPACT_BUFFER_TOKENS` (≈ window−33k) was only a sensible margin when
 // the denominator ≈ the provider's true cap; `contextWindow` is now the
@@ -10,7 +10,7 @@
 
 /** Default auto-compact gate as a fraction of the policy budget window
  *  (ADR-0100). */
-export const AUTO_COMPACT_STRATEGY_RATIO = 0.95;
+export const AUTO_COMPACT_STRATEGY_RATIO = 0.9;
 
 /**
  * Derive the auto-compact threshold.

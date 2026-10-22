@@ -284,6 +284,10 @@ describe("ADR-0132 — scratch: no exception for any unestablished or out-of-sco
     ["a second variable appended to the trusted one", `rm -f $TMPDIR${"$SUFFIX"}`],
     ["a command substitution", `rm -f $TMPDIR/$(echo a).cjs`],
     ["a tilde", `rm -f ~/a.cjs`],
+    // Retained, not replaced: the affected word `$TMPDIR/a\ b.cjs` holds an
+    // expansion, so its static value is `undefined` and #1188 keeps it at
+    // `vetoed / backslash-whitespace` rather than admitting an incomplete
+    // word. The deny is asserted id-agnostically either way.
     ["a backslash escape inside the operand", `rm -f $TMPDIR/a\\ b.cjs`],
     ["no target at all", `rm -f`],
     ["a nested shell that runs rm", `bash -c 'rm -f $TMPDIR/a.cjs'`],

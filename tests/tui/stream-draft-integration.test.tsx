@@ -30,7 +30,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { testRender } from "@opentui/react/test-utils";
 import type { TestRendererSetup } from "@opentui/core/testing";
-import { TuiApp, createToolEventSink } from "../../src/tui/app.js";
+import {
+  TuiApp,
+  TOKEN_SPEED_REPAINT_MS,
+  createToolEventSink,
+} from "../../src/tui/app.js";
 import {
   createInflightRegistry,
   createTuiBridge,
@@ -50,6 +54,7 @@ import type {
   LoopAdapter,
   LoopEngineDeps,
   LoopState,
+  TokenUsage,
 } from "../../src/harness/index.js";
 import type { ToolExecutionResult } from "../../src/harness/tools/types.js";
 import { toAnthropicToolResults } from "../../src/harness/tools/tool-result.js";
@@ -635,6 +640,418 @@ describe("TUI 流式 draft 接线（spec SC8）", () => {
 
     await app.destroy();
   }, 30_000);
+
+  test("token speed stays visible at zero before output, live while generating, and ends at the weighted turn average", async () => {
+    // Instrument the 800 ms repaint cadence: the app creates exactly one
+    // 800 ms interval per generating call (other timers are 600 ms / 1 Hz),
+    // and clears it on post_call / tool phase / turn end.
+    const realSetInterval = globalThis.setInterval;
+    const realClearInterval = globalThis.clearInterval;
+    const liveIntervals = new Map<
+      Parameters<typeof globalThis.clearInterval>[0],
+      number
+    >();
+    let speedTimerCreations = 0;
+    function observedSetInterval(
+      ...args: Parameters<typeof globalThis.setInterval>
+    ): ReturnType<typeof setInterval> {
+      const handle = realSetInterval(...args);
+      const ms = typeof args[1] === "number" ? args[1] : 0;
+      liveIntervals.set(handle, ms);
+      if (ms === TOKEN_SPEED_REPAINT_MS) speedTimerCreations += 1;
+      return handle;
+    }
+    function observedClearInterval(
+      handle?: Parameters<typeof globalThis.clearInterval>[0]
+    ): void {
+      if (handle !== undefined) liveIntervals.delete(handle);
+      realClearInterval(handle);
+    }
+    globalThis.setInterval =
+      observedSetInterval as typeof globalThis.setInterval;
+    globalThis.clearInterval =
+      observedClearInterval as typeof globalThis.clearInterval;
+    const activeSpeedTimers = (): number =>
+      [...liveIntervals.values()].filter((ms) => ms === TOKEN_SPEED_REPAINT_MS)
+        .length;
+
+    // Scripted adapter: a first-token wait (no output → no reading), output
+    // fragments, then a tool call + its input JSON (generation, not
+    // execution), then a second call with its own output.
+    let stepCounter = 0;
+    let oldRunOnStream: ((event: HarnessStreamEvent) => void) | undefined;
+    let signalNextCallStarted!: () => void;
+    const nextCallStarted = new Promise<void>((resolve) => {
+      signalNextCallStarted = resolve;
+    });
+    let releaseNextCall!: () => void;
+    const nextCallGate = new Promise<void>((resolve) => {
+      releaseNextCall = resolve;
+    });
+    const speedAdapter: LoopAdapter = {
+      async step(
+        _state: LoopState,
+        request: { onStream?: (e: HarnessStreamEvent) => void },
+        signal?: AbortSignal
+      ): Promise<AssistantTurnResult> {
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        const usage = (outputTokens: number): TokenUsage => ({
+          inputTokens: 100,
+          outputTokens,
+          cacheCreationInputTokens: null,
+          cacheReadInputTokens: null,
+        });
+        const step = ++stepCounter;
+        if (step === 1) {
+          oldRunOnStream = request.onStream;
+          // First-token wait: the bar keeps its zero reading (1.5 s is long
+          // enough to observe past the harness start-up latency).
+          await abortableDelay(1_500, signal);
+          request.onStream?.({ type: "text_delta", text: "a".repeat(40) });
+          // Keep generating long enough for the live reading to be
+          // observable (the repaint publishes it ~800 ms after the fragment).
+          await abortableDelay(1_200, signal);
+          request.onStream?.({
+            type: "tool_call_start",
+            id: "t1",
+            name: "noop",
+          });
+          request.onStream?.({
+            type: "tool_input_delta",
+            id: "t1",
+            partialJson: '{"k":"v"}',
+          });
+          return {
+            ...assistantResult({
+              texts: [],
+              toolCalls: [{ id: "t1", name: "noop", input: {} }],
+              usage: usage(20),
+            }),
+            generationMs: 1_100,
+          };
+        }
+        if (step === 3) {
+          signalNextCallStarted();
+          await nextCallGate;
+          request.onStream?.({ type: "text_delta", text: "c".repeat(40) });
+          await abortableDelay(400, signal);
+          return {
+            ...assistantResult({
+              texts: ["speed-next-final"],
+              usage: usage(8),
+            }),
+            generationMs: 400,
+          };
+        }
+        await abortableDelay(400, signal);
+        request.onStream?.({ type: "text_delta", text: "b".repeat(40) });
+        return {
+          ...assistantResult({
+            texts: ["speed-final"],
+            supplierStop: "success",
+            usage: usage(10),
+          }),
+          generationMs: 400,
+        };
+      },
+      encodeUserText(t: string): AnthropicNativeMessage {
+        return { role: "user", content: [{ type: "text", text: t }] };
+      },
+      encodeToolResults(
+        results: ReadonlyArray<ToolExecutionResult>
+      ): AnthropicContentBlock[] {
+        return toAnthropicToolResults(results);
+      },
+    };
+
+    try {
+      const app = await mountAppAsync(
+        [],
+        "speed-final",
+        buildToolDeps(speedAdapter)
+      );
+      await untilFrame(app.setup, (f) => f.includes("Version"));
+
+      await app.typeText("hi");
+      app.setup.mockInput.pressEnter();
+
+      // First-token wait (adapter sleeps 1.5 s): zero remains visible and no
+      // live rate has been published yet.
+      await new Promise((r) => setTimeout(r, 500));
+      await app.setup.renderOnce();
+      const waitingFrame = app.setup.captureCharFrame();
+      expect(waitingFrame).toMatch(/\b0 tok\/s\b/);
+      expect(waitingFrame).not.toContain("~");
+
+      // After the first output fragment the live estimate shows, marked `~`.
+      const live = await untilFrame(
+        app.setup,
+        (f) => /~\d+ tok\/s/.test(f),
+        8000,
+        "live-speed"
+      );
+      expect(live).toMatch(/~\d+ tok\/s/);
+      // The repaint cadence is running while generating.
+      expect(speedTimerCreations).toBeGreaterThan(0);
+      expect(activeSpeedTimers()).toBeGreaterThan(0);
+
+      // The per-turn rate weights both model calls by their generation time:
+      // (20 + 10) / ((1100 + 400) / 1000) = 20 tok/s.
+      await until(
+        () => app.bridge.inflight.ids().size === 0,
+        12_000,
+        "turn-done"
+      );
+      const finalFrame = await untilFrame(
+        app.setup,
+        (f) => f.includes("20 tok/s"),
+        8000,
+        "final-speed"
+      );
+      expect(finalFrame).not.toContain("~20 tok/s");
+      await until(() => activeSpeedTimers() === 0, 3000, "speed-timer-cleared");
+
+      // No idle repaint: a settled turn creates no new speed interval and the
+      // displayed reading does not change.
+      const creationsAtRest = speedTimerCreations;
+      await new Promise((r) => setTimeout(r, 500));
+      await app.setup.renderOnce();
+      expect(speedTimerCreations).toBe(creationsAtRest);
+      expect(app.setup.captureCharFrame()).toContain("20 tok/s");
+
+      // A callback retained by the completed run must not mutate a newer
+      // turn's zero reading or arm that turn's live repaint timer.
+      await app.typeText("next");
+      app.setup.mockInput.pressEnter();
+      await nextCallStarted;
+      oldRunOnStream?.({ type: "text_delta", text: "stale-old-output" });
+      await app.setup.renderOnce();
+      expect(app.setup.captureCharFrame()).toMatch(/\b0 tok\/s\b/);
+      expect(activeSpeedTimers()).toBe(0);
+
+      releaseNextCall();
+      await until(
+        () => app.bridge.inflight.ids().size === 0,
+        12_000,
+        "second-turn-done"
+      );
+      await untilFrame(
+        app.setup,
+        (f) => f.includes("20 tok/s"),
+        8000,
+        "second-turn-speed"
+      );
+      await app.destroy();
+    } finally {
+      releaseNextCall();
+      globalThis.setInterval = realSetInterval;
+      globalThis.clearInterval = realClearInterval;
+    }
+  }, 30_000);
+
+  test("holds the last live rate when the one-second window expires", async () => {
+    const realSetInterval = globalThis.setInterval;
+    const realClearInterval = globalThis.clearInterval;
+    const realDateNow = Date.now;
+    let fakeNow: number | undefined;
+    let nextFakeTimerId = 0;
+    let speedTimerCreations = 0;
+    const speedTimers = new Map<ReturnType<typeof setInterval>, () => void>();
+    function observedSetInterval(
+      ...args: Parameters<typeof globalThis.setInterval>
+    ): ReturnType<typeof setInterval> {
+      const ms = typeof args[1] === "number" ? args[1] : 0;
+      if (ms === TOKEN_SPEED_REPAINT_MS) {
+        speedTimerCreations += 1;
+        const handle =
+          `speed-timer-${++nextFakeTimerId}` as unknown as ReturnType<
+            typeof setInterval
+          >;
+        speedTimers.set(handle, args[0] as () => void);
+        return handle;
+      }
+      return realSetInterval(...args);
+    }
+    function observedClearInterval(
+      handle?: Parameters<typeof globalThis.clearInterval>[0]
+    ): void {
+      if (
+        handle !== undefined &&
+        speedTimers.delete(handle as ReturnType<typeof setInterval>)
+      )
+        return;
+      realClearInterval(
+        handle as unknown as Parameters<typeof realClearInterval>[0]
+      );
+    }
+    const tickAt = (now: number, callback: () => void): void => {
+      fakeNow = now;
+      try {
+        callback();
+      } finally {
+        fakeNow = undefined;
+      }
+    };
+    globalThis.setInterval =
+      observedSetInterval as typeof globalThis.setInterval;
+    globalThis.clearInterval =
+      observedClearInterval as typeof globalThis.clearInterval;
+    Date.now = () => fakeNow ?? realDateNow();
+    let app: DrivenApp | undefined;
+    let preTickFrame = "";
+    let boundaryFrame = "";
+    let expiredFrame = "";
+    let timersAtBoundary = 0;
+    let timersAfterExpiry = 0;
+    let boundaryHandled = false;
+    const usage: TokenUsage = {
+      inputTokens: 100,
+      outputTokens: 10,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    const adapter: LoopAdapter = {
+      async step(
+        _state: LoopState,
+        request: { onStream?: (e: HarnessStreamEvent) => void },
+        signal?: AbortSignal
+      ): Promise<AssistantTurnResult> {
+        if (signal?.aborted) {
+          throw new DOMException("This operation was aborted", "AbortError");
+        }
+        // Two fragments at distinct fake times: 20 estimated tokens inside a
+        // 100 ms span (20 tokens / 100 ms = ~200 tok/s while the window is
+        // that young).
+        fakeNow = 10_000;
+        try {
+          request.onStream?.({ type: "text_delta", text: "a".repeat(40) });
+        } finally {
+          fakeNow = undefined;
+        }
+        fakeNow = 10_100;
+        try {
+          request.onStream?.({ type: "text_delta", text: "a".repeat(40) });
+        } finally {
+          fakeNow = undefined;
+        }
+        expect(app).toBeDefined();
+        const mountedApp = app as DrivenApp;
+        // Publishing is deferred to the repaint tick, so the bar still shows
+        // the turn's zero reading before it (per-fragment publishing would
+        // already render ~200 tok/s here). The wait lets React flush a
+        // pending publish, so the capture is what the bar would display.
+        await new Promise((resolve) => setTimeout(resolve, 50));
+        await mountedApp.setup.renderOnce();
+        preTickFrame = mountedApp.setup.captureCharFrame();
+        const firstTick = [...speedTimers.values()][0];
+        expect(firstTick).toBeDefined();
+        // The window is inclusive at exactly 1,000 ms, so both samples count:
+        // 20 tokens / 1,000 ms = 20 tok/s.
+        tickAt(11_000, firstTick as () => void);
+        boundaryFrame = await untilFrame(
+          mountedApp.setup,
+          (frame) => frame.includes("~20 tok/s"),
+          2_000,
+          "inclusive-speed-boundary"
+        );
+        timersAtBoundary = speedTimers.size;
+
+        const nextTick = [...speedTimers.values()][0];
+        if (nextTick !== undefined) {
+          // The second tick lands in an empty window: the bar must hold the
+          // last rate, never flash 0.
+          tickAt(12_000, nextTick);
+          expiredFrame = await untilFrame(
+            mountedApp.setup,
+            (frame) =>
+              frame.includes("~20 tok/s") && !/\b0 tok\/s\b/.test(frame),
+            2_000,
+            "expired-speed-window"
+          );
+        }
+        timersAfterExpiry = speedTimers.size;
+        boundaryHandled = true;
+        return {
+          ...assistantResult({
+            texts: ["boundary-final"],
+            supplierStop: "success",
+            usage,
+          }),
+          generationMs: 1_000,
+        };
+      },
+      encodeUserText(t: string): AnthropicNativeMessage {
+        return { role: "user", content: [{ type: "text", text: t }] };
+      },
+      encodeToolResults(
+        results: ReadonlyArray<ToolExecutionResult>
+      ): AnthropicContentBlock[] {
+        return toAnthropicToolResults(results);
+      },
+    };
+
+    try {
+      const mountedApp = await mountAppAsync(
+        [],
+        "boundary-final",
+        buildToolDeps(adapter)
+      );
+      app = mountedApp;
+      await untilFrame(mountedApp.setup, (frame) => frame.includes("Version"));
+      await mountedApp.typeText("boundary");
+      mountedApp.setup.mockInput.pressEnter();
+      await until(() => boundaryHandled, 8_000, "boundary-ticks");
+      await until(
+        () => mountedApp.bridge.inflight.ids().size === 0,
+        8_000,
+        "boundary-turn-done"
+      );
+      expect(speedTimerCreations).toBe(1);
+      // Live publishing is deferred to the repaint tick, so the pre-tick
+      // frame is still the turn's zero reading.
+      expect(preTickFrame).toMatch(/\b0 tok\/s\b/);
+      expect(preTickFrame).not.toContain("~");
+      // The reducer's window is inclusive at exactly 1,000 ms, so both
+      // samples count (20 tokens / 1,000 ms = 20 tok/s) and the timer must
+      // remain armed until a later tick excludes the sample.
+      expect(boundaryFrame).toContain("~20 tok/s");
+      expect(timersAtBoundary).toBe(1);
+      // The window is empty now: the bar holds the last rate instead of
+      // dropping to zero.
+      expect(expiredFrame).toContain("~20 tok/s");
+      expect(expiredFrame).not.toMatch(/\b0 tok\/s\b/);
+      expect(timersAfterExpiry).toBe(0);
+
+      const creationsAtRest = speedTimerCreations;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(speedTimerCreations).toBe(creationsAtRest);
+    } finally {
+      try {
+        if (app !== undefined) {
+          const mountedApp = app;
+          await until(
+            () => mountedApp.bridge.inflight.ids().size === 0,
+            8_000,
+            "boundary-cleanup"
+          );
+          await mountedApp.destroy();
+        }
+      } finally {
+        globalThis.setInterval = realSetInterval;
+        globalThis.clearInterval = realClearInterval;
+        Date.now = realDateNow;
+      }
+    }
+  }, 30_000);
+
+  // The cadence value itself is the tuned constant in the spec ("不要刷太快"):
+  // the cases above compare against the imported constant, so nothing else
+  // would catch a revert to a per-fragment / 200 ms cadence.
+  test("token-speed repaint cadence stays 800 ms", () => {
+    expect(TOKEN_SPEED_REPAINT_MS).toBe(800);
+  });
 
   test("事件混排：tool→text→tool→text 第二段草稿在后续工具之下", async () => {
     // web_search (retract) goes into the unanchored block; bash (keep) + the two

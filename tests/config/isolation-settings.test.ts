@@ -608,3 +608,68 @@ describe("settings.isolation.fsMode", () => {
     }
   });
 });
+
+/* -----------------------------------------------------------------------------
+ * ADR-0141 guardrail — a posture key in settings is ignored WITH a warning
+ * -------------------------------------------------------------------------- */
+
+describe("ADR-0141：settings 里的 posture 键忽略并告警", () => {
+  it("isolation.posture 被忽略，且发出点名该键的警告", async () => {
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "workspace", posture: "yolo" } },
+      {}
+    );
+    const warnings: string[] = [];
+    const settings = loadIknowSettings({
+      home,
+      cwd,
+      onWarn: (m) => warnings.push(m),
+    });
+    assert.deepEqual(settings.isolation, { fsMode: "workspace" });
+    assert.equal("posture" in settings.isolation!, false);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"posture"/);
+    assert.match(warnings[0]!, /yolo/);
+  });
+
+  it("顶层 posture 键被忽略，且发出点名该键的警告", async () => {
+    const { home, cwd } = await makeSettings({ posture: "yolo" }, {});
+    const warnings: string[] = [];
+    const settings = loadIknowSettings({
+      home,
+      cwd,
+      onWarn: (m) => warnings.push(m),
+    });
+    assert.equal("posture" in settings, false);
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0]!, /"posture"/);
+  });
+
+  it("fsMode: workspace + posture → 依然出围栏（settings 不能退 fence）", async () => {
+    // The typed-error arm of this combination is invariant 7's own test; what the
+    // settings layer owes here is the weaker, still-binding claim: the key never
+    // reaches the derivation, so nothing typed or not can retire a fence from disk.
+    const { home, cwd } = await makeSettings(
+      { isolation: { fsMode: "workspace", posture: "yolo" } },
+      {}
+    );
+    assert.equal(resolveFsIsolationMode(loadIknowSettings({ home, cwd })), "workspace");
+  });
+
+  it("posture 键的值任意形态都只告警一次，不抛错", async () => {
+    for (const value of ["yolo", "no-sandbox", true, 1, null]) {
+      const { home, cwd } = await makeSettings(
+        { isolation: { fsMode: "global", posture: value } },
+        {}
+      );
+      const warnings: string[] = [];
+      const settings = loadIknowSettings({
+        home,
+        cwd,
+        onWarn: (m) => warnings.push(m),
+      });
+      assert.deepEqual(settings.isolation, { fsMode: "global" }, `posture=${String(value)}`);
+      assert.equal(warnings.length, 1, `posture=${String(value)}`);
+    }
+  });
+});

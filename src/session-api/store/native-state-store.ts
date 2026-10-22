@@ -29,6 +29,7 @@ import type {
   NativeStateSnapshot,
 } from "../../shared/native-state-port.js";
 import { BLOBS_DIR_NAME } from "../../shared/session-tree-names.js";
+import { isImageContentBlock } from "../../harness/model-adapter/image-content.js";
 import type { FileIntentTarget } from "./jsonl.js";
 import { factPayloadField, isNativeStateBoundary } from "./jsonl.js";
 
@@ -291,8 +292,12 @@ const EXCLUSION_RULES: ReadonlyArray<ExclusionRule> = [
     allow: isProcessIdentityOnly,
   },
   {
+    // ADR-0141: `no-sandbox` / `fenceRetired` are the same class of field as
+    // `yolo` — a preset declaration that must never survive into persisted
+    // state under a name the guard has not heard of. The old pattern matched
+    // `yolo` only, so a renamed wire would have passed straight through.
     pattern:
-      /(allowonce|permissiongrants?|grants|approvals?|approvedtools|autoapprove|yolo)/i,
+      /(allowonce|permissiongrants?|grants|approvals?|approvedtools|autoapprove|yolo|no[-_]?sandbox|fence[-_]?retired)/i,
   },
 ];
 
@@ -524,6 +529,9 @@ const BLOCK_VALIDATORS = new Map<
       typeof b["thinking"] === "string" && typeof b["signature"] === "string",
   ],
   ["redacted_thinking", (b) => typeof b["data"] === "string"],
+  // The same gate the transcript and the wire projection apply, so a snapshot
+  // mirror can never carry an image the transcript would refuse.
+  ["image", (b) => isImageContentBlock(b)],
 ]);
 
 function isRole(value: unknown): value is NativeStateRole {

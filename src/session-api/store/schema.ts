@@ -47,12 +47,28 @@
  * (`shouldSeedTaskFocus` + `TASK_FOCUS_GREETING_RE`) moves to
  * turn-projection.ts — its only remaining consumer is
  * `extractRecentUserTasks` (compact-boundary recent-tasks excerpt).
+ *
+ * Later revision (additive, CURRENT stays 5): `messages[]` accepts a
+ * top-level `type: "image"` block on a user message — the user-pasted
+ * attachment. No schema bump, no new record type: the bytes ride inside the
+ * already-accepted user message record, and the shape gate is shared with the
+ * outbound projection (`harness/model-adapter/image-content.ts`) so nothing the
+ * store accepts can be refused by the wire.
+ *
+ * Later revision (additive, CURRENT stays 5): optional `model` carries the
+ * conversation's own model route (`provider/model`) — the durable copy of the
+ * route ADR-0145 gives every conversation. Absent on files written before the
+ * field existed (the hub backfills the current default on first attach); a
+ * present value must be a non-empty `provider/model` string and is never
+ * coerced. No schema bump, no migration: a file without the key round-trips
+ * byte-identical.
  */
 import path from "node:path";
 import type {
   AnthropicNativeMessage,
   TokenUsage,
 } from "../../harness/index.js";
+import { isImageContentBlock } from "../../harness/model-adapter/image-content.js";
 import { MAX_WORKSPACE_ROOT_CHARS } from "../../config/workspace-root.js";
 
 /** Why a turn ended in an interrupt state — the checkpoint's discriminating
@@ -200,6 +216,12 @@ export interface SessionFileV1 {
    *  the header spread, so one save cannot silently drop it.
    *  `sanitizeSessionFile` rewrites `schemaVersion` but never this key. */
   readonly nativeStateFormat?: number;
+  /** ADR-0145: the conversation's own model route (`provider/model`) — the
+   *  durable copy of the route the hub resolves for every model call made for
+   *  this conversation. Absent on files written before the route existed (the
+   *  hub backfills the current default on first attach); a present value must
+   *  be a non-empty `provider/model` string, and it is never coerced. */
+  readonly model?: string;
 }
 
 /** ADR-0136: the native-state format a new-format session declares. Kept
@@ -266,39 +288,40 @@ export function validateSessionFile(value: unknown): string | null {
 function firstInvalidOptionalField(
   obj: Record<string, unknown>
 ): string | null {
+  for (const gate of OPTIONAL_FIELD_GATES) {
+    const value = obj[gate.field];
+    if (value !== undefined && !gate.isValid(value)) return gate.field;
+  }
+  return null;
+}
+
+/** Optional-field shape gates, in validation order. Absent is always valid;
+ *  a present value must match its shape and is never coerced. */
+const OPTIONAL_FIELD_GATES: ReadonlyArray<{
+  readonly field: string;
+  readonly isValid: (value: unknown) => boolean;
+}> = [
   // v3: optional `checkpoints` array — validate shape if present, never
   // silently coerce (a malformed checkpoints field would break downstream
   // rewind computation).
-  if (
-    obj["checkpoints"] !== undefined &&
-    !isValidCheckpointList(obj["checkpoints"])
-  ) {
-    return "checkpoints";
-  }
+  { field: "checkpoints", isValid: isValidCheckpointList },
   // v5: optional `goal` object — validate shape if present, never silently
   // coerce (a malformed goal would break downstream verify-loop binding).
-  if (obj["goal"] !== undefined && !isValidGoal(obj["goal"])) {
-    return "goal";
-  }
+  { field: "goal", isValid: isValidGoal },
   // Additive optional string: absent is valid (unbound). Present values must
   // be absolute, non-empty, and ≤ MAX_WORKSPACE_ROOT_CHARS — never coerce.
-  if (
-    obj["workspaceRoot"] !== undefined &&
-    !isValidWorkspaceRoot(obj["workspaceRoot"])
-  ) {
-    return "workspaceRoot";
-  }
+  { field: "workspaceRoot", isValid: isValidWorkspaceRoot },
+  // ADR-0145: optional `model` route — absent is valid (a file written before
+  // the conversation owned a route). A present value must be a non-empty
+  // `provider/model` string — never coerce: a malformed route resolves to no
+  // provider at all.
+  { field: "model", isValid: isValidModelRoute },
   // Optional parallel array over messages: validate shape if present, never
   // silently coerce (a misaligned / malformed messageCreatedAt would feed the
   // rewind picker wrong timestamps index-by-index). Elements are ISO strings
   // or null — JSON round-trip serializes the runtime `undefined` holes to
   // null, so both spellings mean "no stamp at this position".
-  if (
-    obj["messageCreatedAt"] !== undefined &&
-    !isValidMessageCreatedAt(obj["messageCreatedAt"])
-  ) {
-    return "messageCreatedAt";
-  }
+  { field: "messageCreatedAt", isValid: isValidMessageCreatedAt },
   // Optional parallel array over messages for assistant-turn thinking
   // duration (ms). Elements must be number or null — runtime `undefined`
   // serializes to null via JSON.stringify, so only null holes are accepted
@@ -307,12 +330,7 @@ function firstInvalidOptionalField(
   // Infinity never reach disk. Array length is not enforced; short arrays
   // fall back to ?? undefined on the consumer side (as with
   // messageCreatedAt).
-  if (
-    obj["thinkingMs"] !== undefined &&
-    !isValidThinkingMs(obj["thinkingMs"])
-  ) {
-    return "thinkingMs";
-  }
+  { field: "thinkingMs", isValid: isValidThinkingMs },
   // Additive optional TokenUsage: absent is valid (no usage ever recorded —
   // legacy files and never-successful sessions). Present values must match
   // the harness TokenUsage shape; a malformed object fails validate with
@@ -320,23 +338,16 @@ function firstInvalidOptionalField(
   // arithmetic (never silently coerce — same posture as goal / workspaceRoot).
   // Whole-field null is rejected: the writers omit the key on null usage, and
   // JSON round-trip only spells inner cache holes as null, never the record.
-  if (obj["lastUsage"] !== undefined && !isValidUsageRecord(obj["lastUsage"])) {
-    return "lastUsage";
-  }
+  { field: "lastUsage", isValid: isValidUsageRecord },
   // ADR-0136: optional new-format marker — absent is valid (every
   // pre-existing file), a present value must be a positive integer.
-  if (!isValidNativeStateFormat(obj)) return "nativeStateFormat";
-  return null;
-}
+  { field: "nativeStateFormat", isValid: isValidNativeStateFormatValue },
+];
 
 /** The new-format marker gate. Never coerced: a malformed marker would let the
  *  recovery path guess whether this file carries restorable state. */
-function isValidNativeStateFormat(obj: Record<string, unknown>): boolean {
-  const value = obj["nativeStateFormat"];
-  return (
-    value === undefined ||
-    (typeof value === "number" && Number.isInteger(value) && value > 0)
-  );
+function isValidNativeStateFormatValue(value: unknown): boolean {
+  return typeof value === "number" && Number.isInteger(value) && value > 0;
 }
 
 /** Type guard companion to validateSessionFile for callers that want a boolean. */
@@ -580,36 +591,54 @@ function isValidMessage(m: unknown): boolean {
   return (msg["content"] as ReadonlyArray<unknown>).every(isValidContentBlock);
 }
 
+// One validator per accepted `type`, keyed the same way the native-state mirror
+// keys its block validators (store/native-state-store.ts `BLOCK_VALIDATORS`).
+// A Map lookup, not a switch: the accepted set is a roster, and the image arm's
+// own predicate already carries its branching.
+//
+// thinking / redacted_thinking: the harness retains thinking blocks (with
+// signature) in the authoritative history. The session store must accept them on
+// save and replay them verbatim — otherwise the wire thinking view has nothing to
+// project after a real thinking turn. `redacted_thinking.data` is the encrypted
+// blob — kept verbatim so replays stay byte-identical with the LLM-emitted
+// history (mirror of `thinking`).
+//
+// A user-pasted image rides inside the accepted user message record (same
+// verbatim-opaque posture as `redacted_thinking`), so the shape gate is the one
+// the wire projection applies — a block stored here must be a block the provider
+// will take.
+const CONTENT_BLOCK_VALIDATORS: ReadonlyMap<
+  string,
+  (block: Record<string, unknown>) => boolean
+> = new Map([
+  ["text", (b) => typeof b["text"] === "string"],
+  [
+    "tool_use",
+    (b) =>
+      typeof b["id"] === "string" &&
+      typeof b["name"] === "string" &&
+      "input" in b,
+  ],
+  [
+    "tool_result",
+    (b) => typeof b["tool_use_id"] === "string" && "content" in b,
+  ],
+  [
+    "thinking",
+    (b) =>
+      typeof b["thinking"] === "string" && typeof b["signature"] === "string",
+  ],
+  ["redacted_thinking", (b) => typeof b["data"] === "string"],
+  ["image", (b) => isImageContentBlock(b)],
+]);
+
 function isValidContentBlock(b: unknown): boolean {
   if (b === null || typeof b !== "object") return false;
   const block = b as Record<string, unknown>;
-  switch (block["type"]) {
-    case "text":
-      return typeof block["text"] === "string";
-    case "tool_use":
-      return (
-        typeof block["id"] === "string" &&
-        typeof block["name"] === "string" &&
-        "input" in block
-      );
-    case "tool_result":
-      return typeof block["tool_use_id"] === "string" && "content" in block;
-    // thinking / redacted_thinking: the harness retains thinking blocks
-    // (with signature) in the authoritative history. The session store must
-    // accept them on save and replay them verbatim — otherwise the wire
-    // thinking view has nothing to project after a real thinking turn.
-    case "thinking":
-      return (
-        typeof block["thinking"] === "string" &&
-        typeof block["signature"] === "string"
-      );
-    case "redacted_thinking":
-      // `data` is the encrypted blob — kept verbatim so replays stay byte-
-      // identical with the LLM-emitted history (mirror of `thinking`).
-      return typeof block["data"] === "string";
-    default:
-      return false;
-  }
+  const type = block["type"];
+  if (typeof type !== "string") return false;
+  const validate = CONTENT_BLOCK_VALIDATORS.get(type);
+  return validate !== undefined && validate(block);
 }
 
 /** Deep-validate a `checkpoints` array (v3). Each element must carry the
@@ -712,6 +741,17 @@ function isValidWorkspaceRoot(value: unknown): boolean {
     return false;
   }
   return path.isAbsolute(value);
+}
+
+/** Optional SessionFile model route: a `provider/model` id — a non-empty
+ *  string carrying the separator. A bare model name is not a route.
+ *
+ *  Exported: the hub's runtime route map carries the same ids, so the file
+ *  gate and the runtime gate are one predicate (ADR-0145). */
+export function isValidModelRoute(value: unknown): boolean {
+  if (typeof value !== "string") return false;
+  if (value.length === 0) return false;
+  return value.includes("/");
 }
 
 /** Optional `messageCreatedAt` parallel array (rewind prompt timestamps):

@@ -102,7 +102,7 @@ function makeHub(
       )
     ),
     verifyConfig,
-    ...(yolo ? { yolo } : {}),
+    ...(yolo ? { fenceRetired: yolo } : {}),
   });
 }
 

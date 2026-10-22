@@ -174,18 +174,41 @@ export function applyShiftTabAgentModeFlip(opts: {
   readonly permission: PermissionModeContext | undefined;
   readonly graph: GraphModeContext | undefined;
   readonly onFlip: (next: AgentModeSnapshot) => void;
+  /**
+   * ADR-0141: the caller's clear hook — a permission step clears the overlay
+   * when the preset declared that axis. A callback rather than the overlay so
+   * `graph/` keeps no import of `sandbox/`; the caller owns the overlay and
+   * decides whether it declared the axis.
+   */
+  readonly onUserPermissionChange?: () => void;
+  /**
+   * ADR-0141: the EFFECTIVE permission, which under a preset differs from the
+   * holder's value. The wheel must step away from what the operator SEES, or a
+   * press moves the holder from a value the row is not showing — the ADR's F4
+   * in a new axis. Absent (no preset in force) the holder IS the effective
+   * value and this is omitted.
+   */
+  readonly effectivePermission?: PermissionMode;
 }): boolean {
   if (!isShiftTabKey(opts.key)) return false;
   const permission = opts.permission;
   if (!permission) return false;
   const graph = opts.graph;
   const current: AgentModeSnapshot = {
-    permission: permission.get(),
+    permission: opts.effectivePermission ?? permission.get(),
     graph: graph?.get().enabled ?? false,
   };
   const next = graph
     ? nextShiftTabAgentMode(current)
     : { permission: nextShiftTabMode(current.permission), graph: false };
+  // ADR-0141 §3: the wheel is read as its RESULT, not as a press. The
+  // `full_auto → full_auto + graph` step changes only the graph axis, which no
+  // preset owns, so it must clear nothing — an unconditional hook would drop
+  // the posture on a keystroke that contradicted nothing. The hook runs before
+  // the write, so the flip lands on the tier the user chose.
+  if (next.permission !== current.permission) {
+    opts.onUserPermissionChange?.();
+  }
   permission.set(next.permission);
   graph?.setEnabled(next.graph);
   opts.onFlip(next);

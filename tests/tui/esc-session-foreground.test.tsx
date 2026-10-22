@@ -141,6 +141,7 @@ async function mountApp(opts: MountOptions): Promise<ForegroundRig> {
     },
     inflight: createInflightRegistry(),
     contextWindow: 200_000,
+    listLiveBackgroundTasks: () => [],
     listSubagents: () => opts.subagents ?? [],
     abortSubagentTask: () => true,
     abortSessionForegroundWork: (conversationId) => {

@@ -178,6 +178,7 @@ async function mount(opts: {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
+    listLiveBackgroundTasks: () => [],
     listSubagents: () => [],
     abortSessionForegroundWork: () => [],
     abortSubagentTask: () => false,

@@ -43,6 +43,8 @@ upstream-*/
 # personal / local tooling (not team-shared)
 .claude/skills/
 .claude/worktrees/
+# 本仓 worktree 目录（内嵌 git 仓库，git add -A 会误抓）
+.worktrees/
 .serena/
 # .kiro/ is mostly shared, but teach is personal
 .kiro
@@ -136,14 +138,14 @@ docs/kb-assistant-guide
 !.claude/
 .claude/*
 !.claude/settings.json
-# Rule files AGENTS.md pulls in with `@` — these are part of the project
-# contract, so a fresh clone must carry them. Anything else under rules/ stays
-# personal.
+# Rule files are the project contract: AGENTS.md's rule index names all of them
+# and CLAUDE.md pulls some in with `@`, so a fresh clone must carry them. Track
+# every rule file by extension — the previous named allow-list silently dropped
+# the three paths-scoped files added with the v2 rule set. Same convention as
+# .codex/rules/*.md below; anything else under rules/ stays personal.
 !.claude/rules/
 .claude/rules/*
-!.claude/rules/test.md
-!.claude/rules/code-quality.md
-!.claude/rules/security-boundaries.md
+!.claude/rules/*.md
 # Mirror of the same team-shared policy for the Codex CLI, same convention:
 # only the shared rule files and generic settings are tracked; config.toml
 # wires machine-local MCP daemons (nvm-pinned binary paths) and stays personal.
@@ -166,7 +168,8 @@ docs/harness-report
 .iknow/*
 !.iknow/settings.json
 .qoder/
-AGENTS.md
+# AGENTS.md is the rule single source of truth that CLAUDE.md pulls in with `@`,
+# so it travels with the repository. Do not ignore it.
 .mcp.json
 # 忽略 worktree symlink(共享宿主 node_modules,git add -A 会误抓)
 node_modules

@@ -492,13 +492,23 @@ describe("bash_output 对写失败的 stderr 通道（real manager）", () => {
     await rm(sidecar, { recursive: true, force: true });
 
     const tool = createBashOutputTool({ backgroundManager: manager });
-    const caught = await tool.handler({ task_id }).then(
-      (ok) => {
-        assert.fail(`expected an io_failure, got ${String(ok)}`);
-      },
-      (err: unknown) => err
+    let caught: unknown;
+    try {
+      await tool.handler({ task_id });
+      caught = undefined;
+    } catch (err) {
+      caught = err;
+    }
+    // A resolve here (no throw) must fail the case explicitly, so the success
+    // path cannot masquerade as a typed-error pass.
+    assert.ok(
+      caught !== undefined,
+      "expected an io_failure, got a successful answer"
     );
-    assert.ok(caught instanceof BashOutputTaskError, "typed error, not [object Object]");
+    assert.ok(
+      caught instanceof BashOutputTaskError,
+      "typed error, not [object Object]"
+    );
     assert.equal(caught.kind, "io_failure");
     assert.equal(caught.context, `output stderr ${task_id}`);
     assert.match(String(caught.cause), /EISDIR/);

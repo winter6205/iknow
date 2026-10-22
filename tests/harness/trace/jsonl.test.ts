@@ -30,6 +30,7 @@ import { tmpdir } from "node:os";
 import { createHash } from "node:crypto";
 import { createJsonlTraceService } from "../../../src/harness/trace/jsonl.ts";
 import {
+  DEFAULT_OWNER,
   clearActiveExtraSecrets,
   setActiveExtraSecrets,
 } from "../../../src/harness/sandbox/env-isolation.ts";
@@ -726,11 +727,11 @@ describe("createJsonlTraceService — recordSandboxCmd (T2, schema 就位埋点�
 // so it picks up the registry values via the module slot (setActiveExtraSecrets).
 // Real secret values written into rows must be masked to *** through that chain.
 describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
-  beforeEach(() => clearActiveExtraSecrets());
-  afterEach(() => clearActiveExtraSecrets());
+  beforeEach(() => clearActiveExtraSecrets(DEFAULT_OWNER));
+  afterEach(() => clearActiveExtraSecrets(DEFAULT_OWNER));
 
   it("registry 追踪值出现在 recordLlmCall 消息里 → blob 正文含 *** 且不含真值, 行内亦无真值", async () => {
-    setActiveExtraSecrets(["sk-registry-secret"]);
+    setActiveExtraSecrets(DEFAULT_OWNER, ["sk-registry-secret"]);
     const svc = createJsonlTraceService({
       filePath: scratch,
       conversationId: "conv-t3-a4",
@@ -758,8 +759,8 @@ describe("#406 T3 — jsonl 输出 mask 兜底 (A4)", () => {
   });
 
   it("clearActiveExtraSecrets 后 registry 值不再被遮蔽 (blob 正文保留原值)", async () => {
-    setActiveExtraSecrets(["sk-registry-secret"]);
-    clearActiveExtraSecrets();
+    setActiveExtraSecrets(DEFAULT_OWNER, ["sk-registry-secret"]);
+    clearActiveExtraSecrets(DEFAULT_OWNER);
     const svc = createJsonlTraceService({
       filePath: scratch,
       conversationId: "conv-t3-a4-clear",
@@ -802,7 +803,7 @@ describe("createJsonlTraceService — output mask lifecycle", () => {
   });
 
   it("rebuilds the mask when active secrets change after factory creation", async () => {
-    clearActiveExtraSecrets();
+    clearActiveExtraSecrets(DEFAULT_OWNER);
     try {
       const { lines, writer } = captureWriter();
       const svc = createJsonlTraceService({
@@ -811,7 +812,7 @@ describe("createJsonlTraceService — output mask lifecycle", () => {
         writer,
       });
 
-      setActiveExtraSecrets(["NEWSECRET"]);
+      setActiveExtraSecrets(DEFAULT_OWNER, ["NEWSECRET"]);
       await svc.recordLlmCall({
         ...SAMPLE_LLM,
         messages: [{ role: "user", content: "NEWSECRET" }],
@@ -829,7 +830,7 @@ describe("createJsonlTraceService — output mask lifecycle", () => {
       assert.equal(blob.includes("NEWSECRET"), false);
       assert.equal(blob.includes("***"), true);
     } finally {
-      clearActiveExtraSecrets();
+      clearActiveExtraSecrets(DEFAULT_OWNER);
     }
   });
 });
@@ -988,7 +989,7 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
   });
 
   it("SC13: blob 内容 mask 后写入, sha == 内容 sha256, bytes == 实际 UTF-8 字节数", async () => {
-    setActiveExtraSecrets(["blob-secret"]);
+    setActiveExtraSecrets(DEFAULT_OWNER, ["blob-secret"]);
     try {
       const { lines, writer } = captureWriter();
       const svc = createJsonlTraceService({
@@ -1017,7 +1018,7 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
       // The row also contains no secret.
       assert.equal(lines[0]!.includes("blob-secret"), false);
     } finally {
-      clearActiveExtraSecrets();
+      clearActiveExtraSecrets(DEFAULT_OWNER);
     }
   });
 
@@ -1099,7 +1100,7 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
   });
 
   it("SC11: blobs/ 不可写 → 零行落盘, 返回 undefined, 服务存活 (无内联回退)", async () => {
-    setActiveExtraSecrets(["blob-secret"]);
+    setActiveExtraSecrets(DEFAULT_OWNER, ["blob-secret"]);
     try {
       writeFileSync(join(scratch, "blobs"), "not a directory", "utf8");
       const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
@@ -1161,7 +1162,7 @@ describe("createJsonlTraceService — content 级 blob 引用 (SC10, T4)", () =>
         warnSpy.mockRestore();
       }
     } finally {
-      clearActiveExtraSecrets();
+      clearActiveExtraSecrets(DEFAULT_OWNER);
     }
   });
 });

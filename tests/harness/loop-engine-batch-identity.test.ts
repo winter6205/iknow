@@ -102,6 +102,9 @@ function batchDeps(
   const sink: RuntimePersistenceSink<AnthropicNativeMessage> = {
     async publishSavedState(request) {
       rec.published.push(request.messages);
+      // The recorder IS the write here: the publication is stored, so the
+      // sink reports the write as durable.
+      return true;
     },
     async appendOperationFact(
       fact: RuntimeOperationFact<AnthropicNativeMessage>

@@ -83,10 +83,13 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
     assert.equal(argv[0], "bwrap");
     assert.equal(argv[1], "--unshare-user-try");
     assert.equal(argv[2], "--unshare-net");
-    assert.equal(argv[3], "--die-with-parent");
+    // ADR-0141: the pid namespace joins the constant namespace block, so it
+    // sits with `--unshare-net` / `--die-with-parent` ahead of every mount.
+    assert.equal(argv[3], "--unshare-pid");
+    assert.equal(argv[4], "--die-with-parent");
     // 1. host root `/` is the first mount and the base the last mount wins over (the only `/` mount here).
     const rootBindIdx = assertTriple(argv, "--bind", "/", "host root bind");
-    assert.equal(rootBindIdx, 4, "`--bind / /` is the first mount token");
+    assert.equal(rootBindIdx, 5, "`--bind / /` is the first mount token");
     // 2. system block: all fixed prefixes are --ro-bind, after `/`, in strictly increasing order.
     let cursor = rootBindIdx;
     for (const target of READ_ONLY_SYSTEM_PATHS) {
@@ -214,7 +217,9 @@ describe("createBwrapFence — 全局档 argv 形态 (ADR-0092)", () => {
       "constant netns isolation; spec SC1"
     );
     assert.ok(argv.includes("--die-with-parent"));
-    assert.equal(assertTriple(argv, "--bind", "/", "host root bind"), 4);
+    // ADR-0141: pidns is constant too, and still ahead of the first mount.
+    assert.ok(argv.includes("--unshare-pid"));
+    assert.equal(assertTriple(argv, "--bind", "/", "host root bind"), 5);
   });
 });
 

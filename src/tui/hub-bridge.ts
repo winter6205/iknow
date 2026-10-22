@@ -32,6 +32,7 @@ import type { EngineBundle } from "../harness/build-engine.js";
 import type {
   PostMessageResponse,
   TurnOutcomeView,
+  UserContentBlock,
   WireThinkingOverride,
 } from "../session-api/contract.js";
 import { knownTurnOutcome } from "../session-api/contract.js";
@@ -53,6 +54,7 @@ import type {
   SubAgentManager,
   SubagentInfo,
 } from "../harness/subagent/manager.js";
+import type { BackgroundLiveTask } from "../harness/background/manager.js";
 import type { SubAgentTerminalNotice } from "../harness/subagent/mailbox.js";
 import type {
   AutoMemoryHook,
@@ -61,7 +63,7 @@ import type {
 import type { VerifyConfig } from "../harness/verify/index.js";
 import type { GraphAssembly } from "../harness/graph/assembly.js";
 import type { FsModeContext } from "../harness/sandbox/fs-mode.js";
-import type { YoloContext } from "../harness/sandbox/yolo.js";
+import type { FenceRetirementReader } from "../harness/sandbox/yolo.js";
 import {
   seedRestoredGraphNodes,
   type LiveGraphLedgerHost,
@@ -168,13 +170,21 @@ export interface TuiBridge {
   /** Send one message, run one turn (signal passes through so Esc can
    *  interrupt the foreground). thinking: per-turn override of the harness
    *  thinking control arm (same shape as SessionHub.postMessage's wire
-   *  field; absent -> keep ensureDeps' cached configuration). */
+   *  field; absent -> keep ensureDeps' cached configuration). content: the
+   *  ordered block payload the composer holds (text + image); `text` stays
+   *  required and stays what the goal parser, the text cap and the prefetch
+   *  query read, so a caller that has no blocks sends exactly what it always
+   *  sent. */
   readonly postMessage: (opts: {
     readonly conversationId: string;
     readonly text: string;
+    readonly content?: readonly UserContentBlock[];
     readonly signal?: AbortSignal;
     readonly thinking?: WireThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
+    /** Who sent it (spec remote-sync §4.1); forwarded to the hub bus, absent
+     *  → "local". */
+    readonly origin?: "local" | "remote";
   }) => Promise<TuiPostResult>;
   /** Host wake subscription; absent manager is a no-op (ask-safe). */
   readonly subscribeSubagentTerminal: (
@@ -213,6 +223,22 @@ export interface TuiBridge {
     readonly file: TuiLoadedSessionFile | null;
     readonly recovery: TuiSessionRecovery;
   }>;
+  /**
+   * ADR-0145: the conversation's OWN model route, as the hub knows it (its
+   * map entry, else the route its session file carries, else the current
+   * default). undefined = the hub cannot name one. Read-only — it changes
+   * nothing.
+   *
+   * The TUI seeds its per-conversation state with it, so the model row, the
+   * `/info` Model row and the `/model` cursor show the route the conversation
+   * RUNS on, not the default (which another conversation's `/model` act moves).
+   *
+   * Optional: a bridge double (fixture / test) may leave it unwired; the
+   * display then falls back to the default model, as before ADR-0145.
+   */
+  readonly getSessionModel?: (
+    conversationId: string
+  ) => Promise<string | undefined>;
   /** Manual compaction (/compact). Returns `{ compacted, cancelled? }`:
    *  `compacted` true = trimming actually happened; false = nothing
    *  compactable (empty session is idempotent) or full failure — the auto
@@ -254,6 +280,12 @@ export interface TuiBridge {
   readonly inflight: InflightRegistry;
   /** Context window capacity (tokens). Display only; never triggers compaction. */
   readonly contextWindow: number;
+  /**
+   * Still-running background tasks from every engine built by the TUI
+   * (identity only, all conversations — /quit joins by conversation_id).
+   * Read at CALL time so finished tasks disappear; no callback -> empty.
+   */
+  readonly listLiveBackgroundTasks: () => ReadonlyArray<BackgroundLiveTask>;
   /** Read-only projection of subagent state: no manager -> empty array. */
   readonly listSubagents: (
     conversationId?: string
@@ -303,6 +335,8 @@ export interface CreateTuiBridgeOptions {
    *  buildHarnessEngine SSOT; hub-bridge passes it through to SessionHub.
    *  Default undefined -> no-manager path (drain returns empty). */
   readonly subagentManager?: SubAgentManager;
+  /** Read-only projection of live background tasks across the TUI's engines. */
+  readonly listLiveBackgroundTasks?: () => ReadonlyArray<BackgroundLiveTask>;
   /**
    * ADR-0031: auto-memory hook. Rides the same route as subagentManager
    * (buildTuiDeps -> buildHarnessEngine SSOT assembly) into SessionHub.
@@ -387,14 +421,14 @@ export interface CreateTuiBridgeOptions {
    */
   readonly fsMode?: FsModeContext;
   /**
-   * ADR-0119 / specs/yolo-mode.md: the yolo no-sandbox-mode holder (same shape
-   * as `SessionHubOptions.yolo`). Passed through to `SessionHub`, whose verify
-   * call site reads it per call — it is the **same instance** as the TUI's bash
-   * surface (BuildEngineOpts.yolo, passed through buildTuiDeps). Absent = this
-   * entry has no yolo wiring -> the hub's verify surface stays non-yolo
-   * (fail-closed, fence kept).
+   * ADR-0141: the derived fence posture (same shape as
+   * `SessionHubOptions.fenceRetired`). Passed through to `SessionHub`, whose
+   * verify call site reads it per call — it is the **same instance** as the
+   * TUI's bash surface (BuildEngineOpts.fenceRetired, passed through
+   * buildTuiDeps). Absent = this entry has no wiring -> the hub's verify
+   * surface stays fenced (fail-closed, fence kept).
    */
-  readonly yolo?: YoloContext;
+  readonly fenceRetired?: FenceRetirementReader;
 }
 
 /**
@@ -505,13 +539,13 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     // saving one ternary branch — the S5 lint ratchet tolerates zero
     // complexity growth in touched functions.
     fsMode: opts.fsMode,
-    // ADR-0119 / specs/yolo-mode.md: holder pass-through — the TUI's verify
-    // command surface and its bash tool surface must stay homogeneous (same
-    // instance; the hub's runVerifyLoop call site reads it per call, so a
-    // `/yolo` flip takes effect on the next call). Direct assignment:
+    // ADR-0141: reader pass-through — the TUI's verify command surface and its
+    // bash tool surface must stay homogeneous (same instance; the hub's
+    // runVerifyLoop call site reads it per call, so a preset flip takes effect
+    // on the next call). Direct assignment:
     // `undefined` equals "key absent" under the hub opts destructuring (same as
     // the fsMode line).
-    yolo: opts.yolo,
+    fenceRetired: opts.fenceRetired,
   });
 
   const toPostResult = (resp: PostMessageResponse): TuiPostResult => ({
@@ -551,9 +585,11 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     postMessage: async ({
       conversationId,
       text,
+      content,
       signal,
       thinking,
       onStream,
+      origin,
     }) => {
       opts.inflight.mark(conversationId);
       try {
@@ -562,7 +598,9 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           text,
           signal,
           onStream,
+          ...(content !== undefined ? { content } : {}),
           ...(thinking !== undefined ? { thinking } : {}),
+          ...(origin !== undefined ? { origin } : {}),
         });
         return toPostResult(resp);
       } finally {
@@ -650,6 +688,11 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
           : { ...recovery.file, lastTurnOutcome: outcome };
       return { file, recovery };
     },
+    // ADR-0145: the conversation's own route, straight from the hub — the
+    // TUI seeds its per-conversation state with it, so the model row, the
+    // `/info` Model row and the `/model` cursor show the route the
+    // conversation RUNS on, not the default.
+    getSessionModel: (conversationId) => hub.getSessionModel(conversationId),
     compactSession: async (conversationId, compactOpts) => {
       const res = await hub.compactSession(
         conversationId,
@@ -704,6 +747,7 @@ export function createTuiBridge(opts: CreateTuiBridgeOptions): TuiBridge {
     },
     inflight: opts.inflight,
     contextWindow: opts.contextWindow ?? DEFAULT_CONTEXT_WINDOW,
+    listLiveBackgroundTasks: () => opts.listLiveBackgroundTasks?.() ?? [],
     // Subagent read-only projection. No manager (ask surface / legacy product path) -> empty.
     listSubagents: (conversationId) => hub.listSubagents(conversationId),
     // Force-kill exit (Ctrl+X). Hub-side no-op semantics -> false.

@@ -14,6 +14,7 @@
  */
 
 import type { HarnessStreamEvent } from "../stream.js";
+import type { ImageContentBlock } from "./image-content.js";
 
 /** Anthropic native content block (interpreted by the model adapter). */
 export type AnthropicContentBlock =
@@ -31,7 +32,10 @@ export type AnthropicContentBlock =
       is_error?: boolean;
     }
   | { type: "thinking"; thinking: string; signature: string }
-  | { type: "redacted_thinking"; data: string };
+  | { type: "redacted_thinking"; data: string }
+  // Top-level images exist only on the user-paste path (`image-content.ts`);
+  // the `read_image` tool's output stays nested inside `tool_result.content`.
+  | ImageContentBlock;
 
 /** Anthropic native message role. */
 export type AnthropicRole = "user" | "assistant" | "system";
@@ -144,7 +148,19 @@ export interface AssistantTurnResult {
   readonly supplierStop: "success" | "truncation" | "refusal" | "other";
   /** Whether tools are needed (any valid tool call ⇒ true). */
   readonly needsTools: boolean;
-  /** EmptyFinalResponse? (success stop but no text block). */
+  /**
+   * Whether the turn carried thinking / redacted_thinking content. The
+   * adapter is the only party that read the native blocks, so it reports the
+   * fact: consumers that need "progress without an answer" (loop-engine's
+   * tool-free arm) ask here instead of re-deriving the EmptyFinalResponse
+   * rule from the block mix.
+   */
+  readonly hasThinking: boolean;
+  /**
+   * EmptyFinalResponse?: a success stop whose blocks carry no text, no
+   * tool_use, and no thinking / redacted_thinking — neither an answer nor
+   * visible progress.
+   */
   readonly isEmptyFinalResponse: boolean;
   /**
    * ADR-0008: token usage of one successful assistant turn (sealed
@@ -165,6 +181,42 @@ export interface AssistantTurnResult {
    * "not measurable" — the field simply doesn't exist (never null).
    */
   readonly thinkingMs?: number;
+  /**
+   * Generation duration of this assistant turn in ms: wall clock from the
+   * first non-empty output delta (text_delta / thinking_delta /
+   * tool_input_delta) to `finalMessage()` resolution. Excludes the first-token
+   * wait and tool execution; measured on the monotonic clock. Edge forms are
+   * pinned like thinkingMs: `generationMs <= 0` or non-finite → undefined
+   * (never null). Non-streaming arms and streams whose deltas were all empty
+   * don't produce it. Postel: absent means "not measurable".
+   */
+  readonly generationMs?: number;
+}
+
+/**
+ * EmptyFinalResponse rule (the field above): a success stop ends the run with
+ * no answer only when its blocks carry neither displayable content (text) nor
+ * progress-bearing content (thinking / redacted_thinking); tool_use turns
+ * continue regardless.
+ *
+ * Lives beside the contract it interprets, not in the adapter: this module is
+ * a runtime leaf (every import in it is `import type`), so a test fixture can
+ * state the rule without pulling in a module that other tests replace with a
+ * `vi.mock` factory — a factory that imports such a fixture deadlocks when the
+ * fixture statically imports the very module being mocked.
+ */
+export function isEmptyFinalResponseStop(
+  supplierStop: AssistantTurnResult["supplierStop"],
+  texts: readonly string[],
+  toolCalls: readonly unknown[],
+  hasThinking: boolean
+): boolean {
+  return (
+    supplierStop === "success" &&
+    texts.length === 0 &&
+    toolCalls.length === 0 &&
+    !hasThinking
+  );
 }
 
 /** Token quartet aligned with the Anthropic SDK Usage (ADR-0008). */

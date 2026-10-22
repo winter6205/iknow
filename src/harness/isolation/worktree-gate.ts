@@ -1509,7 +1509,8 @@ export function createWorktreeIsolationExecutor(
     turnId?: string,
     onStream?: (event: import("../stream.js").HarnessStreamEvent) => void,
     messages?: import("../tools/types.js").ToolExecutionContext["messages"],
-    parentThinking?: import("../tools/types.js").ToolExecutionContext["parentThinking"]
+    parentThinking?: import("../tools/types.js").ToolExecutionContext["parentThinking"],
+    parentModelRoute?: import("../tools/types.js").ToolExecutionContext["parentModelRoute"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> => {
     // ADR-0096 — wave snapshot for the SWITCH as well: read the holder
     // ONCE at wave entry. A panel flip (ON→OFF / OFF→ON) therefore applies to
@@ -1525,7 +1526,8 @@ export function createWorktreeIsolationExecutor(
         turnId,
         onStream,
         messages,
-        parentThinking
+        parentThinking,
+        parentModelRoute
       );
     }
     // Snapshot live taskRoot ONCE at executeAll entry. The whole wave
@@ -1559,7 +1561,8 @@ export function createWorktreeIsolationExecutor(
         turnId,
         onStream,
         messages,
-        parentThinking
+        parentThinking,
+        parentModelRoute
       );
     }
     // mixed / mutating batch: per-call gating (read calls still batched one
@@ -1587,7 +1590,8 @@ export function createWorktreeIsolationExecutor(
           turnId,
           onStream,
           messages,
-          parentThinking
+          parentThinking,
+          parentModelRoute
         );
         rootFlipped = true;
         rootFlipTool = call.name;
@@ -1601,7 +1605,8 @@ export function createWorktreeIsolationExecutor(
           turnId,
           onStream,
           messages,
-          parentThinking
+          parentThinking,
+          parentModelRoute
         );
       } else if (rootFlipped) {
         result = block(
@@ -1627,7 +1632,8 @@ export function createWorktreeIsolationExecutor(
               turnId,
               onStream,
               messages,
-              parentThinking
+              parentThinking,
+              parentModelRoute
             )
           )[0]!;
       }

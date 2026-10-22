@@ -141,50 +141,66 @@ describe("createViolationCounter", () => {
 });
 
 describe("createKillSessionHook", () => {
-  it("forwards execution_failed with [hard_wall] dangerous to mid-tier", () => {
+  it("a [hard_wall] execution_failed does not increment the counter or escalate the turn", async () => {
     const counter = createViolationCounter();
-    let killed = false;
+    const kills: string[] = [];
+    let escalated = 0;
+    let interrupted = 0;
     const hook = createKillSessionHook({
       counter,
-      onKill: () => {
-        killed = true;
+      onKill: (reason) => kills.push(reason),
+      onEscalate: () => {
+        escalated += 1;
+      },
+      onInterrupt: () => {
+        interrupted += 1;
       },
     });
-    hook({
-      toolUseId: "x",
-      name: "bash",
-      input: { command: "rm -rf /" },
-      kind: "execution_failed",
-      message: "[hard_wall] dangerous command rejected",
-    });
-    assert.equal(killed, false);
-    assert.equal(counter.snapshot(), 1);
+    const messages = [
+      "[hard_wall] dangerous command rejected",
+      "[hard_wall] sensitive path: /etc/shadow",
+      "[permission_denied] [hard_wall] dangerous command pattern matched",
+    ];
+    for (const message of messages) {
+      await observe(hook, { kind: "execution_failed", message });
+    }
+    assert.equal(counter.snapshot(), 0);
+    assert.deepEqual(kills, []);
+    assert.equal(escalated, 0);
+    assert.equal(interrupted, 0);
   });
 
-  it("fires onKill when mid-tier threshold is hit", () => {
+  it("fires onKill, onEscalate, and onInterrupt when a non-hardwall mid threshold is hit", async () => {
     const counter = createViolationCounter({ midEscalationThreshold: 2 });
     const killReasons: string[] = [];
+    let escalated = 0;
+    let interrupted = 0;
     const hook = createKillSessionHook({
       counter,
-      onKill: (r) => killReasons.push(r),
+      onKill: (reason) => killReasons.push(reason),
+      onEscalate: () => {
+        escalated += 1;
+      },
+      onInterrupt: () => {
+        interrupted += 1;
+      },
     });
-    hook({
-      toolUseId: "x",
-      name: "bash",
-      input: { command: "rm -rf /" },
+    await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[network_denied] evil.com: not in allowlist",
     });
-    hook({
-      toolUseId: "y",
-      name: "bash",
-      input: { command: "rm -rf /" },
+    assert.equal(escalated, 0);
+    assert.equal(interrupted, 0);
+    await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[network_denied] evil.com: not in allowlist",
     });
     assert.equal(killReasons.length, 1);
     assert.match(killReasons[0] ?? "", /"tier":"mid-escalation"/);
     assert.match(killReasons[0] ?? "", /"kind":"violation"/);
+    assert.equal(escalated, 1);
+    assert.equal(interrupted, 1);
+    assert.equal(counter.snapshot(), 2);
   });
 
   it("fires onKill on a single mid-tier record when threshold=1", () => {
@@ -290,29 +306,72 @@ describe("consecutive confirmed violations (ADR-0135 streak)", () => {
     for (let i = 0; i < 2; i += 1) {
       await observe(hook, {
         kind: "execution_failed",
-        message: "[hard_wall] sensitive path: /etc/shadow",
+        message: "[fs_denied] the workspace is read-only in this session",
       });
     }
     assert.equal(counter.snapshot(), 2);
     await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] sensitive path: /etc/shadow",
+      message: "[fs_denied] the workspace is read-only in this session",
     });
     assert.equal(counter.snapshot(), 3);
   });
 
-  it("different rules accumulate onto the same streak", async () => {
+  it("different non-hardwall mid rules accumulate onto the same streak", async () => {
     const counter = createViolationCounter();
     const hook = createKillSessionHook({ counter, onKill: () => undefined });
     await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[network_denied] evil.com: not in allowlist",
     });
     await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] sensitive path",
+      message: "[fs_denied] the workspace is read-only in this session",
+    });
+    await observe(hook, {
+      kind: "execution_failed",
+      message: "[permission_denied] dangerous command",
+    });
+    assert.equal(counter.snapshot(), 3);
+  });
+
+  it("a [hard_wall] denial neither increments nor resets a non-hardwall streak", async () => {
+    const counter = createViolationCounter();
+    let escalated = 0;
+    let interrupted = 0;
+    const hook = createKillSessionHook({
+      counter,
+      onKill: () => undefined,
+      onEscalate: () => {
+        escalated += 1;
+      },
+      onInterrupt: () => {
+        interrupted += 1;
+      },
+    });
+    await observe(hook, {
+      kind: "execution_failed",
+      message: "[network_denied] evil.com: not in allowlist",
+    });
+    await observe(hook, {
+      kind: "execution_failed",
+      message: "[fs_denied] the workspace is read-only in this session",
     });
     assert.equal(counter.snapshot(), 2);
+    await observe(hook, {
+      kind: "execution_failed",
+      message: "[hard_wall] dangerous command rejected",
+    });
+    assert.equal(counter.snapshot(), 2);
+    assert.equal(escalated, 0);
+    assert.equal(interrupted, 0);
+    await observe(hook, {
+      kind: "execution_failed",
+      message: "[permission_denied] dangerous command",
+    });
+    assert.equal(counter.snapshot(), 3);
+    assert.equal(escalated, 1);
+    assert.equal(interrupted, 1);
   });
 
   it("an admitted successful call resets the streak", async () => {
@@ -320,11 +379,11 @@ describe("consecutive confirmed violations (ADR-0135 streak)", () => {
     const hook = createKillSessionHook({ counter, onKill: () => undefined });
     await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[network_denied] evil.com: not in allowlist",
     });
     await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[network_denied] evil.com: not in allowlist",
     });
     assert.equal(counter.snapshot(), 2);
     await observe(hook, {
@@ -335,11 +394,11 @@ describe("consecutive confirmed violations (ADR-0135 streak)", () => {
     // Two more violations after the reset must not reach the threshold.
     await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[network_denied] evil.com: not in allowlist",
     });
     await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[network_denied] evil.com: not in allowlist",
     });
     assert.equal(counter.snapshot(), 2);
   });
@@ -371,11 +430,11 @@ describe("consecutive confirmed violations (ADR-0135 streak)", () => {
       const hook = createKillSessionHook({ counter, onKill: () => undefined });
       await observe(hook, {
         kind: "execution_failed",
-        message: "[hard_wall] dangerous command",
+        message: "[network_denied] evil.com: not in allowlist",
       });
       await observe(hook, {
         kind: "execution_failed",
-        message: "[hard_wall] dangerous command",
+        message: "[network_denied] evil.com: not in allowlist",
       });
       assert.equal(
         counter.snapshot(),
@@ -414,11 +473,11 @@ describe("consecutive confirmed violations (ADR-0135 streak)", () => {
     });
     await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[permission_denied] dangerous command",
     });
     await observe(hook, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[permission_denied] dangerous command",
     });
     assert.equal(first.snapshot(), 2);
 
@@ -430,14 +489,14 @@ describe("consecutive confirmed violations (ADR-0135 streak)", () => {
     });
     await observe(hook2, {
       kind: "execution_failed",
-      message: "[hard_wall] dangerous command",
+      message: "[permission_denied] dangerous command",
     });
     assert.equal(second.snapshot(), 1);
   });
 });
 
 describe("categorizeResult", () => {
-  it("[hard_wall] dangerous / sensitive → mid", () => {
+  it("[hard_wall] dangerous / sensitive does not count toward a turn kill", () => {
     assert.equal(
       categorizeResult({
         name: "bash",
@@ -445,7 +504,7 @@ describe("categorizeResult", () => {
         kind: "execution_failed",
         message: "[hard_wall] dangerous command rejected",
       }).tier,
-      "mid"
+      undefined
     );
     assert.equal(
       categorizeResult({
@@ -454,7 +513,17 @@ describe("categorizeResult", () => {
         kind: "execution_failed",
         message: "[hard_wall] sensitive path",
       }).tier,
-      "mid"
+      undefined
+    );
+    assert.equal(
+      categorizeResult({
+        name: "bash",
+        input: {},
+        kind: "execution_failed",
+        message:
+          "[permission_denied] [hard_wall] dangerous command pattern matched",
+      }).tier,
+      undefined
     );
   });
 

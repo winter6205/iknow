@@ -16,6 +16,7 @@ import type {
   TokenUsage,
 } from "../../src/harness/index.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
+import { isEmptyFinalResponseStop } from "../../src/harness/model-adapter/types.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
@@ -89,10 +90,13 @@ export function assistantResult(
     projection: { nativeMessage: native, texts, toolCalls },
     supplierStop,
     needsTools: toolCalls.length > 0,
-    isEmptyFinalResponse:
-      supplierStop === "success" &&
-      texts.length === 0 &&
-      toolCalls.length === 0,
+    hasThinking: thinkingBlocks.length > 0,
+    isEmptyFinalResponse: isEmptyFinalResponseStop(
+      supplierStop,
+      texts,
+      toolCalls,
+      thinkingBlocks.length > 0
+    ),
     // thinkingMs default-field semantics: the stub passes nothing; when supplied it
     // is attached verbatim.
     ...(opts.thinkingMs !== undefined && { thinkingMs: opts.thinkingMs }),

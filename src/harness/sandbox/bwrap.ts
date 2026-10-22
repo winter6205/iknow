@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { ToolExecutionError } from "../errors.js";
+import { requireBwrap } from "./runner.js";
 import { fsBoundarySnapshot } from "./fs-boundary.js";
 import type { FsPolicy } from "./fs-policy.js";
 import {
@@ -7,7 +8,12 @@ import {
   READ_ONLY_SYSTEM_PATHS,
 } from "./fs-policy.js";
 import type { EgressFenceSpec } from "./egress/session.js";
-import { credentialReadMaskArgs } from "./credential-read-mask.js";
+import {
+  credentialReadMaskArgs,
+  type CredentialReadMaskArgs,
+  type CredentialReadMaskArgsResult,
+  type MaskPlanCache,
+} from "./credential-read-mask.js";
 import {
   assertMaterializedTargetsUnchanged,
   materializeProtectedTargets,
@@ -189,6 +195,26 @@ export interface BwrapFenceOptions {
    */
   readonly protectCredentialReads?: boolean;
   /**
+   * SESSION-SCOPED HOLDER for the credential read-mask plan (perf: the plan
+   * is otherwise rebuilt — and the credential subtrees re-walked — on every
+   * fence assembly).
+   *
+   * The holder is created once per session (the bash tool's factory closure)
+   * and passed explicitly down to this factory, so a plan never outlives the
+   * session that produced it and two sessions never share one. Absent → the
+   * plan is computed per assembly, byte-identical to the pre-holder
+   * behaviour.
+   *
+   * The holder caches the PLAN only: the protected-target inventory and the
+   * materialized name-rule matches are re-derived per assembly (the
+   * inventory carries the one-shot awaited pre-walk; the materialized set is
+   * what makes "a newly appearing credential file is protected on the next
+   * call" true). The plan invalidates itself on the fs identities it
+   * depends on, so a changed subtree, a changed exact file or a changed
+   * generated cover source rebuilds it.
+   */
+  readonly maskCache?: MaskPlanCache;
+  /**
    * Warn-level diagnostic sink for entries skipped as absent on this host —
    * one typed `ProtectedTargetSkippedWarning` per skipped entry on the same
    * onWarn-callback channel shape the egress module already uses; defaults to
@@ -198,21 +224,22 @@ export interface BwrapFenceOptions {
     warning: ProtectedTargetSkippedWarning
   ) => void;
   /**
-   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox switch (the whole fence
-   * retires).
+   * ADR-0141: the fence layer's only input — the whole fence retires when true.
+   * Renamed from `yolo`, which named a preset rather than the axis (ADR-0141
+   * ruling 1).
    *
-   * Strict boolean: only `=== true` hits the yolo branch; absent / false /
-   * non-boolean all take today's fence path (illegal input stays fail-closed,
-   * keeps the fence, does not throw).
+   * Strict boolean: only `=== true` hits the retired branch; absent / false /
+   * non-boolean all take the fence path (illegal input stays fail-closed, keeps
+   * the fence, does not throw).
    *
-   * The yolo branch argv is bare argv: command + args, no bwrap prefix, no
+   * The retired branch argv is bare argv: command + args, no bwrap prefix, no
    * netns, no mount, no clearenv / setenv; cwd and env are handed to spawn by
    * the caller (server/index.ts's req.cwd / req.env).
    *
    * Absent (`undefined`) must stay byte-for-byte identical to today (V1
    * baseline regression contract).
    */
-  readonly yolo?: boolean;
+  readonly fenceRetired?: boolean;
 }
 
 export interface BwrapFence {
@@ -557,6 +584,21 @@ function baseArgs(
     // hatch. The only path to the host network is the egress unix socket
     // seam — netns isolation is the sole fence-layer control axis.
     "--unshare-net",
+    // ADR-0142: the pid namespace is the fence's lifetime boundary. Without
+    // it a fenced command can `setsid` a grandchild into a fresh process
+    // group, which the runner's group-directed SIGTERM/SIGKILL never reaches
+    // and `--die-with-parent` does not cover (that flag only holds bwrap's
+    // *direct* child) — the stray then outlives the tool call on the host.
+    // Under `--unshare-pid` bwrap is pid 1 of the namespace, and the kernel
+    // kills every remaining process when that init exits, so no descendant can
+    // outlive the fence however it detached. Constant, like `--unshare-net`:
+    // no input strips it, and the foreground and background fences share this
+    // one assembly point, so both routes get it.
+    //
+    // Cost, deliberately accepted: inside the namespace `/proc` and `ps` show
+    // only the fence's own processes, so a fenced command can no longer
+    // observe host processes. See docs/adr/0142-sandbox-pid-namespace.md.
+    "--unshare-pid",
     "--die-with-parent",
     // Host root: real paths visible and writable.
     "--bind",
@@ -687,14 +729,7 @@ function boundaryMountSegments(opts: BwrapFenceOptions): {
   const mask =
     opts.protectCredentialReads !== true
       ? { args: [] as string[], exactFileMaskPaths: [] as readonly string[] }
-      : credentialReadMaskArgs({
-          inventory: opts.protectedTargets,
-          sessionTmpRoot: opts.fsPolicy.tmpRoot(),
-          ...(opts.egress === undefined
-            ? {}
-            : { egressBinds: opts.egress.binds ?? [] }),
-          materializedTargets: write.materialized,
-        });
+      : credentialMaskPlan(opts, opts.protectedTargets, write.materialized);
   return {
     segments: [...write.args, ...mask.args],
     skipped: write.skipped,
@@ -702,8 +737,47 @@ function boundaryMountSegments(opts: BwrapFenceOptions): {
   };
 }
 
-export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
-  // ADR-0119 / specs/yolo-mode.md: yolo branch — the whole fence retires.
+/**
+ * The credential read-mask plan for this assembly, through the session's
+ * mask holder when it has one.
+ *
+ * The holder's key covers the inventory, the materialized targets, the
+ * egress binds and the session tmp root, and its fs identities cover the
+ * credential file set — so a cached plan is the plan THIS assembly would
+ * have produced, and the emitted `/dev/null` mask dests stay exactly the set
+ * this fence emits (the EBUSY correlation set never drifts from the argv).
+ */
+function credentialMaskPlan(
+  opts: BwrapFenceOptions,
+  inventory: ProtectedTargetInventory,
+  materialized: readonly ProtectedTargetBindPath[]
+): CredentialReadMaskArgsResult {
+  const args: CredentialReadMaskArgs = {
+    inventory,
+    sessionTmpRoot: opts.fsPolicy.tmpRoot(),
+    ...(opts.egress === undefined
+      ? {}
+      : { egressBinds: opts.egress.binds ?? [] }),
+    materializedTargets: materialized,
+  };
+  return opts.maskCache === undefined
+    ? credentialReadMaskArgs(args)
+    : opts.maskCache.resolve(args);
+}
+
+export function createBwrapFence(
+  opts: BwrapFenceOptions,
+  /**
+   * ADR-0141 invariant 9: the per-call bwrap availability probe. Defaults to
+   * `requireBwrap`; injectable so a test can assert the probe cadence without
+   * shadowing a real binary on PATH. A throw here is a typed refusal and the
+   * command does not run — the factory never falls back to unfenced.
+   */
+  probe: () => void = requireBwrap
+): BwrapFence {
+  // ADR-0141: the retirement branch — the whole fence retires. This file holds
+  // no `yolo` judgment: the preset that decided this lives in the sandbox
+  // overlay, and this factory only reads the derived boolean.
   //
   // Strict `=== true` check (illegal input stays fail-closed, keeps the fence,
   // does not throw). All four routes (foreground bash / background spawn /
@@ -713,23 +787,27 @@ export function createBwrapFence(opts: BwrapFenceOptions): BwrapFence {
   //
   // bare argv: no bwrap prefix / netns / mount / clearenv / setenv emitted.
   // cwd and env are handed to spawn by the caller (server/index.ts's req.cwd /
-  // req.env). The egress seam is skipped wholesale under yolo (no socket bind,
-  // no proxy env) — no fence means no netns, so the domain allowlist does not
-  // intervene (ADR-0119 ruling 3).
+  // req.env). The egress seam is skipped wholesale (no socket bind, no proxy
+  // env) — no fence means no netns, so the domain allowlist does not intervene.
   //
   // This early return also precedes the ADR-0109 `unboundFence` ro-bind: since
   // the entire fence is gone, its physical main-checkout guarantee is inside the
-  // yolo exemption by construction (bare argv wins over ro-bind; see the
-  // ADR-0119 Amendment).
-  if (opts.yolo === true) {
+  // retirement exemption by construction (bare argv wins over ro-bind).
+  if (opts.fenceRetired === true) {
     return Object.freeze({
       argv: Object.freeze([opts.command, ...opts.args]),
       sealed: true as const,
-      // The whole boundary block is below this return: a yolo fence emitted no
-      // mask, so it must carry an empty correlation set and never name one.
+      // The whole boundary block is below this return: a retired fence emitted
+      // no mask, so it must carry an empty correlation set and never name one.
       exactFileMaskPaths: Object.freeze([]),
     });
   }
+  // ADR-0141 invariant 9: presence is rechecked on EVERY fenced call, because
+  // bwrap can disappear mid-session (package removed, PATH changed) after the
+  // assembly-time probe passed. Skipped entirely on the retired path above,
+  // and never cached across calls: a success is evidence about one moment.
+  probe();
+
   // Egress env injection: spec.env is the session-computed proxy
   // (ADR-0097)
   // keys + NO_PROXY; the fence splices them into its own envArgs (same form as

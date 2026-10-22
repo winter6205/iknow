@@ -30,7 +30,7 @@ Locked sub-decisions:
 - scratch writes go through the session fence tmp pad rather than the main checkout (sub-decision 2);
 - EROFS → `create-worktree` → reuse of the existing re-bind machinery, no new mechanism (sub-decision 6).
 
-**ADR relationships:** ADR-0037 Amendment 2026-09-04's bash "will it write the workspace" self-adjudication and unknown-command fail-closed interception clause, and the physical form of the §9.2 write whitelist in the unbound tier, are **superseded by this ADR** (noted in place in 0037). `validateReadonlyCommand` still serves only `bashMode === "readonly"`, unrelated to this decision (that half-clause persists). The PreWrite user-hook event still reuses `classifyCall`, but for bash `classifyCall` is no longer the gate's enforcement surface.
+**ADR relationships:** ADR-0037 Amendment 2026-09-04's bash "will it write the workspace" self-adjudication and unknown-command fail-closed interception clause, and the physical form of the §9.2 write whitelist in the unbound tier, are **superseded by this ADR** (noted in place in 0037). `validateReadonlyCommand` still serves only `bashMode === "readonly"`, unrelated to this decision (that half-clause persists). **Annotated 2026-10-20** (ADR-0148): ADR-0148 gives `validateReadonlyCommand` a second, **non-gate** use as one conjunct of the bash per-call concurrency judgment — a different question ("may this call share a wave?"), answered by a stricter conjunction that can only refuse, so the clause above is annotated, not rescinded (ADR-0148 §8). The PreWrite user-hook event still reuses `classifyCall`, but for bash `classifyCall` is no longer the gate's enforcement surface.
 
 ## Why not
 

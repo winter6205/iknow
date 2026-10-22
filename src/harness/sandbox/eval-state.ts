@@ -14,7 +14,7 @@
  * only, user-layer settings never rewritten), the bwrap fence retired wholesale
  * — so every route this entry mounts (foreground bash) runs bare — and the egress
  * seam retired with it (ADR-0119 §ruling 3). The fence carrier is therefore the
- * very same `YoloContext` holder the fence factory's single branch reads, applied
+ * very same overlay-backed reader the fence factory's single branch reads, applied
  * by the very same enter action, and the four routes run bare through it because
  * the fence is gone: **the parity is structural in the fence carrier and the
  * fence shape — the shape that could drift — not in a copy.**
@@ -54,8 +54,10 @@ import type {
   PermissionModeContext,
 } from "../permission/modes.js";
 import type { FsModeContext } from "./fs-mode.js";
+import { FS_ISOLATION_MODE_DEFAULT } from "./fs-mode.js";
 import { createYoloContext, createYoloController } from "./yolo.js";
-import type { YoloContext } from "./yolo.js";
+import type { FenceRetirementReader } from "./yolo.js";
+import { createPresetOverlay } from "./no-sandbox-marker.js";
 
 /** The named opt-in flag, available to the headless one-shot entries. */
 export const EVAL_STATE_FLAG = "--eval-state";
@@ -184,9 +186,10 @@ export function rejectEvalStateConflict(
   };
 }
 
-/** The three holder axes an eval-state invocation runs with. */
+/** The three posture axes an eval-state invocation runs with. */
 export interface EvalStateHolders {
-  readonly yolo: YoloContext;
+  /** ADR-0141: the derived fence posture — what the fence layer reads. */
+  readonly fenceRetired: FenceRetirementReader;
   readonly permission: PermissionModeContext;
   readonly fsMode: FsModeContext;
 }
@@ -197,9 +200,9 @@ export interface EvalStateHolders {
  * fence-retire holder alongside them.
  *
  * It delegates the **fence** half to `createYoloController(...).enterAtLaunch()`
- * — the same action `iknow tui --yolo` runs, and the same holder the fence
- * factory's single branch reads. Reusing it is what keeps the fence shape
- * identical by construction rather than by copy.
+ * — the same action `iknow tui --yolo` runs, and the same overlay-backed
+ * reader the fence factory's single branch reads. Reusing it is what keeps the
+ * fence shape identical by construction rather than by copy.
  *
  * The **permission** half is written here, on its own line, and that asymmetry
  * is the decision rather than an accident (ADR-0139 §3). The two axes never
@@ -218,10 +221,14 @@ export function enterEvalState(initial: {
   readonly fsMode: FsModeContext;
 }): EvalStateHolders {
   const yolo = createYoloContext(false);
+  // ADR-0141: eval applies the yolo preset declaratively through the same
+  // overlay the TUI entry uses — one preset definition, not a second face.
+  const overlay = createPresetOverlay();
   const action = createYoloController({
     yolo,
     permission: initial.permission,
     fsMode: initial.fsMode,
+    overlay,
   }).enterAtLaunch();
   if (!action.ok) {
     // Unreachable by construction (that branch only fires on the probed, in-session
@@ -229,8 +236,17 @@ export function enterEvalState(initial: {
     // would publish a number under a false label.
     throw new Error(`eval_state_entry_refused: ${action.text}`);
   }
-  // The fence combination above touched the fsMode holder only; the permission
-  // posture is this entry's own (ADR-0139 §3).
+  // The fence layer still reads the holders, so the declared axes go down to
+  // them as well as into the overlay — the headless run must land on the same
+  // triple the overlay declares (ADR-0141 §1: the overlay tiers over the
+  // settings tier, it does not replace the holders readers consume).
+  if (initial.fsMode.get() !== FS_ISOLATION_MODE_DEFAULT) {
+    initial.fsMode.set(FS_ISOLATION_MODE_DEFAULT);
+  }
   initial.permission.set(EVAL_STATE_PERMISSION_TARGET);
-  return { yolo, permission: initial.permission, fsMode: initial.fsMode };
+  return {
+    fenceRetired: { get: () => overlay.fenceRetired() },
+    permission: initial.permission,
+    fsMode: initial.fsMode,
+  };
 }

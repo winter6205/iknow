@@ -4,11 +4,11 @@
  * subagent wait chain":
  *   - Esc (running-fg) interrupts a foreground `spawn_subagent(wait:true)`
  *     (interrupt key migrated from Ctrl+C to Esc);
- *   - `/quit` aborts the current foreground turn first, then wraps up,
+ *   - `/quit` aborts the turns owned by this TUI first, then wraps up,
  *     without waiting for the subagent per-task wall clock (default 7200s).
  *
  * Verified exit chain (this test walks every segment to ground truth):
- *   app.tsx (Esc handler / quit()'s `abortForegroundTurnOnQuit`)
+ *   app.tsx (Esc handler → `interruptForegroundTurn`; quit() → `abortOwnedWorkOnQuit`)
  *   → `aborters.get(id).abort()` → bridge.postMessage({signal}) → SessionHub
  *   → loop-engine `run(…, signal)` → `executeWaveAndCommit` →
  *   `deps.executor.executeAll(wave, signal, …)` → ACI middleware

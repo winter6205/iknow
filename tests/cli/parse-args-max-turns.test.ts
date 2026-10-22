@@ -6,15 +6,18 @@
  *   - valid positive integer → pass-through
  *   - missing value → throws
  *   - non-integer (0 / -1 / 1.5 / abc) → throws "Invalid --max-turns: ..."
+ *   - non-finite (1e999 → Infinity) → throws (the overflow class: it is not an
+ *     integer), while a finite huge integer stays accepted — the cap simply
+ *     never fires, which is the documented unlimited default.
  *
- * Covers the config-parsing layer only; LoopEngine wiring is verified elsewhere
- * (LoopEngineDeps changes belong to another task).
+ * Covers the config-parsing layer for every entry that reaches a run, `tui`
+ * included; the engine wiring is covered by tests/tui/deps-max-turns.test.ts.
  */
 import { describe, expect, it } from "vitest";
 import assert from "node:assert/strict";
 import { parseArgs } from "../../src/cli/parse-args.ts";
 
-describe("parseArgs: --max-turns (plan T5)", () => {
+describe("parseArgs: --max-turns", () => {
   it("未设 → maxTurns=undefined", () => {
     const parsed = parseArgs({ argv: ["chat"], interactive: true });
     expect(parsed.maxTurns).toBeUndefined();
@@ -121,5 +124,104 @@ describe("parseArgs: --max-turns (plan T5)", () => {
     expect(parsed.command).toBe("serve");
     expect(parsed.maxTurns).toBe(4);
     expect(parsed.dataDir).toBe("/tmp/pool");
+  });
+});
+
+describe("parseArgs: --max-turns on the tui entry", () => {
+  it("--max-turns 3 → tui carries maxTurns=3 (the TUI assembly reads it from here)", () => {
+    const parsed = parseArgs({
+      argv: ["tui", "--max-turns", "3"],
+      interactive: true,
+    });
+    expect(parsed.command).toBe("tui");
+    expect(parsed.maxTurns).toBe(3);
+  });
+
+  it("unset → maxTurns=undefined on tui (absent flag = the env/settings value stays)", () => {
+    const parsed = parseArgs({ argv: ["tui"], interactive: true });
+    expect(parsed.maxTurns).toBeUndefined();
+  });
+
+  it("tui --max-turns 缺失值 → throws", () => {
+    assert.throws(
+      () => parseArgs({ argv: ["tui", "--max-turns"], interactive: true }),
+      /--max-turns requires an integer argument/
+    );
+  });
+
+  it("tui --max-turns 0 → throws (n<1 拒绝)", () => {
+    assert.throws(
+      () => parseArgs({ argv: ["tui", "--max-turns", "0"], interactive: true }),
+      /Invalid --max-turns: 0/
+    );
+  });
+
+  it("tui --max-turns -1 → throws (negative-class 拒绝)", () => {
+    assert.throws(
+      () =>
+        parseArgs({ argv: ["tui", "--max-turns", "-1"], interactive: true }),
+      /Invalid --max-turns: -1/
+    );
+  });
+
+  it("tui --max-turns abc → throws (非数字拒绝)", () => {
+    assert.throws(
+      () =>
+        parseArgs({ argv: ["tui", "--max-turns", "abc"], interactive: true }),
+      /Invalid --max-turns: abc/
+    );
+  });
+
+  it("tui --max-turns 1.5 → throws (非整数拒绝)", () => {
+    assert.throws(
+      () =>
+        parseArgs({ argv: ["tui", "--max-turns", "1.5"], interactive: true }),
+      /Invalid --max-turns: 1.5/
+    );
+  });
+
+  it("tui --max-turns 1e999 → throws (overflow-class: a non-finite value is not an integer)", () => {
+    assert.throws(
+      () =>
+        parseArgs({
+          argv: ["tui", "--max-turns", "1e999"],
+          interactive: true,
+        }),
+      /Invalid --max-turns: 1e999/
+    );
+  });
+
+  it("tui --max-turns 999999999999 → kept verbatim (a finite positive integer; the cap simply never fires, the documented unlimited default)", () => {
+    const parsed = parseArgs({
+      argv: ["tui", "--max-turns", "999999999999"],
+      interactive: true,
+    });
+    expect(parsed.maxTurns).toBe(999999999999);
+  });
+
+  it("tui --max-turns 1 → boundary: 最小合法正整数", () => {
+    const parsed = parseArgs({
+      argv: ["tui", "--max-turns", "1"],
+      interactive: true,
+    });
+    expect(parsed.maxTurns).toBe(1);
+  });
+
+  it("tui --max-turns coexists with --data-dir / --trace-out", () => {
+    const parsed = parseArgs({
+      argv: [
+        "tui",
+        "--max-turns",
+        "4",
+        "--data-dir",
+        "/tmp/pool",
+        "--trace-out",
+        "/tmp/t.jsonl",
+      ],
+      interactive: true,
+    });
+    expect(parsed.maxTurns).toBe(4);
+    expect(parsed.dataDir).toBe("/tmp/pool");
+    expect(parsed.traceOut).toBe("/tmp/t.jsonl");
   });
 });

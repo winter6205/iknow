@@ -428,13 +428,27 @@ export class SessionStore {
    * survives every subsequent save. A fresh session, a legacy-only mirror,
    * or a corrupt log falls back to a full rewrite (self-heal; the
    * simple non-append-aware shape).
-   * Throws: write_failed
+   *
+   * `keepHead` is for a caller that may only ever grow or re-branch the chain —
+   * a closing save that must not abandon commits made while it was running. Of
+   * the four arms above, only the strict-prefix one can fail: the plan is
+   * refused with `concurrent_write` and NOTHING is written, instead of this
+   * store quietly rewriting the caller's projection to keep the head. Identical,
+   * extension and fork all leave the head in place or move it forward, and the
+   * full-rewrite fallback has no chain to fall behind, so an absent flag and a
+   * present one are byte-identical for those. A caller that owns a rewind
+   * (resetSession / rewindSession) leaves the flag absent.
+   *
+   * Throws: write_failed | concurrent_write (keepHead refused the strict-prefix
+   * arm)
    */
   async save(opts: {
     readonly id: string;
     readonly file: SessionFileV1;
+    /** Refuse a save whose only fitting plan moves `head` backward. */
+    readonly keepHead?: boolean;
   }): Promise<void> {
-    const { id, file } = opts;
+    const { id, file, keepHead } = opts;
     const jsonlPath = this.jsonlPath(id);
     const jsonlTmp = `${jsonlPath}.tmp`;
     try {
@@ -452,10 +466,22 @@ export class SessionStore {
         log = null;
       }
       const plan = planSessionSave(gateTitleToEvent(file, log), log);
+      if (keepHead === true && plan.arm === "headBackward") {
+        // EXIT: refused plan — the intent came from the caller, so the failure
+        // is the concurrent-write shape it describes, not a broken write path.
+        // Nothing reaches the file: this is checked before the first write.
+        throw {
+          kind: "concurrent_write",
+          conversation_id: id,
+        } satisfies SessionStoreError;
+      }
       await writeFile(jsonlTmp, plan.jsonl, "utf8");
       await rename(jsonlTmp, jsonlPath);
     } catch (err) {
       const typed = err as { kind?: string; cause?: unknown };
+      // The refusal above is already a typed store error; only genuine I/O
+      // failures are a broken write path.
+      if (typed.kind === "concurrent_write") throw err;
       throw {
         kind: "write_failed",
         conversation_id: id,
@@ -1590,10 +1616,162 @@ function gateTitleToEvent(
   return title === file.title ? file : { ...file, title };
 }
 
-/** Save plan: the JSONL text to persist. The mirror `.json` file write was
- *  removed, so the save plan now only carries the JSONL bytes. */
+/** Which arm produced a save plan: the four alignment arms, plus
+ *  `full_rewrite` (the self-heal path with no log to align against).
+ *  `headBackward` names the one arm that MOVES the head, so a caller can
+ *  declare intent without re-deriving the alignment relation that decides it. */
+type SavePlanArm =
+  "full_rewrite" | "identical" | "extension" | "headBackward" | "fork";
+
+/** Save plan: the JSONL text to persist, plus the arm it came from. The mirror
+ *  `.json` file write was removed, so the plan carries no other output. */
 interface SavePlan {
   readonly jsonl: string;
+  readonly arm: SavePlanArm;
+}
+
+/** One projection message spans this many already-committed chain events
+ *  when it is the concatenation of consecutive pure tool_result user
+ *  messages. 0 = not that shape.
+ *
+ *  appendEvents writes one tool_result message per settled call. The closing
+ *  projection concatenates that batch into a single user message. A span of
+ *  2+ whose blocks deep-equal the projection is the same calls, not a new
+ *  turn. A one-event match stays with jsonDeepEqual so a message that
+ *  differs outside its blocks still forks.
+ */
+function coalescedToolResultSpan(
+  message: AnthropicNativeMessage,
+  chain: ReadonlyArray<SessionEventRecord>,
+  start: number
+): number {
+  const want = toolResultBlocks(message);
+  if (want === undefined) return 0;
+  const got: AnthropicContentBlock[] = [];
+  let span = 0;
+  while (start + span < chain.length) {
+    const part = toolResultBlocks(chain[start + span]!.message);
+    if (part === undefined) break;
+    got.push(...part);
+    span += 1;
+    if (got.length > want.length) return 0;
+    if (got.length === want.length) {
+      return span >= 2 && jsonDeepEqual(got, want) ? span : 0;
+    }
+  }
+  return 0;
+}
+
+function toolResultBlocks(
+  message: AnthropicNativeMessage
+): ReadonlyArray<AnthropicContentBlock> | undefined {
+  if (message.role !== "user") return undefined;
+  const content = message.content;
+  if (content.length === 0) return undefined;
+  if (!content.every((block) => block.type === "tool_result")) {
+    return undefined;
+  }
+  return content;
+}
+
+interface ProjectionAlign {
+  readonly messageCount: number;
+  readonly chainCount: number;
+  /** Last head-chain index (0-based) consumed by each matched projection
+   *  message. A coalesced tool-result batch records the span's end, so
+   *  checkpoint messagesCount can retarget onto that event. */
+  readonly chainEnds: readonly number[];
+}
+
+/** Longest prefix of `messages` that is the head chain, counting a coalesced
+ *  tool-result user message as the chain events it concatenates. */
+function alignSessionProjection(
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  chain: ReadonlyArray<SessionEventRecord>
+): ProjectionAlign {
+  let messageCount = 0;
+  let chainCount = 0;
+  const chainEnds: number[] = [];
+  while (messageCount < messages.length && chainCount < chain.length) {
+    const message = messages[messageCount]!;
+    if (jsonDeepEqual(message, chain[chainCount]!.message)) {
+      chainEnds.push(chainCount);
+      messageCount += 1;
+      chainCount += 1;
+      continue;
+    }
+    const span = coalescedToolResultSpan(message, chain, chainCount);
+    if (span === 0) break;
+    chainEnds.push(chainCount + span - 1);
+    messageCount += 1;
+    chainCount += span;
+  }
+  return { messageCount, chainCount, chainEnds };
+}
+
+function checkpointSitsOnChain(
+  messagesCount: number,
+  anchorEventId: string | undefined,
+  headChainIds: readonly string[]
+): boolean {
+  if (anchorEventId === undefined) return false;
+  const index = messagesCount - 1;
+  return (
+    index >= 0 &&
+    index < headChainIds.length &&
+    headChainIds[index] === anchorEventId
+  );
+}
+
+/** Projection messagesCount → index into the head chain this save keeps.
+ *  1:1 prefixes stay put. A coalesced batch's count moves to the last
+ *  committed tool_result event of that batch. */
+function retargetedMessagesCount(
+  messagesCount: number,
+  align: ProjectionAlign,
+  headChainLength: number
+): number {
+  const projectionIndex = messagesCount - 1;
+  if (projectionIndex < 0) return messagesCount;
+  if (projectionIndex < align.chainEnds.length) {
+    return align.chainEnds[projectionIndex]! + 1;
+  }
+  const extra = projectionIndex - align.messageCount;
+  const chainIndex = align.chainCount + extra;
+  if (extra < 0 || chainIndex < 0 || chainIndex >= headChainLength) {
+    return messagesCount;
+  }
+  return chainIndex + 1;
+}
+
+function withCoalescedCheckpointCounts(
+  file: SessionFileV1,
+  align: ProjectionAlign,
+  headChainIds: readonly string[]
+): SessionFileV1 {
+  if (file.checkpoints === undefined) return file;
+  return {
+    ...file,
+    checkpoints: file.checkpoints.map((checkpoint) => {
+      if (
+        checkpointSitsOnChain(
+          checkpoint.messagesCount,
+          checkpoint.anchorEventId,
+          headChainIds
+        )
+      ) {
+        return checkpoint;
+      }
+      const messagesCount = retargetedMessagesCount(
+        checkpoint.messagesCount,
+        align,
+        headChainIds.length
+      );
+      return messagesCount === checkpoint.messagesCount
+        ? checkpoint
+        : { ...checkpoint, messagesCount };
+    }),
+  };
 }
 
 /**
@@ -1604,7 +1782,13 @@ interface SavePlan {
  *   extension      → append the tail events, parented at the current head;
  *   strict prefix  → append only a head record (head moves backward);
  *   fork           → append the divergent suffix parented at the LCP end.
- * `log === null` (fresh / legacy-only / corrupt) → full rewrite. Pure.
+ * A user message that is only the concatenation of consecutive tool_result
+ * events already on the chain is the same prefix, not a fork — those
+ * events were committed one call at a time. `log === null` (fresh /
+ * legacy-only / corrupt) → full rewrite. The plan names the arm it came from so
+ * a caller can state intent (`keepHead`, enforced by `save()`) without
+ * re-deriving this relation, which only here counts a coalesced batch as the
+ * per-call events behind it. Pure.
  */
 function planSessionSave(
   file: SessionFileV1,
@@ -1618,50 +1802,63 @@ function planSessionSave(
     return fullRewritePlan(file); // cycle / dangling head → self-heal
   }
   const messages = file.messages;
-  const limit = Math.min(messages.length, chain.length);
-  let prefixLen = 0;
-  while (
-    prefixLen < limit &&
-    jsonDeepEqual(messages[prefixLen], chain[prefixLen]!.message)
-  ) {
-    prefixLen++;
-  }
+  const aligned = alignSessionProjection(messages, chain);
   const records: SessionTailRecord[] = [...log.records];
-  let finalIds: string[];
-  if (prefixLen === chain.length && messages.length === chain.length) {
-    // Identical projection: header-refresh only, no new records.
-    finalIds = chain.map((e) => e.id);
-  } else if (prefixLen === chain.length) {
+  let arm: SavePlanArm;
+  let headChainIds: string[];
+  if (
+    aligned.messageCount === messages.length &&
+    aligned.chainCount === chain.length
+  ) {
+    // Identical projection, including a coalesced tool-result batch that
+    // already exists as per-call events. Header-refresh only.
+    arm = "identical";
+    headChainIds = chain.map((event) => event.id);
+  } else if (aligned.chainCount === chain.length) {
     // Extension: the head chain is a prefix of the projection.
+    arm = "extension";
     const appended = buildEventRecords(
-      messages.slice(prefixLen),
+      messages.slice(aligned.messageCount),
       log.maxEventIndex + 1,
       log.head
     );
     records.push(...appended.events, appended.head);
-    finalIds = [...chain.map((e) => e.id), ...appended.events.map((e) => e.id)];
-  } else if (prefixLen === messages.length) {
+    headChainIds = [
+      ...chain.map((event) => event.id),
+      ...appended.events.map((event) => event.id),
+    ];
+  } else if (aligned.messageCount === messages.length) {
     // Strict prefix (reset-shaped): move the head backward, append nothing.
-    const newHead = prefixLen === 0 ? null : chain[prefixLen - 1]!.id;
+    // The one arm that abandons committed events, so the only arm a `keepHead`
+    // caller refuses — `save()` reads that from the arm, never from the shape.
+    arm = "headBackward";
+    const newHead =
+      aligned.chainCount === 0 ? null : chain[aligned.chainCount - 1]!.id;
     records.push({ type: "head", id: newHead });
-    finalIds = chain.slice(0, prefixLen).map((e) => e.id);
+    headChainIds = chain.slice(0, aligned.chainCount).map((event) => event.id);
   } else {
-    // Fork: the projection diverges from the chain at prefixLen.
-    const parent = prefixLen === 0 ? null : chain[prefixLen - 1]!.id;
+    // Fork: the projection diverges from the chain. Parent at the last
+    // event the shared prefix actually consumed.
+    arm = "fork";
+    const parent =
+      aligned.chainCount === 0 ? null : chain[aligned.chainCount - 1]!.id;
     const appended = buildEventRecords(
-      messages.slice(prefixLen),
+      messages.slice(aligned.messageCount),
       log.maxEventIndex + 1,
       parent
     );
     records.push(...appended.events, appended.head);
-    finalIds = [
-      ...chain.slice(0, prefixLen).map((e) => e.id),
-      ...appended.events.map((e) => e.id),
+    headChainIds = [
+      ...chain.slice(0, aligned.chainCount).map((event) => event.id),
+      ...appended.events.map((event) => event.id),
     ];
   }
-  const finalFile = withDerivedAnchors(file, finalIds);
+  const finalFile = withDerivedAnchors(
+    withCoalescedCheckpointCounts(file, aligned, headChainIds),
+    headChainIds
+  );
   const { messages: _messages, ...meta } = finalFile;
-  return { jsonl: serializeSessionLog(meta, records) };
+  return { jsonl: serializeSessionLog(meta, records), arm };
 }
 
 /** Full-rewrite plan (fresh session / legacy migration / corrupt-log
@@ -1669,7 +1866,7 @@ function planSessionSave(
 function fullRewritePlan(file: SessionFileV1): SavePlan {
   const ids = file.messages.map((_, i) => messageEventId(i));
   const finalFile = withDerivedAnchors(file, ids);
-  return { jsonl: sessionFileToJsonl(finalFile) };
+  return { jsonl: sessionFileToJsonl(finalFile), arm: "full_rewrite" };
 }
 
 /** Derive checkpoint `anchorEventId`s against a chain's event

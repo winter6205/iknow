@@ -91,6 +91,24 @@ describe("subagent envelope schema (SC13 / D1)", () => {
     );
   });
 
+  it("parses an optional parent model route", () => {
+    const env = parseWorkerEnvelope(
+      JSON.stringify({
+        task: "inherit route",
+        sandboxRoot: "/tmp/sb",
+        parentModelRoute: "primary/parent-model",
+      })
+    );
+    assert.equal(env.parentModelRoute, "primary/parent-model");
+  });
+
+  it("an envelope without the parent model route still decodes (key absent)", () => {
+    const env = parseWorkerEnvelope(
+      JSON.stringify({ task: "no route", sandboxRoot: "/tmp/sb" })
+    );
+    assert.equal("parentModelRoute" in env, false);
+  });
+
   it("throws ProtocolError when a required worker field is missing (task)", () => {
     assert.throws(
       () => parseWorkerEnvelope(JSON.stringify({ sandboxRoot: "/tmp/sb" })),

@@ -4,7 +4,7 @@
  * ADR-0119 / `specs/yolo-mode.md`: the CLI entry parsing contract of `--yolo`
  * (no-sandbox mode).
  *
- * Invariants pinned (plan acceptance, `plans/yolo-mode.md`):
+ * Invariants pinned (`ADR-0119` / `specs/yolo-mode.md`):
  *   1. The five non-TUI **session** commands (chat / serve / ask / oneshot /
  *      trace) carrying `--yolo` -> the parse result carries the typed refusal
  *      (discriminated-union `kind`), never a bare thrown Error.
@@ -16,8 +16,10 @@
  *   4. The `--subagent-worker` early-return path does not pass this gate (spawned
  *      by the parent agent only, not a product entry).
  *   5. Pure display paths are explicitly allowed (`-h` / `--help` / `-V` /
- *      `--version` / bare `--yolo` with no subcommand): exit 0 display, no session
- *      start, no refusal filled.
+ *      `--version`, and a bare `--yolo` with no subcommand **without a TTY**):
+ *      exit 0 display, no session start, no refusal filled. On a TTY the same
+ *      bare `--yolo` starts the TUI holding that posture (ADR-0119's legal home
+ *      for the flag) instead of falling to a non-TUI session.
  *   6. `--yolo` together with `--auto-mode` does not conflict.
  *
  * Parsing layer only; the dispatch-time rendering in cli.ts (stderr + exit 1) is
@@ -217,19 +219,11 @@ describe("parseArgs --yolo: pure display paths explicitly allowed (exit 0, no se
     }
   );
 
-  it.each([true, false])(
-    "bare --yolo (no subcommand, interactive=%s) -> help, no refusal filled",
-    (interactive) => {
-      const parsed = parseArgs({ argv: ["--yolo"], interactive });
-      assert.equal(parsed.command, "help");
-      assert.equal(parsed.versionOnly, false);
-      assert.equal("yoloRejection" in parsed, false);
-    }
-  );
-
-  it("bare --yolo does not fall to chat under a TTY — a dangerous flag is not silently swallowed into a non-TUI session", () => {
-    const parsed = parseArgs({ argv: ["--yolo"], interactive: true });
-    assert.notEqual(parsed.command, "chat");
+  it("bare --yolo without a TTY -> help, no refusal filled", () => {
+    const parsed = parseArgs({ argv: ["--yolo"], interactive: false });
+    assert.equal(parsed.command, "help");
+    assert.equal(parsed.versionOnly, false);
+    assert.equal("yoloRejection" in parsed, false);
   });
 
   it("iknow help --yolo -> help (positional subcommand, same display path)", () => {
@@ -239,31 +233,99 @@ describe("parseArgs --yolo: pure display paths explicitly allowed (exit 0, no se
   });
 });
 
-describe("usageText: publishing --yolo (plan acceptance)", () => {
-  // The usage file is intentionally bilingual, so each assertion accepts either
-  // language face of the same published fact.
+describe("usageText: publishing --yolo", () => {
+  // The usage text is one English-only data table, so each assertion pins the
+  // exact published wording rather than accepting a translation face.
   it("carries a --yolo line and publishes TUI-only / no-sandbox / not persisted / in-session confirmation", () => {
     const t = usageText();
     assert.match(t, /--yolo/);
-    assert.match(t, /仅 tui|tui only/i);
-    assert.match(t, /无沙箱|no-sandbox/i);
-    assert.match(t, /不落盘|not persisted/i);
-    assert.match(t, /确认|confirmation/i);
+    assert.match(t, /tui only/i);
+    assert.match(t, /no-sandbox/i);
+    assert.match(t, /not persisted/i);
+    assert.match(t, /confirmation/i);
   });
 
   it("publishes that the five non-TUI commands refuse it when carried (trace included)", () => {
     const t = usageText();
     assert.match(t, /chat \/ serve \/ ask \/ oneshot \/ trace/);
-    assert.match(t, /非零退出|non-zero exit/i);
+    assert.match(t, /non-zero exit/i);
   });
 
-  it("the trace line publishes the same --yolo constraint (explicitly required by the plan)", () => {
+  it("the trace line publishes the same --yolo constraint", () => {
     const t = usageText();
-    assert.match(t, /trace 属会话命令，--yolo 与其不兼容/);
+    assert.match(t, /trace is a session command: --yolo is incompatible/);
   });
 
   it("the tui usage line publishes --yolo", () => {
     const t = usageText();
     assert.match(t, /iknow tui \[session-id\] \[--auto-mode\] \[--yolo\]/);
+  });
+});
+
+// ADR-0141: `--no-sandbox` is a second NAMED preset entry, so it inherits the
+// same exhaustive non-TUI refusal. The enumeration is the defense line — a new
+// entry added to the rejected-command list without a matching flag arm would
+// leave the gap this group exists to close.
+describe("parseArgs --no-sandbox: the same typed refusal on the same five entries", () => {
+  it.each(NON_TUI_ENTRIES)(
+    "$command --no-sandbox -> yoloRejection.kind=yolo_non_tui_entry, message names the FLAG typed",
+    ({ command, argv }) => {
+      const parsed = parseArgs({ argv: [...argv, "--no-sandbox"] });
+      assert.equal(parsed.command, command);
+      const rejection = parsed.yoloRejection;
+      assert.ok(
+        rejection !== undefined,
+        `${command} carrying --no-sandbox must land on the typed refusal`
+      );
+      assert.equal(rejection.kind, "yolo_non_tui_entry");
+      assert.equal(rejection.command, command);
+      // The message names the flag actually typed — telling someone who typed
+      // --no-sandbox to "drop --yolo" would point at the wrong token.
+      assert.ok(
+        rejection.message.includes("--no-sandbox"),
+        `the message must name --no-sandbox, got: ${rejection.message}`
+      );
+      assert.ok(
+        !rejection.message.includes("Drop --yolo"),
+        "the advice must match the flag typed"
+      );
+      assert.ok(rejection.message.includes(`'${command}'`));
+    }
+  );
+
+  it("iknow tui --no-sandbox -> command=tui, noSandbox=true, no refusal", () => {
+    const parsed = parseArgs({ argv: ["tui", "--no-sandbox"] });
+    assert.equal(parsed.command, "tui");
+    assert.equal(parsed.noSandbox, true);
+    assert.equal(parsed.yoloRejection, undefined);
+  });
+
+  it("the two flags are independent: --no-sandbox alone leaves yolo unset", () => {
+    const parsed = parseArgs({ argv: ["tui", "--no-sandbox"] });
+    assert.equal(parsed.yolo, undefined);
+    const both = parseArgs({ argv: ["tui", "--no-sandbox", "--yolo"] });
+    assert.equal(both.noSandbox, true);
+    assert.equal(both.yolo, true);
+  });
+
+  it("--no-sandbox is stripped, never reaching the positional stream", () => {
+    const parsed = parseArgs({ argv: ["tui", "sess-1", "--no-sandbox"] });
+    assert.equal(parsed.command, "tui");
+    assert.ok(
+      !JSON.stringify(parsed).includes("--no-sandbox\",") ,
+      "the flag must not survive into the query/positional output"
+    );
+  });
+
+  it("bare --no-sandbox off a TTY -> help, no refusal (display path allowance)", () => {
+    const parsed = parseArgs({ argv: ["--no-sandbox"], interactive: false });
+    assert.equal(parsed.command, "help");
+    assert.equal(parsed.yoloRejection, undefined);
+  });
+
+  it("absent: noSandbox is undefined and no refusal key exists", () => {
+    const parsed = parseArgs({ argv: ["tui"] });
+    assert.equal(parsed.noSandbox, undefined);
+    assert.equal(parsed.yoloRejection, undefined);
   });
 });

@@ -213,7 +213,7 @@ describe("loadUserAgentEntries: 扫描", () => {
     const warnings: string[] = [];
     // The nested child key shadows a real field name, so a parser that reads
     // indented lines as top-level pairs would leak it — the silent-overwrite
-    // path that the frontmatter coercion boundary forbids (docs/CONTEXT.md, ADR-0123).
+    // path that the frontmatter coercion boundary forbids (docs/CONTEXT.md, ADR-0144).
     writeFileSync(
       path.join(dir, "nested.md"),
       ["---", "description:", "  bashMode: readonly", "---", "body"].join("\n")

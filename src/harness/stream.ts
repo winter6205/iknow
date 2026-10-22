@@ -30,15 +30,34 @@
  * narrow on `type`); no emit / consume sites to change.
  */
 import type { AgentStatusSnapshot } from "./agent-status.js";
+import type { OccupancyReading } from "./compress/projection.js";
 import type { EnvSnapshot } from "./env-snapshot.js";
 import type { GraphProgressSnapshot } from "./graph/progress.js";
 import type { TokenUsage } from "./model-adapter/types.js";
+import type { ApprovalOutcome } from "./permission/types.js";
 
 export type HarnessStreamEvent =
   | { type: "text_delta"; text: string }
   | { type: "thinking_delta"; text: string }
   | { type: "tool_call_start"; name: string; id: string }
   | { type: "tool_input_delta"; id: string; partialJson: string }
+  // ADR-0147 R1: a call is held for approval. Emitted only when a question is
+  // actually shown (a silent §7 re-decision emits neither event), so clients
+  // can address the pending question to the call it is about.
+  | {
+      type: "approval_pending";
+      toolUseId: string;
+      tool: string;
+      conversationId?: string;
+    }
+  | {
+      type: "approval_resolved";
+      toolUseId: string;
+      // Reused, not restated: the ending vocabulary is owned by
+      // permission/types.ts, so a new ending breaks this event's consumers
+      // at compile time instead of drifting silently.
+      outcome: ApprovalOutcome;
+    }
   | { type: "stop_summary"; text: string }
   // LLM structured-summary compaction (full-compact) lifecycle events. The
   // host renders a "Compacting…" indicator / surfaces summary latency from
@@ -124,23 +143,33 @@ export type HarnessStreamEvent =
       maxAttempts: number;
       detail: string;
     }
-  // Context-usage call-beat reading (#1079 Track A) — the display truth for
-  // the usage bar, one beat per model call instead of one per run(). Two
-  // phases ride the same event: `pre_call` is emitted at the same turn
-  // boundary as `agent_status` / `env_snapshot`, just before the model call,
-  // and carries the **measured** outgoing input occupancy (system + tools +
-  // messages via `ModelAdapter.countTokens`; outputTokens 0 / cache null —
-  // nothing is invented for fields the measurement cannot know);
-  // `post_call` is emitted as soon as that call succeeds and carries the
-  // call's real API usage (the `AssistantTurnResult.usage` sealed
-  // passthrough). A beat without a successful real reading emits nothing —
-  // chars/N estimation must never fill the bar (ADR-0008 D6). Hosts narrow
-  // on `phase` only if they distinguish; the TUI display consumes both
-  // phases verbatim as the latest reading.
+  // Context-usage call-beat reading (#1079 Track A; projected variant per
+  // ADR-0008 D6 display amendment / ADR-0118). One beat per model call:
+  //   - `pre_call` / `post_call` are **measured** readings and carry the API
+  //     usage plus `source:"measured"`. `post_call` additionally carries
+  //     `projectedNext` — the next request's projection (previous input +
+  //     generated output, before any appended tool results) — and, when the
+  //     adapter measured it, `generationMs`.
+  //   - `phase:"projected"` has **no `usage` field**: it carries a
+  //     client-side projection of the request that is about to be sent. An
+  //     image-bearing request can never be measured (the gateway prices the
+  //     base64 text), so its pre-call beat is this variant; the same variant
+  //     is emitted after the assistant append, after each tool-result batch,
+  //     and after compaction. A projected value is marked with `~` by hosts
+  //     and must never be written into `lastUsage`, the trace, or billing.
   | {
       type: "context_usage";
       phase: "pre_call" | "post_call";
+      source: "measured";
       usage: TokenUsage;
+      projectedNext?: OccupancyReading;
+      generationMs?: number;
+    }
+  | {
+      type: "context_usage";
+      phase: "projected";
+      occupancy: OccupancyReading;
+      projectedNext?: OccupancyReading;
     };
 
 /**

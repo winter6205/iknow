@@ -31,6 +31,12 @@ export interface SubAgentDefinition {
   readonly maxTurns?: number;
   readonly timeoutMs?: number;
   /**
+   * ADR-0141: the parent's fence posture frozen for this dispatch hop, recorded
+   * on the subagent row so a bare child keeps the 无沙箱 marker lit after the
+   * preset that spawned it clears. Absent = spawned under the fenced default.
+   */
+  readonly fenceRetiredAtSpawn?: boolean;
+  /**
    * Subagent task text (WorkerEnvelope.task is required; optional in this
    * local definition for compat). The spawn_subagent tool is responsible
    * for writing def.task (an earlier omission left children with task:"").
@@ -54,6 +60,12 @@ export interface SubAgentDefinition {
    * the worker so unset subagent settings inherit the spawning turn.
    */
   readonly parentThinking?: ThinkingParams;
+  /**
+   * Parent conversation's model route (`provider/model`). Carried to the
+   * worker so the child runs on the route the conversation chose instead of the
+   * process-global default.
+   */
+  readonly parentModelRoute?: string;
   /**
    * Parent-only: trace turn id of the turn that spawned this subagent. The
    * manager copies it into the `parentTurnId` of subagent_spawn /
@@ -111,6 +123,33 @@ export interface SubAgentDefinition {
    * Parent-only: not copied onto WorkerEnvelope.
    */
   readonly spawnDepth?: number;
+}
+
+/**
+ * The parent fields a worker payload carries: the parent's thinking snapshot
+ * and the parent's model route. Both are present only when the source has
+ * them, so an absent field never reaches the envelope. One helper for both
+ * so a site that carries them states the rule once.
+ */
+export function parentFields(
+  src:
+    | {
+        readonly parentThinking?: ThinkingParams;
+        readonly parentModelRoute?: string;
+      }
+    | undefined
+): {
+  readonly parentThinking?: ThinkingParams;
+  readonly parentModelRoute?: string;
+} {
+  return {
+    ...(src?.parentThinking !== undefined
+      ? { parentThinking: src.parentThinking }
+      : {}),
+    ...(src?.parentModelRoute !== undefined
+      ? { parentModelRoute: src.parentModelRoute }
+      : {}),
+  };
 }
 
 /** Default deny-list: subagents must not spawn further subagents (recursion-explosion guard). Frozen. */

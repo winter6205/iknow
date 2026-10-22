@@ -362,7 +362,7 @@ function makeEnv(apiKey: string | undefined): IknowEnv {
     // IknowCompressEnv is required and build-engine threads it into
     // LoopEngineDeps.compress. The fixture pins 200_000 EXPLICITLY (not the
     // product default — see DEFAULT_STRATEGY_CONTEXT_WINDOW);
-    // thresholdTokens=undefined → threshold.ts derives floor(0.95 × window).
+    // thresholdTokens=undefined → threshold.ts derives floor(0.9 × window).
     compress: { contextWindow: 200_000, thresholdTokens: undefined },
     // MCP connect timeout (default 60_000).
     mcp: { connectTimeoutMs: 60_000 },
@@ -771,7 +771,7 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     if (built.shutdown) await built.shutdown();
   });
 
-  it("ask surface：skill 一件在场 + 无 shutdown 句柄（manager 未创建，SC12）", async () => {
+  it("ask surface：skill 一件在场 + shutdown 只负责释放 egress agent（manager 未创建，SC12）", async () => {
     const root = await mkdtemp(join(tmpdir(), "iknow-t8-ask-skill-"));
     roots.push(root);
     await plantSkill(root, "ask-skill", "ask-only skill");
@@ -790,10 +790,16 @@ describe("buildHarnessEngine — #337 T8 skill 装配", () => {
     // skill_search has been removed (see disclosure-index-align/).
     expect(built.deps.registry.get("skill_search")).toBeUndefined();
 
-    // ask builds no MCP manager → shutdown handle absent; the subagent
-    // manager is gated the same way (created only when surface !== "ask").
-    expect(built.shutdown).toBeUndefined();
+    // ask builds no MCP manager / background manager / auto-memory → those
+    // layers stay absent; the subagent manager is gated the same way (created
+    // only when surface !== "ask").
+    // The shutdown handle itself IS present: the engine owns the
+    // session-resident egress agent (ADR-0097 T4), and the shutdown releases
+    // it — an engine that owns a disposable layer always gets a shutdown.
+    expect(built.shutdown).toBeDefined();
     expect(built.subagentManager).toBeUndefined();
+    // Releasing the agent on the ask surface must not throw.
+    await expect(built.shutdown!()).resolves.toBeUndefined();
 
     // ask strips spawn_subagent / subagent_result from the registry view.
     // skillCatalog is still assembled.

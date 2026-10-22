@@ -691,6 +691,13 @@
 {"command":"echo\\ test","output":"declarative","rule":"Bash(ls:*)","pre":false,"post":false,"label":"same"}
 {"command":"echo\\ test","output":"declarative","rule":"Bash(git *)","pre":false,"post":false,"label":"same"}
 {"command":"echo\\ test","output":"declarative","rule":"Bash(ls *)","pre":false,"post":false,"label":"same"}
+{"command":"printf '<%s>\\n' a\\\nb","output":"readonly","pre":"deny:bash readonly: output redirection is not allowed in readonly mode. Use read_file / grep / glob / lsp_* tools for read operations instead of bash. Command: printf '<%s>\\n' a\\\nb","post":"deny:bash readonly: output redirection is not allowed in readonly mode. Use read_file / grep / glob / lsp_* tools for read operations instead of bash. Command: printf '<%s>\\n' a\\\nb","label":"same"}
+{"command":"printf '<%s>\\n' a\\\nb","output":"readpath","pre":null,"post":null,"label":"same"}
+{"command":"printf '<%s>\\n' a\\\nb","output":"grep","pre":null,"post":null,"label":"same"}
+{"command":"printf '<%s>\\n' a\\\nb","output":"declarative","rule":"Bash(git status:*)","pre":false,"post":false,"label":"same"}
+{"command":"printf '<%s>\\n' a\\\nb","output":"declarative","rule":"Bash(ls:*)","pre":false,"post":false,"label":"same"}
+{"command":"printf '<%s>\\n' a\\\nb","output":"declarative","rule":"Bash(git *)","pre":false,"post":false,"label":"same"}
+{"command":"printf '<%s>\\n' a\\\nb","output":"declarative","rule":"Bash(ls *)","pre":false,"post":false,"label":"same"}
 {"command":"mkfs -t ext4 /dev/sdb1","output":"readonly","pre":"deny:bash readonly: 'mkfs' is not in the readonly command policy. Use read_file / grep / glob / lsp_* tools for read operations instead of bash. Command: mkfs -t ext4 /dev/sdb1","post":"deny:bash readonly: 'mkfs' is not in the readonly command policy. Use read_file / grep / glob / lsp_* tools for read operations instead of bash. Command: mkfs -t ext4 /dev/sdb1","label":"same"}
 {"command":"mkfs -t ext4 /dev/sdb1","output":"readpath","pre":null,"post":null,"label":"same"}
 {"command":"mkfs -t ext4 /dev/sdb1","output":"grep","pre":null,"post":null,"label":"same"}

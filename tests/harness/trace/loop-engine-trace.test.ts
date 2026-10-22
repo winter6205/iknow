@@ -2,13 +2,21 @@
  * LoopEngine trace instrumentation tests.
  */
 
-import { describe, it, beforeEach, afterEach } from "vitest";
+import { describe, it, beforeEach, afterEach, vi } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
-import { run } from "../../../src/harness/loop-engine.ts";
+import { run, type LoopEngineDeps } from "../../../src/harness/loop-engine.ts";
+import { createAciExecutor } from "../../../src/harness/aci/aci-executor.ts";
+import { createPermissionPolicy } from "../../../src/harness/aci/permission.ts";
+import type { AciCatalog, AciToolDef } from "../../../src/harness/aci/types.ts";
 import type { ToolDef } from "../../../src/harness/tools/types.ts";
+import type {
+  Executor,
+  ToolCall,
+  ToolExecutionResult,
+} from "../../../src/harness/tools/types.ts";
 import { createRegistry } from "../../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { createStubModel } from "../../../src/harness/stubs/stub-model.ts";
@@ -16,6 +24,7 @@ import { createStubTool } from "../../../src/harness/stubs/stub-tool.ts";
 import { createNoopTraceService } from "../../../src/harness/trace/noop.ts";
 import { createJsonlTraceService } from "../../../src/harness/trace/jsonl.ts";
 import {
+  DEFAULT_OWNER,
   setActiveExtraSecrets,
   clearActiveExtraSecrets,
 } from "../../../src/harness/sandbox/env-isolation.ts";
@@ -30,7 +39,15 @@ import type {
 } from "../../../src/harness/trace/types.ts";
 import { assistantResult } from "../../cli/_fixtures.ts";
 import { parseJsonl } from "./_fixtures.ts";
-import type { TokenUsage } from "../../../src/harness/model-adapter/types.ts";
+import type {
+  AnthropicNativeMessage,
+  AssistantTurnResult,
+  TokenUsage,
+} from "../../../src/harness/model-adapter/types.ts";
+import {
+  ProtocolError,
+  TransportRetryExhaustedError,
+} from "../../../src/harness/errors.ts";
 
 describe("T4 criterion 5: byte-level consistency", () => {
   it("pure-text run: result is identical with undefined trace vs NoopTraceService", async () => {
@@ -763,8 +780,8 @@ describe("tool_call arguments 落盘形态", () => {
   // The output-mask fallback shares one secret slot across this describe, so
   // clear it before/after each case to avoid cross-test pollution (same
   // pattern as the beforeEach/afterEach in jsonl.test.ts).
-  beforeEach(() => clearActiveExtraSecrets());
-  afterEach(() => clearActiveExtraSecrets());
+  beforeEach(() => clearActiveExtraSecrets(DEFAULT_OWNER));
+  afterEach(() => clearActiveExtraSecrets(DEFAULT_OWNER));
 
   it("object arguments 含中文与嵌套字段:arguments_captured=true 且深等一致", async () => {
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-args-cn-"));
@@ -876,7 +893,7 @@ describe("tool_call arguments 落盘形态", () => {
     // writeLine mask path (jsonl.ts masks the whole stringified row via
     // currentOutputMask().mask); if arguments contain a registry secret value,
     // the written file must contain *** and never the real value.
-    setActiveExtraSecrets(["sk-tool-arg-secret"]);
+    setActiveExtraSecrets(DEFAULT_OWNER, ["sk-tool-arg-secret"]);
     const tmpDir = mkdtempSync(join(tmpdir(), "trace-args-mask-"));
     const write = createStubTool({
       name: "write",
@@ -981,5 +998,425 @@ describe("tool_call arguments 落盘形态", () => {
       `view.input 为 undefined 时 arguments key 应缺席(keys=${keys.join(",")})`
     );
     rmSync(tmpDir, { recursive: true, force: true });
+  });
+});
+
+describe("protocolError trace error carries the upstream cause", () => {
+  const CAUSE_HEAD = "upstream gateway refused the dispatch";
+  const CAUSE_TAIL = "TAIL_SENTINEL_MUST_NOT_LAND";
+
+  function throwingAdapter(fail: () => never) {
+    return Object.freeze({
+      encodeUserText: (text: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text }],
+      }),
+      encodeToolResults: () => undefined as never,
+      step: async (): Promise<AssistantTurnResult> => {
+        fail();
+      },
+    });
+  }
+
+  async function tracedProtocolStop(fail: () => never) {
+    const tmpDir = mkdtempSync(join(tmpdir(), "trace-protocol-cause-"));
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const trace = createJsonlTraceService({
+      filePath: tmpDir,
+      conversationId: "protocol-cause",
+    });
+    try {
+      const { result } = await run("go", {
+        adapter: throwingAdapter(fail),
+        executor: exec,
+        registry: reg,
+        maxTurns: 5,
+        trace,
+        agentVersion: "0.22.0",
+      });
+      const lines = parseJsonl(join(tmpDir, "protocol-cause.jsonl"));
+      return { result, lines };
+    } finally {
+      rmSync(tmpDir, { recursive: true, force: true });
+    }
+  }
+
+  function errorOf(row: Record<string, unknown>): {
+    type: string;
+    message: string;
+  } {
+    const error = row["error"] as { type: string; message: string };
+    return error;
+  }
+
+  it("apiError present: llm_call, turn, and session messages carry the bounded cause; type stays protocolError", async () => {
+    const cause = `${CAUSE_HEAD} ${"x".repeat(8_000)} ${CAUSE_TAIL}`;
+    const { result, lines } = await tracedProtocolStop(() => {
+      throw new TransportRetryExhaustedError(5, new Error(cause));
+    });
+    assert.equal(result.stopReason, "protocolError");
+    assert.equal(result.apiError?.message, cause);
+    const llm = lines.find(
+      (row) => row["record_type"] === "llm_call" && row["status"] === "error"
+    );
+    const turn = lines.find(
+      (row) => row["record_type"] === "turn" && row["status"] === "error"
+    );
+    const session = lines.find((row) => row["record_type"] === "session");
+    assert.ok(llm !== undefined);
+    assert.ok(turn !== undefined);
+    assert.ok(session !== undefined);
+    for (const row of [llm, turn, session]) {
+      const error = errorOf(row);
+      assert.equal(error.type, "protocolError");
+      assert.ok(error.message.includes(CAUSE_HEAD));
+      assert.equal(error.message.includes(CAUSE_TAIL), false);
+      assert.ok(error.message.length < cause.length);
+    }
+  });
+
+  it("apiError absent: trace error message stays the reason string", async () => {
+    const { result, lines } = await tracedProtocolStop(() => {
+      throw new ProtocolError("structurally invalid assistant turn");
+    });
+    assert.equal(result.stopReason, "protocolError");
+    assert.equal(result.apiError, undefined);
+    const llm = lines.find(
+      (row) => row["record_type"] === "llm_call" && row["status"] === "error"
+    );
+    const turn = lines.find(
+      (row) => row["record_type"] === "turn" && row["status"] === "error"
+    );
+    const session = lines.find((row) => row["record_type"] === "session");
+    assert.ok(llm !== undefined);
+    assert.ok(turn !== undefined);
+    assert.ok(session !== undefined);
+    for (const row of [llm, turn, session]) {
+      const error = errorOf(row);
+      assert.equal(error.type, "protocolError");
+      assert.equal(error.message, "protocolError");
+    }
+  });
+});
+
+interface ToolTimingClock {
+  set(milliseconds: number): void;
+  restore(): void;
+}
+
+function installToolTimingClock(): ToolTimingClock {
+  const epoch = Date.parse("2026-10-21T00:00:00.000Z");
+  vi.useFakeTimers({ toFake: ["Date"] });
+  vi.setSystemTime(epoch);
+  let monotonicMs = 0;
+  const monotonicSpy = vi
+    .spyOn(performance, "now")
+    .mockImplementation(() => monotonicMs);
+  return {
+    set(milliseconds: number): void {
+      monotonicMs = milliseconds;
+      vi.setSystemTime(epoch + milliseconds);
+    },
+    restore(): void {
+      monotonicSpy.mockRestore();
+      vi.useRealTimers();
+    },
+  };
+}
+
+function timedToolResult(call: ToolCall): ToolExecutionResult {
+  return {
+    kind: "ok",
+    toolUseId: call.id,
+    payload: [{ type: "text", text: call.id }],
+  };
+}
+
+async function runToolTimingFixture(opts: {
+  readonly calls: ReadonlyArray<{ id: string; label: string }>;
+  readonly executor?: Executor;
+  readonly executorFactory?: (tool: AciToolDef) => Executor;
+  readonly concurrencySafe: boolean;
+  readonly permissionCategory?: AciToolDef["aci"]["category"];
+  readonly runtimePersistence?: LoopEngineDeps["runtimePersistence"];
+}): Promise<Record<string, unknown>[]> {
+  const tmpDir = mkdtempSync(join(tmpdir(), "iknow-tool-timing-"));
+  assert.equal(isAbsolute(tmpDir), true);
+  assert.equal(resolve(tmpDir).startsWith(`${resolve(tmpdir())}${sep}`), true);
+  const conversationId = "synthetic-tool-timing";
+  const tracedTool: AciToolDef = {
+    ...createStubTool({ name: "timed", next: () => "unused" }),
+    aci: {
+      category: opts.permissionCategory ?? "read-only",
+      isConcurrencySafe: opts.concurrencySafe,
+      interruptBehavior: "cancel",
+      timeoutTier: "fast",
+    },
+  };
+  const registry = createRegistry([tracedTool]);
+  const executor = opts.executorFactory?.(tracedTool) ?? opts.executor;
+  assert.ok(executor, "a synthetic timing executor is required");
+  const model = createStubModel({
+    responses: [
+      assistantResult({
+        texts: [],
+        toolCalls: opts.calls.map(({ id, label }) => ({
+          id,
+          name: "timed",
+          input: { label },
+        })),
+      }),
+      assistantResult({
+        texts: ["done"],
+        toolCalls: [],
+        supplierStop: "success",
+      }),
+    ],
+  });
+  const trace = createJsonlTraceService({ filePath: tmpDir, conversationId });
+  try {
+    await run("synthetic request", {
+      adapter: model,
+      executor,
+      registry,
+      maxTurns: 5,
+      trace,
+      ...(opts.runtimePersistence === undefined
+        ? {}
+        : { runtimePersistence: opts.runtimePersistence }),
+    });
+    return parseJsonl(join(tmpDir, `${conversationId}.jsonl`)).filter(
+      (row) => row["record_type"] === "tool_call"
+    );
+  } finally {
+    rmSync(tmpDir, { recursive: true, force: true });
+  }
+}
+
+function timingForLabel(
+  rows: ReadonlyArray<Record<string, unknown>>,
+  label: string
+): Record<string, unknown> {
+  const row = rows.find(
+    (candidate) =>
+      (candidate["arguments"] as { label?: string } | undefined)?.label ===
+      label
+  );
+  assert.ok(row, `missing synthetic tool timing row for ${label}`);
+  return row;
+}
+
+describe("tool_call trace timing reflects observed call settlement", () => {
+  it("charges each concurrent call from wave dispatch to its own settlement", async () => {
+    const clock = installToolTimingClock();
+    try {
+      const executor: Executor = {
+        executeAll: async (
+          calls,
+          _signal,
+          _timeout,
+          _conversationId,
+          onSettled
+        ) => {
+          assert.equal(calls.length, 2);
+          assert.ok(onSettled);
+          clock.set(30);
+          const fast = calls.find((call) => call.id === "fast");
+          const slow = calls.find((call) => call.id === "slow");
+          assert.ok(fast);
+          assert.ok(slow);
+          clock.set(40);
+          await onSettled(timedToolResult(fast), 1);
+          clock.set(100);
+          await onSettled(timedToolResult(slow), 0);
+          return calls.map(timedToolResult);
+        },
+      };
+      const rows = await runToolTimingFixture({
+        calls: [
+          { id: "slow", label: "slow" },
+          { id: "fast", label: "fast" },
+        ],
+        executor,
+        concurrencySafe: true,
+      });
+      const slow = timingForLabel(rows, "slow");
+      const fast = timingForLabel(rows, "fast");
+      assert.equal(fast["duration_ms"], 40);
+      assert.equal(slow["duration_ms"], 100);
+      assert.equal(fast["started_at"], slow["started_at"]);
+      assert.equal(fast["ended_at"], "2026-10-21T00:00:00.040Z");
+      assert.equal(slow["ended_at"], "2026-10-21T00:00:00.100Z");
+    } finally {
+      clock.restore();
+    }
+  });
+
+  it("includes a real ACI approval wait before handler settlement", async () => {
+    const clock = installToolTimingClock();
+    let approvalCount = 0;
+    try {
+      const inner: Executor = {
+        executeAll: async (calls) => {
+          clock.set(510);
+          return calls.map(timedToolResult);
+        },
+      };
+      const rows = await runToolTimingFixture({
+        calls: [{ id: "approved", label: "approved" }],
+        concurrencySafe: false,
+        permissionCategory: "write",
+        executorFactory: (tool) => {
+          const catalog: AciCatalog = Object.freeze({
+            get: (name: string) => (name === tool.name ? tool : undefined),
+            all: () => Object.freeze([tool]),
+          });
+          return createAciExecutor({
+            inner,
+            catalog,
+            policy: createPermissionPolicy(),
+            askUser: async () => {
+              approvalCount += 1;
+              clock.set(500);
+              return true;
+            },
+          });
+        },
+      });
+      const row = timingForLabel(rows, "approved");
+      assert.equal(approvalCount, 1);
+      assert.equal(row["duration_ms"], 510);
+      assert.equal(row["ended_at"], "2026-10-21T00:00:00.510Z");
+    } finally {
+      clock.restore();
+    }
+  });
+
+  it("starts each serial wave after the previous wave's wait", async () => {
+    const clock = installToolTimingClock();
+    try {
+      let wave = 0;
+      const executor: Executor = {
+        executeAll: async (
+          _calls,
+          _signal,
+          _timeout,
+          _conversationId,
+          onSettled
+        ) => {
+          assert.ok(onSettled);
+          const call = _calls[0];
+          assert.ok(call);
+          const result = timedToolResult(call);
+          if (wave === 0) {
+            wave += 1;
+            clock.set(10);
+            await onSettled(result, 0);
+            // This interval belongs after wave one's settlement and before the
+            // next executeAll dispatch.
+            clock.set(1_010);
+            return [result];
+          }
+          clock.set(1_020);
+          await onSettled(result, 0);
+          return [result];
+        },
+      };
+      const rows = await runToolTimingFixture({
+        calls: [
+          { id: "first", label: "first" },
+          { id: "second", label: "second" },
+        ],
+        executor,
+        concurrencySafe: false,
+      });
+      const first = timingForLabel(rows, "first");
+      const second = timingForLabel(rows, "second");
+      assert.equal(first["duration_ms"], 10);
+      assert.equal(second["duration_ms"], 10);
+      assert.equal(first["started_at"], "2026-10-21T00:00:00.000Z");
+      assert.equal(second["started_at"], "2026-10-21T00:00:01.010Z");
+    } finally {
+      clock.restore();
+    }
+  });
+
+  it("ends the measurement before awaiting result persistence", async () => {
+    const clock = installToolTimingClock();
+    let persistedResults = 0;
+    try {
+      const executor: Executor = {
+        executeAll: async (
+          calls,
+          _signal,
+          _timeout,
+          _conversationId,
+          onSettled
+        ) => {
+          assert.ok(onSettled);
+          const call = calls[0];
+          assert.ok(call);
+          const result = timedToolResult(call);
+          clock.set(10);
+          await onSettled(result, 0);
+          return [result];
+        },
+      };
+      const runtimePersistence: NonNullable<
+        LoopEngineDeps["runtimePersistence"]
+      > = {
+        // This fake writes nothing, so it reports "skipped", never a durable
+        // write.
+        publishSavedState: async () => false,
+        appendOperationFact: async (fact) => {
+          if (fact.kind === "tool_result") {
+            persistedResults += 1;
+            clock.set(1_000);
+          }
+        },
+      };
+      const rows = await runToolTimingFixture({
+        calls: [{ id: "persisted", label: "persisted" }],
+        executor,
+        concurrencySafe: false,
+        runtimePersistence,
+      });
+      const row = timingForLabel(rows, "persisted");
+      assert.equal(persistedResults, 1);
+      assert.equal(row["duration_ms"], 10);
+      assert.equal(row["ended_at"], "2026-10-21T00:00:00.010Z");
+    } finally {
+      clock.restore();
+    }
+  });
+
+  it("uses a coarse whole-wave interval when a legacy executor omits onSettled", async () => {
+    const clock = installToolTimingClock();
+    try {
+      const executor: Executor = {
+        executeAll: async (calls) => {
+          clock.set(50);
+          return calls.map(timedToolResult);
+        },
+      };
+      const rows = await runToolTimingFixture({
+        calls: [
+          { id: "legacy-a", label: "legacy-a" },
+          { id: "legacy-b", label: "legacy-b" },
+        ],
+        executor,
+        concurrencySafe: true,
+      });
+      const first = timingForLabel(rows, "legacy-a");
+      const second = timingForLabel(rows, "legacy-b");
+      assert.equal(first["duration_ms"], 50);
+      assert.equal(second["duration_ms"], 50);
+      assert.equal(first["started_at"], second["started_at"]);
+      assert.equal(first["ended_at"], second["ended_at"]);
+    } finally {
+      clock.restore();
+    }
   });
 });

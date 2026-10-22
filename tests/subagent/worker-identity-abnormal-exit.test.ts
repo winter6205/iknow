@@ -184,7 +184,9 @@ if (process.argv.includes("--subagent-worker")) {
     // recorded and there is nothing for a recovery process to reconcile.
     runtimePersistence: {
       bind: () => ({
-        publishSavedState: async () => {},
+        // This fake writes nothing, so it reports "skipped", never a durable
+        // write (the manager only appends facts here anyway).
+        publishSavedState: async () => false,
         appendOperationFact: async () => {},
       }),
     },
@@ -268,7 +270,9 @@ function makeRecordingSink(): RecordingSink {
       bind: (sessionId) => {
         boundSessions.push(sessionId ?? "<none>");
         return {
-          publishSavedState: async () => {},
+          // This fake writes nothing, so it reports "skipped", never a durable
+          // write (the recording happens in appendOperationFact below).
+          publishSavedState: async () => false,
           appendOperationFact: async (fact) => {
             if (fact.kind === "worker_progress") facts.push(fact);
           },

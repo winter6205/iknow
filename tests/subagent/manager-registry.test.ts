@@ -5,6 +5,7 @@ import {
   SubagentManagerDrainError,
   type SubagentManagerReadView,
 } from "../../src/harness/subagent/manager-registry.ts";
+import type { ClaimedDelivery } from "../../src/harness/subagent/delivery-ledger.ts";
 import { createSubAgentMailbox } from "../../src/harness/subagent/mailbox.ts";
 
 type Completed = ReturnType<SubagentManagerReadView["drainCompleted"]>[number];
@@ -32,6 +33,71 @@ function readManager(
     listSubagents,
     subscribe: mailbox.subscribe,
     publish: mailbox.publish,
+  };
+}
+
+interface ClaimingManagerFake extends SubagentManagerReadView {
+  readonly deliveredTaskIds: () => ReadonlyArray<string>;
+  readonly addTask: (taskId: string) => void;
+}
+
+/**
+ * Structural manager with the optional claim seam: one terminal generation per
+ * task, claimable once and settled through the registry's ack/release routing.
+ * The bookkeeping is local to this file so these cases pin registry
+ * aggregation, not the product ledger's semantics.
+ */
+function claimingManager(
+  initialTaskIds: ReadonlyArray<string>
+): ClaimingManagerFake {
+  const taskIds = [...initialTaskIds];
+  const claimed = new Set<string>();
+  const delivered = new Set<string>();
+  const owners = new Map<symbol, string>();
+  const mailbox = createSubAgentMailbox();
+
+  const visible = (): ReadonlyArray<Completed> =>
+    taskIds
+      .filter((taskId) => !claimed.has(taskId) && !delivered.has(taskId))
+      .map(completed);
+
+  const settle = (
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>,
+    outcome: "delivered" | "released"
+  ): void => {
+    for (const claim of claims) {
+      const taskId = owners.get(claim.token);
+      if (taskId === undefined) continue;
+      owners.delete(claim.token);
+      claimed.delete(taskId);
+      if (outcome === "delivered") delivered.add(taskId);
+    }
+  };
+
+  return {
+    drainCompleted: () => visible(),
+    claimCompleted: () =>
+      visible().map(({ taskId, envelope }) => {
+        const token = Symbol(taskId);
+        owners.set(token, taskId);
+        claimed.add(taskId);
+        return {
+          key: taskId,
+          token,
+          conversationId: "",
+          taskId,
+          terminalSeq: 1,
+          envelope,
+        };
+      }),
+    acknowledgeDeliveries: (claims) => settle(claims, "delivered"),
+    releaseDeliveries: (claims) => settle(claims, "released"),
+    listSubagents: () => [],
+    subscribe: mailbox.subscribe,
+    deliveredTaskIds: () => [...delivered],
+    addTask: (taskId) => {
+      taskIds.push(taskId);
+    },
   };
 }
 
@@ -112,6 +178,102 @@ describe("createSubagentManagerRegistry", () => {
       reason: "drainFailed",
       cause: failure,
     });
+  });
+
+  it("claims every manager's undelivered result and delivers them on acknowledge", () => {
+    const registry = createSubagentManagerRegistry();
+    const first = claimingManager(["first-task"]);
+    const second = claimingManager(["second-task"]);
+    registry.register(first);
+    registry.register(second);
+
+    const claims = registry.claimCompleted();
+    expect(claims.map(({ taskId }) => taskId)).toEqual([
+      "first-task",
+      "second-task",
+    ]);
+    // A claimed generation is invisible to both the read and a second claim.
+    expect(registry.drainCompleted()).toEqual([]);
+    expect(registry.claimCompleted()).toEqual([]);
+
+    registry.acknowledgeDeliveries(claims);
+    expect(first.deliveredTaskIds()).toEqual(["first-task"]);
+    expect(second.deliveredTaskIds()).toEqual(["second-task"]);
+    expect(registry.drainCompleted()).toEqual([]);
+    expect(registry.claimCompleted()).toEqual([]);
+  });
+
+  it("reports a typed claim error and keeps the other manager's claims", () => {
+    const failure = new Error("claim unavailable");
+    const onError = vi.fn();
+    const registry = createSubagentManagerRegistry({ onError });
+    const healthy = claimingManager(["healthy"]);
+    const broken: ClaimingManagerFake = {
+      ...claimingManager(["broken"]),
+      claimCompleted: () => {
+        throw failure;
+      },
+    };
+    registry.register(broken);
+    registry.register(healthy);
+
+    expect(registry.claimCompleted().map(({ taskId }) => taskId)).toEqual([
+      "healthy",
+    ]);
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(expect.any(SubagentManagerDrainError));
+    expect(onError.mock.calls[0]?.[0]).toMatchObject({
+      reason: "drainFailed",
+      cause: failure,
+    });
+  });
+
+  it("routes same-task-id claims back to their own manager", () => {
+    const registry = createSubagentManagerRegistry();
+    const first = claimingManager(["shared-task"]);
+    const second = claimingManager(["shared-task"]);
+    registry.register(first);
+    registry.register(second);
+
+    const claims = registry.claimCompleted();
+    expect(claims.map(({ taskId }) => taskId)).toEqual([
+      "shared-task",
+      "shared-task",
+    ]);
+
+    registry.acknowledgeDeliveries(claims);
+    // Routing is by claim token, not by the parent-visible task id: each
+    // manager settles its own generation.
+    expect(first.deliveredTaskIds()).toEqual(["shared-task"]);
+    expect(second.deliveredTaskIds()).toEqual(["shared-task"]);
+    expect(registry.claimCompleted()).toEqual([]);
+  });
+
+  it("a delivered entry from one manager does not hide another manager's entry", () => {
+    const registry = createSubagentManagerRegistry();
+    const first = claimingManager(["first-task"]);
+    const second = claimingManager([]);
+    registry.register(first);
+    registry.register(second);
+
+    registry.acknowledgeDeliveries(registry.claimCompleted());
+    expect(first.deliveredTaskIds()).toEqual(["first-task"]);
+
+    // A later terminal result on another manager still claims.
+    second.addTask("second-task");
+    expect(registry.claimCompleted().map(({ taskId }) => taskId)).toEqual([
+      "second-task",
+    ]);
+  });
+
+  it("drains read-only when a view has no claim seam", () => {
+    const registry = createSubagentManagerRegistry();
+    registry.register(readManager(() => [completed("read-only")]));
+
+    expect(registry.claimCompleted()).toEqual([]);
+    expect(registry.drainCompleted()).toEqual([completed("read-only")]);
+    expect(() => registry.acknowledgeDeliveries([])).not.toThrow();
+    expect(() => registry.releaseDeliveries([])).not.toThrow();
   });
 
   it("fans terminal notices in from managers registered before and after subscribe", () => {

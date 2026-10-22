@@ -5,15 +5,16 @@
  *   - The assembly layer (`assemble.ts`) consumes it through an injected
  *     seam and never shells out to git directly — preserving assemble.ts's
  *     fs / path-only purity.
- *   - `createGitSnapshotProvider({ cwd })` returns a closure that takes one
- *     snapshot at factory time and freezes it for the session (executed
- *     synchronously during build-engine / worker assembly). The assembly
- *     layer calls the same closure every turn → adjacent turns are
- *     byte-identical (KV cache contract).
+ *   - `createGitSnapshotProvider({ cwd })` returns a closure over one pending
+ *     capture. The capture contract (when it starts, that it stays frozen for
+ *     the session, how it degrades) is documented on the factory itself.
  *   - Degraded states (cwd unavailable / not a git repo / git unavailable) →
  *     snapshot = undefined → the whole assembly segment is absent ("absence =
  *     byte change is accepted"). The taxonomy lives in `env-snapshot.ts`;
  *     this module only collapses degradation into undefined.
+ *   - An unexpected failure (the exec seam rejects / throws) is NOT
+ *     degradation: the capture rejects and the assembly layer's diagnostic
+ *     fires. See the factory doc below — it is the contract SSOT.
  *   - status output is truncated via `truncateByCodepoints` (capped at
  *     `GIT_STATUS_MAX_CHARS`, 2000 codepoints, same tier as
  *     `MAX_ENV_DIFF_CHARS`); the four fields + disclaimer all come from SSOT
@@ -28,12 +29,11 @@
  *                        `## ...` line stripped), truncated at the codepoint cap.
  *   - recentCommits  ← `git --no-pager log --oneline -5` split by line.
  *
- * `spawnSync` is used for reads: a one-shot session-level snapshot keeps cost
- * controlled; the closure returns the frozen value with no further IO.
- * This module is the only place in the repo that spawns `git` (verified by
- * the assemble.ts test suite).
+ * Reads go through `execFile` (async): one shot per session keeps cost
+ * controlled. This module is the sole git-read exit for the `## Git` block —
+ * the env segment reads git on its own (see `env-snapshot.ts`).
  */
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { execFile, type ExecFileException } from "node:child_process";
 import { truncateByCodepoints } from "../env-snapshot.js";
 
 // ---------------------------------------------------------------------------
@@ -85,12 +85,23 @@ export interface GitSnapshot {
   readonly recentCommits: ReadonlyArray<string>;
 }
 
-/** Spawn seam (replaceable in tests; default uses node:child_process.spawnSync). */
+/** One git invocation outcome. `status === null` means "no exit code": the git
+ *  binary is missing, the process was killed by the timeout, or it died on a
+ *  signal. The capture degrades on any non-zero status, so the null case
+ *  degrades exactly like the `status === null` a synchronous spawn returned. */
+export interface GitExecResult {
+  /** Exit code; null = no exit code (missing binary / killed process). */
+  readonly status: number | null;
+  readonly stdout: string | null;
+  readonly stderr: string | null;
+}
+
+/** Spawn seam (replaceable in tests; default uses node:child_process.execFile). */
 export type GitExec = (
   args: readonly string[],
   cwd: string,
   timeoutSeconds?: number
-) => SpawnSyncReturns<string>;
+) => Promise<GitExecResult>;
 
 /** Options for `createGitSnapshotProvider`. */
 export interface CreateGitSnapshotProviderOpts {
@@ -98,34 +109,52 @@ export interface CreateGitSnapshotProviderOpts {
    *  root); the worker passes the same value as the parent session;
    *  missing → degraded cwd_unavailable. */
   readonly cwd: string;
-  /** Tests may inject exec; defaults to spawnSync. */
+  /** Tests may inject exec; defaults to execFile. */
   readonly exec?: GitExec;
   /** Per-git-command timeout (seconds); default = 5. */
   readonly timeoutSeconds?: number;
 }
 
 // ---------------------------------------------------------------------------
-// Default exec (spawnSync git)
+// Default exec (async execFile git)
 // ---------------------------------------------------------------------------
 
 function defaultExec(
   args: readonly string[],
   cwd: string,
   timeoutSeconds?: number
-): SpawnSyncReturns<string> {
-  return spawnSync("git", [...args], {
-    cwd,
-    encoding: "utf8",
-    stdio: ["ignore", "pipe", "pipe"],
-    timeout: (timeoutSeconds ?? DEFAULT_GIT_TIMEOUT_SECONDS) * 1000,
+): Promise<GitExecResult> {
+  return new Promise<GitExecResult>((resolve) => {
+    execFile(
+      "git",
+      [...args],
+      {
+        cwd,
+        encoding: "utf8",
+        timeout: (timeoutSeconds ?? DEFAULT_GIT_TIMEOUT_SECONDS) * 1000,
+      },
+      (error, stdout, stderr) => {
+        resolve(toGitExecResult(error, stdout, stderr));
+      }
+    );
   });
 }
 
-// ---------------------------------------------------------------------------
-// Degradation handling (same vocabulary as env-snapshot.ts: degradation
-// collapses to undefined — this module no longer exposes the
-// EnvDegradeReason taxonomy; env-snapshot.ts owns those details)
-// ---------------------------------------------------------------------------
+/** Map an execFile outcome onto the exec seam's shape: a non-zero exit keeps
+ *  its exit code; a missing binary or a killed process has no exit code
+ *  (null) and therefore degrades like the old synchronous spawn. */
+function toGitExecResult(
+  error: ExecFileException | null,
+  stdout: string,
+  stderr: string
+): GitExecResult {
+  if (error === null) return { status: 0, stdout, stderr };
+  return {
+    status: typeof error.code === "number" ? error.code : null,
+    stdout,
+    stderr,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Pure computation (no IO)
@@ -158,90 +187,158 @@ function cleanStatusBlock(porcelain: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * Factory returning a closure. The closure takes the git snapshot once,
- * synchronously, at factory time and freezes it; the assembly layer calls the
- * same closure every turn → adjacent turns are byte-identical.
+ * Factory returning a closure. The git read starts here (the capture promise
+ * is created and the first git command is spawned) so it overlaps the rest of
+ * the session / worker startup; the closure hands the same pending promise to
+ * every caller → the snapshot is frozen for the session (adjacent turns are
+ * byte-identical) and the first `await` resolves with the complete result.
  *
- * Degraded paths:
+ * This doc is the contract SSOT for the capture — other modules point here
+ * instead of restating it.
+ *
+ * Degraded paths — the capture RESOLVES with undefined:
  *   - empty cwd → immediate degradation, git is **not** spawned.
- *   - synchronous spawn failure (ENOENT / EACCES) / timeout / non-zero exit →
- *     the closure returns undefined (degradation collapses to undefined; no
- *     taxonomy is exposed).
+ *   - spawn failure (missing binary) / timeout / non-zero exit → the capture
+ *     resolves to undefined (degradation collapses to undefined; no taxonomy
+ *     is exposed).
  *
- * Once frozen (success or degraded), the closure always returns the same
- * value; no retries, no IO.
+ * Failure paths — the capture REJECTS (failure and degradation are distinct):
+ *   - the exec seam rejects or throws, or the capture hits an internal bug →
+ *     the pending promise rejects. The rejection is marked handled
+ *     SYNCHRONOUSLY at creation time (see below), so a provider that is
+ *     created but never awaited cannot raise an unhandled rejection, while
+ *     every later awaiter still observes the rejection. The first awaiter is
+ *     the assembly layer (`assemble.ts`), whose catch logs
+ *     `[identity/assemble] git snapshot resolver failed: …` and degrades to
+ *     snapshot = undefined → the segment is absent (no crash, no half render).
  */
 export function createGitSnapshotProvider(
   opts: CreateGitSnapshotProviderOpts
-): () => GitSnapshot | undefined {
+): () => Promise<GitSnapshot | undefined> {
   const exec = opts.exec ?? defaultExec;
   const cwd = opts.cwd;
-  const snapshot = captureSnapshot({
+  const pending = captureSnapshot({
     cwd,
     exec,
     timeoutSeconds: opts.timeoutSeconds,
   });
-  return (): GitSnapshot | undefined => snapshot;
+  // EXIT: an unexpected capture failure (the exec seam threw / rejected, or
+  // the capture hit an internal bug) stays OBSERVABLE — the capture rejects
+  // instead of degrading to undefined, so the assembly layer's diagnostic can
+  // fire. This no-op handler marks that rejection as handled in the same
+  // synchronous turn, so a provider that is created but never awaited cannot
+  // kill the process with an unhandled rejection; every later awaiter still
+  // observes the rejection.
+  void pending.catch(() => {});
+  return () => pending;
 }
 
-/** One synchronous IO snapshot capture. Failure / degradation → undefined. */
-function captureSnapshot(args: {
-  readonly cwd: string;
-  readonly exec: GitExec;
-  readonly timeoutSeconds?: number;
-}): GitSnapshot | undefined {
-  const { cwd, exec, timeoutSeconds } = args;
-  if (cwd.trim() === "") return undefined;
+/** Porcelain-derived fields of one status read; absent when the status call
+ *  did not exit 0 (the whole snapshot degrades). */
+interface StatusRead {
+  readonly branch: string | null;
+  readonly body: string;
+}
 
-  // 1) status (includes the branch annotation line) — any spawn failure
-  // degrades the whole snapshot (degradation = undefined, no taxonomy).
-  const statusResult = exec(
+/** `git status --porcelain=v1 -b` → branch + dirty list; a non-zero exit →
+ *  undefined (the whole snapshot degrades). */
+async function readStatus(
+  exec: GitExec,
+  cwd: string,
+  timeoutSeconds: number | undefined
+): Promise<StatusRead | undefined> {
+  const result = await exec(
     ["--no-pager", "status", "--porcelain=v1", "-b"],
     cwd,
     timeoutSeconds
   );
-  if (statusResult.status !== 0) {
-    return undefined;
-  }
-  const porcelain = statusResult.stdout ?? "";
-  const branch = parseBranchFromStatus(porcelain);
-  const statusBody = cleanStatusBlock(porcelain);
+  // EXIT: status did not exit 0 (not a git repo / git unavailable) → the whole snapshot is absent.
+  if (result.status !== 0) return undefined;
+  const porcelain = result.stdout ?? "";
+  return {
+    branch: parseBranchFromStatus(porcelain),
+    body: cleanStatusBlock(porcelain),
+  };
+}
 
-  // 2) mainBranch (origin/HEAD) — soft failure: no origin / offline → null,
-  // no whole-snapshot degradation.
-  let mainBranch: string | null = null;
-  const mainResult = exec(
+/** `git symbolic-ref --short refs/remotes/origin/HEAD` → the PR base branch;
+ *  no origin / offline / empty ref → null (soft failure, no degradation). */
+async function readMainBranch(
+  exec: GitExec,
+  cwd: string,
+  timeoutSeconds: number | undefined
+): Promise<string | null> {
+  const result = await exec(
     ["--no-pager", "symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
     cwd,
     timeoutSeconds
   );
-  if (mainResult.status === 0) {
-    const trimmed = (mainResult.stdout ?? "").trim();
-    mainBranch = trimmed === "" ? null : trimmed;
-  }
+  // EXIT: symbolic-ref did not exit 0 (no origin / offline) → mainBranch is null; the snapshot survives.
+  if (result.status !== 0) return null;
+  const trimmed = (result.stdout ?? "").trim();
+  return trimmed === "" ? null : trimmed;
+}
 
-  // 3) recent commits — soft failure → empty array.
-  let recentCommits: ReadonlyArray<string> = [];
-  const logResult = exec(
+/** `git log --oneline -5` → the recent commit lines; a non-zero exit → an
+ *  empty list (soft failure, no degradation). */
+async function readRecentCommits(
+  exec: GitExec,
+  cwd: string,
+  timeoutSeconds: number | undefined
+): Promise<ReadonlyArray<string>> {
+  const result = await exec(
     ["--no-pager", "log", "--oneline", "-5"],
     cwd,
     timeoutSeconds
   );
-  if (logResult.status === 0) {
-    recentCommits = (logResult.stdout ?? "")
-      .split("\n")
-      .map((l) => l.trim())
-      .filter((l) => l.length > 0)
-      .map((l) => truncateByCodepoints(l, GIT_FIELD_MAX_CHARS));
-  }
+  // EXIT: log did not exit 0 → recentCommits is empty; the snapshot survives.
+  if (result.status !== 0) return [];
+  return (result.stdout ?? "")
+    .split("\n")
+    .map((l) => l.trim())
+    .filter((l) => l.length > 0)
+    .map((l) => truncateByCodepoints(l, GIT_FIELD_MAX_CHARS));
+}
+
+/**
+ * One asynchronous IO snapshot capture.
+ *
+ * - Degradation (non-zero exit / missing binary / timeout / blank cwd) →
+ *   resolves with undefined (the `## Git` segment is absent, no warning).
+ * - An unexpected failure (the exec seam rejected or threw, or an internal
+ *   bug in the capture) → REJECTS. The rejection is deliberately NOT
+ *   swallowed here: it is the signal the assembly layer's catch turns into
+ *   the diagnostic `[identity/assemble] git snapshot resolver failed: …`.
+ */
+async function captureSnapshot(args: {
+  readonly cwd: string;
+  readonly exec: GitExec;
+  readonly timeoutSeconds?: number;
+}): Promise<GitSnapshot | undefined> {
+  const { cwd, exec, timeoutSeconds } = args;
+  // EXIT: blank cwd → the capture resolves to undefined; git is never spawned.
+  if (cwd.trim() === "") return undefined;
+
+  // 1) status (includes the branch annotation line) — a non-zero exit
+  // degrades the whole snapshot (degradation = undefined, no taxonomy).
+  const status = await readStatus(exec, cwd, timeoutSeconds);
+  // EXIT: the status read degraded → the whole snapshot is absent.
+  if (status === undefined) return undefined;
+
+  // 2) mainBranch (origin/HEAD) — soft failure: no origin / offline → null,
+  // no whole-snapshot degradation.
+  const mainBranch = await readMainBranch(exec, cwd, timeoutSeconds);
+
+  // 3) recent commits — soft failure → empty array.
+  const recentCommits = await readRecentCommits(exec, cwd, timeoutSeconds);
 
   return Object.freeze({
-    branch,
+    branch: status.branch,
     mainBranch,
     status:
-      statusBody === ""
+      status.body === ""
         ? null
-        : truncateByCodepoints(statusBody, GIT_STATUS_MAX_CHARS),
+        : truncateByCodepoints(status.body, GIT_STATUS_MAX_CHARS),
     recentCommits,
   });
 }

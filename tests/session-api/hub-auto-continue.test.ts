@@ -346,9 +346,12 @@ describe("hub auto-loop store.load typed catch", () => {
     stubVerify("failed");
     const origLoad = store.load.bind(store);
     let n = 0;
+    // This flow reads the store five times: turn start → the closing save's head
+    // chain → the auto-loop persist → buildStop → loadSessionForAutoLoop. The
+    // last one is the target: a not_found on the auto-loop's own read stops it.
     vi.spyOn(store, "load").mockImplementation(async (id: string) => {
       n += 1;
-      if (n >= 4) {
+      if (n >= 5) {
         throw { kind: "not_found", conversation_id: id };
       }
       return origLoad(id);

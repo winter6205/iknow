@@ -21,13 +21,22 @@
  *       recorded deny-to-reviewed-ask row; an unreviewed deny-to-ordinary-allow
  *       fails here, and so does a row the generator could not license, which
  *       arrives already labeled `open`;
+ *   (b') #1188's two roster-amendment labels are re-derived the same way: an
+ *       `authorized-fidelity-admission` row is a spelling the pre-state denied
+ *       with the RETIRED blanket backslash-whitespace veto and that HEAD now
+ *       parses, and an `authorized-roster-amendment` row is the retained
+ *       fidelity denial whose id and tier held while its diagnostic lost the
+ *       generated rewrite (spec SC6). Both licenses are the row's own recorded
+ *       bytes, so a wall that narrowed its roster cannot license them by
+ *       shrinking them;
  *   (c) every row's recorded HEAD hit still matches what HEAD computes now,
  *       which is what catches a future `id`/`pattern` move — or a narrowed
  *       wall roster — sneaking in without a regeneration;
- *   (d) every `{id, pattern}` move is one of the two authorized shapes — the
- *       fork-bomb pair, and the `malformed` diagnostic that kept its id and
- *       gained the reason the parse layer already held — each pinned byte for
- *       byte on both sides, with no other row moved;
+ *   (d) every `{id, pattern}` move is one of the three authorized shapes — the
+ *       fork-bomb pair, the `malformed` diagnostic that kept its id and
+ *       gained the reason the parse layer already held, and #1188's retained
+ *       backslash-whitespace denial — each pinned byte for byte on both sides,
+ *       with no other row moved;
  *   (e) every relaxation row cites the SC-GATES-3 clause its own class names,
  *       and the carrier, wrapper, store-or-run and unknown-executor shapes the
  *       ledger prices stay unlicensable against the wall's live answer;
@@ -84,6 +93,8 @@ type DivergenceLabel =
   | "expected-relaxation"
   | "authorized-id-move"
   | "authorized-diagnostic-move"
+  | "authorized-fidelity-admission"
+  | "authorized-roster-amendment"
   | "fixed"
   | "security-review"
   | "open";
@@ -136,6 +147,8 @@ const ADMITTED_LABELS: readonly DivergenceLabel[] = [
   "expected-relaxation",
   "authorized-id-move",
   "authorized-diagnostic-move",
+  "authorized-fidelity-admission",
+  "authorized-roster-amendment",
   "fixed",
   "security-review",
   "open",
@@ -242,35 +255,121 @@ const AUTHORIZED_DIAGNOSTIC_MOVE = {
 } as const;
 
 /**
+ * #1188's two roster-amendment shapes, and the only reason either may be
+ * recorded. The pre-state denial they replace is byte-identical in its first
+ * clause and identifiable only by the rewrite suggestion that the repair
+ * deleted (`改用引号承载该词，例如`), so the recognizer reads THAT marker rather
+ * than a copied copy of the retired sentence — one retired reason existed with
+ * a per-command rewrite tail, not one text.
+ */
+const RETIRED_BACKSLASH_VETO_PREFIX =
+  "verdict=vetoed 解析分歧字符（backslash-whitespace）：";
+const RETIRED_REWRITE_MARKER = "改用引号承载该词，例如";
+
+/**
+ * The one current backslash-whitespace reason, pinned byte for byte. SC6 of
+ * `specs/backslash-whitespace-veto-repair.md` keeps the class, names the
+ * retained limitation, and drops the generated command; a row may claim the
+ * roster amendment only by landing on exactly these bytes.
+ */
+const RETAINED_BACKSLASH_WHITESPACE_REASON =
+  "verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，且该形状与 bash 的词法不一致（词内折行、引号内折行、TAB/CR/CRLF、未证明的转义或不成词的片段），连解析都不做，直接硬拒；已实测一致的普通转义空格与词分隔折行不在本清单内。";
+
+/** The pre-state denial the #1188 repair amended, recognized from its own bytes. */
+function isRetiredBackslashVeto(value: WallValue): boolean {
+  const hit = value as Partial<DangerousPatternHit> | null;
+  return (
+    typeof hit === "object" &&
+    hit !== null &&
+    hit.id === "unparseable" &&
+    typeof hit.pattern === "string" &&
+    hit.pattern.startsWith(RETIRED_BACKSLASH_VETO_PREFIX) &&
+    hit.pattern.includes(RETIRED_REWRITE_MARKER)
+  );
+}
+
+/**
+ * The deny-to-deny #1188 shape: the retained fidelity denial kept its id and
+ * its tier, and only the diagnostic text moved (SC6). It is a shape rather than
+ * a pinned pair because the pre-state side of every such row carries its own
+ * command's retired rewrite tail.
+ */
+const AUTHORIZED_ROSTER_AMENDMENT = {
+  head: { id: "unparseable", pattern: RETAINED_BACKSLASH_WHITESPACE_REASON },
+} as const;
+
+type AuthorizedShape =
+  | {
+      readonly kind: "pair";
+      readonly label: DivergenceLabel;
+      readonly base: WallValue;
+      readonly head: WallValue;
+    }
+  | {
+      readonly kind: "retired-backslash-veto";
+      readonly label: DivergenceLabel;
+      readonly head: WallValue;
+    };
+
+/**
  * The label vocabulary and the authorized shapes, bound together: a move label
  * with no pinned shape cannot be granted, and a pinned shape with no label
  * cannot be recorded. A label added to one list and not the other fails the
  * load rather than quietly pricing a moved row.
  */
-const AUTHORIZED_MOVE_BY_LABEL: ReadonlyMap<
-  DivergenceLabel,
-  typeof AUTHORIZED_MOVE | typeof AUTHORIZED_DIAGNOSTIC_MOVE
-> = new Map<
-  DivergenceLabel,
-  typeof AUTHORIZED_MOVE | typeof AUTHORIZED_DIAGNOSTIC_MOVE
->([
-  ["authorized-id-move", AUTHORIZED_MOVE],
-  ["authorized-diagnostic-move", AUTHORIZED_DIAGNOSTIC_MOVE],
-]);
+const AUTHORIZED_MOVE_BY_LABEL: ReadonlyMap<DivergenceLabel, AuthorizedShape> =
+  new Map<DivergenceLabel, AuthorizedShape>([
+    [
+      "authorized-id-move",
+      {
+        kind: "pair",
+        label: "authorized-id-move",
+        base: AUTHORIZED_MOVE.base,
+        head: AUTHORIZED_MOVE.head,
+      },
+    ],
+    [
+      "authorized-diagnostic-move",
+      {
+        kind: "pair",
+        label: "authorized-diagnostic-move",
+        base: AUTHORIZED_DIAGNOSTIC_MOVE.base,
+        head: AUTHORIZED_DIAGNOSTIC_MOVE.head,
+      },
+    ],
+    [
+      "authorized-roster-amendment",
+      {
+        kind: "retired-backslash-veto",
+        label: "authorized-roster-amendment",
+        head: AUTHORIZED_ROSTER_AMENDMENT.head,
+      },
+    ],
+  ]);
+
+function shapeCovers(
+  shape: AuthorizedShape,
+  base: WallValue,
+  head: WallValue
+): boolean {
+  if (!sameValue(head, shape.head)) return false;
+  return shape.kind === "pair"
+    ? sameValue(base, shape.base)
+    : isRetiredBackslashVeto(base);
+}
 
 /**
  * Whether one recorded `{base, head}` pair is one of the authorized moves. Both
- * fields of both sides are compared: a prefix match on `pattern`, or a match on
- * `id` alone, would let a future wall reword or re-id its own diagnostic
- * through this gate.
+ * fields of the pair shapes are compared: a prefix match on `pattern`, or a
+ * match on `id` alone, would let a future wall reword or re-id its own
+ * diagnostic through this gate.
  */
 function isAuthorizedMove(
   base: WallValue,
   head: WallValue
-): typeof AUTHORIZED_MOVE | typeof AUTHORIZED_DIAGNOSTIC_MOVE | null {
-  for (const shape of [AUTHORIZED_MOVE, AUTHORIZED_DIAGNOSTIC_MOVE] as const) {
-    if (sameValue(base, shape.base) && sameValue(head, shape.head))
-      return shape;
+): AuthorizedShape | null {
+  for (const shape of AUTHORIZED_MOVE_BY_LABEL.values()) {
+    if (shapeCovers(shape, base, head)) return shape;
   }
   return null;
 }
@@ -449,12 +548,13 @@ function assertLabelIsCoherent(row: FixtureRow, where: string): void {
   }
   if (row.clause !== undefined)
     throw new Error(`${where}: only a relaxation row carries a citation`);
+  if (row.label === "authorized-fidelity-admission") {
+    assertAdmissionIsAuthorized(row, where);
+    return;
+  }
   const authorized = AUTHORIZED_MOVE_BY_LABEL.get(row.label);
   if (authorized !== undefined) {
-    if (
-      !sameValue(row.base, authorized.base) ||
-      !sameValue(row.head, authorized.head)
-    )
+    if (!shapeCovers(authorized, row.base, row.head))
       throw new Error(
         `${where}: labeled ${row.label} but is not the authorized pair`
       );
@@ -486,6 +586,32 @@ function rejectEvidence(row: FixtureRow, where: string): void {
     throw new Error(
       `${where}: a ${row.label} row carries no review or new-deny evidence`
     );
+}
+
+/**
+ * A #1188 admission: the pre-state denied the spelling purely as the blanket
+ * backslash-whitespace veto, and HEAD no longer does. The load admits it only
+ * with those exact recorded bytes — the retired veto on the pattern wall, an
+ * empty HEAD, no class and no evidence — so no other deny can arrive wearing
+ * this label, and the live re-derivation lives in `unlicensedAdmission`.
+ */
+function assertAdmissionIsAuthorized(row: FixtureRow, where: string): void {
+  if (row.wall !== "pattern")
+    throw new Error(
+      `${where}: an admission is priced on the pattern wall only`
+    );
+  if (!isRetiredBackslashVeto(row.base))
+    throw new Error(
+      `${where}: an admission's pre-state must be the retired ` +
+        `backslash-whitespace veto, got ${JSON.stringify(row.base)}`
+    );
+  if (row.head !== null)
+    throw new Error(
+      `${where}: an admission records an empty HEAD, not a denial`
+    );
+  if (row.class !== undefined)
+    throw new Error(`${where}: an admission is not a span-excision relaxation`);
+  rejectEvidence(row, where);
 }
 
 /**
@@ -683,6 +809,44 @@ function unlicensedRelaxation(row: FixtureRow): string | null {
 }
 
 /**
+ * The same anti-blind-spot check for #1188's admission rows. The recorded base
+ * is the only claim the ledger makes about the past, and HEAD's own parse is
+ * the only claim about the present, so the grader re-derives both: a row whose
+ * pre-state denial was not the retired fidelity veto, or whose command HEAD
+ * still refuses to parse, is refused here rather than passed on its label.
+ */
+function unlicensedAdmission(row: FixtureRow): string | null {
+  if (row.label !== "authorized-fidelity-admission") return null;
+  if (!isRetiredBackslashVeto(row.base))
+    return `${describeRow(row)}: the recorded pre-state ${JSON.stringify(
+      row.base
+    )} is not the retired backslash-whitespace veto`;
+  if (parseForSecurity(row.command).kind !== "ok")
+    return `${describeRow(row)}: HEAD does not parse the admitted spelling, so the recorded allow is not an admission`;
+  if (liveHead(row) !== null)
+    return `${describeRow(row)}: HEAD still denies the admitted spelling`;
+  return null;
+}
+
+/** The same re-derivation for the deny-to-deny #1188 roster amendment. */
+function unlicensedAmendment(row: FixtureRow): string | null {
+  if (row.label !== "authorized-roster-amendment") return null;
+  const shape = AUTHORIZED_MOVE_BY_LABEL.get("authorized-roster-amendment");
+  if (shape === undefined || !shapeCovers(shape, row.base, row.head))
+    return (
+      `${describeRow(row)}: the recorded pair is not the retained ` +
+      `backslash-whitespace denial this label exists for`
+    );
+  if (
+    (row.head as DangerousPatternHit | null)?.pattern.includes(
+      RETIRED_REWRITE_MARKER
+    )
+  )
+    return `${describeRow(row)}: HEAD still carries the retired rewrite suggestion`;
+  return null;
+}
+
+/**
  * The review tier's own drift check, priced against live HEAD — the gate that
  * makes the previous generator roster's labels non-exportable and keeps every
  * deny-to-review row an actual review. A `security-review` row must still be
@@ -690,6 +854,10 @@ function unlicensedRelaxation(row: FixtureRow): string | null {
  * span; an `expected-relaxation` row must still answer `clean` there, because
  * SC-S2-6 forbids pricing a row under review as an inert relaxation. Commands
  * the fixture prices as `same` carry no transition and are not checked here.
+ *
+ * The two #1188 rows are transitions too, and the tier they moved to is the
+ * one the ledger claims — an ordinary allow — so a command HEAD routes to
+ * security review must not be priced as either of them.
  */
 function reviewDrift(row: FixtureRow): string | null {
   const transited = denies(row.base) && !denies(row.head);
@@ -706,6 +874,11 @@ function reviewDrift(row: FixtureRow): string | null {
   }
   if (row.label === "expected-relaxation" && scan.verdict === "review")
     return `${describeRow(row)}: priced as an inert relaxation, but HEAD routes the command to security review (${scan.requirement.cause})`;
+  if (
+    row.label === "authorized-fidelity-admission" &&
+    scan.verdict === "review"
+  )
+    return `${describeRow(row)}: priced as an admission, but HEAD routes the command to security review (${scan.requirement.cause})`;
   return null;
 }
 
@@ -792,6 +965,7 @@ describe("(b) every new allow is a licensed relaxation or a recorded review", ()
     for (const row of rows) {
       if (!denies(row.base) || denies(liveHead(row))) continue;
       if (row.label === "security-review") continue;
+      if (row.label === "authorized-fidelity-admission") continue;
       const licensed = LICENSED_CLASSES[row.wall];
       if (row.label !== "expected-relaxation") {
         violations.push(
@@ -804,6 +978,41 @@ describe("(b) every new allow is a licensed relaxation or a recorded review", ()
       }
     }
     expect(violations, "unlicensed relaxations").toEqual([]);
+  });
+
+  it("the grader re-derives every #1188 admission and roster amendment itself", () => {
+    // The ledger may not license its own admission: the pre-state it records
+    // must be the retired fidelity veto, and HEAD must really parse the
+    // spelling and really stop denying it. The amendment is re-derived the
+    // same way, including the assertion that the current reason no longer
+    // carries the retired rewrite suggestion.
+    const admissions = rows.filter(
+      (row) => row.label === "authorized-fidelity-admission"
+    );
+    const amendments = rows.filter(
+      (row) => row.label === "authorized-roster-amendment"
+    );
+    expect(
+      admissions.length,
+      "the fixture licenses no #1188 admission, so the re-derivation is vacuous"
+    ).toBeGreaterThan(0);
+    expect(
+      amendments.length,
+      "the fixture records no #1188 roster amendment, so the re-derivation is vacuous"
+    ).toBeGreaterThan(0);
+    const unlicensed = [...admissions, ...amendments]
+      .map((row) => unlicensedAdmission(row) ?? unlicensedAmendment(row))
+      .filter(Boolean);
+    expect(
+      unlicensed,
+      "a #1188 row the grader cannot re-derive from its own recorded bytes"
+    ).toEqual([]);
+    for (const row of amendments) {
+      expect(denies(liveHead(row)), describeRow(row)).toBe(true);
+      expect((row.head as DangerousPatternHit).id, describeRow(row)).toBe(
+        "unparseable"
+      );
+    }
   });
 
   it("the grader re-derives every recorded relaxation from the row's own baseline hit", () => {
@@ -907,15 +1116,31 @@ describe("(c) live HEAD still answers what the fixture recorded", () => {
   });
 });
 
-describe("(d) every move is one of the two authorized shapes", () => {
-  it("the moved set is exactly the two authorized pairs, one row each", () => {
+describe("(d) every move is one of the three authorized shapes", () => {
+  /**
+   * The two deny-to-deny shapes #1188 added, pinned by command so the count and
+   * the spelling are both gates: a roster amendment is only ever the retained
+   * mid-word / backslash+TAB fidelity denial the corpus labels
+   * `retained-fidelity`, and a fourth command arriving in that shape fails here.
+   */
+  const AMENDMENT_COMMANDS: readonly string[] = [
+    "printf '<%s>\\n' a\\\nb",
+    "printf '<%s>\\n' a\\\tb",
+  ];
+
+  const movedLabel = (row: FixtureRow): DivergenceLabel | null =>
+    isAuthorizedMove(row.base, row.head)?.label ?? null;
+
+  it("the moved set is exactly the three authorized shapes, one row each", () => {
     const moved = movedPatternRows();
     const bomb = moved.filter(
-      (row) => isAuthorizedMove(row.base, row.head) === AUTHORIZED_MOVE
+      (row) => movedLabel(row) === "authorized-id-move"
     );
     const diagnostic = moved.filter(
-      (row) =>
-        isAuthorizedMove(row.base, row.head) === AUTHORIZED_DIAGNOSTIC_MOVE
+      (row) => movedLabel(row) === "authorized-diagnostic-move"
+    );
+    const amendment = moved.filter(
+      (row) => movedLabel(row) === "authorized-roster-amendment"
     );
     expect(
       bomb.map((row) => row.command),
@@ -925,12 +1150,16 @@ describe("(d) every move is one of the two authorized shapes", () => {
       diagnostic.length,
       "the diagnostic correction moved no rows on the fixture"
     ).toBeGreaterThan(0);
+    expect(
+      amendment.map((row) => row.command).sort(),
+      "the #1188 roster amendment is not exactly the two retained-fidelity rows"
+    ).toEqual([...AMENDMENT_COMMANDS].sort());
     const movedKey = (row: FixtureRow) =>
       `${describeRow(row)} ${JSON.stringify(row.head)}`;
     expect(
       moved.map(movedKey).sort(),
-      "a row moved its {id, pattern} without matching either authorized shape"
-    ).toEqual([...bomb, ...diagnostic].map(movedKey).sort());
+      "a row moved its {id, pattern} without matching an authorized shape"
+    ).toEqual([...bomb, ...diagnostic, ...amendment].map(movedKey).sort());
   });
 
   it("labels every move with the class its own pinned shape authorizes", () => {
@@ -947,9 +1176,7 @@ describe("(d) every move is one of the two authorized shapes", () => {
           shape,
           `${describeRow(row)} is labeled but matches no authorized shape`
         ).not.toBeNull();
-        return shape === AUTHORIZED_MOVE
-          ? "authorized-id-move"
-          : "authorized-diagnostic-move";
+        return shape!.label;
       })
     );
   });
@@ -1481,6 +1708,186 @@ describe("(f) planted falsifiers: the grader itself must fail on each", () => {
         `${what} must price as an unlicensed divergence, not a second-class move`
       ).toBe("open");
     }
+  });
+
+  it("fails to admit a #1188 admission the pre-state never earned", () => {
+    // The admission label exists for exactly one thing: a spelling the blanket
+    // backslash-whitespace probe denied and the repair measures as agreeing
+    // with bash. A ledger that dresses any other pre-state deny as an
+    // admission would turn this gate into a general allow, so the retired
+    // veto's own bytes are the whole license and nothing else is.
+    const cmd = "printf '<%s>\\n' a\\ b";
+    const impostors: ReadonlyArray<readonly [string, Record<string, unknown>]> =
+      [
+        [
+          "another id on the pre-state",
+          {
+            command: cmd,
+            wall: "pattern",
+            base: { id: "destructive-rm", pattern: "rm -rf" },
+            head: null,
+            label: "authorized-fidelity-admission",
+          },
+        ],
+        [
+          "a real denial that only mentions the class",
+          {
+            command: cmd,
+            wall: "pattern",
+            base: {
+              id: "unparseable",
+              pattern: `verdict=vetoed 解析分歧字符（backslash-whitespace）：anything`,
+            },
+            head: null,
+            label: "authorized-fidelity-admission",
+          },
+        ],
+        [
+          "the retired veto on the sensitive wall",
+          {
+            command: cmd,
+            wall: "sensitive",
+            base: {
+              id: "unparseable",
+              pattern: `verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 ${JSON.stringify(cmd)}`,
+            },
+            head: false,
+            label: "authorized-fidelity-admission",
+          },
+        ],
+        [
+          "an admission that still denies at HEAD",
+          {
+            command: cmd,
+            wall: "pattern",
+            base: {
+              id: "unparseable",
+              pattern: `verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 ${JSON.stringify(cmd)}`,
+            },
+            head: { id: "unparseable", pattern: "verdict=vetoed" },
+            label: "authorized-fidelity-admission",
+          },
+        ],
+        [
+          "an admission wearing a relaxation class",
+          {
+            command: cmd,
+            wall: "pattern",
+            base: {
+              id: "unparseable",
+              pattern: `verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 ${JSON.stringify(cmd)}`,
+            },
+            head: null,
+            label: "authorized-fidelity-admission",
+            class: "1",
+            clause:
+              "specs/hard-wall-ast-migration.md SC-GATES-3 class (1) quote/heredoc (SC-S2-1; never a declared code or carrier operand)",
+          },
+        ],
+      ];
+    for (const [what, raw] of impostors) {
+      expect(
+        () => parseRow(planted(raw), 0),
+        `${what} must be refused at the load`
+      ).toThrow();
+    }
+    const accepted = parseRow(
+      planted({
+        command: cmd,
+        wall: "pattern",
+        base: {
+          id: "unparseable",
+          pattern: `verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 ${JSON.stringify(cmd)}`,
+        },
+        head: null,
+        label: "authorized-fidelity-admission",
+      }),
+      0
+    );
+    expect(accepted.label).toBe("authorized-fidelity-admission");
+    expect(unlicensedAdmission(accepted)).toBeNull();
+    // And the same row priced against a command HEAD still refuses to parse is
+    // refused by the re-derivation even though the load accepted the bytes.
+    expect(
+      unlicensedAdmission({ ...accepted, command: "printf '<%s>\\n' a\\\nb" })
+    ).toContain("does not parse");
+  });
+
+  it("fails to admit a #1188 roster amendment that is not the retained denial", () => {
+    const cmd = "printf '<%s>\\n' a\\\nb";
+    const retired = `verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 printf '<%s>\\n' a "b"`;
+    const impostors: ReadonlyArray<readonly [string, Record<string, unknown>]> =
+      [
+        [
+          "a head that still carries the retired rewrite",
+          {
+            command: cmd,
+            wall: "pattern",
+            base: { id: "unparseable", pattern: retired },
+            head: { id: "unparseable", pattern: retired },
+            label: "authorized-roster-amendment",
+          },
+        ],
+        [
+          "a reworded reason that is not the pinned one",
+          {
+            command: cmd,
+            wall: "pattern",
+            base: { id: "unparseable", pattern: retired },
+            head: {
+              id: "unparseable",
+              pattern: `${RETAINED_BACKSLASH_WHITESPACE_REASON}。`,
+            },
+            label: "authorized-roster-amendment",
+          },
+        ],
+        [
+          "a re-id'd verdict",
+          {
+            command: cmd,
+            wall: "pattern",
+            base: { id: "unparseable", pattern: retired },
+            head: {
+              id: "malformed",
+              pattern: RETAINED_BACKSLASH_WHITESPACE_REASON,
+            },
+            label: "authorized-roster-amendment",
+          },
+        ],
+        [
+          "a base that is not the retired veto",
+          {
+            command: cmd,
+            wall: "pattern",
+            base: { id: "unparseable", pattern: "verdict=malformed" },
+            head: {
+              id: "unparseable",
+              pattern: RETAINED_BACKSLASH_WHITESPACE_REASON,
+            },
+            label: "authorized-roster-amendment",
+          },
+        ],
+      ];
+    for (const [what, raw] of impostors) {
+      expect(
+        () => parseRow(planted(raw), 0),
+        `${what} must be refused at the load`
+      ).toThrow(/not the authorized pair/);
+    }
+    const accepted = parseRow(
+      planted({
+        command: cmd,
+        wall: "pattern",
+        base: { id: "unparseable", pattern: retired },
+        head: {
+          id: "unparseable",
+          pattern: RETAINED_BACKSLASH_WHITESPACE_REASON,
+        },
+        label: "authorized-roster-amendment",
+      }),
+      0
+    );
+    expect(unlicensedAmendment(accepted)).toBeNull();
   });
 
   it("fails to admit a moved row wearing either move label", () => {

@@ -8,7 +8,10 @@
  *
  * Cross-package mirror constraint: the three color thresholds and numeric
  * semantics mirror TUI src/tui/context-bar.tsx — changing either side must
- * sync the other (formula / thresholds change together).
+ * sync the other (formula / thresholds change together). The occupancy
+ * FORMULA is mirrored, and both sides display confirmed values only (ADR-0008
+ * 2026-10-22); the TUI refreshes per call-beat while Web waits for the
+ * persisted answer until the web DTO carries the live channel (follow-up).
  *
  * Numeric semantics = context occupancy (migrated from ContextUsageStrip, see
  * CONTEXT.md `context usage (display)` / ADR-0118): pre_call shape (both
@@ -42,6 +45,10 @@ const COLOR_ALERT = "#c95d47";
  * cache is never added onto a total that already includes it; post_call
  * (at least one cache field non-null) → three disjoint categories summed,
  * null cache counting as 0. Exported for tests (shared numerator table).
+ *
+ * The formula is mirrored; both sides render this confirmed value (ADR-0008
+ * 2026-10-22). The TUI refreshes it per call-beat; Web waits for the persisted
+ * answer until the web DTO carries the live channel.
  */
 export function contextOccupancy(u: TokenUsage): number {
   const read = u.cacheReadInputTokens ?? null;

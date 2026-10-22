@@ -91,7 +91,9 @@ function makeRefs(
     conversationId: "conv-1",
   };
   initStore(loc, "seed");
+  const atBaseline = readFileSync(storePath(loc), "utf8").split("\n");
   const baselineOffset = readFileSync(storePath(loc)).length;
+  const baselineLines = atBaseline.filter((l) => l.trim() !== "");
   appendUser({ loc, index: 1, parent: "e0", text: "S1" });
   appendNativeState({
     loc,
@@ -120,6 +122,8 @@ function makeRefs(
     JSON.stringify({
       conversationId: loc.conversationId,
       byteOffset: baselineOffset,
+      lineCount: baselineLines.length,
+      lastLine: baselineLines[baselineLines.length - 1],
       eventIds: ["e0"],
     }),
     "utf8"
@@ -138,6 +142,113 @@ function makeRefs(
     ...over,
   };
 }
+
+describe("deriveCounters — the window survives a full-file store rewrite", () => {
+  /**
+   * Simulate exactly what `SessionStore.save()` does to the retained copy: it
+   * writes the whole log to a tmp file and renames it over the authority, and the
+   * `session` header on line 1 GROWS during a run (`turnCount`, `title`,
+   * `lastUsage`). Every record after it shifts.
+   *
+   * Before the repair the window was sliced with the baseline's BYTE offset, so a
+   * grown header made both slices start or end mid-record and `JSON.parse`
+   * threw — `finalizeEvidence` turned that into `counters: null` and the required
+   * check `evidence.counters_derived` into a failure, reporting an otherwise
+   * clean run as unusable. Nothing caught it before because the fixture only ever
+   * appended; this is the first coverage of a header that changes length.
+   */
+  function growHeader(storeJsonl: string, extraTurns: number): string {
+    const lines = readFileSync(storeJsonl, "utf8").split("\n");
+    const header = JSON.parse(lines[0]!) as Record<string, unknown>;
+    header.turnCount = Number(header.turnCount ?? 1) + extraTurns;
+    header.title = `${String(header.title ?? "")}${"x".repeat(40)}`;
+    lines[0] = JSON.stringify(header);
+    writeFileSync(storeJsonl, lines.join("\n"), "utf8");
+    return lines[0]!;
+  }
+
+  it("counts the same accepted and settled records after the header grows", () => {
+    const refs = makeRefs(makeRoot("rewrite"));
+    const before = deriveCounters(refs);
+    const grown = growHeader(refs.storeJsonl, 7);
+
+    assert.ok(
+      grown.length > 283,
+      `the rewritten header must actually be longer; got ${grown.length} B`
+    );
+    const after = deriveCounters(refs);
+    assert.equal(
+      after.acceptedStimuli,
+      before.acceptedStimuli,
+      `a grown header must not change the accepted count; ${before.acceptedStimuli} -> ${after.acceptedStimuli}`
+    );
+    assert.equal(
+      after.settledStimuli,
+      before.settledStimuli,
+      `a grown header must not change the settled count; ${before.settledStimuli} -> ${after.settledStimuli}`
+    );
+    assert.equal(after.storeRecords, before.storeRecords);
+    assert.deepEqual(after.storeCensus, before.storeCensus);
+  });
+
+  it("attributes only post-baseline records when the baseline is mid-conversation", () => {
+    // A RESUME takes its baseline from a store that already holds a settled
+    // round. Counting the whole file would charge this run the resumed run's
+    // settled boundary.
+    const refs = makeRefs(makeRoot("resume-baseline"));
+    // A RESUME takes its baseline from a store that already holds a COMPLETED
+    // round, terminal boundary included. Counting the whole file would charge
+    // this run the resumed round's acceptance and its settlement.
+    const finalLines = readFileSync(refs.storeJsonl, "utf8")
+      .split("\n")
+      .filter((l) => l.trim() !== "");
+    writeFileSync(
+      refs.baselineJson,
+      JSON.stringify({
+        conversationId: "conv-1",
+        byteOffset: 0,
+        lineCount: finalLines.length,
+        lastLine: finalLines[finalLines.length - 1],
+        eventIds: ["e0", "e1", "e2"],
+      }),
+      "utf8"
+    );
+    growHeader(refs.storeJsonl, 3);
+    const counters = deriveCounters(refs);
+    assert.equal(
+      counters.acceptedStimuli,
+      0,
+      "no user message follows e2, so this run accepted nothing"
+    );
+    assert.equal(
+      counters.settledStimuli,
+      0,
+      "the terminal boundary on e2 belongs to the resumed round, not this run"
+    );
+    // The whole-file census is still reported in full.
+    assert.equal(counters.storeCensus.message, 3);
+  });
+
+  it("refuses to count when the store was rewritten below the baseline", () => {
+    const refs = makeRefs(makeRoot("below-baseline"));
+    writeFileSync(
+      refs.baselineJson,
+      JSON.stringify({
+        conversationId: "conv-1",
+        byteOffset: 0,
+        lineCount: 1,
+        lastLine: '{"type":"session","conversation_id":"someone-else"}',
+        eventIds: ["e999"],
+      }),
+      "utf8"
+    );
+    assert.throws(
+      () => deriveCounters(refs),
+      /rewritten below the measured window/,
+      "an unlocatable baseline must fail loudly, never widen the window to 'from the start'"
+    );
+  });
+});
 
 describe("deriveCounters — every number comes from a retained artifact", () => {
   it("derives RSS rows, unique timestamps, snapshots, accepted stimuli and the store census", () => {

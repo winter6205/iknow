@@ -129,6 +129,9 @@ export function createStubModel(opts: StubModelOptions): StubModelFull {
             },
             supplierStop: "success",
             needsTools: false,
+            // content: [] carries no block at all, so no thinking either —
+            // this is exactly the terminal-empty shape the real adapter reports.
+            hasThinking: false,
             isEmptyFinalResponse: true,
           };
         }

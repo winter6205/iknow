@@ -3,13 +3,14 @@
  *
  * Two layers: user-level `~/.iknow/settings.json` and project-level
  * `<cwd>/.iknow/settings.json`. Project files adopt only the `verify` /
- * `secrets` / `permissions` sections; these still override user settings
+ * `secrets` / `permissions` / `approval` sections; these still override user settings
  * field-by-field (project overrides only the legal fields it actually declares,
  * unlisted user fields are kept). `hooks` is user-layer only (command hooks are
  * arbitrary shell — the same supply-chain risk as `plugins`). Any other
  * top-level section (`llm` / `isolation` / `subagent` / `web` / `lsp` /
- * `memory` / `loop` / `graph` / `hooks`) found in a project file is dropped
- * with a warning (`filterProjectSettingsKeys`); only the user layer may give it.
+ * `memory` / `loop` / `graph` / `hooks` / `codeRestore` / `plugins` / `remote`)
+ * found in a project file is dropped with a warning (`filterProjectSettingsKeys`);
+ * only the user layer may give it.
  * One file behind both paths (cwd === home, or `$HOME` reached via a symlink) still feeds both
  * layers: ADR-0019 D1.1 makes the launch dir the per-root state anchor and ADR-0088 keeps
  * project settings in its `.iknow` — the entry directory is a workspace scope in its own right.
@@ -35,6 +36,14 @@
  *  - `settings.llm.apiKey` accepts a literal or a `${VAR}` placeholder; env.ts
  *    resolves it via `expandPlaceholders` from process.env > .env.local > .env;
  *    unset → undefined (a guard at the consumer point throws).
+ *
+ * The `remote` section (user-layer only; a project file's `remote` is dropped by
+ * the allowlist, so a clone cannot enable a listener or redirect notifications):
+ *  - `remote.enabled`: boolean; absent / illegal → consumers treat it as false.
+ *  - `remote.notify`: ntfy publish config — `url` (https anywhere; http only for
+ *    a loopback host), `topic` (`[-_A-Za-z0-9]{1,64}`), `token` (literal or
+ *    `${VAR}`, stored verbatim and resolved at the consumer, never logged here),
+ *    `turnEndMinMs` (integer >= 0; absent → the consumer's 30000 default).
  *
  * The auto-correction loop:
  *  - the `settings.verify` section carries the loop config; unset → verify is
@@ -73,6 +82,7 @@
  * with the project's immutability discipline).
  */
 import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
@@ -691,6 +701,57 @@ export interface IknowSettingsPermissions {
   deny?: ReadonlyArray<unknown>;
 }
 
+/**
+ * Approval-inlet timeout section (`approval.timeoutMs`).
+ *
+ * Bounds how long an approval question waits for the operator. **Absent or `0`
+ * means wait without limit** — there is no default timeout at any layer, so an
+ * absent section never turns into a deadline. A positive integer is
+ * milliseconds.
+ *
+ * Resolution chain (first present wins): explicit factory argument >
+ * `IKNOW_APPROVAL_TIMEOUT_MS` env > this setting. Both layers (user and
+ * project) parse this section and the project layer wins, the same shape as
+ * `subagent.taskTimeoutMs`; unlike that field, `0` is legal here because it is
+ * the "unlimited" spelling rather than an invalid duration.
+ *
+ * Validation discipline (drop-not-throw, mirrors `IknowSettingsSubagent`):
+ * only a finite integer >= 0 is legal; negative / fractional / non-number /
+ * wrong type → drop the field; a section whose field was dropped is not
+ * produced. Every drop leaves one `[settings] approval...` warning on the
+ * `LoadSettingsOpts.onWarn` channel (the layer carrying the value names it).
+ */
+export interface IknowSettingsApproval {
+  timeoutMs?: number;
+}
+
+/**
+ * ntfy notification config for the remote seat (`remote.notify`).
+ *
+ * Every field is independent and optional; an illegal value is dropped alone
+ * (legal siblings survive). `url` and `topic` are both required for a publish,
+ * so a consumer treats a section missing either as "notify off". `token` is a
+ * secret: it is stored verbatim (literal or `${VAR}`, resolved at the consumer)
+ * and no parse warning ever echoes it. `turnEndMinMs` absent stays undefined so
+ * the consumer applies its 30000 default; `0` disables the turn-end notice.
+ */
+export interface IknowSettingsRemoteNotify {
+  readonly url?: string;
+  readonly topic?: string;
+  readonly token?: string;
+  readonly turnEndMinMs?: number;
+}
+
+/**
+ * Remote seat / ntfy section — user-layer only (a project file's `remote` is
+ * dropped by `PROJECT_SETTINGS_ALLOWED_KEYS` and never overrides user values).
+ * Settings are read at TUI start; changing them needs a restart.
+ */
+export interface IknowSettingsRemote {
+  readonly enabled?: boolean;
+  readonly notify?: IknowSettingsRemoteNotify;
+}
+
 export interface IknowSettings {
   llm?: IknowSettingsLlm;
   verify?: IknowSettingsVerify;
@@ -712,6 +773,13 @@ export interface IknowSettings {
   permissions?: IknowSettingsPermissions;
   /** Subagent config section (per-task wallclock). */
   subagent?: IknowSettingsSubagent;
+  /**
+   * Approval-inlet timeout (user and project layers; project wins). Absent or
+   * `0` = wait without limit; there is no default timeout.
+   */
+  approval?: IknowSettingsApproval;
+  /** Remote seat + ntfy notify config (user-layer only; dropped from project files). */
+  readonly remote?: IknowSettingsRemote;
   /** Graph-orchestration overlay default for new sessions (off by default). */
   graph?: IknowSettingsGraph;
   /** Rewind preimage capture switch (on by default; only an explicit `false`
@@ -762,7 +830,7 @@ export interface IknowSettingsPlugins {
 
 /**
  * Top-level key allowlist for shared project settings files — a project file adopts
- * only the three "team contract" sections; `hooks` is not in the list (command hooks
+ * only the four "team contract" sections; `hooks` is not in the list (command hooks
  * are arbitrary shell, the same supply-chain class as `plugins`: if a project can
  * configure it, cloning means executing). Any other top-level key (isolation /
  * llm / memory / subagent / web / lsp / loop / graph / hooks ...) found in a project
@@ -772,6 +840,7 @@ export const PROJECT_SETTINGS_ALLOWED_KEYS = [
   "verify",
   "secrets",
   "permissions",
+  "approval",
 ] as const;
 
 const PROJECT_SETTINGS_ALLOWED_KEY_SET: ReadonlySet<string> = Object.freeze(
@@ -873,6 +942,24 @@ function isValidTaskTimeoutMs(v: unknown): v is number {
   return (
     typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 1
   );
+}
+
+/**
+ * Validation for approval.timeoutMs. Same integer discipline as maxTurns, except
+ * that `0` is legal: it spells "wait without limit", not an invalid duration.
+ */
+function isValidApprovalTimeoutMs(v: unknown): v is number {
+  return (
+    typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0
+  );
+}
+
+/** Why an `approval.timeoutMs` value is not a legal duration (drop reason for the warning text). */
+function approvalTimeoutDropReason(v: unknown): string {
+  if (typeof v !== "number") return "not a number";
+  if (!Number.isFinite(v)) return "not a finite number";
+  if (!Number.isInteger(v)) return "not an integer";
+  return "negative";
 }
 
 /** Value domain of the subagent concurrency cap: a finite positive integer or the literal string `"unlimited"`. */
@@ -1352,6 +1439,206 @@ function mergeSubagent(
 }
 
 /**
+ * Validate a single `approval` layer — the timeout field is dropped when it is
+ * not a finite integer >= 0 (0 = wait without limit). Non-plain-object → the
+ * layer is dropped; a layer whose only field was dropped is not produced.
+ *
+ * onWarn (shared channel with the file-load `[settings] ...` lines) names every
+ * illegal value exactly once, on the layer that carries it: a non-plain-object
+ * section and an illegal `timeoutMs` each produce one line, so a bad value is
+ * never silently swallowed. An absent section / field is legal, not a warning.
+ */
+function parseApproval(
+  raw: unknown,
+  onWarn?: (message: string) => void
+): IknowSettingsApproval | undefined {
+  if (!isPlainObject(raw)) {
+    if (raw !== undefined) {
+      onWarn?.(
+        `[settings] approval section ${JSON.stringify(raw)} dropped: not an object`
+      );
+    }
+    return undefined;
+  }
+  const out: IknowSettingsApproval = {};
+  if (raw.timeoutMs === undefined) return undefined;
+  if (isValidApprovalTimeoutMs(raw.timeoutMs)) {
+    out.timeoutMs = raw.timeoutMs;
+  } else {
+    onWarn?.(
+      `[settings] approval.timeoutMs ${JSON.stringify(raw.timeoutMs)} dropped: ${approvalTimeoutDropReason(raw.timeoutMs)}`
+    );
+  }
+  return undefinedWhenEmpty(out);
+}
+
+/**
+ * Merge approval layer by layer: project fields take priority, uncovered user
+ * fields are kept. `0` is a real value (unlimited), so it overrides a positive
+ * user value rather than falling through to it.
+ */
+function mergeApproval(
+  user: IknowSettingsApproval | undefined,
+  project: IknowSettingsApproval | undefined
+): IknowSettingsApproval | undefined {
+  if (!user && !project) return undefined;
+  const out: IknowSettingsApproval = {};
+  if (project?.timeoutMs !== undefined) out.timeoutMs = project.timeoutMs;
+  else if (user?.timeoutMs !== undefined) out.timeoutMs = user.timeoutMs;
+  return undefinedWhenEmpty(out);
+}
+
+/** Hosts allowed to carry the plain-http ntfy transport (never leaves the machine). */
+const REMOTE_LOOPBACK_HOSTS: ReadonlySet<string> = Object.freeze(
+  new Set(["localhost", "127.0.0.1", "::1"])
+);
+
+/** ntfy topic rule: 1-64 chars of the [-_A-Za-z0-9] alphabet. */
+const REMOTE_TOPIC_PATTERN = /^[-_A-Za-z0-9]{1,64}$/;
+
+/** Whitespace, C0 controls and DEL are never legal inside a URL. */
+const REMOTE_URL_FORBIDDEN_CHARS = /[\s\u0000-\u001f\u007f]/;
+
+/**
+ * `remote.notify.url`: https anywhere; http only for a loopback host. The
+ * literal scheme prefix is required (no uppercase / scheme smuggling), and the
+ * WHATWG parser supplies host normalization (IPv6 hostnames keep their
+ * brackets). Forbidden characters are rejected before parsing so a value can
+ * never be re-encoded instead of dropped.
+ */
+function isLegalRemoteUrl(v: unknown): v is string {
+  if (typeof v !== "string") return false;
+  if (REMOTE_URL_FORBIDDEN_CHARS.test(v)) return false;
+  const https = v.startsWith("https://");
+  if (!https && !v.startsWith("http://")) return false;
+  let parsed: URL;
+  try {
+    parsed = new URL(v);
+  } catch {
+    return false;
+  }
+  if (https) return true;
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  return REMOTE_LOOPBACK_HOSTS.has(host);
+}
+
+/** `remote.notify.topic`: the ntfy publish-topic rule (closed character set, 1-64 chars). */
+function isLegalRemoteTopic(v: unknown): v is string {
+  return typeof v === "string" && REMOTE_TOPIC_PATTERN.test(v);
+}
+
+/** `remote.notify.turnEndMinMs`: integer >= 0 (0 disables the turn-end notice). */
+function isValidTurnEndMinMs(v: unknown): v is number {
+  return (
+    typeof v === "number" && Number.isFinite(v) && Number.isInteger(v) && v >= 0
+  );
+}
+
+/**
+ * Validate the `remote.notify` layer — each illegal field is dropped alone and
+ * leaves one `[settings] remote.notify...` warning; legal siblings survive.
+ * Non-plain-object → the field is dropped with one warning. Values are never
+ * echoed for `url` / `token` (a URL may carry userinfo; the token is a secret).
+ * All fields illegal / absent → undefined (consumers treat notify as off).
+ */
+function parseRemoteNotify(
+  raw: unknown,
+  onWarn?: (message: string) => void
+): IknowSettingsRemoteNotify | undefined {
+  if (!isPlainObject(raw)) {
+    if (raw !== undefined) {
+      onWarn?.("[settings] remote.notify dropped: not an object");
+    }
+    return undefined;
+  }
+  // Mutable draft of the readonly exported contract (same fields, no cast).
+  const out: {
+    url?: string;
+    topic?: string;
+    token?: string;
+    turnEndMinMs?: number;
+  } = {};
+  if (raw.url !== undefined) {
+    if (isLegalRemoteUrl(raw.url)) out.url = raw.url;
+    else
+      onWarn?.(
+        "[settings] remote.notify.url dropped: must be an https:// URL, or http:// for a loopback host"
+      );
+  }
+  if (raw.topic !== undefined) {
+    if (isLegalRemoteTopic(raw.topic)) out.topic = raw.topic;
+    else
+      onWarn?.(
+        `[settings] remote.notify.topic ${JSON.stringify(raw.topic)} dropped: must match [-_A-Za-z0-9]{1,64}`
+      );
+  }
+  if (raw.token !== undefined) {
+    // Secret: never echoed. Stored verbatim — resolution belongs to the consumer.
+    if (isApiKeyOrPlaceholder(raw.token)) out.token = raw.token;
+    else
+      onWarn?.(
+        "[settings] remote.notify.token dropped: must be a non-empty literal or ${VAR} placeholder"
+      );
+  }
+  if (raw.turnEndMinMs !== undefined) {
+    if (isValidTurnEndMinMs(raw.turnEndMinMs))
+      out.turnEndMinMs = raw.turnEndMinMs;
+    else
+      onWarn?.(
+        `[settings] remote.notify.turnEndMinMs ${JSON.stringify(raw.turnEndMinMs)} dropped: not an integer >= 0`
+      );
+  }
+  return undefinedWhenEmpty(out);
+}
+
+/**
+ * Validate the `remote` layer — drop-not-throw with one `[settings] remote...`
+ * warning per illegal value. A non-object section is dropped with one warning;
+ * an illegal field drops alone (legal siblings survive); a section whose fields
+ * all dropped is not produced (consumers treat it as off / notify off).
+ */
+function parseRemote(
+  raw: unknown,
+  onWarn?: (message: string) => void
+): IknowSettingsRemote | undefined {
+  if (!isPlainObject(raw)) {
+    if (raw !== undefined) {
+      onWarn?.("[settings] remote section dropped: not an object");
+    }
+    return undefined;
+  }
+  const out: {
+    enabled?: boolean;
+    notify?: IknowSettingsRemoteNotify;
+  } = {};
+  if (raw.enabled !== undefined) {
+    if (typeof raw.enabled === "boolean") out.enabled = raw.enabled;
+    else
+      onWarn?.(
+        `[settings] remote.enabled ${JSON.stringify(raw.enabled)} dropped: not a boolean`
+      );
+  }
+  if (raw.notify !== undefined) {
+    const notify = parseRemoteNotify(raw.notify, onWarn);
+    if (notify !== undefined) out.notify = notify;
+  }
+  return undefinedWhenEmpty(out);
+}
+
+/**
+ * `remote` is **user-layer only** — deliberately takes no `project` parameter
+ * (same shape as `mergeWeb`). `filterProjectSettingsKeys` strips a project
+ * file's `remote` before `mergeSettings` runs, so a cloned project can neither
+ * enable the seat nor redirect notifications.
+ */
+function mergeRemote(
+  user: IknowSettingsRemote | undefined
+): IknowSettingsRemote | undefined {
+  if (!user) return undefined;
+  return user;
+}
+
+/**
  * Validate the `graph` layer — illegal fields are dropped (mirrors parseLoop).
  * Non-plain-object → undefined (drop the layer); non-boolean → drop the field;
  * all fields illegal → undefined (consumers fall back to the default off).
@@ -1474,6 +1761,7 @@ function parseIsolation(
   onWarn?: (message: string) => void
 ): IknowSettingsIsolation | undefined {
   if (!isPlainObject(raw)) return undefined;
+  warnIgnoredPostureKey(raw, onWarn);
   const out = parseIsolationLegacyFields(raw);
   const network = parseIsolationNetwork(raw.network, onWarn);
   if (network !== undefined) {
@@ -1484,6 +1772,25 @@ function parseIsolation(
     out.credentials = credentials;
   }
   return undefinedWhenEmpty(out);
+}
+
+/**
+ * ADR-0141 guardrail: a preset posture is memory-only (ruling: the overlay never
+ * becomes a settings key), so `posture` in a settings file is not a value this
+ * layer knows and not a value it silently swallows. An explicit key is warned
+ * about and dropped; the fence stays whatever `fsMode` says, which is what keeps
+ * the `fsMode: workspace` + retired-fence contradiction reachable only from an
+ * in-memory preset (invariant 7's typed error), never from a file on disk.
+ */
+function warnIgnoredPostureKey(
+  raw: Record<string, unknown>,
+  onWarn?: (message: string) => void
+): void {
+  if (onWarn === undefined) return;
+  if (!Object.prototype.hasOwnProperty.call(raw, "posture")) return;
+  onWarn(
+    '[settings] key "posture" ignored (a preset is session-only; pass --yolo / --no-sandbox)'
+  );
 }
 
 /**
@@ -1645,7 +1952,8 @@ function parseWeb(raw: unknown): IknowSettingsWeb | undefined {
   // Vendor keys: literal-or-placeholder, same value shape as llm.apiKey. Each is
   // independent of searchBackend — a section carrying only a key is legal (the
   // backend then falls back to the default "bing").
-  if (isApiKeyOrPlaceholder(raw.backendKey)) out.backendKey = raw.backendKey.trim();
+  if (isApiKeyOrPlaceholder(raw.backendKey))
+    out.backendKey = raw.backendKey.trim();
   // undefinedWhenEmpty, not a hand-written `=== undefined` chain: only defined
   // values are ever assigned above, so key count is exactly the emptiness test,
   // and a new field needs no edit here (settings.ts:806).
@@ -1699,7 +2007,9 @@ function mergePlugins(
  * allowlist widening fail loudly at the signature rather than silently letting a
  * cloned project file contribute a backend API key.
  */
-function mergeWeb(user: IknowSettingsWeb | undefined): IknowSettingsWeb | undefined {
+function mergeWeb(
+  user: IknowSettingsWeb | undefined
+): IknowSettingsWeb | undefined {
   if (!user) return undefined;
   return user;
 }
@@ -1885,11 +2195,12 @@ function mergeSecrets(
  *
  * On the production path `projectRaw` has passed the project allowlist
  * (`loadIknowSettings` → `filterProjectSettingsKeys`), so the non-allowlisted sections
- * (llm / isolation / subagent / web / lsp / memory / loop / graph) are always empty objects
+ * (llm / isolation / subagent / web / lsp / memory / loop / graph / remote) are
+ * always empty objects
  * — each `mergeXxx`'s `project > user` branch is currently unreachable for them (kept to
  * preserve the merge functions' own semantic completeness; the branch is not deleted).
- * The three allowlisted sections (verify / secrets / permissions) are unaffected: project
- * still overrides user field by field. `hooks` is user-layer only.
+ * The four allowlisted sections (verify / secrets / permissions / approval) are
+ * unaffected: project still overrides user field by field. `hooks` is user-layer only.
  */
 function mergeSettings(
   userRaw: Record<string, unknown>,
@@ -1909,6 +2220,12 @@ function mergeSettings(
   const userSubagent = parseSubagent(userRaw.subagent);
   const projectSubagent = parseSubagent(projectRaw.subagent);
   const subagent = mergeSubagent(userSubagent, projectSubagent);
+  // Approval-inlet timeout (user and project, project wins; 0 = unlimited).
+  // Both layers share the onWarn channel so an illegal value names its own layer.
+  const approval = mergeApproval(
+    parseApproval(userRaw.approval, onWarn),
+    parseApproval(projectRaw.approval, onWarn)
+  );
   const userLoop = parseLoop(userRaw.loop);
   const projectLoop = parseLoop(projectRaw.loop);
   const loop = mergeLoop(userLoop, projectLoop);
@@ -1954,11 +2271,15 @@ function mergeSettings(
     parsePlugins(userRaw.plugins),
     parsePlugins(projectRaw.plugins)
   );
+  // Remote seat / ntfy config — user-layer only; a project `remote` was already
+  // dropped by the allowlist, so no project value exists to merge.
+  const remote = mergeRemote(parseRemote(userRaw.remote, onWarn));
   return assembleSettings({
     llm,
     verify,
     secrets,
     subagent,
+    approval,
     loop,
     graph,
     codeRestore,
@@ -1969,6 +2290,7 @@ function mergeSettings(
     hooks,
     permissions,
     plugins,
+    remote,
   });
 }
 
@@ -2095,11 +2417,148 @@ function isSameSettingsFile(userPath: string, projectPath: string): boolean {
   }
 }
 
-export function loadIknowSettings(opts?: LoadSettingsOpts): IknowSettings {
-  const cwd = opts?.cwd ?? process.cwd();
-  const home = opts?.home ?? homedir();
-  const userPath = join(home, ".iknow", "settings.json");
-  const projectPath = join(cwd, ".iknow", "settings.json");
+/**
+ * Cheap stale guard for the memoized load: a file written within this window
+ * of now must never be served from cache. This is what preserves the masking
+ * invariant — `currentSecretValues()` feeds `currentOutputMask()` before every
+ * trace write (`src/harness/trace/jsonl.ts`), so an operator's key edit has to
+ * be visible on the very next read. mtime is compared in nanoseconds against
+ * the wall clock (`Date.now()` is already ms — hence the 1e6 scaling); hrtime
+ * is monotonic and NOT comparable to mtime.
+ */
+const SETTINGS_CACHE_STALE_WINDOW_NS = 2_000_000_000n;
+
+/**
+ * Memoized result of `loadIknowSettings`. Module-level on purpose: the loader
+ * is called per stream-draft refresh / trace write through the masking hot
+ * path, and each miss costs up to two file reads plus a full merge.
+ */
+let settingsCache: { key: string; value: IknowSettings } | undefined;
+
+/**
+ * Metadata of one settings source file: a stable cache-key fragment plus
+ * whether the file looks freshly written.
+ *
+ * Existence is a first-class cacheable state (same precedent as
+ * `fileChangeSignal`'s `"absent"` marker): an absent file is `statSync`'s
+ * throw, not a zeroed stat, so absence gets its own stable fragment — without
+ * it, a missing file would be an eternal cache miss. For a present file the
+ * fragment is the metadata of the **realpath'd target**: `statSync` follows
+ * symlinks, so one call reports the target's identity, and a symlink retarget
+ * to a different inode changes `dev`/`ino` and so invalidates. Captured with
+ * bigint `statSync` in nanosecond precision: `mtimeNs` has non-zero
+ * sub-millisecond digits on the filesystems this runs on, which matters for
+ * same-millisecond rewrites, and `ctimeNs` covers write paths that preserve
+ * mtime (any inode metadata write bumps ctime).
+ *
+ * "Unstattable" is folded into the same absent fragment: the pre-memo loader's
+ * `readSettingsFile` guards with `existsSync`, which returns `false` — and so
+ * degrades the layer to `{}` — for EVERY stat error, not only ENOENT
+ * (`existsSync` swallows EACCES, ELOOP, ENAMETOOLONG, ENOTDIR, …). The probe
+ * must classify those identically so the subsequent real read runs and yields
+ * what `readSettingsFile` yields today. `throwIfNoEntry: false` suppresses
+ * only ENOENT; any other errno throws — so the probe catches every stat error
+ * (and maps it to the absent fragment; see the failing probe in
+ * tests/config/settings-memo.test.ts "an unstattable project file does not
+ * throw": ELOOP reproduced empirically). Note one deliberate divergence from
+ * `existsSync`'s blanket `false`: `throwIfNoEntry: false` also turns ENOTDIR
+ * into `undefined`, while `existsSync`'s underlying `stat` throws ENOTDIR
+ * internally and reports `false` for the same reason — both end at `false` /
+ * absent, so the observable classification is the same.
+ *
+ * Failures never fall back to a stale cache: an unstattable file returns a
+ * stable fragment that cannot match a previously cached present-file key, so
+ * the read runs and a read error propagates exactly as the un-memoized loader
+ * does.
+ */
+interface SourceFileMeta {
+  key: string;
+  fresh: boolean;
+}
+
+function sourceFileMeta(path: string): SourceFileMeta {
+  // The catch is the point: `throwIfNoEntry: false` only absorbs ENOENT, while
+  // `existsSync` (the guard `readSettingsFile` actually relies on) swallows
+  // every stat error. Mapping every probe failure to the absent fragment keeps
+  // the cache key in lockstep with `existsSync`'s classification, so an
+  // unstattable path degrades to `{}` through the real read instead of
+  // crashing the masking hot path.
+  let st: BigIntStats | undefined;
+  try {
+    st = statSync(path, { bigint: true, throwIfNoEntry: false });
+  } catch {
+    st = undefined; // EXIT: any stat error the pre-memo `existsSync` guard would have swallowed.
+  }
+  if (st === undefined) return { key: "absent", fresh: false };
+  const fresh =
+    BigInt(Date.now()) * 1_000_000n - st.mtimeNs <=
+    SETTINGS_CACHE_STALE_WINDOW_NS;
+  return {
+    key: `real:${st.dev}:${st.ino}:${st.size}:${st.mtimeNs}:${st.ctimeNs}`,
+    fresh,
+  };
+}
+
+/**
+ * Cache probe: the memo key for this call, or `undefined` when the call must
+ * bypass the memo. Memoization is keyed by the two paths plus both source
+ * files' metadata; any metadata change (rewrite, create-after-absent, symlink
+ * retarget) or a fresh mtime forces a re-read.
+ *
+ * `home` and `cwd` are the already-derived values `loadIknowSettings` used to
+ * build `userPath`/`projectPath`, so the key's path components can never
+ * drift from the paths the key is supposed to describe.
+ *
+ * An injected `onWarn` bypasses the cache entirely: it is a side-effect
+ * channel, and the pinned contract (settings.test.ts "默认通道按文件去重…注入
+ * onWarn 仍逐条收到") is that the channel receives every warning on EVERY
+ * call — a cache hit returns early without re-running the merge, so it could
+ * not re-emit. The default channel is safe to cache through:
+ * `warnOncePerFile`'s dedup key already includes the per-file change signal,
+ * so re-warning an unchanged file is already suppressed, and the masking hot
+ * path (`currentSecretValues`) uses the default channel, so the bypass costs
+ * nothing where it matters.
+ */
+function settingsCacheKey(
+  home: string,
+  cwd: string,
+  userPath: string,
+  projectPath: string,
+  onWarn: ((message: string) => void) | undefined
+): string | undefined {
+  const userMeta = sourceFileMeta(userPath);
+  const projectMeta = sourceFileMeta(projectPath);
+  if (onWarn !== undefined || userMeta.fresh || projectMeta.fresh)
+    return undefined;
+  return [home, cwd, userMeta.key, projectMeta.key].join("\u0000");
+}
+
+/** Memoized result of a previous load, or `undefined` (miss / bypass). */
+function lookupSettingsCache(
+  cacheKey: string | undefined
+): IknowSettings | undefined {
+  if (cacheKey === undefined) return undefined;
+  const cached = settingsCache;
+  return cached !== undefined && cached.key === cacheKey
+    ? cached.value
+    : undefined;
+}
+
+/** Store a fresh load under `cacheKey` (no-op on a bypass) and return it. */
+function rememberSettings(
+  cacheKey: string | undefined,
+  value: IknowSettings
+): IknowSettings {
+  if (cacheKey !== undefined) settingsCache = { key: cacheKey, value };
+  return value;
+}
+
+/** The uncached load — the original body of `loadIknowSettings`. */
+function computeIknowSettings(
+  opts: LoadSettingsOpts | undefined,
+  userPath: string,
+  projectPath: string
+): IknowSettings {
   // ADR-0019 D1.1 / ADR-0088 make the entry directory a workspace scope of its own, so when
   // both layer paths name one file, the project layer must keep working exactly as before.
   const sameFile = isSameSettingsFile(userPath, projectPath);
@@ -2116,6 +2575,10 @@ export function loadIknowSettings(opts?: LoadSettingsOpts): IknowSettings {
     onWarn(
       '[settings] user settings key "permissions" ignored (project-layer only)'
     );
+  // ADR-0141 guardrail: `posture` is a session-only preset name, so a user file
+  // may not carry one. The project file is covered already — `filterProjectSettingsKeys`
+  // names every key off the allowlist — so warning there too would double the text.
+  warnIgnoredPostureKey(userRaw, onWarn);
 
   return deepFreeze(
     mergeSettings(
@@ -2126,5 +2589,33 @@ export function loadIknowSettings(opts?: LoadSettingsOpts): IknowSettings {
       ),
       onWarn
     )
+  );
+}
+
+export function loadIknowSettings(opts?: LoadSettingsOpts): IknowSettings {
+  const cwd = opts?.cwd ?? process.cwd();
+  const home = opts?.home ?? homedir();
+  const userPath = join(home, ".iknow", "settings.json");
+  const projectPath = join(cwd, ".iknow", "settings.json");
+  const cacheKey = settingsCacheKey(
+    home,
+    cwd,
+    userPath,
+    projectPath,
+    opts?.onWarn
+  );
+  const cached = lookupSettingsCache(cacheKey);
+  if (cached !== undefined) return cached;
+  // A failed load throws inside `computeIknowSettings` before
+  // `rememberSettings` runs, so a failure never serves or leaves a stale
+  // cache entry — matching the no-memo behavior byte for byte. The probe's
+  // catch maps an unstattable file to the absent fragment (what `existsSync`
+  // would report), which is itself cached under its own key like any other
+  // cacheable state — it can never equal a previously cached present-file
+  // key, so the fragment changing back (the path becoming stattable) is a
+  // normal miss and re-reads.
+  return rememberSettings(
+    cacheKey,
+    computeIknowSettings(opts, userPath, projectPath)
   );
 }

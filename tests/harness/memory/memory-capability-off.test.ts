@@ -161,7 +161,7 @@ function handlerOf(
 ): (input: unknown) => Promise<unknown> {
   const tool = engine.deps.registry.list().find((t) => t.name === name);
   if (tool === undefined) throw new Error(`tool not registered: ${name}`);
-  return tool.handler;
+  return tool.handler as (input: unknown) => Promise<unknown>;
 }
 
 /** The one toggle transition a host performs on `/memory` Esc. */

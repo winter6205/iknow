@@ -78,7 +78,7 @@ describe.skipIf(!hasBwrap())("bash foreground truthful status", () => {
     // the host — not a bwrap boundary — observes the exit signal. That is the
     // projection this assertion pins.
     const tool = createBashTool(FIX_CWD, {
-      yolo: { get: () => true, set: () => undefined },
+      fenceRetired: { get: () => true },
     });
     const envelope = (await tool.handler({
       command: "kill -9 $$",

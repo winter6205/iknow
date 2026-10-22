@@ -24,8 +24,20 @@
 {"command":"[[ a == b ]]","wall":"sensitive","base":false,"head":false,"label":"same"}
 {"command":"echo hi &&","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=malformed"},"head":{"id":"unparseable","pattern":"verdict=malformed 语法不完整：解析树带有 ERROR/MISSING 节点（如引号未闭合）"},"label":"authorized-diagnostic-move"}
 {"command":"echo hi &&","wall":"sensitive","base":false,"head":false,"label":"same"}
-{"command":"echo\\ test","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 echo \"test\""},"head":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 echo \"test\""},"label":"same"}
+{"command":"echo\\ test","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 echo \"test\""},"head":null,"label":"authorized-fidelity-admission"}
 {"command":"echo\\ test","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"printf '<%s>\\n' a\\ b","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 printf '<%s>\\n' a \"b\""},"head":null,"label":"authorized-fidelity-admission"}
+{"command":"printf '<%s>\\n' a\\ b","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"printf '<%s>\\n' a \\\n b","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 printf '<%s>\\n' a  \"b\""},"head":null,"label":"authorized-fidelity-admission"}
+{"command":"printf '<%s>\\n' a \\\n b","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"ls -lt --time-style=+%m-%d\\ %H:%M docs/evidence","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 ls -lt --time-style=+%m-%d \"%H:%M\" docs/evidence"},"head":null,"label":"authorized-fidelity-admission"}
+{"command":"ls -lt --time-style=+%m-%d\\ %H:%M docs/evidence","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"gh issue view 1188 --json number,title \\\n -q '.title'","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 gh issue view 1188 --json number,title  \"-q\" '.title'"},"head":null,"label":"authorized-fidelity-admission"}
+{"command":"gh issue view 1188 --json number,title \\\n -q '.title'","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"printf '<%s>\\n' a\\\nb","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 printf '<%s>\\n' a \"b\""},"head":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，且该形状与 bash 的词法不一致（词内折行、引号内折行、TAB/CR/CRLF、未证明的转义或不成词的片段），连解析都不做，直接硬拒；已实测一致的普通转义空格与词分隔折行不在本清单内。"},"label":"authorized-roster-amendment"}
+{"command":"printf '<%s>\\n' a\\\nb","wall":"sensitive","base":false,"head":false,"label":"same"}
+{"command":"printf '<%s>\\n' a\\\tb","wall":"pattern","base":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 printf '<%s>\\n' a \"b\""},"head":{"id":"unparseable","pattern":"verdict=vetoed 解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，且该形状与 bash 的词法不一致（词内折行、引号内折行、TAB/CR/CRLF、未证明的转义或不成词的片段），连解析都不做，直接硬拒；已实测一致的普通转义空格与词分隔折行不在本清单内。"},"label":"authorized-roster-amendment"}
+{"command":"printf '<%s>\\n' a\\\tb","wall":"sensitive","base":false,"head":false,"label":"same"}
 {"command":"mkfs -t ext4 /dev/sdb1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}
 {"command":"mkfs -t ext4 /dev/sdb1","wall":"sensitive","base":false,"head":false,"label":"same"}
 {"command":"mkfs.ext4 /dev/sda1","wall":"pattern","base":{"id":"destructive-disk","pattern":"mkfs"},"head":{"id":"destructive-disk","pattern":"mkfs"},"label":"same"}

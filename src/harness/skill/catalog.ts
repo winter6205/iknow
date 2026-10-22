@@ -2,7 +2,7 @@ import { join } from "node:path";
 
 /**
  * A `SKILL.md` frontmatter block as the scanner sees it, i.e. after the shared
- * coerce boundary (ADR-0123): every value is a string, so a YAML boolean
+ * coerce boundary (ADR-0144): every value is a string, so a YAML boolean
  * arrives as `"true"` and a scalar sequence as a `", "`-folded list. Unknown
  * author keys survive as extras on the index signature.
  */

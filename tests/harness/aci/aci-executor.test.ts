@@ -359,7 +359,13 @@ describe("createAciExecutor — #224 W5 S7b: partial salvage 仅 bash（契约 Y
     const r = results[0]!;
     assert.equal(r.kind, "execution_failed");
     if (r.kind === "execution_failed") {
-      assert.equal(r.message, "cancelled");
+      // ADR-0147 R3: the question was shown (approved) and no sibling call had
+      // started before it settled, so the note names `none`.
+      assert.equal(
+        r.message,
+        "cancelled\n" +
+          "[approval] held for user approval (approved); calls that ran in this wave meanwhile under the wave-start verdict: none"
+      );
       assert.deepEqual(r.partial, { stdout: "partial" });
     }
   });

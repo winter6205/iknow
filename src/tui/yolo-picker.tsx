@@ -33,7 +33,7 @@ export function yoloEnterConfirmContent(): SelectModalContent {
   return {
     title: "启用 yolo 模式？",
     description:
-      "危险操作：沙箱围栏将整体退场——bash 不再经 bwrap，网络与文件系统不受限。/yolo 即时退出并恢复进入前快照。",
+      "危险操作：沙箱围栏将整体退场——bash 不再经 bwrap，网络与文件系统不受限；同时权限模式切到 full_auto（不再询问），文件系统档切到 global。/yolo 再按一次即退出，两项都回到你的 settings 值——本姿态不会被写入 settings 或会话文件。硬墙与审查仍在生效。",
     options: [
       { value: "execute", label: "启用 yolo" },
       { value: "cancel", label: "取消" },

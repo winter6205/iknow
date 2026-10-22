@@ -524,12 +524,18 @@ const BARE_OPERATOR_TOKENS: ReadonlySet<string> = new Set([
 ]);
 
 interface VetoRule {
-  readonly probe: RegExp;
+  readonly matches: (command: string) => boolean;
   readonly reason: (command: string) => string;
+  /**
+   * Present only on a rule the parse can settle: the sites it returns are the
+   * deferred arm of `preParseVeto`. A rule without it always vetoes.
+   */
+  readonly sites?: (command: string) => readonly BackslashWhitespaceSite[];
 }
 
 const CONTROL_CHARACTER_VETO: VetoRule = {
-  probe: /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/,
+  matches: (command) =>
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/.test(command),
   reason: () =>
     "解析分歧字符（control-character）：命令含控制字符（制表符、换行、回车除外），连解析都不做，直接硬拒",
 };
@@ -541,16 +547,104 @@ const CONTROL_CHARACTER_VETO: VetoRule = {
  * covers the zero-width joiners, BOM included.
  */
 const UNICODE_WHITESPACE_VETO: VetoRule = {
-  probe: /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\p{Zl}\p{Zp}\p{Cf}]/u,
+  matches: (command) =>
+    /[\u00a0\u1680\u2000-\u200a\u202f\u205f\u3000\p{Zl}\p{Zp}\p{Cf}]/u.test(command),
   reason: () =>
     "解析分歧字符（unicode-whitespace-or-zero-width）：命令含 Unicode 空白/零宽字符（非断行空格、零宽字符、BOM 等），词法切分与 bash 不一致，连解析都不做，直接硬拒",
 };
 
 const BACKSLASH_WHITESPACE_VETO: VetoRule = {
-  probe: /\\[ \t\n\r\f\v]/,
-  reason: (command) =>
-    `解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，与 bash 的词法不一致，连解析都不做，直接硬拒；改用引号承载该词，例如 ${quotedRewrite(command)}`,
+  matches: (command) => BACKSLASH_FOLLOWER_PROBE.test(command),
+  sites: backslashWhitespaceSites,
+  reason: () => BACKSLASH_WHITESPACE_REASON,
 };
+
+/**
+ * The six ASCII whitespace characters a backslash can precede — the single
+ * statement of this roster. The pre-filter below is derived from it, so the two
+ * consumers of the roster cannot disagree: a character dropped from one and not
+ * the other would leave a spelling that neither the pre-filter nor the site scan
+ * recognizes, which fails OPEN.
+ */
+const BACKSLASH_FOLLOWERS = " \t\n\r\f\v";
+const REGEX_ESCAPE_FOR: Readonly<Record<string, string>> = {
+  "\f": "\\f",
+  "\n": "\\n",
+  "\r": "\\r",
+  "\t": "\\t",
+  "\v": "\\v",
+};
+const BACKSLASH_FOLLOWER_PROBE = new RegExp(
+  `\\\\[${[...BACKSLASH_FOLLOWERS]
+    .map((char) => REGEX_ESCAPE_FOR[char] ?? char)
+    .join("")}]`
+);
+
+const BACKSLASH_WHITESPACE_REASON =
+  "解析分歧字符（backslash-whitespace）：反斜杠紧跟空白，且该形状与 bash 的词法不一致（词内折行、引号内折行、TAB/CR/CRLF、未证明的转义或不成词的片段），连解析都不做，直接硬拒；已实测一致的普通转义空格与词分隔折行不在本清单内。";
+
+/** One backslash-whitespace occurrence, with the run parity that decides it. */
+interface BackslashWhitespaceSite {
+  /** Offset of the first backslash of the run. */
+  readonly runStart: number;
+  /** Offset of the last backslash of the run, the one that precedes the whitespace. */
+  readonly backslash: number;
+  /** Offset of the whitespace character itself. */
+  readonly whitespace: number;
+  readonly char: string;
+  /**
+   * True when the run ending at `backslash` has odd length, so the whitespace
+   * is escaped by it. An even run means the whitespace is a real separator and
+   * the shape is unproven, which the roster keeps denying.
+   */
+  readonly escaped: boolean;
+}
+
+/** Length of the backslash run ending at `index`; 0 when there is none. */
+function backslashRunBefore(text: string, index: number): number {
+  if (index < 0 || text.charAt(index) !== "\\") {
+    return 0;
+  }
+  let runStart = index;
+  while (runStart > 0 && text.charAt(runStart - 1) === "\\") {
+    runStart -= 1;
+  }
+  return index - runStart + 1;
+}
+
+/** Every backslash-whitespace occurrence, in source order. */
+function backslashWhitespaceSites(
+  command: string
+): readonly BackslashWhitespaceSite[] {
+  const sites: BackslashWhitespaceSite[] = [];
+  for (let index = 0; index + 1 < command.length; index += 1) {
+    if (command.charAt(index) !== "\\") {
+      continue;
+    }
+    const follower = command.charAt(index + 1);
+    if (!BACKSLASH_FOLLOWERS.includes(follower)) {
+      continue;
+    }
+    const runLength = backslashRunBefore(command, index);
+    sites.push({
+      backslash: index,
+      char: follower,
+      escaped: runLength % 2 === 1,
+      runStart: index - runLength + 1,
+      whitespace: index + 1,
+    });
+    index += 1;
+  }
+  return sites;
+}
+
+/**
+ * The two spellings the parse can settle: an odd-parity run escaping U+0020 or
+ * an unquoted LF. Every other occurrence stays on the retained roster.
+ */
+function isProvableSite(site: BackslashWhitespaceSite): boolean {
+  return site.escaped && (site.char === " " || site.char === "\n");
+}
 
 /** One entry per divergent shape; a new class must be registered here to exist. */
 const VETO_RULES = {
@@ -564,6 +658,10 @@ const VETO_ORDER = Object.keys(VETO_RULES) as VetoClass[];
 const OVER_CAP_RESULT: SecurityParseOverCap = Object.freeze({
   kind: "over-cap" as const,
   reason: `过长无法分析：命令超过 ${CAP_BYTES} UTF-8 字节上限，未进入解析器`,
+});
+
+const UNAVAILABLE_RESULT: SecurityParseUnavailable = Object.freeze({
+  kind: "parser-unavailable" as const,
 });
 
 const MALFORMED_REASON =
@@ -590,23 +688,26 @@ export function parseForSecurityWithBudget(
   command: string,
   budgetMicros: number
 ): SecurityParseResult {
-  const vetoed = vetoResult(command);
-  if (vetoed !== null) {
-    return vetoed;
+  const veto = preParseVeto(command);
+  if (veto !== null && veto.kind === "vetoed") {
+    return veto.result;
   }
   if (Buffer.byteLength(command, "utf8") > CAP_BYTES) {
-    return OVER_CAP_RESULT;
+    return unparsedVerdict(veto, OVER_CAP_RESULT);
   }
   const binding = readyBinding();
   if (binding === null) {
-    return { kind: "parser-unavailable" };
+    return unparsedVerdict(veto, UNAVAILABLE_RESULT);
   }
   const memoEligible = budgetMicros === PARSE_BUDGET_MICROS;
   const cached = memoEligible ? memoRead(command) : undefined;
   if (cached !== undefined) {
-    return cached;
+    return settleDeferredSites(veto, cached);
   }
-  const result = classify(binding, command, budgetMicros);
+  const result = settleDeferredSites(
+    veto,
+    classify(binding, command, budgetMicros)
+  );
   if (memoEligible && MEMOIZED_VERDICTS.has(result.kind)) {
     memo.set(command, result);
     memoEvictIfNeeded();
@@ -701,22 +802,161 @@ function readyBinding(): ShellBinding | null {
   }
 }
 
-function vetoResult(command: string): SecurityParseVetoed | null {
+interface DeferredVeto {
+  readonly kind: "deferred";
+  readonly result: SecurityParseVetoed;
+  readonly sites: readonly BackslashWhitespaceSite[];
+}
+
+type PreParseVeto =
+  | { readonly kind: "vetoed"; readonly result: SecurityParseVetoed }
+  | DeferredVeto;
+
+function preParseVeto(command: string): PreParseVeto | null {
   for (const vetoClass of VETO_ORDER) {
     const rule = VETO_RULES[vetoClass];
-    if (rule.probe.test(command)) {
-      return { class: vetoClass, kind: "vetoed", reason: rule.reason(command) };
+    if (!rule.matches(command)) {
+      continue;
     }
+    const sites = rule.sites?.(command) ?? [];
+    const result = settledVeto(vetoClass, rule, command);
+    if (sites.length > 0 && sites.every(isProvableSite)) {
+      return { kind: "deferred", result, sites };
+    }
+    return { kind: "vetoed", result };
   }
   return null;
 }
 
-/** Keep the separating space: the hint must read as a same-word rewrite. */
-function quotedRewrite(command: string): string {
-  return command.replace(
-    /\\+[ \t\n\r\f\v]+(\S+)/g,
-    (_match, word: string) => ` "${word}"`
+function settledVeto(
+  vetoClass: VetoClass,
+  rule: VetoRule,
+  command: string
+): SecurityParseVetoed {
+  return { class: vetoClass, kind: "vetoed", reason: rule.reason(command) };
+}
+
+/**
+ * The verdict for a command the parse never sees. A deferred site keeps the
+ * class-bearing veto it carried before this rule narrowed, so an unavailable
+ * foundation cannot launder a newly supported spelling through the legacy scan.
+ */
+function unparsedVerdict(
+  veto: PreParseVeto | null,
+  fallback: SecurityParseResult
+): SecurityParseResult {
+  return veto === null ? fallback : veto.result;
+}
+
+/**
+ * A deferred site survives only on an `ok` parse whose facts settle every site;
+ * anything else keeps the class-bearing veto it had before this rule narrowed.
+ */
+function settleDeferredSites(
+  veto: DeferredVeto | null,
+  result: SecurityParseResult
+): SecurityParseResult {
+  if (veto === null) {
+    return result;
+  }
+  const admitted =
+    result.kind === "ok" && veto.sites.every((site) => siteSettled(site, result));
+  return admitted ? result : veto.result;
+}
+
+function siteSettled(
+  site: BackslashWhitespaceSite,
+  result: SecurityParseOk
+): boolean {
+  return site.char === "\n"
+    ? continuationSettled(site, result)
+    : escapedSpaceSettled(site, result);
+}
+
+/**
+ * An escaped U+0020 is settled when it lands in a word whose static value is
+ * complete and that word is a whole lexical word. A word the tree split at the
+ * escape, or a concatenation fragment, fails the maximality arm.
+ */
+function escapedSpaceSettled(
+  site: BackslashWhitespaceSite,
+  result: SecurityParseOk
+): boolean {
+  const word = result.words.find(
+    (candidate) =>
+      candidate.span.start <= site.backslash &&
+      site.backslash < candidate.span.end
   );
+  if (word === undefined || word.value === undefined) {
+    return false;
+  }
+  return (
+    isWordBoundary(result.text, word.span.start - 1) &&
+    isWordBoundary(result.text, word.span.end)
+  );
+}
+
+/**
+ * The characters bash ends a word at. Distinct from `BARE_OPERATOR_TOKENS`
+ * above, which grades operator tokens, and from the wall's metachar roster,
+ * which grades refusal: this one is the only one that ADMITS when it matches, so
+ * it deliberately covers only what terminates a word in the shell grammar and
+ * excludes characters that merely look separating. A quote, a backslash, `$`, `:`
+ * and `=` all continue a word in Bash, so none of them may appear here: a
+ * concatenation such as `"a\ b"\ c` is a single Bash argument whose static value
+ * this module does not model, and it must not read as two whole words.
+ */
+const WORD_TERMINATING_CHARS: ReadonlySet<string> = new Set([
+  "|",
+  "&",
+  ";",
+  "(",
+  ")",
+  "<",
+  ">",
+]);
+
+/** True at string bounds and wherever bash would end the current word. */
+function isWordBoundary(text: string, index: number): boolean {
+  if (index < 0 || index >= text.length) {
+    return true;
+  }
+  const char = text.charAt(index);
+  return /\s/.test(char) || WORD_TERMINATING_CHARS.has(char);
+}
+
+/**
+ * An unquoted LF continuation is settled when it separates two words: a space on
+ * each side, and no quoted span and no word span around the site. Those four
+ * guards are the settlement; the newline-fact check below is a cross-check on
+ * the fact layer, not a fifth guard — `bareLineBreaks` already skips every
+ * odd-parity line break, so it can only fail if that skip regresses, which is
+ * precisely when this arm should stop admitting.
+ */
+function continuationSettled(
+  site: BackslashWhitespaceSite,
+  result: SecurityParseOk
+): boolean {
+  if (
+    result.text.charAt(site.runStart - 1) !== " " ||
+    result.text.charAt(site.whitespace + 1) !== " "
+  ) {
+    return false;
+  }
+  if (offsetInsideAnySpan(result.quotedSpans, site.backslash)) {
+    return false;
+  }
+  if (offsetInsideAnySpan(result.quotedSpans, site.whitespace)) {
+    return false;
+  }
+  if (
+    result.words.some(
+      (word) => word.span.start <= site.whitespace && site.whitespace < word.span.end
+    )
+  ) {
+    return false;
+  }
+  return !result.bareNewlineOffsets.includes(site.whitespace);
 }
 
 /**
@@ -1670,8 +1910,8 @@ function commandIndexAtStart(
 /**
  * Offsets of every `\n` / `\r` outside the protected spans — the quoted
  * sites and heredoc bodies, where such a character is content rather than a
- * statement separator. A backslash-escaped line break never reaches this
- * scan: the pre-parse veto refuses that spelling before the parser exists.
+ * statement separator. A line break an odd-parity backslash run escapes is
+ * content of the shape above, not a separator, so it is absent from both lists.
  */
 function bareLineBreaks(
   text: string,
@@ -1688,6 +1928,9 @@ function bareLineBreaks(
       continue;
     }
     if (offsetInsideAnySpan(protectedSpans, index)) {
+      continue;
+    }
+    if (backslashRunBefore(text, index - 1) % 2 === 1) {
       continue;
     }
     if (char === "\n") {

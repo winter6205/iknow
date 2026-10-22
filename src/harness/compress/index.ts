@@ -132,6 +132,9 @@ export {
 export { compactMessages } from "./window.js";
 export { estimateMessagesTokens, estimateTokens } from "./estimate.js";
 export { occupancyFromUsage } from "./occupancy.js";
+export { estimateRequestTokens, projectOccupancy } from "./projection.js";
+export type { OccupancyAnchor, OccupancyReading } from "./projection.js";
+export { containsImageBlocks } from "./image-tokens.js";
 export { getAutoCompactThreshold, validateThreshold } from "./threshold.js";
 export {
   buildCompactPrompt,

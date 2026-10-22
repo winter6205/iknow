@@ -39,6 +39,7 @@ import {
 } from "../../src/session-api/store/index.ts";
 import { captureCodeSnapshot } from "../../src/session-api/store/code-snapshot-store.ts";
 import { createPermissionModeContext } from "../../src/harness/permission/modes.ts";
+import { createServeAskUser } from "../../src/harness/permission/ask-user.ts";
 import type { AssistantTurnResult } from "../../src/harness/index.ts";
 import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
 import type { LlmCallRecord } from "../../src/harness/trace/types.ts";
@@ -682,6 +683,49 @@ describe("POST /api/v1/sessions/:id/messages — thinking override (T2)", () => 
   });
 });
 
+// -- POST /messages: the ordered block payload is an in-process field --------
+
+describe("POST /api/v1/sessions/:id/messages — content blocks", () => {
+  // The route reads `text` alone, so a block-carrying request must be refused
+  // rather than answered with the attachment quietly stripped off it.
+
+  it("non-empty content → 400 naming the field", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: {
+        text: "look at this",
+        content: [{ type: "text", text: "look at this" }],
+      },
+    });
+    assert.equal(status, 400);
+    assertNestedError({ body, kind: "validation" });
+    const b = body as { error: { field?: string; message: string } };
+    assert.equal(b.error.field, "content");
+    assert.ok(b.error.message.includes("text only"));
+  });
+
+  it("content: [] is the text-only turn → 200", async () => {
+    const id = await createSession();
+    const { status, body } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "hi", content: [] },
+    });
+    assert.equal(status, 200);
+    const b = body as { turn: { answer: { finalText: string } } };
+    assert.equal(b.turn.answer.finalText, "hello");
+  });
+
+  it("content: null is the text-only turn → 200", async () => {
+    const id = await createSession();
+    const { status } = await postJson({
+      path: `/api/v1/sessions/${id}/messages`,
+      payload: { text: "hi", content: null },
+    });
+    assert.equal(status, 200);
+  });
+});
+
 // -- endpoint 6: POST /api/v1/sessions/:id/reset -----------------------------
 
 describe("POST /api/v1/sessions/:id/reset", () => {
@@ -959,6 +1003,55 @@ describe("GET /api/v1/sessions/:id/rewind-targets", () => {
       "rewound prompt must leave the picker"
     );
     assert.ok(after.targets.some((t) => t.userMessageText === "q1"));
+  });
+});
+
+// -- endpoint: GET /api/v1/sessions/:id/asks ---------------------------------
+
+describe("GET /api/v1/sessions/:id/asks — pending ask identity (ADR-0147 R1)", () => {
+  it("route body carries the ask's toolUseId and conversationId", async () => {
+    await listening.close();
+    await rm(baseDir, { recursive: true, force: true });
+    const handle = createServeAskUser();
+    await startServer([assistantResult({ texts: ["hello"] })], {
+      askUser: handle.ask,
+      askHandle: handle,
+    });
+    const id = await createSession();
+    const pending = handle.ask({
+      tool: "write_tool",
+      input: {},
+      summaryHint: "write_tool",
+      toolUseId: "toolu_route_ask_1",
+      conversationId: id,
+    });
+
+    const { status, body } = await getJson(`/api/v1/sessions/${id}/asks`);
+    assert.equal(status, 200);
+    const asks = (
+      body as {
+        asks: ReadonlyArray<{
+          id: string;
+          toolUseId?: string;
+          conversationId?: string;
+        }>;
+      }
+    ).asks;
+    assert.equal(asks.length, 1, "the in-flight question must be listed");
+    assert.equal(
+      asks[0]!.toolUseId,
+      "toolu_route_ask_1",
+      "the wire body must address the question to its tool_use id"
+    );
+    assert.equal(
+      asks[0]!.conversationId,
+      id,
+      "the wire body must carry the wave's conversation id"
+    );
+
+    // Settle so the pending ask does not outlive the test.
+    assert.equal(handle.resolveAsk(asks[0]!.id, true), true);
+    assert.deepEqual(await pending, { kind: "approved" });
   });
 });
 

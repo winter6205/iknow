@@ -26,43 +26,47 @@ import {
 import { yoloModalRows } from "../../src/tui/yolo-picker.js";
 import { tuiPalette } from "../../src/tui/theme.js";
 
-describe("modeRowText: yolo ON is visible in both layouts", () => {
-  test("wide layout: ` · YOLO` appended after the label (default / full_auto faces)", () => {
+describe("modeRowText: the yolo preset is visible in both layouts", () => {
+  test("wide layout: the badge plus 无沙箱, with no axis labels (the badge states them)", () => {
     expect(
       modeRowText({
-        yoloOn: true,
+        preset: "yolo",
+        fenceRetired: true,
         graphOn: false,
         permMode: "default",
         cols: 80,
       })
-    ).toBe("mode: Default · YOLO");
+    ).toBe(" · YOLO · 无沙箱");
     expect(
       modeRowText({
-        yoloOn: true,
+        preset: "yolo",
+        fenceRetired: true,
         graphOn: false,
         permMode: "full_auto",
         cols: 80,
       })
-    ).toBe("mode: Auto · YOLO");
+    ).toBe(" · YOLO · 无沙箱");
   });
 
-  test("narrow layout (cols < 40): the bracket form appends [YOLO]", () => {
+  test("narrow layout (cols < 40): the bracket forms", () => {
     expect(
       modeRowText({
-        yoloOn: true,
+        preset: "yolo",
+        fenceRetired: true,
         graphOn: false,
         permMode: "full_auto",
         cols: 39,
       })
-    ).toBe("[auto][YOLO]");
+    ).toBe("[YOLO][无沙箱]");
     expect(
       modeRowText({
-        yoloOn: true,
+        preset: "yolo",
+        fenceRetired: true,
         graphOn: false,
         permMode: "default",
         cols: 39,
       })
-    ).toBe("[def][YOLO]");
+    ).toBe("[YOLO][无沙箱]");
   });
 
   test("red-marker token: brackets when narrow, ` · ` separator when wide (never empty)", () => {
@@ -71,11 +75,11 @@ describe("modeRowText: yolo ON is visible in both layouts", () => {
   });
 });
 
-describe("modeRowText: yolo OFF is byte-identical to the existing labels (no snapshot regression)", () => {
+describe("modeRowText: no preset and a fenced config is byte-identical to the existing labels", () => {
   test("wide layout: mode: Default / Auto / Graph", () => {
     expect(
       modeRowText({
-        yoloOn: false,
+        fenceRetired: false,
         graphOn: false,
         permMode: "default",
         cols: 80,
@@ -83,7 +87,7 @@ describe("modeRowText: yolo OFF is byte-identical to the existing labels (no sna
     ).toBe("mode: Default");
     expect(
       modeRowText({
-        yoloOn: false,
+        fenceRetired: false,
         graphOn: false,
         permMode: "full_auto",
         cols: 80,
@@ -91,7 +95,7 @@ describe("modeRowText: yolo OFF is byte-identical to the existing labels (no sna
     ).toBe("mode: Auto");
     expect(
       modeRowText({
-        yoloOn: false,
+        fenceRetired: false,
         graphOn: true,
         permMode: "default",
         cols: 80,
@@ -111,10 +115,10 @@ describe("modeRowText: yolo OFF is byte-identical to the existing labels (no sna
     ).toBe("[graph]");
   });
 
-  test("OFF projection = base label (the red-marker node leaves entirely, no empty-string node left behind)", () => {
+  test("OFF projection = base label (the marker nodes leave entirely, no empty-string node left behind)", () => {
     expect(
       modeRowText({
-        yoloOn: false,
+        fenceRetired: false,
         graphOn: false,
         permMode: "default",
         cols: 80,
@@ -146,13 +150,25 @@ describe("chromeReserveRows is not touched by yolo (zero cost in the line budget
 });
 
 describe("coloring wiring: pal.error and no new theme token (source-assertion precedent)", () => {
-  test("the yolo red-marker node on the mode row is colored pal.error (render slot and projection concatenate the same string)", () => {
+  test("both indicator nodes on the mode row are colored pal.error (render slot and projection concatenate the same string)", () => {
     const src = readFileSync(
       join(import.meta.dir, "..", "..", "src/tui/app.tsx"),
       "utf8"
     );
-    expect(src).toMatch(/yoloOn && <text fg=\{pal\.error\}>/);
+    // The two indicators live in the `ModeRowIndicators` component (folded out
+    // of `TuiApp` for the S5 complexity budget); the gate is the DECLARED
+    // preset, not the yolo mirror — an entry-sourced gate is what the
+    // two-marker split removed. Every regex below is scoped to that component's
+    // body, so the claim stays "these nodes are pal.error" rather than "these
+    // tokens appear somewhere in the file".
+    const component = src.slice(
+      src.indexOf("function ModeRowIndicators"),
+      src.indexOf("function ModeRowIndicators") + 1200
+    );
+    expect(component).toMatch(/preset === "yolo" && <text fg=\{pal\.error\}>\{yoloBadge\(cols\)\}<\/text>/);
     expect(src).toMatch(/modeRowYoloMarker\(cols\)/);
+    // The 无沙箱 marker rides the same row, independent of the badge.
+    expect(component).toMatch(/fenceRetired && <text fg=\{pal\.error\}>\{noSandboxMarker\(cols\)\}<\/text>/);
   });
 
   test("theme.ts gains no yolo token (reuses the existing pal.error)", () => {

@@ -89,6 +89,7 @@ function fakeBridge(subagents: ReadonlyArray<SubagentInfo>): TuiBridge {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
+    listLiveBackgroundTasks: () => [],
     listSubagents: () => subagents,
     subscribeSubagentTerminal: () => () => undefined,
     wakeFromSubagent: async () => undefined,

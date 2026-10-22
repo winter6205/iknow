@@ -64,20 +64,44 @@ export type TuiModal =
       readonly kind: "permission";
       readonly tool: string;
       readonly summaryHint: string;
+      /** The call this question is about (ADR-0147 R1); absent only when the
+       *  ask carries no identity (e.g. a legacy bridge). */
+      readonly toolUseId?: string;
       readonly selectedIndex: number;
     }
   | ({ readonly kind: "select" } & SelectModalContent & {
         readonly selectedIndex: number;
       });
 
-/** Permission modal content descriptor (single source for rendering + row accounting). */
+/** First 12 characters of the call id — enough to match a question to the
+ *  call in the transcript without widening the modal.
+ *
+ *  Shared by the modal description and the host's inline ask line, so the two
+ *  spell the short id the same way. An empty id is filtered by the caller: both
+ *  call sites omit the `call …` segment when the id is empty. */
+export function shortToolUseId(toolUseId: string): string {
+  return toolUseId.slice(0, 12);
+}
+
+/** Permission modal content descriptor (single source for rendering + row accounting).
+ *
+ *  `toolUseId` is additive: when present the description names the call it is
+ *  asking about (`call <short>`, ADR-0147 R1); the summary hint line stays. */
 export function permissionModalContent(ask: {
   readonly tool: string;
   readonly summaryHint: string;
+  readonly toolUseId?: string;
 }): SelectModalContent {
+  const short =
+    ask.toolUseId !== undefined && ask.toolUseId.length > 0
+      ? `call ${shortToolUseId(ask.toolUseId)}`
+      : "";
+  const description = [ask.summaryHint, short]
+    .filter((part) => part.length > 0)
+    .join(" · ");
   return {
     title: `允许执行 ${ask.tool}？`,
-    ...(ask.summaryHint.length > 0 ? { description: ask.summaryHint } : {}),
+    ...(description.length > 0 ? { description } : {}),
     options: PERMISSION_ANSWERS,
     hint: PERMISSION_MODAL_HINT,
   };
@@ -141,6 +165,7 @@ export function permissionModalRows(
   ask: {
     readonly tool: string;
     readonly summaryHint: string;
+    readonly toolUseId?: string;
   },
   cols: number,
   selectedIndex = 0

@@ -26,7 +26,12 @@ import {
   type TuiBridge,
 } from "../../src/tui/hub-bridge.js";
 import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
-import { attachSession } from "../../src/tui/session-state.js";
+import {
+  attachSession,
+  createDraftSession,
+  withContextUsageBeat,
+  type TuiSessionState,
+} from "../../src/tui/session-state.js";
 import { ContextBar } from "../../src/tui/context-bar.js";
 import { occupancyFromUsage } from "../../src/harness/compress/occupancy.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
@@ -118,7 +123,8 @@ function slowToolDeps(adapter: LoopAdapter): LoopEngineDeps {
 async function untilFrame(
   setup: TestRendererSetup,
   pred: (frame: string) => boolean,
-  ms = 8000
+  ms = 8000,
+  label = ""
 ): Promise<string> {
   const start = Date.now();
   while (Date.now() - start < ms) {
@@ -127,7 +133,9 @@ async function untilFrame(
     const frame = setup.captureCharFrame();
     if (pred(frame)) return frame;
   }
-  throw new Error(`untilFrame timeout:\n${setup.captureCharFrame()}`);
+  throw new Error(
+    `untilFrame timeout${label ? ` (${label})` : ""}:\n${setup.captureCharFrame()}`
+  );
 }
 
 async function until(
@@ -185,13 +193,43 @@ describe("context_usage call-beat → ContextBar（#1079 T4）", () => {
     await delay(100);
 
     // Observation window: call #1 done, its tool still running → the bar
-    // must carry call #1's real usage (12.8k) before the turn finishes.
-    await untilFrame(setup, (f) => f.includes("12.8k"), 8000);
+    // carries the CONFIRMED input-side occupancy (12,800), no `~` marker,
+    // before the turn finishes. `projectedNext` (12,807) is on the wire for
+    // the image-bearing gate only — it never repaints the bar (2026-10-22
+    // confirmed-only amendment).
+    const postCallFrame = await untilFrame(
+      setup,
+      (f) => f.includes("12.8k") && f.includes("5%"),
+      8000,
+      "confirmed-post-call"
+    );
+    // The same k-string exists under the old projected display; the marker is
+    // what distinguishes the two contracts.
+    expect(postCallFrame).not.toMatch(/~\d+%/);
     expect(bridge.inflight.ids().size).toBeGreaterThan(0);
+    const [conversationId] = [...bridge.inflight.ids()];
+    expect(conversationId).toBeDefined();
 
-    // Turn over → the bar stands at call #2's reading (19.2k).
+    // Turn over → the bar stands at call #2's confirmed usage (19,200 → 19.2k).
     await until(() => bridge.inflight.ids().size === 0, 8000, "turn-done");
-    await untilFrame(setup, (f) => f.includes("19.2k"), 8000);
+    const finalFrame = await untilFrame(
+      setup,
+      (f) => f.includes("19.2k") && f.includes("8%"),
+      8000,
+      "final-confirmed"
+    );
+    expect(finalFrame).not.toMatch(/~\d+%/);
+
+    // Separate assertion: `lastUsage` still equals the CONFIRMED usage of the
+    // last call, and the projected display reading never reaches the file.
+    const file = await bridge.loadSessionFile(conversationId!);
+    expect(file.lastUsage).toEqual({
+      inputTokens: 19200,
+      outputTokens: 9,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    });
+    expect(JSON.stringify(file)).not.toContain("displayOccupancy");
 
     if (!setup.renderer.isDestroyed) setup.renderer.destroy();
   }, 30_000);
@@ -309,18 +347,38 @@ describe("long turn ≥3 llm_calls + reopen（#1079 T6）", () => {
     expect(conversationId).toBeDefined();
 
     // Beat 1: call #1's post_call on the bar while its tool loop runs —
-    // before call #2 is issued.
-    await untilFrame(setup, (f) => f.includes("12.8k"), 8000);
+    // before call #2 is issued. The bar shows the CONFIRMED input-side
+    // occupancy of the call (no `~`); projectedNext is gate-only.
+    const beat1Frame = await untilFrame(
+      setup,
+      (f) => f.includes("12.8k") && f.includes("5%"),
+      8000,
+      "beat-1-confirmed"
+    );
+    expect(beat1Frame).not.toMatch(/~\d+%/);
     expect(bridge.inflight.ids().size).toBe(1);
 
     // Beat 2: the bar already moved again while the turn is still running
-    // (call #2's reading during its tool loop, before call #3 is issued).
-    await untilFrame(setup, (f) => f.includes("19.2k"), 8000);
+    // (call #2's confirmed reading during its tool loop, before call #3 is
+    // issued).
+    const beat2Frame = await untilFrame(
+      setup,
+      (f) => f.includes("19.2k") && f.includes("8%"),
+      8000,
+      "beat-2-confirmed"
+    );
+    expect(beat2Frame).not.toMatch(/~\d+%/);
     expect(bridge.inflight.ids().size).toBe(1);
 
-    // Turn over → final call's reading.
+    // Turn over → final call's confirmed reading (25,600 → 25.6k).
     await until(() => bridge.inflight.ids().size === 0, 12_000, "turn-done");
-    await untilFrame(setup, (f) => f.includes("25.6k"), 8000);
+    const finalFrame = await untilFrame(
+      setup,
+      (f) => f.includes("25.6k") && f.includes("10%"),
+      8000,
+      "final-confirmed"
+    );
+    expect(finalFrame).not.toMatch(/~\d+%/);
     if (!setup.renderer.isDestroyed) setup.renderer.destroy();
 
     // Reopen, TUI attach path: persisted snapshot → attachSession → bar
@@ -340,6 +398,9 @@ describe("long turn ≥3 llm_calls + reopen（#1079 T6）", () => {
     );
     await bar.renderOnce();
     expect(bar.captureCharFrame()).toContain("25.6k");
+    // Attach falls back to the CONFIRMED persisted reading: no `~` marker
+    // until a projected beat arrives (Plan A T4).
+    expect(bar.captureCharFrame()).not.toContain("~");
     if (!bar.renderer.isDestroyed) bar.renderer.destroy();
 
     // Reopen, web load path: the replayed last turn carries the same reading.
@@ -348,4 +409,162 @@ describe("long turn ≥3 llm_calls + reopen（#1079 T6）", () => {
     const lastAnswer = turns[turns.length - 1]!.answer;
     expect(lastAnswer.lastUsage?.inputTokens).toBe(25600);
   }, 60_000);
+});
+
+/**
+ * Deterministic display sequence for the beats the real harness emits (Plan A
+ * T4 / 2026-10-22 confirmed-only amendment): each `context_usage` beat is
+ * applied through the session-state reducer and rendered by the product
+ * ContextBar. This pins the TUI half without the slow tool loop:
+ *  - a projected beat does NOT move the bar (gate-only input for the
+ *    image-bearing request path);
+ *  - a post_call beat shows the CONFIRMED input-side occupancy — the
+ *    event's `projectedNext` is ignored for display (that is the flicker
+ *    root cause: outputTokens are not guaranteed to be replayed into the
+ *    next measured input by every provider);
+ *  - a later MEASURED beat (a `pre_call` / `post_call` with a different
+ *    confirmed usage) is the only thing that moves the bar;
+ *  - a projected beat never mutates `lastUsage`;
+ *  - attach (reopen) still renders the confirmed persisted reading, no `~`
+ *    marker anywhere in the frame.
+ */
+describe("context_usage 拍的条上序列（confirmed-only / 投影不刷条 / 隔离）", () => {
+  const WINDOW = 256_000;
+
+  function confirmedUsage(input: number, output = 0): TokenUsage {
+    return {
+      inputTokens: input,
+      outputTokens: output,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+  }
+
+  /** Render the product bar for one session state. */
+  async function renderSession(session: TuiSessionState) {
+    const setup = await testRender(
+      <ContextBar
+        lastUsage={session.lastUsage}
+        displayOccupancy={session.displayOccupancy}
+        contextWindow={WINDOW}
+        running={true}
+        cols={80}
+      />,
+      { width: 80, height: 5, consoleMode: "disabled" }
+    );
+    await setup.renderOnce();
+    const frame = setup.captureCharFrame();
+    if (!setup.renderer.isDestroyed) setup.renderer.destroy();
+    return frame;
+  }
+
+  /** k-value of the numerator (`X.Xk/`), for the raise/drop assertions. */
+  function shownK(frame: string): number {
+    const match = /(\d+\.\d)k\//.exec(frame);
+    if (match === null) throw new Error(`no k-value in frame:\n${frame}`);
+    return Number.parseFloat(match[1]!);
+  }
+
+  test("projected 拍不刷条；post_call 上确认读数；投影 append/compact 不动；后来 measured 才移动；lastUsage 不被投影改写", async () => {
+    const draft = createDraftSession();
+    expect(draft.displayOccupancy).toBeNull();
+    expect(draft.lastUsage).toBeNull();
+
+    // 1. Projected pre-call (image-bearing request): a client estimate, no
+    //    usage — it is a gate input only. Same session identity, no repaint.
+    const projectedPre = withContextUsageBeat(draft, {
+      type: "context_usage",
+      phase: "projected",
+      occupancy: { tokens: 20_000, source: "projected" },
+    });
+    expect(projectedPre).toBe(draft);
+    expect(projectedPre.lastUsage).toBeNull();
+    expect(projectedPre.displayOccupancy).toBeNull();
+
+    // 2. post_call with a projectedNext: the bar shows the CONFIRMED
+    //    input-side occupancy (20,000 → 20.0k / 8%), the `projectedNext`
+    //    (20,500) is ignored for display. lastUsage holds the confirmed usage.
+    let session = withContextUsageBeat(projectedPre, {
+      type: "context_usage",
+      phase: "post_call",
+      source: "measured",
+      usage: confirmedUsage(20_000, 500),
+      projectedNext: { tokens: 20_500, source: "projected" },
+    });
+    expect(session.lastUsage).toEqual(confirmedUsage(20_000, 500));
+    expect(session.displayOccupancy).toEqual({
+      tokens: 20_000,
+      source: "measured",
+    });
+    const postCallFrame = await renderSession(session);
+    expect(shownK(postCallFrame)).toBe(20);
+    expect(postCallFrame).toContain("8%");
+    // no `~NN%` occupancy marker anywhere in the frame
+    expect(postCallFrame).not.toMatch(/~\d+%/);
+
+    // 3. Tool append: the harness re-projects (24,000). The bar stays put —
+    //    projected beats are gate-only.
+    session = withContextUsageBeat(session, {
+      type: "context_usage",
+      phase: "projected",
+      occupancy: { tokens: 24_000, source: "projected" },
+    });
+    const appended = await renderSession(session);
+    expect(shownK(appended)).toBe(20);
+    expect(appended).not.toMatch(/~\d+%/);
+    expect(session.lastUsage).toEqual(confirmedUsage(20_000, 500));
+    expect(session.displayOccupancy).toEqual({
+      tokens: 20_000,
+      source: "measured",
+    });
+
+    // 4. Compaction: another projected beat (lower unanchored estimate).
+    //    Still no repaint.
+    session = withContextUsageBeat(session, {
+      type: "context_usage",
+      phase: "projected",
+      occupancy: { tokens: 10_000, source: "projected" },
+    });
+    const compacted = await renderSession(session);
+    expect(shownK(compacted)).toBe(20);
+    expect(compacted).not.toMatch(/~\d+%/);
+    expect(session.lastUsage).toEqual(confirmedUsage(20_000, 500));
+
+    // 5. Only a later MEASURED beat moves the bar: pre_call 10,000 → 10.0k / 4%.
+    session = withContextUsageBeat(session, {
+      type: "context_usage",
+      phase: "pre_call",
+      source: "measured",
+      usage: confirmedUsage(10_000),
+    });
+    const measured = await renderSession(session);
+    expect(shownK(measured)).toBe(10);
+    expect(measured).toContain("4%");
+    expect(measured).not.toMatch(/~\d+%/);
+    expect(session.lastUsage).toEqual(confirmedUsage(10_000));
+    expect(session.displayOccupancy).toEqual({
+      tokens: 10_000,
+      source: "measured",
+    });
+
+    // 6. Attach (reopen): the UI-only display reading is gone; the confirmed
+    //    value renders without the marker until the next measured beat arrives.
+    const now = new Date().toISOString();
+    const attached = attachSession({
+      schemaVersion: 2,
+      conversation_id: "conv-projection",
+      messages: [],
+      jsonMode: false,
+      turnCount: 1,
+      updatedAt: now,
+      title: "projection",
+      cwd: "/tmp/proj",
+      sanitized_at: now,
+      lastUsage: confirmedUsage(20_000, 500),
+    });
+    expect(attached.displayOccupancy).toBeNull();
+    const reopened = await renderSession(attached);
+    expect(reopened).toContain("20.0k");
+    expect(reopened).not.toMatch(/~\d+%/);
+  });
 });

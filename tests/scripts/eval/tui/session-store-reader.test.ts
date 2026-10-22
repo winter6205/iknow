@@ -27,6 +27,8 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { SessionStore } from "../../../../src/session-api/store/session-store.ts";
+import type { SessionFileV1 } from "../../../../src/session-api/store/schema.ts";
 import {
   ObserverError,
   SessionTailReader,
@@ -730,6 +732,226 @@ describe("validateWholeFile — the retained store is production-valid", () => {
     assert.ok(
       !readFileSync(storePath(loc), "utf8").includes("sub"),
       "a sub-agent write must not land in the measured conversation"
+    );
+  });
+});
+
+/**
+ * #1221 REGRESSION: the store is append-only in SIZE but not in BYTE OFFSET.
+ *
+ * `SessionStore.save()` writes the WHOLE log to a tmp file and renames it over
+ * the authority — even on its "identical projection → header-refresh only"
+ * path. The `session` header is line 1 and it GROWS as the run progresses
+ * (`turnCount`, `title`, `lastUsage`), so every record after it shifts. A tail
+ * reader that carries a monotonic byte offset therefore parses from the MIDDLE
+ * of a record and raises `ObserverError(malformed_line)` mid-turn.
+ *
+ * These cases drive the REAL `SessionStore` against a real filesystem, so the
+ * header really does change length and the records really do move. Nothing is
+ * hand-written: the assertion is on the persisted data a reader has to see.
+ */
+describe("SessionTailReader — the session header grows under a full-file rewrite", () => {
+  /** A production-shaped projection: only `messages`, `turnCount` and `title`
+   *  differ between saves, which is exactly what a running turn changes. */
+  function projection(
+    loc: FixtureLocation,
+    over: Partial<SessionFileV1> = {}
+  ): SessionFileV1 {
+    const now = "2026-10-06T12:00:54.826Z";
+    return {
+      schemaVersion: 5,
+      conversation_id: loc.conversationId,
+      messages: [{ role: "user", content: [{ type: "text", text: "seed" }] }],
+      jsonMode: false,
+      turnCount: 1,
+      updatedAt: now,
+      title: "short",
+      cwd: loc.cwd,
+      sanitized_at: now,
+      workspaceRoot: loc.cwd,
+      nativeStateFormat: 1,
+      messageCreatedAt: [now],
+      ...over,
+    };
+  }
+
+  /** Byte length of line 1 — the header whose growth caused the desync. */
+  function headerBytes(path: string): number {
+    const first = readFileSync(path, "utf8").split("\n")[0]!;
+    return Buffer.byteLength(first, "utf8");
+  }
+
+  it("keeps reading across a rewrite that makes the header longer", async () => {
+    const loc = makeLoc();
+    const store = new SessionStore(loc.dataDir, loc.cwd);
+    const path = storePath(loc);
+    await store.save({ id: loc.conversationId, file: projection(loc) });
+    assert.ok(existsSync(path), `the real store must create its file`);
+
+    const reader = new SessionTailReader({
+      location: loc,
+      baseline: takeBaseline(loc),
+    });
+    const headerBefore = headerBytes(path);
+    const sizeBefore = statSync(path).size;
+
+    // The product's second save: one more turn, and a title long enough that
+    // line 1 provably grows. `save()` rewrites the WHOLE file, so every record
+    // after line 1 moves by the header's growth.
+    await store.save({
+      id: loc.conversationId,
+      file: projection(loc, {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "seed" }] },
+          {
+            role: "user",
+            content: [{ type: "text", text: "second stimulus" }],
+          },
+        ],
+        turnCount: 42,
+        title: "a deliberately much longer session title that grows the header",
+      }),
+    });
+
+    // The premise is measured, not assumed: the header really got longer.
+    assert.ok(
+      headerBytes(path) > headerBefore,
+      `the header must grow for this case to mean anything; ` +
+        `${headerBefore} -> ${headerBytes(path)}`
+    );
+
+    const poll = reader.poll();
+
+    assert.equal(
+      poll.error,
+      null,
+      `a header that changed length must not desynchronize the reader; ` +
+        `got: ${JSON.stringify(poll.error)}`
+    );
+    assert.deepEqual(
+      poll.messages.map(messageText),
+      ["second stimulus"],
+      `the post-baseline turn must be yielded exactly once; the file grew ` +
+        `${statSync(path).size - sizeBefore} bytes and line 1 grew ` +
+        `${headerBytes(path) - headerBefore}`
+    );
+    assert.equal(poll.headId, "e1");
+  });
+
+  it("still WAITS on an incomplete trailing line after the header grew", async () => {
+    const loc = makeLoc();
+    const store = new SessionStore(loc.dataDir, loc.cwd);
+    await store.save({ id: loc.conversationId, file: projection(loc) });
+    const reader = new SessionTailReader({
+      location: loc,
+      baseline: takeBaseline(loc),
+    });
+    await store.save({
+      id: loc.conversationId,
+      file: projection(loc, {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "seed" }] },
+          {
+            role: "user",
+            content: [{ type: "text", text: "second stimulus" }],
+          },
+        ],
+        turnCount: 42,
+        title: "a deliberately much longer session title that grows the header",
+      }),
+    });
+    const complete = reader.poll();
+    assert.equal(complete.error, null, String(complete.error));
+    assert.deepEqual(complete.messages.map(messageText), ["second stimulus"]);
+
+    // CONTRACT 1 (#1219): an unterminated trailing line is the writer being
+    // mid-append. It is WAITED ON — never an error, never an idle signal.
+    appendPartial(loc, '{"type":"native_state","anchorEventId":"e1","bound');
+
+    const partial = reader.poll();
+
+    assert.equal(
+      partial.error,
+      null,
+      `an incomplete trailing line must be a wait, not an ObserverError; ` +
+        `got: ${JSON.stringify(partial.error)}`
+    );
+    assert.ok(
+      partial.pendingTailBytes > 0,
+      `the partial bytes must be retained, so the record is read once it lands`
+    );
+    assert.deepEqual(
+      partial.messages.map(messageText),
+      [],
+      `nothing new is complete yet`
+    );
+    assert.deepEqual(
+      partial.terminalAnchors,
+      [],
+      `a partial line is never an idle signal`
+    );
+
+    // And the record is picked up exactly once when it completes.
+    appendPartial(
+      loc,
+      'ary":"input","bodySha":"a","messageCount":2,"createdAt":"2026-10-06T12:00:57.196Z"}\n'
+    );
+    const done = reader.poll();
+    assert.equal(done.error, null, String(done.error));
+    assert.deepEqual(done.inputAnchors, ["e1"]);
+    assert.equal(done.pendingTailBytes, 0);
+    assert.deepEqual(
+      done.messages.map(messageText),
+      [],
+      `a completing line must not re-yield the message read on the earlier poll`
+    );
+  });
+
+  it("still REPORTS a malformed COMPLETE line as an ObserverError after the header grew", async () => {
+    const loc = makeLoc();
+    const store = new SessionStore(loc.dataDir, loc.cwd);
+    await store.save({ id: loc.conversationId, file: projection(loc) });
+    const reader = new SessionTailReader({
+      location: loc,
+      baseline: takeBaseline(loc),
+    });
+    await store.save({
+      id: loc.conversationId,
+      file: projection(loc, {
+        messages: [
+          { role: "user", content: [{ type: "text", text: "seed" }] },
+          {
+            role: "user",
+            content: [{ type: "text", text: "second stimulus" }],
+          },
+        ],
+        turnCount: 42,
+        title: "a deliberately much longer session title that grows the header",
+      }),
+    });
+    assert.equal(reader.poll().error, null);
+
+    // CONTRACT 2 (#1219): a malformed COMPLETE line is a BROKEN OBSERVER, and
+    // a broken observer is an error report — never the quiet the stop rule
+    // reads as "settled".
+    appendRaw(loc, '{"type":"head","id":"e1"');
+
+    const poll = reader.poll();
+
+    assert.ok(
+      poll.error instanceof ObserverError,
+      `a malformed complete line must be an ObserverError; got: ${JSON.stringify(poll.error)}`
+    );
+    assert.equal(poll.error?.kind, "malformed_line");
+    assert.deepEqual(
+      poll.terminalAnchors,
+      [],
+      `an observer error must never read as a settled round`
+    );
+    assert.throws(
+      () => reader.poll(),
+      ObserverError,
+      `the error is sticky: a later poll must not silently pass`
     );
   });
 });

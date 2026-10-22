@@ -17,7 +17,12 @@
  * `tests/tui/wait-cancel-abort.test.tsx`, which reaches the real manager.waitFor.
  */
 import { describe, expect, test } from "bun:test";
-import { abortForegroundTurnOnQuit } from "../../src/tui/quit-abort.js";
+import {
+  abortForegroundTurnOnQuit,
+  abortOwnedWorkOnQuit,
+  removeOwnedTurnController,
+  trackOwnedTurnController,
+} from "../../src/tui/quit-abort.js";
 import {
   createDraftSession,
   type TuiSessionState,
@@ -132,5 +137,53 @@ describe("abortForegroundTurnOnQuit（SC12）", () => {
     expect(abortForegroundTurnOnQuit(input)).toBe(true);
     expect(abortForegroundTurnOnQuit(input)).toBe(true);
     expect(controller.signal.aborted).toBe(true);
+  });
+});
+
+describe("abortOwnedWorkOnQuit（confirmed TUI process exit）", () => {
+  test("中止当前 TUI 的所有 conversation turn 和手工 compaction，重复调用安全", () => {
+    const active = new AbortController();
+    const switchedBackground = new AbortController();
+    const compaction = new AbortController();
+    const aborters = new Map([
+      ["conv-active", active],
+      ["conv-switched", switchedBackground],
+    ]);
+
+    abortOwnedWorkOnQuit({ aborters, compaction });
+    abortOwnedWorkOnQuit({ aborters, compaction });
+
+    expect(active.signal.aborted).toBe(true);
+    expect(switchedBackground.signal.aborted).toBe(true);
+    expect(compaction.signal.aborted).toBe(true);
+  });
+
+  test("同一会话的重叠 turn 都在当前 TUI 的 abort 集合内", () => {
+    const olderTurn = new AbortController();
+    const newerTurn = new AbortController();
+    const byConversation = new Map<string, AbortController>();
+    const owned = new Set<AbortController>();
+    trackOwnedTurnController(byConversation, owned, "conv-overlap", olderTurn);
+    trackOwnedTurnController(byConversation, owned, "conv-overlap", newerTurn);
+
+    abortOwnedWorkOnQuit({ aborters: owned });
+
+    expect(olderTurn.signal.aborted).toBe(true);
+    expect(newerTurn.signal.aborted).toBe(true);
+  });
+
+  test("旧 turn finally 不会移除同会话较新的 interrupt controller", () => {
+    const olderTurn = new AbortController();
+    const newerTurn = new AbortController();
+    const byConversation = new Map<string, AbortController>();
+    const owned = new Set<AbortController>();
+    trackOwnedTurnController(byConversation, owned, "conv-overlap", olderTurn);
+    trackOwnedTurnController(byConversation, owned, "conv-overlap", newerTurn);
+
+    removeOwnedTurnController(byConversation, owned, "conv-overlap", olderTurn);
+
+    expect(byConversation.get("conv-overlap")).toBe(newerTurn);
+    expect(owned.has(newerTurn)).toBe(true);
+    expect(owned.has(olderTurn)).toBe(false);
   });
 });

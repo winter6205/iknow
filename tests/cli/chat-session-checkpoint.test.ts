@@ -15,25 +15,33 @@
  *     after run, so the delta is correct;
  *   + empty/invalid: conversationId=null skips persistence;
  *   + concurrency: repeated commits under one conversationId accumulate in
- *     order.
+ *     order;
+ *   + close-save visibility: the concurrent_write refusal — the one failure
+ *     mode keepHead created — prints a stderr notice even when no opts.warn
+ *     is passed; every other kind keeps the pre-existing optional-warn
+ *     silence.
  *
  * Reuses the established pattern: processChatLine over a pipe, stub deps, and a
  * SessionStore in an isolated temp dir (never the real ~/.iknow).
  */
 import { afterAll, describe, it } from "vitest";
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   persistChatSessionCheckpoint,
   processChatLine,
 } from "../../src/cli/chat-session.ts";
+import type { ChatLineContext } from "../../src/cli/chat-session.ts";
 import {
+  resolveConversationDir,
   resolveProjectSessionDir,
+  SESSION_JSONL_EXT,
   SessionStore,
 } from "../../src/session-api/store/index.ts";
 import { assistantResult, makeCtx } from "./_fixtures.ts";
+import { captureStderrOf } from "../_helpers/capture-stderr.ts";
 import type {
   AnthropicNativeMessage,
   LoopEngineDeps,
@@ -630,6 +638,333 @@ describe("processChatLine checkpoint 落盘接线", () => {
       () => s.load("pcl-max-turns"),
       (err: unknown) => (err as { kind?: string }).kind === "not_found",
       "MaxTurnsExceeded 抛出路径不得写空文件"
+    );
+  });
+});
+
+// -- full-arm close vs. the persisted head chain -----------------------------
+
+/** One session's JSONL path, taken from the store's own resolved project root. */
+const sessionJsonl = (s: SessionStore, id: string): string =>
+  join(
+    resolveConversationDir({
+      projectDir: s.getProjectDir(),
+      conversationId: id,
+    }),
+    `${id}${SESSION_JSONL_EXT}`
+  );
+
+describe("persistChatSessionCheckpoint full-arm close vs. the persisted head chain", () => {
+  it("fresh full-arm close bootstraps the JSONL and lands the head on the projection tip", async () => {
+    const s = await storeFor();
+    const id = "head-full-fresh";
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "completed",
+        messages: [userMsg("q1"), assistantMsg("a1")],
+        turnCount: 1,
+      }),
+      priorMessages: [],
+      workspaceRoot: process.cwd(),
+    });
+    assert.equal(await s.readHead(id), "e1");
+    const file = await s.load(id);
+    assert.deepEqual(
+      file.messages.map((m) => m.role),
+      ["user", "assistant"]
+    );
+  });
+
+  it("full-arm close whose projection is ahead of the chain moves the head forward", async () => {
+    const s = await storeFor();
+    const id = "head-full-extension";
+    const first = [userMsg("q1"), assistantMsg("a1")];
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "completed",
+        messages: first,
+        turnCount: 1,
+      }),
+      priorMessages: [],
+      workspaceRoot: process.cwd(),
+    });
+    // Mid-run commit of the next turn's query, then the close carries the whole
+    // history plus that turn's reply: an extension of the persisted chain.
+    const second = [...first, userMsg("q2"), assistantMsg("a2")];
+    await s.appendEvents({ id, events: [userMsg("q2")] });
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "cancelled",
+        messages: second,
+        turnCount: 0,
+      }),
+      priorMessages: first,
+      workspaceRoot: process.cwd(),
+    });
+    assert.equal(await s.readHead(id), "e3");
+    const file = await s.load(id);
+    assert.equal(file.messages.length, 4);
+    assert.equal(
+      file.turnCount,
+      1,
+      "a cancelled turn does not complete a turn"
+    );
+    assert.equal(file.checkpoints?.length, 1);
+  });
+
+  it("full-arm close whose projection fell behind the chain leaves the head and the file untouched", async () => {
+    const s = await storeFor();
+    const id = "head-full-behind-chain";
+    const first = [userMsg("q1"), assistantMsg("a1")];
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "completed",
+        messages: first,
+        turnCount: 1,
+      }),
+      priorMessages: [],
+      workspaceRoot: process.cwd(),
+    });
+    // A second writer on this conversation id commits a full turn while the run
+    // being closed here is in flight, so the chain grows past its projection.
+    await s.appendEvents({
+      id,
+      events: [userMsg("q2"), assistantMsg("a2")],
+    });
+    const headBefore = await s.readHead(id);
+    const bytesBefore = await readFile(sessionJsonl(s, id), "utf8");
+    assert.equal(headBefore, "e3", "the other writer grew the head chain");
+
+    // The close carries the history as of turn start (prior=[q1], result adds the
+    // reply): delta > 0 so the decision is "full", and the projection it writes
+    // is a strict prefix of the chain on disk.
+    const collector = warnCollector();
+    await persistChatSessionCheckpoint({
+      store: s,
+      conversationId: id,
+      jsonMode: false,
+      result: buildResult({
+        stopReason: "cancelled",
+        messages: first,
+        turnCount: 0,
+      }),
+      priorMessages: [userMsg("q1")],
+      warn: collector.warn,
+      workspaceRoot: process.cwd(),
+    });
+
+    assert.equal(
+      await s.readHead(id),
+      headBefore,
+      "a closing save never moves the persisted head backward"
+    );
+    assert.equal(
+      await readFile(sessionJsonl(s, id), "utf8"),
+      bytesBefore,
+      "a refused close writes no bytes"
+    );
+    assert.deepEqual(
+      (await s.load(id)).messages.map((m) => m.role),
+      ["user", "assistant", "user", "assistant"],
+      "the commits the projection fell behind stay on the head chain"
+    );
+    assert.equal(collector.lines.length, 1);
+    assert.match(collector.lines[0]!, /concurrent_write/);
+  });
+});
+
+// -- close-save failure visibility at the chat entries -----------------------
+
+/**
+ * The `keepHead` declaration gave the chat close exactly ONE new failure
+ * mode: the store's `concurrent_write` refusal. Only that kind is surfaced —
+ * `persistChatSessionCheckpoint` itself prints it through the module's
+ * `writeErr` operator sink (the same one the resume path uses for operator
+ * notices), so a refused checkpoint write cannot vanish in silence at ANY
+ * entry without the entries opting a `warn` in. Every other kind keeps the
+ * pre-existing optional-`opts.warn` behavior: no `warn`, no line.
+ *
+ * The rewind shape pinned here: a second real writer commits on the same
+ * conversation id while the closing turn's model step is in flight, so the
+ * wholesale projection the close carries is behind that commit. `keepHead`
+ * refuses it; the head chain keeps the other writer's commits.
+ */
+
+/** One chat turn's result — the entries below also report on stderr, so their
+ *  return value is captured alongside it (nothing here mocks the sink). */
+type ChatTurnResult = Awaited<ReturnType<typeof processChatLine>>;
+
+/** File bytes + head, as of one commit. */
+type ChainCommit = { head: string | null; bytes: string };
+
+/**
+ * Grow the head chain from a second writer inside this turn's first model step
+ * (the real window, before the close), then record the file as it stood right
+ * after that commit.
+ */
+function commitDuringStep(opts: {
+  readonly ctx: ChatLineContext;
+  readonly store: SessionStore;
+  readonly id: string;
+  readonly events: ReadonlyArray<AnthropicNativeMessage>;
+  readonly commit: ChainCommit;
+}): void {
+  const { ctx, store, id, commit } = opts;
+  const base = ctx.deps.adapter;
+  let fired = false;
+  ctx.deps = {
+    ...ctx.deps,
+    adapter: {
+      ...base,
+      step: async (state, request, signal) => {
+        if (!fired) {
+          fired = true;
+          await store.appendEvents({ id, events: [...opts.events] });
+          commit.head = await store.readHead(id);
+          commit.bytes = await readFile(sessionJsonl(store, id), "utf8");
+        }
+        return base.step(state, request, signal);
+      },
+    },
+  };
+}
+
+describe("chat close-save 失败可见性（仅并发拒绝进 stderr）", () => {
+  it("/continue close 被并发拒绝 → 恰好一条点名 kind 的 stderr 提示，链表与盘一字节不动", async () => {
+    const s = await storeFor();
+    const id = "prod-close-concurrent";
+    // An empty final response lands only the query (partial_user_only), which
+    // is exactly the transcript that makes `/continue` pending.
+    await processChatLine({
+      line: "q1",
+      ctx: makeCtx({
+        responses: [assistantResult({ texts: [] })],
+        checkpointStore: s,
+        workspaceRoot: process.cwd(),
+        stateOverrides: { conversationId: id },
+      }),
+    });
+    assert.equal(await s.readHead(id), "e0");
+
+    const ctx = makeCtx({
+      responses: [assistantResult({ texts: ["a1"] })],
+      checkpointStore: s,
+      workspaceRoot: process.cwd(),
+      stateOverrides: { conversationId: id },
+    });
+    const commit: ChainCommit = { head: null, bytes: "" };
+    commitDuringStep({
+      ctx,
+      store: s,
+      id,
+      events: [assistantMsg("a1"), userMsg("q2")],
+      commit,
+    });
+    // Disk as the refused close finds it: the other writer's commits, and the
+    // turn-1 state fields the refused close must not advance.
+    const before = await s.load(id);
+    let r: ChatTurnResult | undefined;
+    const stderr = await captureStderrOf(async () => {
+      r = await processChatLine({ line: "/continue", ctx });
+    });
+
+    assert.equal(r!.ranQuery, true, "被拒绝的 close 不打断 /continue");
+    assert.match(
+      stderr,
+      /会话检查点写入失败 \[concurrent_write\]/,
+      "并发拒绝必须点名 typed kind 进 stderr"
+    );
+    assert.equal(
+      stderr.match(/会话检查点写入失败/g)?.length,
+      1,
+      "一次被拒的 close 只发一条提示"
+    );
+    // Rendering pin: the refusal is a typed PLAIN object (never an Error) —
+    // dumping it would print `[object Object]` in the operator notice.
+    assert.doesNotMatch(stderr, /\[object Object\]/, "提示不得倾倒对象");
+    assert.equal(commit.head, "e2", "the other writer did grow the chain");
+    assert.equal(
+      await s.readHead(id),
+      commit.head,
+      "另一个 writer 的 head 不被回退"
+    );
+    assert.equal(
+      await readFile(sessionJsonl(s, id), "utf8"),
+      commit.bytes,
+      "被拒绝的 close 一个字节都不写"
+    );
+    const file = await s.load(id);
+    assert.equal(
+      file.turnCount,
+      before.turnCount,
+      "被拒绝的 turn 不推进盘上 turnCount"
+    );
+    assert.deepEqual(
+      file.checkpoints,
+      before.checkpoints,
+      "被拒绝的 turn 的 checkpoint 不落盘"
+    );
+  });
+
+  it("非 concurrent_write 的 close 失败不新增 stderr（钉住既有静默）", async () => {
+    // Rootless-bootstrap ValidationError driven through the real chat entry:
+    // no ctx.workspaceRoot, so the bootstrap inside the save throws before any
+    // write. The chat entries pass no `warn`, so this kind must stay fully
+    // silent — the shape chat-session-rebind relies on for its own turn.
+    const s = await storeFor();
+    const rootlessCtx = makeCtx({
+      responses: [assistantResult({ texts: ["a1"] })],
+      checkpointStore: s,
+      stateOverrides: { conversationId: "close-silent-rootless" },
+    });
+    const rootlessStderr = await captureStderrOf(async () => {
+      await processChatLine({ line: "q", ctx: rootlessCtx });
+    });
+    assert.equal(
+      rootlessStderr,
+      "",
+      "rootless 失败不是并发拒绝：stderr 必须保持全静默"
+    );
+    assert.deepEqual(await s.list(), [], "bootstrap 未成功时不得落任何文件");
+
+    // write_failed from the save itself, through the same catch with no
+    // `warn`: the store's baseDir is a file, so save's mkdir must fail (the
+    // blocker shape the direct-helper write_failed case already uses).
+    const blocker = await mkdtemp(join(tmpdir(), "iknow-chat-cp-vis-block-"));
+    tempDirs.push(blocker);
+    const blockerPath = join(blocker, "blocker");
+    await writeFile(blockerPath, "x", "utf8");
+    const bad = new SessionStore(blockerPath, process.cwd());
+    const saveStderr = await captureStderrOf(async () => {
+      await persistChatSessionCheckpoint({
+        store: bad,
+        conversationId: "close-silent-write-failed",
+        jsonMode: false,
+        result: buildResult({
+          stopReason: "cancelled",
+          messages: [userMsg("q"), assistantMsg("partial")],
+          turnCount: 1,
+        }),
+        priorMessages: [],
+        workspaceRoot: process.cwd(),
+      });
+    });
+    assert.equal(
+      saveStderr,
+      "",
+      "write_failed 无 warn 时不得新增 stderr（仅并发拒绝可见）"
     );
   });
 });

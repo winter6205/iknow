@@ -352,6 +352,53 @@ interface Slot {
 // createMcpManager callers (tests/scripts) and prevents dual-default drift.
 const DEFAULT_CONNECT_TIMEOUT_MS = 60_000;
 const DEFAULT_CALL_TIMEOUT_MS = 1_800_000; // long tier (see TIMEOUT_TIER_MS in aci/types.ts)
+const MCP_SHUTDOWN_TERM_GRACE_MS = 500;
+const MCP_SHUTDOWN_KILL_VERIFY_MS = 500;
+
+export type McpShutdownFailureReason =
+  | "client_close_failed"
+  | "client_close_timed_out"
+  | "stdio_signal_failed"
+  | "stdio_process_unconfirmed";
+
+export interface McpShutdownFailure {
+  readonly server: string;
+  readonly reason: McpShutdownFailureReason;
+}
+
+/** Shutdown did not confirm that every manager-owned MCP resource stopped. */
+export class McpShutdownError extends Error {
+  override readonly name = "McpShutdownError";
+  readonly failures: ReadonlyArray<McpShutdownFailure>;
+
+  constructor(failures: ReadonlyArray<McpShutdownFailure>) {
+    super("MCP shutdown could not confirm cleanup for every owned server");
+    this.failures = failures;
+  }
+}
+
+interface ShutdownCloseAttempt {
+  readonly server: string;
+  state: "pending" | "closed" | "failed";
+}
+
+interface ShutdownOwnedProcess {
+  readonly server: string;
+  readonly pid: number;
+  signalFailed: boolean;
+}
+
+interface ShutdownPreparation {
+  readonly closeAttempts: ReadonlyArray<ShutdownCloseAttempt>;
+  readonly ownedProcesses: ReadonlyArray<ShutdownOwnedProcess>;
+  readonly failures: ReadonlyArray<McpShutdownFailure>;
+}
+
+interface SlotShutdownPreparation {
+  readonly closeAttempt?: ShutdownCloseAttempt;
+  readonly ownedProcess?: ShutdownOwnedProcess;
+  readonly failure?: McpShutdownFailure;
+}
 
 export function createMcpManager(opts: McpManagerOptions): McpManager {
   const workspaceRoot = requireWorkspaceRoot(opts.workspaceRoot);
@@ -360,6 +407,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
 
   /** Slots indexed by name. */
   const slots = new Map<string, Slot>();
+  let shutdownPromise: Promise<void> | undefined;
 
   /**
    * Lifecycle generation: incremented by shutdown / reload. bootSlot captures
@@ -380,6 +428,7 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     config: readonly McpServerConfig[],
     fromReload = false
   ): void {
+    shutdownPromise = undefined;
     slots.clear();
     for (const cfg of [...config].sort((a, b) =>
       a.name.localeCompare(b.name)
@@ -680,49 +729,104 @@ export function createMcpManager(opts: McpManagerOptions): McpManager {
     bootstrapAll();
   }
 
-  async function shutdown(): Promise<void> {
-    // Bump the generation first to block all late registrations from in-flight
-    // bootSlot / list_changed callbacks.
+  function shutdown(): Promise<void> {
+    if (shutdownPromise) return shutdownPromise;
+
+    let resolveShutdown!: () => void;
+    let rejectShutdown!: (error: unknown) => void;
+    shutdownPromise = new Promise<void>((resolve, reject) => {
+      resolveShutdown = resolve;
+      rejectShutdown = reject;
+    });
+
+    const currentSlots = [...slots.values()];
+    // Fence late callbacks synchronously, before any shutdown waiter yields.
     bootGeneration += 1;
-    const tasks: Promise<void>[] = [];
-    for (const slot of slots.values()) {
-      if (slot.state === "disabled") continue;
-      const handle = slot.handle;
-      const abort = slot.callAbort;
-      // Cancel all in-flight calls
-      if (abort) abort.abort();
-      if (handle) {
-        tasks.push(
-          handle.close().catch((err) => {
-            // close failure only warns
-            console.warn(
-              `[mcp/manager] server '${slot.config.name}' close error: ${errorMessage(
-                err
-              )}`
-            );
-          })
+    const preparation = prepareShutdown(currentSlots);
+
+    void completeShutdown(
+      preparation.closeAttempts,
+      preparation.ownedProcesses
+    ).then(
+      (failures) => {
+        finalizeShutdown(
+          currentSlots,
+          [...preparation.failures, ...failures],
+          resolveShutdown,
+          rejectShutdown
+        );
+      },
+      (error: unknown) => {
+        finalizeShutdown(
+          currentSlots,
+          preparation.failures,
+          resolveShutdown,
+          rejectShutdown,
+          error
         );
       }
-    }
-    await Promise.allSettled(tasks);
-    // createRealClient's close path SIGTERMs before handle.close() returns;
-    // the SDK's StdioClientTransport.close() already destroys the child as a
-    // built-in fallback. One more layer here: SIGTERM transport.pid directly.
-    for (const slot of slots.values()) {
-      const child = (
-        slot.handle as unknown as { _stdioPid?: number } | undefined
-      )?._stdioPid;
-      if (child && typeof child === "number") {
-        try {
-          process.kill(child, "SIGTERM");
-        } catch {
-          /* ignore ESRCH etc. */
-        }
+    );
+
+    return shutdownPromise;
+  }
+
+  async function completeShutdown(
+    closeAttempts: ReadonlyArray<ShutdownCloseAttempt>,
+    ownedProcesses: ReadonlyArray<ShutdownOwnedProcess>
+  ): Promise<McpShutdownFailure[]> {
+    await waitForShutdownCondition(
+      () =>
+        closeAttempts.every((attempt) => attempt.state !== "pending") &&
+        ownedProcesses.every((child) => inspectOwnedPid(child.pid) === "dead"),
+      MCP_SHUTDOWN_TERM_GRACE_MS
+    );
+
+    for (const child of ownedProcesses) {
+      if (inspectOwnedPid(child.pid) === "dead") continue;
+      if (signalOwnedPid(child.pid, "SIGKILL") === "failed") {
+        child.signalFailed = true;
       }
     }
-    for (const slot of slots.values()) {
-      if (slot.state !== "disabled") slot.state = "failed";
+
+    if (ownedProcesses.some((child) => inspectOwnedPid(child.pid) !== "dead")) {
+      await waitForShutdownCondition(
+        () =>
+          ownedProcesses.every(
+            (child) => inspectOwnedPid(child.pid) === "dead"
+          ),
+        MCP_SHUTDOWN_KILL_VERIFY_MS
+      );
     }
+
+    const failures: McpShutdownFailure[] = [];
+    for (const attempt of closeAttempts) {
+      if (attempt.state === "failed") {
+        failures.push({
+          server: attempt.server,
+          reason: "client_close_failed",
+        });
+      } else if (attempt.state === "pending") {
+        failures.push({
+          server: attempt.server,
+          reason: "client_close_timed_out",
+        });
+      }
+    }
+    for (const child of ownedProcesses) {
+      if (child.signalFailed) {
+        failures.push({
+          server: child.server,
+          reason: "stdio_signal_failed",
+        });
+      }
+      if (inspectOwnedPid(child.pid) !== "dead") {
+        failures.push({
+          server: child.server,
+          reason: "stdio_process_unconfirmed",
+        });
+      }
+    }
+    return failures;
   }
 
   function status(): readonly McpServerStatus[] {
@@ -1069,6 +1173,167 @@ export function createRealClient(
 // ---------------------------------------------------------------------------
 // Utilities
 // ---------------------------------------------------------------------------
+
+function prepareShutdown(slots: ReadonlyArray<Slot>): ShutdownPreparation {
+  const closeAttempts: ShutdownCloseAttempt[] = [];
+  const ownedProcesses: ShutdownOwnedProcess[] = [];
+  const failures: McpShutdownFailure[] = [];
+
+  for (const slot of slots) {
+    const prepared = prepareShutdownSlot(slot);
+    if (prepared.closeAttempt) closeAttempts.push(prepared.closeAttempt);
+    if (prepared.ownedProcess) ownedProcesses.push(prepared.ownedProcess);
+    if (prepared.failure) failures.push(prepared.failure);
+  }
+  signalPreparedProcesses(ownedProcesses);
+  return { closeAttempts, ownedProcesses, failures };
+}
+
+function prepareShutdownSlot(slot: Slot): SlotShutdownPreparation {
+  if (slot.state === "disabled") return {};
+  slot.callAbort?.abort();
+  const handle = slot.handle;
+  if (!handle) return {};
+
+  const closeAttempt = startClientClose(slot, handle);
+  const owned = captureOwnedProcess(slot, handle);
+  return {
+    closeAttempt,
+    ...(owned.process ? { ownedProcess: owned.process } : {}),
+    ...(owned.failure ? { failure: owned.failure } : {}),
+  };
+}
+
+function startClientClose(
+  slot: Slot,
+  handle: McpClientHandle
+): ShutdownCloseAttempt {
+  const attempt: ShutdownCloseAttempt = {
+    server: slot.config.name,
+    state: "pending",
+  };
+  try {
+    void Promise.resolve(handle.close()).then(
+      () => {
+        attempt.state = "closed";
+      },
+      () => {
+        attempt.state = "failed";
+      }
+    );
+  } catch {
+    // EXIT: record sync close failure and continue starting peer cleanup.
+    attempt.state = "failed";
+  }
+  return attempt;
+}
+
+function captureOwnedProcess(
+  slot: Slot,
+  handle: McpClientHandle
+): {
+  readonly process?: ShutdownOwnedProcess;
+  readonly failure?: McpShutdownFailure;
+} {
+  const child = (handle as unknown as { readonly _stdioPid?: unknown })
+    ._stdioPid;
+  if (child === undefined) return {};
+  if (
+    typeof child !== "number" ||
+    !Number.isInteger(child) ||
+    child <= 0 ||
+    child === process.pid
+  ) {
+    return {
+      failure: {
+        server: slot.config.name,
+        reason: "stdio_process_unconfirmed",
+      },
+    };
+  }
+  return {
+    process: {
+      server: slot.config.name,
+      pid: child,
+      signalFailed: false,
+    },
+  };
+}
+
+function signalPreparedProcesses(
+  ownedProcesses: ReadonlyArray<ShutdownOwnedProcess>
+): void {
+  for (const child of ownedProcesses) {
+    if (signalOwnedPid(child.pid, "SIGTERM") === "failed") {
+      child.signalFailed = true;
+    }
+  }
+}
+
+function finalizeShutdown(
+  slots: ReadonlyArray<Slot>,
+  failures: ReadonlyArray<McpShutdownFailure>,
+  resolve: () => void,
+  reject: (error: unknown) => void,
+  error?: unknown
+): void {
+  for (const slot of slots) {
+    if (slot.state !== "disabled") slot.state = "failed";
+  }
+  if (error !== undefined) {
+    reject(error);
+    return;
+  }
+  if (failures.length > 0) {
+    reject(new McpShutdownError(failures));
+    return;
+  }
+  resolve();
+}
+
+function signalOwnedPid(
+  pid: number,
+  signal: NodeJS.Signals
+): "sent" | "already_gone" | "failed" {
+  try {
+    process.kill(pid, signal);
+    return "sent";
+  } catch (error) {
+    // EXIT: ESRCH confirms the manager-owned child already exited; other
+    // failures stay visible as unconfirmed cleanup.
+    if (hasSystemErrorCode(error, "ESRCH")) return "already_gone";
+    return "failed";
+  }
+}
+
+function inspectOwnedPid(pid: number): "alive" | "dead" | "unknown" {
+  try {
+    process.kill(pid, 0);
+    return "alive";
+  } catch (error) {
+    // EXIT: ESRCH is authoritative death evidence; EPERM and other failures do
+    // not let this manager claim that the child stopped.
+    if (hasSystemErrorCode(error, "ESRCH")) return "dead";
+    return "unknown";
+  }
+}
+
+function hasSystemErrorCode(error: unknown, code: string): boolean {
+  if (typeof error !== "object" || error === null || !("code" in error)) {
+    return false;
+  }
+  return (error as { readonly code?: unknown }).code === code;
+}
+
+async function waitForShutdownCondition(
+  condition: () => boolean,
+  timeoutMs: number
+): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!condition() && Date.now() < deadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, 20));
+  }
+}
 
 /**
  * Constructor-time validation of the manager's workspaceRoot. Missing →

@@ -854,3 +854,123 @@ describe("D7 / SC6: 会话位置行常驻（主仓也画、绑树只换路径）
     await app.destroy();
   }, 30_000);
 });
+
+// ---------------------------------------------------------------------------
+// --max-turns at the cap: the turn stops early, the terminal must say so
+// ---------------------------------------------------------------------------
+
+describe("turn cap: exhaustion is visible and the session stays usable", () => {
+  /**
+   * Script for a capped run: step 1 asks for a tool so the loop wants another
+   * iteration, the cap stops it there. Step 2 is the epilogue summary round
+   * (loop-engine always runs one after an exceptional stop): empty text means
+   * no `stop_summary` stream event, which is the case where nothing would
+   * otherwise say why the turn ended. Step 3 answers the follow-up message.
+   */
+  function cappedResponses(
+    reply: string
+  ): ReturnType<typeof assistantResult>[] {
+    return [
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "cap-1", name: "noop", input: {} }],
+      }),
+      assistantResult({ texts: [] }),
+      assistantResult({ texts: [reply] }),
+    ];
+  }
+
+  test("cap reached with no wrap-up summary → the notice names the cap, and the next message still runs", async () => {
+    const responses = cappedResponses("后续答复");
+    const app = await mountAppAsync(responses, {
+      ...makeDeps(responses),
+      maxTurns: 1,
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("第一条");
+    await app.pressEnter();
+    await until(
+      () => app.bridge.inflight.ids().size === 0,
+      8000,
+      "capped-turn-done"
+    );
+    const frame = await untilFrame(
+      app.setup,
+      (f) => f.includes("Turn cap reached (maxTurns)"),
+      8000,
+      "cap-notice"
+    );
+    // The cap describes the run that stopped, not the session: the notice says a
+    // further message is accepted.
+    expect(frame).toContain("send a message to continue");
+
+    // The session stays usable: a second message runs and renders its answer.
+    await app.typeText("第二条");
+    await app.pressEnter();
+    await until(
+      () => app.bridge.inflight.ids().size === 0,
+      8000,
+      "second-turn-done"
+    );
+    await untilFrame(
+      app.setup,
+      (f) => f.includes("后续答复"),
+      8000,
+      "follow-up-answer"
+    );
+    // The cap stopped the capped run, not this one: a normal finish clears the
+    // line instead of leaving the lane claiming the session is still capped.
+    expect(app.setup.captureCharFrame()).not.toContain("Turn cap reached");
+    await app.destroy();
+  }, 60_000);
+
+  test("cap reached with a wrap-up summary → the summary survives beside the cap line", async () => {
+    const responses = [
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "cap-2", name: "noop", input: {} }],
+      }),
+      assistantResult({ texts: ["收尾摘要：还有未完成的步骤"] }),
+    ];
+    const app = await mountAppAsync(responses, {
+      ...makeDeps(responses),
+      maxTurns: 1,
+    });
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("go");
+    await app.pressEnter();
+    await until(
+      () => app.bridge.inflight.ids().size === 0,
+      8000,
+      "summary-cap-done"
+    );
+    const frame = await untilFrame(
+      app.setup,
+      (f) =>
+        f.includes("Turn cap reached (maxTurns)") && f.includes("收尾摘要"),
+      8000,
+      "summary-and-cap"
+    );
+    expect(frame).toContain("Turn cap reached (maxTurns)");
+    await app.destroy();
+  }, 60_000);
+
+  test("no cap (absent maxTurns) → the settled turn keeps showing no cap notice", async () => {
+    const responses = [assistantResult({ texts: ["普通答复"] })];
+    const app = await mountAppAsync(responses, makeDeps(responses));
+    await untilFrame(app.setup, (f) => f.includes("Version"));
+
+    await app.typeText("你好");
+    await app.pressEnter();
+    await until(
+      () => app.bridge.inflight.ids().size === 0,
+      8000,
+      "plain-turn-done"
+    );
+    await untilFrame(app.setup, (f) => f.includes("普通答复"), 8000, "answer");
+    expect(app.setup.captureCharFrame()).not.toContain("Turn cap reached");
+    await app.destroy();
+  }, 60_000);
+});

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import {
+  chmodSync,
   existsSync,
   lstatSync,
   mkdirSync,
@@ -8,6 +9,7 @@ import {
   readdirSync,
   writeFileSync,
 } from "node:fs";
+import type { BigIntStats } from "node:fs";
 import { dirname, join } from "node:path";
 import type {
   ProtectedTargetBindPath,
@@ -104,6 +106,203 @@ export interface CredentialReadMaskArgs {
 
 const COVER_ROOT_NAME = "protected-credential-cover";
 
+/**
+ * The fs identity of ONE path the mask plan depends on.
+ *
+ * Identity = (dev, ino, mtimeNs, ctimeNs, size), read with `lstatSync(path,
+ * { bigint: true })` — NEVER `stat`: the mask never follows symlinks (a
+ * link's TARGET is not an observable of the plan — `listRegularFiles` skips
+ * symlinks, and the file's own doc comment says so), so `lstat` is the
+ * correct tool: a substituted symlink is caught by ITS OWN identity rather
+ * than by the identity of whatever it happens to point at. A symlink
+ * retarget mutates the CONTAINING directory, and the containing directory
+ * is what the plan records (see `MaskBuildState`).
+ *
+ * Nanosecond stamps, not second-resolution `mtime`: an add / remove inside
+ * a traversed directory within the same second is invisible to a coarse
+ * stamp, and the plan would keep serving a file set the host no longer
+ * has. `ctimeNs` additionally catches a restored mtime and a permission
+ * change (chmod bumps ctime, not mtime).
+ */
+interface FsIdentity {
+  readonly path: string;
+  /** The path did not exist when the plan was built. */
+  readonly absent: boolean;
+  /**
+   * The path could NOT be read when the plan was built (a non-ENOENT lstat
+   * error — EACCES / EIO / ENOTDIR …). Such an identity is an UNKNOWN
+   * observable, never "absent": it never validates as unchanged, so the
+   * plan is rebuilt instead of being served on top of an unreadable path.
+   */
+  readonly unreadable: boolean;
+  readonly dev: bigint;
+  readonly ino: bigint;
+  readonly mtimeNs: bigint;
+  readonly ctimeNs: bigint;
+  readonly size: bigint;
+  readonly directory: boolean;
+}
+
+/**
+ * The fs identities ONE mask-plan build depends on, keyed by path.
+ *
+ * DIRECTORY GRANULARITY (the soundness argument for the cache): a subtree
+ * rule's plan is "every regular file under this root", and that file SET is
+ * determined by the CONTENTS of the directories the walk traversed. Any
+ * add / remove / type-change / retarget inside a traversed directory
+ * mutates that directory's own mtime+ctime — so recording the traversed
+ * DIRECTORIES (not every file under them) is enough to detect the change.
+ * That is also what makes the cache pay off: validation costs
+ * O(#traversed-dirs + #exact-files) stats instead of O(#files).
+ *
+ * Per-file identities are recorded only where the FILE itself is the
+ * observable: an exact-rule entry (the plan masks it only while it is a
+ * regular file) and a generated cover source (the plan mounts it only
+ * while it exists, and its CONTENT is what the tamper check reads).
+ */
+interface MaskBuildState {
+  readonly identities: Map<string, FsIdentity>;
+}
+
+/**
+ * The outcome of one `lstat` of a path: its own stat, "absent" (ENOENT — the
+ * path does not exist), or "unreadable" (any other errno: EACCES / EIO /
+ * ENOTDIR …).
+ *
+ * "Unreadable" is NOT "absent": a path that cannot be stat'ed is an UNKNOWN
+ * observable. The cache treats an unknown observable as CHANGED (the plan is
+ * rebuilt), never as "the path is gone".
+ */
+type LstatOutcome =
+  | { readonly kind: "present"; readonly stat: BigIntStats }
+  | { readonly kind: "absent" }
+  | { readonly kind: "unreadable" };
+
+/** The path's own stat (never following a symlink), or its absence / unreadability. */
+function lstatOutcome(path: string): LstatOutcome {
+  try {
+    return { kind: "present", stat: lstatSync(path, { bigint: true }) };
+  } catch (err) {
+    // EXIT: the stat failed. ENOENT is the "the path does not exist"
+    // observable; every other errno (EACCES / EIO / ENOTDIR …) means the path
+    // could NOT be read — an UNKNOWN observable, never "absent", so the cache
+    // rebuilds the plan instead of serving one built on an unreadable path.
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return { kind: "absent" };
+    }
+    return { kind: "unreadable" };
+  }
+}
+
+function identityFromStat(path: string, stat: BigIntStats): FsIdentity {
+  return {
+    path,
+    absent: false,
+    unreadable: false,
+    dev: stat.dev,
+    ino: stat.ino,
+    mtimeNs: stat.mtimeNs,
+    ctimeNs: stat.ctimeNs,
+    size: stat.size,
+    directory: stat.isDirectory(),
+  };
+}
+
+function absentIdentity(path: string): FsIdentity {
+  return {
+    path,
+    absent: true,
+    unreadable: false,
+    dev: 0n,
+    ino: 0n,
+    mtimeNs: 0n,
+    ctimeNs: 0n,
+    size: 0n,
+    directory: false,
+  };
+}
+
+/** The identity of a path that could not be read — an UNKNOWN observable. */
+function unreadableIdentity(path: string): FsIdentity {
+  return {
+    path,
+    absent: false,
+    unreadable: true,
+    dev: 0n,
+    ino: 0n,
+    mtimeNs: 0n,
+    ctimeNs: 0n,
+    size: 0n,
+    directory: false,
+  };
+}
+
+function captureIdentity(path: string): FsIdentity {
+  const outcome = lstatOutcome(path);
+  if (outcome.kind === "present") return identityFromStat(path, outcome.stat);
+  if (outcome.kind === "absent") return absentIdentity(path);
+  return unreadableIdentity(path);
+}
+
+/**
+ * Record an identity. LAST write wins: the identity captured at the END of
+ * a build is the one the next call must still match, and a build that
+ * creates a child inside a recorded directory (the cover root) must not
+ * look like a change to it.
+ */
+function recordIdentity(state: MaskBuildState, identity: FsIdentity): void {
+  state.identities.set(identity.path, identity);
+}
+
+/** Is the recorded identity still the identity of that path? */
+function identityUnchanged(recorded: FsIdentity): boolean {
+  // An unreadable path is an UNKNOWN observable, never "unchanged": the plan
+  // is rebuilt (fail-safe direction — any doubt → rebuild). This covers both
+  // sides: a plan built on an unreadable path, and a path that became
+  // unreadable since the plan was built.
+  if (recorded.unreadable) return false;
+  const current = captureIdentity(recorded.path);
+  if (current.unreadable) return false;
+  if (recorded.absent) return current.absent;
+  if (current.absent) return false;
+  return (
+    recorded.dev === current.dev &&
+    recorded.ino === current.ino &&
+    recorded.mtimeNs === current.mtimeNs &&
+    recorded.ctimeNs === current.ctimeNs &&
+    recorded.size === current.size &&
+    recorded.directory === current.directory
+  );
+}
+
+/** Every recorded identity still holds? (the cache's validation step) */
+function identitiesUnchanged(identities: readonly FsIdentity[]): boolean {
+  for (const identity of identities) {
+    if (!identityUnchanged(identity)) return false;
+  }
+  return true;
+}
+
+/**
+ * Trust check for a REUSED placeholder directory: it must be a real
+ * directory (never a symlink — `lstat`, not `stat`), owned by THIS process,
+ * and private (mode exactly 0700).
+ *
+ * A directory that fails any of these is FOREIGN: it is never reused (so
+ * its content is never read as a config source and never mounted), and it
+ * is never mutated (no chmod, no delete) — the caller mints a fresh private
+ * directory instead. The owner comparison is skipped where the platform has
+ * no `process.getuid` (non-POSIX); the mode check still applies there.
+ */
+function isTrustedPlaceholderDir(dir: string): boolean {
+  const outcome = lstatOutcome(dir);
+  if (outcome.kind !== "present" || !outcome.stat.isDirectory()) return false;
+  if ((outcome.stat.mode & 0o777n) !== 0o700n) return false;
+  const uid = process.getuid?.();
+  if (uid !== undefined && outcome.stat.uid !== BigInt(uid)) return false;
+  return true;
+}
+
 /** Per-subtree mask budget: more regular files than this flips the subtree
  *  to the empty-cover fallback instead of bloating argv toward ARG_MAX. */
 const MAX_MASKED_FILES_PER_SUBTREE = 512;
@@ -140,8 +339,20 @@ function coveredBy(dest: string, path: string, subtree: boolean): boolean {
  * never listed: unlinking them inside the read-only subtree already meets
  * EROFS, and a link's read target resolves through mounts this layer pins
  * independently.
+ *
+ * The walk records the identity of every directory it traverses (the
+ * directory-granularity argument in `MaskBuildState`): the file SET is
+ * determined by those directories' contents, so their mtime+ctime is what
+ * tells the next call that the set changed. The identity is taken from the
+ * listing lstat that already happened — no extra syscall — and it is taken
+ * BEFORE the directory is read, so a change that races the read is caught
+ * as a difference (fail toward rebuild, never toward a stale plan).
  */
-function listRegularFiles(root: string, depth: number): string[] | null {
+function listRegularFiles(
+  root: string,
+  depth: number,
+  state: MaskBuildState
+): string[] | null {
   if (depth > MAX_SUBTREE_WALK_DEPTH) return null;
   let names: string[];
   try {
@@ -153,14 +364,15 @@ function listRegularFiles(root: string, depth: number): string[] | null {
   for (const name of names.sort()) {
     if (out.length >= MAX_MASKED_FILES_PER_SUBTREE) return null;
     const path = join(root, name);
-    let stat;
+    let stat: BigIntStats;
     try {
-      stat = lstatSync(path);
+      stat = lstatSync(path, { bigint: true });
     } catch {
       continue; // raced away: nothing to mask, nothing to unlink
     }
     if (stat.isDirectory()) {
-      const nested = listRegularFiles(path, depth + 1);
+      recordIdentity(state, identityFromStat(path, stat));
+      const nested = listRegularFiles(path, depth + 1, state);
       if (nested === null) return null;
       out.push(...nested);
     } else if (stat.isFile()) {
@@ -187,11 +399,17 @@ function relUnderSubtree(dest: string, root: string): string {
  * cover), and is abandoned for a fresh mkdtemp when a predicted path
  * deviates from the expected entry set (planted content), so the fence never
  * surfaces planted content through a predicted cover path.
+ *
+ * The placeholder directory is PRIVATE (mode exactly 0700) and is only
+ * reused when it still is a directory THIS process owns with exactly that
+ * mode: a foreign or wrongly-permissioned directory is neither reused nor
+ * mutated — a fresh private directory is minted instead.
  */
 function ensureFallbackCoverDir(
   coverParent: string,
   path: string,
-  colliding: readonly CredentialMaskFenceBind[]
+  colliding: readonly CredentialMaskFenceBind[],
+  state: MaskBuildState
 ): string {
   mkdirSync(coverParent, { recursive: true });
   const relToSrc = new Map(
@@ -203,15 +421,26 @@ function ensureFallbackCoverDir(
   let dir = deterministic;
   if (existsSync(deterministic)) {
     if (
-      !isDirectory(deterministic) ||
+      !isTrustedPlaceholderDir(deterministic) ||
       !topLevelMatches(deterministic, topSegments(rels))
     ) {
+      // EXIT: a foreign, wrongly-permissioned or tampered placeholder is
+      // never reused and never mutated — a fresh private directory is
+      // minted next to it instead. The deterministic name is kept for the
+      // directory this process owns, so argv stays stable across the
+      // foreground / background / rebind assemblies of one session.
       dir = mkdtempSync(join(coverParent, `${digest}-`));
     }
   } else {
-    mkdirSync(deterministic, { recursive: true });
+    // The placeholder is private: its contents are the mount points of the
+    // covered subtree and nothing outside this process may read or plant
+    // them. `mode` is masked by the process umask, so the private mode is
+    // asserted explicitly on the directory this process just created.
+    mkdirSync(deterministic, { recursive: true, mode: 0o700 });
+    chmodSync(deterministic, 0o700);
   }
-  writePlaceholders(dir, rels, relToSrc);
+  writePlaceholders(dir, rels, relToSrc, state);
+  recordIdentity(state, captureIdentity(dir));
   return dir;
 }
 
@@ -241,15 +470,17 @@ function topSegments(rels: readonly string[]): string[] {
 function writePlaceholders(
   coverDir: string,
   rels: readonly string[],
-  srcByRel: ReadonlyMap<string, string>
+  srcByRel: ReadonlyMap<string, string>,
+  state: MaskBuildState
 ): void {
   for (const rel of rels) {
     if (rel.length === 0) continue; // dest === subtree path: the mount point
     const placeholder = join(coverDir, rel);
-    mkdirSync(dirname(placeholder), { recursive: true });
+    const parent = dirname(placeholder);
+    mkdirSync(parent, { recursive: true, mode: 0o700 });
     const src = srcByRel.get(rel);
     if (src !== undefined && isDirectory(src)) {
-      mkdirSync(placeholder, { recursive: true });
+      mkdirSync(placeholder, { recursive: true, mode: 0o700 });
     } else if (!existsSync(placeholder)) {
       try {
         writeFileSync(placeholder, "", { flag: "wx" });
@@ -258,7 +489,80 @@ function writePlaceholders(
         // the file is there, which is all the mount layer needs.
       }
     }
+    // The placeholder's own directory is recorded: a removed placeholder
+    // mutates that directory's mtime, which is what tells the next call
+    // that the plan's mount points are gone.
+    recordIdentity(state, captureIdentity(parent));
   }
+}
+
+/**
+ * Record the identity of one path the plan depends on: its own stat, the
+ * "absent" identity when the path does not exist, or the "unreadable"
+ * identity when the path could not be read at all.
+ */
+function recordPathIdentity(
+  state: MaskBuildState,
+  path: string,
+  outcome: LstatOutcome
+): void {
+  if (outcome.kind === "present") {
+    recordIdentity(state, identityFromStat(path, outcome.stat));
+    return;
+  }
+  if (outcome.kind === "absent") {
+    recordIdentity(state, absentIdentity(path));
+    return;
+  }
+  recordIdentity(state, unreadableIdentity(path));
+}
+
+/**
+ * The exact-file cover plan. It depends on ONE observable: the path is a
+ * regular file right now. Its own identity is the record of that observation.
+ */
+function planExactCover(
+  path: string,
+  outcome: LstatOutcome,
+  state: MaskBuildState
+): CredentialCoverPlan {
+  recordPathIdentity(state, path, outcome);
+  return outcome.kind === "present" && outcome.stat.isFile()
+    ? { kind: "mask-files", paths: [path] }
+    : { kind: "skip" };
+}
+
+/**
+ * The subtree cover plan: every regular file under the root is masked
+ * individually, unless a colliding sentinel dest has no real mount point to
+ * land on — then the empty-subtree fallback takes over.
+ *
+ * The subtree's dependencies are the directories the walk traverses (their
+ * identities) plus, in the fallback branch, the sentinel dests' presence
+ * (their identities — the walk did not run in that branch, so nothing else
+ * would carry them).
+ */
+function planSubtreeCover(
+  path: string,
+  coverRoot: string,
+  colliding: readonly CredentialMaskFenceBind[],
+  state: MaskBuildState
+): CredentialCoverPlan {
+  const sentinelDestsPresent = colliding.every(
+    (bind) => bind.dest === path || existsSync(bind.dest)
+  );
+  const files = sentinelDestsPresent ? listRegularFiles(path, 0, state) : null;
+  if (files !== null) return { kind: "mask-files", paths: files };
+  // The fallback branch was taken because a sentinel dest has no mount
+  // point: the branch decision itself depends on that dest's presence, and
+  // the walk did not run here — so the dests' own identities are recorded.
+  for (const bind of colliding) {
+    recordIdentity(state, captureIdentity(bind.dest));
+  }
+  return {
+    kind: "fallback-cover",
+    coverDir: ensureFallbackCoverDir(coverRoot, path, colliding, state),
+  };
 }
 
 /**
@@ -271,25 +575,21 @@ function writePlaceholders(
 function planCredentialCover(
   entry: ProtectedTargetEntry,
   coverRoot: string,
-  colliding: readonly CredentialMaskFenceBind[]
+  colliding: readonly CredentialMaskFenceBind[],
+  state: MaskBuildState
 ): CredentialCoverPlan {
   const path = entry.bindPath;
   if (path === undefined) return { kind: "skip" };
+  const outcome = lstatOutcome(path);
   if (entry.rule.kind !== "subtree") {
-    return isRegularFile(path)
-      ? { kind: "mask-files", paths: [path] }
-      : { kind: "skip" };
+    return planExactCover(path, outcome, state);
   }
-  if (!isDirectory(path)) return { kind: "skip" };
-  const sentinelDestsPresent = colliding.every(
-    (bind) => bind.dest === path || existsSync(bind.dest)
-  );
-  const files = sentinelDestsPresent ? listRegularFiles(path, 0) : null;
-  if (files !== null) return { kind: "mask-files", paths: files };
-  return {
-    kind: "fallback-cover",
-    coverDir: ensureFallbackCoverDir(coverRoot, path, colliding),
-  };
+  if (outcome.kind !== "present" || !outcome.stat.isDirectory()) {
+    recordPathIdentity(state, path, outcome);
+    return { kind: "skip" };
+  }
+  recordPathIdentity(state, path, outcome);
+  return planSubtreeCover(path, coverRoot, colliding, state);
 }
 
 /**
@@ -343,10 +643,16 @@ function hasDefaultGhConfig(directory: string): boolean {
 /** GitHub CLI reads config.yml before it can consume the masked hosts.yml.
  * Supply defaults, never host configuration or aliases. The source is
  * session-owned and its directory is rebound read-only before it is exposed.
- * Symlinks and non-regular config paths receive no compatibility override. */
+ * Symlinks and non-regular config paths receive no compatibility override.
+ *
+ * The generated directory is PRIVATE (mode exactly 0700) and is reused only
+ * while it still is a directory THIS process owns with exactly that mode:
+ * a foreign or tampered directory is neither reused nor mutated — the fresh
+ * mkdtemp path takes over. */
 function defaultGhConfigBind(
   entry: ProtectedTargetEntry,
-  coverRoot: string
+  coverRoot: string,
+  state: MaskBuildState
 ): CredentialMaskFenceBind | undefined {
   if (
     entry.targetClass !== "github_cli_credential" ||
@@ -360,17 +666,25 @@ function defaultGhConfigBind(
   const digest = createHash("sha256").update(dest).digest("hex").slice(0, 24);
   let directory = join(coverRoot, `gh-default-config-${digest}`);
   if (existsSync(directory)) {
-    if (hasDefaultGhConfig(directory)) {
+    if (isTrustedPlaceholderDir(directory) && hasDefaultGhConfig(directory)) {
       // EXIT: intact session-owned defaults preserve the stable mount path.
+      recordIdentity(state, captureIdentity(directory));
+      recordIdentity(state, captureIdentity(join(directory, "config.yml")));
       return { src: join(directory, "config.yml"), dest };
     }
-    // EXIT: a tampered source stays untouched; mint a fresh safe view instead.
+    // EXIT: a tampered or foreign source stays untouched; mint a fresh safe
+    // view instead (mkdtemp is private and ours by construction).
     directory = mkdtempSync(join(coverRoot, "gh-default-config-"));
   } else {
+    // `mode` is masked by the process umask, so the private mode is asserted
+    // explicitly on the directory this process just created.
     mkdirSync(directory, { mode: 0o700 });
+    chmodSync(directory, 0o700);
   }
   const src = join(directory, "config.yml");
   writeFileSync(src, "{}\n", { mode: 0o600, flag: "wx" });
+  recordIdentity(state, captureIdentity(directory));
+  recordIdentity(state, captureIdentity(src));
   return { src, dest };
 }
 
@@ -434,10 +748,30 @@ export interface CredentialReadMaskArgsResult {
  * assembly actually emitted — the same one-snapshot discipline as the EROFS
  * guidance's inventory. Without it an unrelated "Device or resource busy"
  * anywhere on the host would be relabelled a protected-target refusal.
+ *
+ * This entry point computes the plan FRESH on every call. A session that
+ * wants the plan reused passes a `MaskPlanCache` holder to the fence
+ * factory (`BwrapFenceOptions.maskCache`); with no holder the behaviour is
+ * exactly this function's.
  */
 export function credentialReadMaskArgs(
   args: CredentialReadMaskArgs
 ): CredentialReadMaskArgsResult {
+  return buildMaskPlan(args).result;
+}
+
+/** One built plan plus the fs identities it depends on. */
+interface BuiltMaskPlan {
+  readonly result: CredentialReadMaskArgsResult;
+  readonly identities: readonly FsIdentity[];
+}
+
+/**
+ * Build the mask plan for one assembly, recording the fs identities the
+ * plan depends on (see `MaskBuildState`).
+ */
+function buildMaskPlan(args: CredentialReadMaskArgs): BuiltMaskPlan {
+  const state: MaskBuildState = { identities: new Map() };
   const binds = args.egressBinds ?? [];
   const coverRoot = join(args.sessionTmpRoot, COVER_ROOT_NAME);
   const covers: string[] = [];
@@ -454,14 +788,14 @@ export function credentialReadMaskArgs(
     const colliding = binds.filter((bind) =>
       coveredBy(bind.dest, path, subtree)
     );
-    const defaultConfig = defaultGhConfigBind(entry, coverRoot);
+    const defaultConfig = defaultGhConfigBind(entry, coverRoot, state);
     if (defaultConfig !== undefined) {
       // The source must not be writable through its session-scratch spelling.
       rebinds.push("--ro-bind", coverRoot, coverRoot);
       // Explicit egress overrides retain their existing final-mount priority.
       colliding.unshift(defaultConfig);
     }
-    const plan = planCredentialCover(entry, coverRoot, colliding);
+    const plan = planCredentialCover(entry, coverRoot, colliding, state);
     covers.push(...coverTokensForPlan(plan, path, masked, exactFileMaskPaths));
     // Re-emit the sentinel binds above the masks so the masked value stays
     // reachable (coordination, not contradiction). Under the fallback cover
@@ -470,8 +804,116 @@ export function credentialReadMaskArgs(
       rebinds.push("--ro-bind", bind.src, bind.dest);
     }
   }
+  // The cover root's own identity is captured LAST: the build creates
+  // children inside it (the gh default-config dir, the fallback cover dir),
+  // and those creations mutate the root's mtime. Capturing after them keeps
+  // the build's own writes from looking like a change on the next call —
+  // which would rebuild the plan on every call, the exact cost the cache
+  // exists to remove.
+  recordIdentity(state, captureIdentity(coverRoot));
   return {
-    args: [...covers, ...rebinds],
-    exactFileMaskPaths: Object.freeze(exactFileMaskPaths),
+    result: {
+      args: [...covers, ...rebinds],
+      exactFileMaskPaths: Object.freeze(exactFileMaskPaths),
+    },
+    identities: [...state.identities.values()],
+  };
+}
+
+/**
+ * The cache key: a digest of the mask plan's REAL inputs.
+ *
+ * The plan depends on (a) the inventory's credential-arm entries (resolved
+ * path, rule kind, target class), (b) this assembly's materialized
+ * name-pattern matches (path + class), (c) the egress bind table (src +
+ * dest — a bind whose dest lands under a covered subtree changes the cover
+ * branch), and (d) the session tmp root (the cover root lives under it). A
+ * change in any of them yields a different digest → a cache miss → the plan
+ * is rebuilt, so a changed inventory or a changed materialized-target set can
+ * never be served from a stale plan.
+ *
+ * There is deliberately NO secret-registry version in this key: the secret
+ * registry is a VALUE map (command restore + output mask) and never
+ * influences which paths get masked — there is no runtime credential-path
+ * registry to version. The fs identities cover the rest.
+ */
+function maskPlanKey(args: CredentialReadMaskArgs): string {
+  const hash = createHash("sha256");
+  hash.update("credential-read-mask/v1\n");
+  hash.update(`sessionTmpRoot=${args.sessionTmpRoot}\n`);
+  for (const entry of credentialMaskEntries(
+    args.inventory,
+    args.materializedTargets ?? []
+  )) {
+    hash.update(
+      `entry=${entry.bindPath ?? ""}|${entry.rule.kind}|${entry.targetClass}\n`
+    );
+  }
+  for (const bind of args.egressBinds ?? []) {
+    hash.update(`bind=${bind.src}|${bind.dest}\n`);
+  }
+  return hash.digest("hex");
+}
+
+/** One cached plan: its key, its result, and the fs identities it holds on. */
+interface MaskCacheEntry {
+  readonly key: string;
+  readonly result: CredentialReadMaskArgsResult;
+  readonly identities: readonly FsIdentity[];
+}
+
+/**
+ * A session-scoped holder for the credential read-mask plan.
+ *
+ * NOT a module-level cache: the holder is created once per bash-tool
+ * instance (i.e. per session) and passed explicitly down to the fence
+ * factory, so two sessions never share a plan and no plan outlives the
+ * session that produced it.
+ */
+export interface MaskPlanCache {
+  /**
+   * The mask plan for these inputs: the cached plan when it still holds
+   * (same key AND every recorded fs identity unchanged), a freshly built
+   * one otherwise.
+   */
+  readonly resolve: (
+    args: CredentialReadMaskArgs
+  ) => CredentialReadMaskArgsResult;
+}
+
+/**
+ * A fresh, empty mask-plan holder. One per session (the bash tool's factory
+ * closure), never a module-level singleton.
+ *
+ * The holder caches the PLAN only — never the inventory and never the
+ * materialized targets. Those two are re-derived per assembly on purpose:
+ * the inventory carries the one-shot awaited name-rule pre-walk (caching it
+ * would silently drop that walk into the blocking synchronous fallback and
+ * break its one-shot contract), and the materialized targets are what make
+ * "a newly appearing credential file is protected on the next call" true —
+ * a cached copy would keep serving the old match set. The plan's own
+ * invalidation (the fs identities) is what keeps a stale file set from
+ * being reused.
+ */
+export function createMaskPlanCache(): MaskPlanCache {
+  let cached: MaskCacheEntry | undefined;
+  return {
+    resolve: (args: CredentialReadMaskArgs): CredentialReadMaskArgsResult => {
+      const key = maskPlanKey(args);
+      if (
+        cached !== undefined &&
+        cached.key === key &&
+        identitiesUnchanged(cached.identities)
+      ) {
+        return cached.result;
+      }
+      const built = buildMaskPlan(args);
+      cached = {
+        key,
+        result: built.result,
+        identities: built.identities,
+      };
+      return built.result;
+    },
   };
 }

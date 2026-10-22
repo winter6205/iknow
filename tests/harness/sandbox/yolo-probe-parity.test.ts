@@ -24,9 +24,9 @@
  *
  * Invariants pinned here:
  *   - the yolo profile and the other profiles are **two disjoint check
- *     lists**: yolo checks only enter the yolo face; non-yolo assertions are
+ *     lists**: retired-fence checks only enter the bare face; live-fence assertions are
  *     conditioned by extension, never by inverting or dropping the old ones;
- *   - the yolo fence opts shape (`yolo: true` into `createBwrapFence`)
+ *   - the fence opts shape (`fenceRetired: true` into `createBwrapFence`)
  *     yields bare argv with no "fence present" token (`bwrap` /
  *     `--unshare-net` / `--clearenv` / `--setenv` / `--bind`);
  *   - the four routes (foreground bash / background spawn / verify
@@ -92,7 +92,7 @@ vi.mock(
       >();
     return {
       ...actual,
-      // Under yolo this must never be called; the non-yolo control arm needs
+      // With the fence retired this must never be called; the fenced control arm needs
       // a fake session to return, so the call count is asserted per case.
       createEgressSession: vi.fn(async () => ({
         id: "probe-parity-egress",
@@ -114,7 +114,7 @@ import * as sandboxRunner from "../../../src/harness/sandbox/runner.ts";
 import * as egressSessionModule from "../../../src/harness/sandbox/egress/session.ts";
 import { createBwrapFence } from "../../../src/harness/sandbox/bwrap.ts";
 import { createFsPolicy } from "../../../src/harness/sandbox/fs-policy.ts";
-import { YOLO_ENV_KEY } from "../../../src/harness/sandbox/yolo.ts";
+import { FENCE_RETIRED_ENV_KEY } from "../../../src/harness/sandbox/yolo.ts";
 import { defaultBackgroundSpawn } from "../../../src/harness/background/manager.ts";
 import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts";
 import { createDefaultSubAgentSpawn } from "../../../src/harness/subagent/spawn.ts";
@@ -170,18 +170,18 @@ const PROXY_ENV_KEYS: readonly string[] = Object.freeze([
   "NO_PROXY",
 ]);
 
-function fenceOpts(yolo: boolean): Parameters<typeof createBwrapFence>[0] {
+function fenceOpts(fenceRetired: boolean): Parameters<typeof createBwrapFence>[0] {
   return {
     command: "bash",
     args: ["-c", "echo hi"],
     fsPolicy: createFsPolicy({ tmpDir: FIX_TMP, mode: "global" }),
     env: { PATH: "/usr/bin:/bin" },
     cwd: FIX_CWD,
-    ...(yolo ? { yolo: true } : {}),
+    ...(fenceRetired ? { fenceRetired: true } : {}),
   };
 }
 
-/** Assert a set of argv is the yolo bare shape — the no-fence criterion. */
+/** Assert a set of argv is the retired-fence bare shape — the no-fence criterion. */
 function expectBareArgv(argv: readonly string[]): void {
   expect(argv[0]).toBe("bash");
   expect(argv).toEqual(["bash", "-c", "echo hi"]);
@@ -196,7 +196,7 @@ function expectBareArgv(argv: readonly string[]): void {
 const CAN_EXEC_BARE =
   process.platform === "linux" && existsSync("/proc/self/ns/net");
 
-/** Spawn the real yolo fence argv (bare) with the given command + env. */
+/** Spawn the real retired-fence argv (bare) with the given command + env. */
 function spawnBare(cmd: string, env: NodeJS.ProcessEnv) {
   const argv = createBwrapFence({
     command: "bash",
@@ -204,7 +204,7 @@ function spawnBare(cmd: string, env: NodeJS.ProcessEnv) {
     fsPolicy: createFsPolicy({ tmpDir: FIX_TMP, mode: "global" }),
     env,
     cwd: FIX_CWD,
-    yolo: true,
+    fenceRetired: true,
   }).argv;
   return spawnSync(argv[0], argv.slice(1), {
     env,
@@ -222,7 +222,7 @@ describe("probe parity — fence opts shape and bare argv (ADR-0119)", () => {
     expectBareArgv(createBwrapFence(fenceOpts(true)).argv);
   });
 
-  it("non-yolo profile keeps argv[0]=bwrap with --unshare-net always present", () => {
+  it("a live fence keeps argv[0]=bwrap with --unshare-net always present", () => {
     const argv = createBwrapFence(fenceOpts(false)).argv;
     expect(argv[0]).toBe("bwrap");
     expect(argv).toContain("--unshare-net");
@@ -264,7 +264,7 @@ describe("four-route bare-argv parity — all collapse onto the same SSOT factor
       cwd: FIX_CWD,
       env: { PATH: "/usr/bin:/bin" },
       tmpDir: FIX_TMP,
-      yolo: true,
+      fenceRetiredAtSpawn: true,
     });
     const call = spawnMock.mock.calls[0];
     expect(call).toBeDefined();
@@ -278,7 +278,7 @@ describe("four-route bare-argv parity — all collapse onto the same SSOT factor
     const runVerify = makeDefaultRunVerify({
       cwd: FIX_CWD,
       tmpDir: FIX_TMP,
-      yolo: { get: () => true, set: () => undefined },
+      fenceRetired: { get: () => true },
     });
     await runVerify("echo hi", {});
     expect(vi.mocked(sandboxRunner.runInSandbox)).toHaveBeenCalledTimes(1);
@@ -292,14 +292,14 @@ describe("four-route bare-argv parity — all collapse onto the same SSOT factor
     ).not.toHaveBeenCalled();
   });
 
-  it("route 3 control: non-yolo verify -> bwrap argv + egress session started (same input, only the holder differs)", async () => {
+  it("route 3 control: fenced verify -> bwrap argv + egress session started (same input, only the holder differs)", async () => {
     const runVerify = makeDefaultRunVerify({
       cwd: FIX_CWD,
       tmpDir: FIX_TMP,
       egressPolicy: {
         allowedDomains: ["example.com"],
         deniedDomains: [],
-        commandLabel: "probe-parity:non-yolo",
+        commandLabel: "probe-parity:fenced",
       },
     });
     await runVerify("echo hi", {});
@@ -330,7 +330,7 @@ describe("four-route bare-argv parity — all collapse onto the same SSOT factor
       sessionRoot: FIX_TMP,
       installRoot: FIX_CWD,
       traceDir: join(FIX_TMP, "trace"),
-      yolo: { get: () => true, set: () => undefined },
+      fenceRetired: { get: () => true },
     });
     spawnFn(
       { id: "probe-parity-task" } as never,
@@ -340,7 +340,7 @@ describe("four-route bare-argv parity — all collapse onto the same SSOT factor
     const call = spawnMock.mock.calls[0];
     expect(call).toBeDefined();
     const opts = call?.[2] as { env?: NodeJS.ProcessEnv } | undefined;
-    expect(opts?.env?.[YOLO_ENV_KEY]).toBe("1");
+    expect(opts?.env?.[FENCE_RETIRED_ENV_KEY]).toBe("1");
 
     // Control: holder absent / false → the key is not written (legacy child
     // env bytes unchanged; the child side reads key-absent as false =
@@ -358,7 +358,7 @@ describe("four-route bare-argv parity — all collapse onto the same SSOT factor
     );
     const plainCall = spawnMock.mock.calls[0];
     const plainOpts = plainCall?.[2] as { env?: NodeJS.ProcessEnv } | undefined;
-    expect(plainOpts?.env?.[YOLO_ENV_KEY]).toBeUndefined();
+    expect(plainOpts?.env?.[FENCE_RETIRED_ENV_KEY]).toBeUndefined();
   });
 });
 
@@ -413,7 +413,7 @@ describe("bare-path physical checks (archived probe yolo category 2-5: no bwrap 
           fsPolicy: createFsPolicy({ tmpDir: FIX_TMP, mode: "global" }),
           env,
           cwd: FIX_CWD,
-          yolo: true,
+          fenceRetired: true,
         }).argv;
         const stdout = await new Promise<string>((resolve, reject) => {
           childProcessModule.execFile(

@@ -229,6 +229,22 @@ function expectDeniedInEveryMode(
   }
 }
 
+/**
+ * The four retained backslash-whitespace shapes of
+ * `specs/backslash-whitespace-veto-repair.md`: the mid-word LF join, the
+ * unquoted backslash+TAB, the backslash+CR and the double-quoted LF fold.
+ * Real Bash disagrees with the facade on all four, so each keeps the
+ * class-bearing hard denial that `echo\ hi` used to stand for before the
+ * repair admitted ordinary escaped spaces. Spelled with escapes, so no raw
+ * control byte lands in this file's source.
+ */
+const RETAINED_BACKSLASH_WHITESPACE: readonly string[] = [
+  "printf '<%s>\\n' a\\\nb",
+  "printf '<%s>\\n' a\\\tb",
+  "printf '<%s>\\n' a\\\rb",
+  "printf '<%s>\\n' \"a\\\nb\"",
+];
+
 /* ------------------------------------------------------------------ */
 /* hand-built SecurityParseOk payloads (SC19's hostile set)            */
 /* ------------------------------------------------------------------ */
@@ -776,7 +792,10 @@ describe("SC20 — the routed hard-deny outcomes deny at the wall surface", () =
         label: "unicode-whitespace-or-zero-width",
         command: `echo ${zeroWidth}hi`,
       },
-      { label: "backslash-whitespace", command: "echo\\ hi" },
+      ...RETAINED_BACKSLASH_WHITESPACE.map((command) => ({
+        label: "backslash-whitespace",
+        command,
+      })),
     ];
     for (const row of vetoed) {
       expect(graph.parseForSecurity(row.command).kind).toBe("vetoed");
@@ -1744,8 +1763,11 @@ describe("SC19's domain read from the ask side — what the export answers empty
       readonly kind: string;
     }> = [
       { command: 'echo "$(rm -rf /', kind: "malformed" },
-      { command: "echo\\ hi", kind: "vetoed" },
       { command: `echo ${String.fromCharCode(1)}hi`, kind: "vetoed" },
+      ...RETAINED_BACKSLASH_WHITESPACE.map((command) => ({
+        command,
+        kind: "vetoed",
+      })),
     ];
     for (const row of routed) {
       expect(graph.parseForSecurity(row.command).kind, row.command).toBe(
@@ -1768,6 +1790,145 @@ describe("SC19's domain read from the ask side — what the export answers empty
     expect(graph.findSubstitutionAsk("echo $(rm -rf /)")).toEqual([]);
     // And the degrade path still denies what it always denied: SC18's floor.
     expectDeniedInEveryMode(graph, "echo $(rm -rf /)", "[hard_wall]");
+  });
+});
+
+describe("SC5 — an admitted separator continuation decides nothing on its own", () => {
+  /**
+   * The admitted LF position needs a space on BOTH sides of the backslash:
+   * that is what makes it a word separator instead of a mid-word join, and it
+   * is the only position the parse settles. Each row below is one command
+   * spelled with and without that continuation, and the claim is equality of
+   * the permission verdict in all three modes — the continuation hides no
+   * danger and invents none. Every command is inspected through
+   * `bashOutcome`; none is ever executed.
+   */
+  const SEPARATOR = " \\\n ";
+
+  const EQUIVALENT_SPELLINGS: readonly (readonly [string, string, string])[] = [
+    ["destructive", "rm -rf /", `rm${SEPARATOR}-rf /`],
+    [
+      "sensitive redirect",
+      "echo x > ~/.ssh/authorized_keys",
+      `echo x >${SEPARATOR}~/.ssh/authorized_keys`,
+    ],
+    [
+      "pipeline",
+      "cat /etc/passwd | grep root",
+      `cat /etc/passwd |${SEPARATOR}grep root`,
+    ],
+    [
+      "confirmed nested danger",
+      "echo $(rm -rf /)",
+      `echo${SEPARATOR}$(rm -rf /)`,
+    ],
+    ["ordinary", "echo a b", `echo a${SEPARATOR}b`],
+  ];
+
+  it("gives every equivalent pair the same decision and the same reason, in every mode", async () => {
+    const graph = await freshGraph();
+    for (const [what, plain, continued] of EQUIVALENT_SPELLINGS) {
+      for (const mode of ["default", "plan", "full_auto"] as PermissionMode[]) {
+        const before = graph.bashOutcome(plain, mode);
+        const after = graph.bashOutcome(continued, mode);
+        expect(graph.parseForSecurity(continued).kind, `${what}`).toBe("ok");
+        expect(after.decision, `${what} in ${mode}`).toBe(before.decision);
+        expect(after.reason, `${what} in ${mode}`).toBe(before.reason);
+      }
+    }
+  });
+
+  it("keeps the deny-tier arms denied, and the ordinary arm ordinary", async () => {
+    const graph = await freshGraph();
+    for (const command of [
+      "rm -rf /",
+      `rm${SEPARATOR}-rf /`,
+      "echo x > ~/.ssh/authorized_keys",
+      `echo x >${SEPARATOR}~/.ssh/authorized_keys`,
+      "cat /etc/passwd | grep root",
+      `cat /etc/passwd |${SEPARATOR}grep root`,
+      "echo $(rm -rf /)",
+      `echo${SEPARATOR}$(rm -rf /)`,
+    ]) {
+      expectDeniedInEveryMode(graph, command, "[hard_wall]");
+    }
+    // The deny tier is named, not merely present: a destructive operand and a
+    // nested one keep their own ids, and the sensitive arms keep the path wall.
+    for (const command of ["rm -rf /", `rm${SEPARATOR}-rf /`]) {
+      expect(idOf(graph, command), command).toBe("destructive-rm");
+      expectDeniedInEveryMode(graph, command, "id=destructive-rm");
+    }
+    for (const command of ["echo $(rm -rf /)", `echo${SEPARATOR}$(rm -rf /)`]) {
+      expect(idOf(graph, command), command).toBe("command-substitution");
+      expectDeniedInEveryMode(graph, command, "subst=dollar-paren");
+    }
+    for (const command of [
+      "echo x > ~/.ssh/authorized_keys",
+      `echo x >${SEPARATOR}~/.ssh/authorized_keys`,
+      "cat /etc/passwd | grep root",
+      `cat /etc/passwd |${SEPARATOR}grep root`,
+    ]) {
+      expectDeniedInEveryMode(
+        graph,
+        command,
+        "sensitive path targeted by command"
+      );
+    }
+    // And the ordinary pair is not smuggled into a deny: the continuation
+    // buys no wall answer it did not already have.
+    const ordinary = `echo a${SEPARATOR}b`;
+    expect(graph.findDangerousPattern(ordinary)).toBeNull();
+    expect(graph.bashOutcome(ordinary).decision).toBe("ask");
+    expect(graph.bashOutcome(ordinary, "full_auto").decision).toBe("allow");
+  });
+
+  it("keeps a review-worthy command a review, with only the source span moving", async () => {
+    const graph = await freshGraph();
+    const plain = "awk 'rm -rf /tmp/x'";
+    const continued = `awk${SEPARATOR}'rm -rf /tmp/x'`;
+    const cause = (reason: string): string =>
+      reason.replace(/\[span \d+-\d+\]/, "[span]");
+    for (const mode of ["default", "plan", "full_auto"] as PermissionMode[]) {
+      const before = graph.bashOutcome(plain, mode);
+      const after = graph.bashOutcome(continued, mode);
+      expect(after.decision, mode).toBe(before.decision);
+      expect(cause(after.reason), mode).toBe(cause(before.reason));
+    }
+    // The review is the ADR-0127 one, on both spellings: the unresolved
+    // region is quoted by SOURCE OFFSET, so it moves with the three characters
+    // the continuation inserts, while the cause and the operand it names do
+    // not. Nothing here is a wall deny and nothing is a silent allow.
+    const before = graph.bashOutcome(plain, "default");
+    const reviewed = graph.bashOutcome(continued, "default");
+    expect(before.reason).toContain("[span 0-19]");
+    expect(reviewed.reason).toContain("[span 0-22]");
+    expect(reviewed.decision).toBe("ask");
+    expect(reviewed.reason).toContain("security review required");
+    expect(reviewed.reason).toContain("execution-unresolved");
+    expect(reviewed.reason).toContain("`awk`");
+    expect(reviewed.reason).toContain("rm -rf");
+  });
+
+  it("still refuses a continuation smuggled INSIDE the nested body", async () => {
+    const graph = await freshGraph();
+    // The parent word fact spans the whole `$( ... )`, so the site sits inside
+    // a word and the parse cannot settle it: the nested arm keeps the
+    // conservative outcome. This is the one SC5 pair whose two spellings do
+    // NOT agree verbatim — the continued one denies for the retained
+    // backslash-whitespace class instead of naming the nested danger — and it
+    // is recorded here as a deny-side divergence rather than papered over.
+    const inside = "echo $(rm -rf \\\n /)";
+    expect(graph.parseForSecurity(inside).kind).toBe("vetoed");
+    expectDeniedInEveryMode(
+      graph,
+      inside,
+      "verdict=vetoed",
+      "backslash-whitespace"
+    );
+    // The tier is unchanged even though the reason is: deny before, deny now.
+    expect(graph.bashOutcome(inside).decision).toBe(
+      graph.bashOutcome("echo $(rm -rf /)").decision
+    );
   });
 });
 

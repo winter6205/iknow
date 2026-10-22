@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { run } from "../../../src/harness/loop-engine.ts";
 import { createExecutor } from "../../../src/harness/tools/executor.ts";
 import { createStubModel } from "../../../src/harness/stubs/stub-model.ts";
+import { isEmptyFinalResponseStop } from "../../../src/harness/model-adapter/types.ts";
 
 import type {
   AnthropicContentBlock,
@@ -54,15 +55,20 @@ function assistantResult(opts: AssistantResultOpts): AssistantTurnResult {
     blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input });
   }
   const native: AnthropicNativeMessage = { role: "assistant", content: blocks };
+  // This builder scripts text / tool_use blocks only — never thinking content.
+  const hasThinking = false;
   return {
     nativeMessage: native,
     projection: { nativeMessage: native, texts, toolCalls },
     supplierStop,
     needsTools: toolCalls.length > 0,
-    isEmptyFinalResponse:
-      supplierStop === "success" &&
-      texts.length === 0 &&
-      toolCalls.length === 0,
+    hasThinking,
+    isEmptyFinalResponse: isEmptyFinalResponseStop(
+      supplierStop,
+      texts,
+      toolCalls,
+      hasThinking
+    ),
   };
 }
 

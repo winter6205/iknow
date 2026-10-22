@@ -142,6 +142,26 @@ describe("loop-engine records a security-interruption cancellation", () => {
     expect(row!["cause"]).toBe("cancelled");
     expect((row!["error"] as { message: string }).message).toBe("cancelled");
   });
+
+  it("a cancelled result that carries an ADR-0147 R3 [approval] line still becomes cause=cancelled", async () => {
+    // The two-stage gate appends its `[approval]` line to the result's own
+    // message, so the tag the engine reads is the message's FIRST line. The
+    // appended line names the approval outcome, not why the call failed; if it
+    // hid the cancel, a cancelled call would lose its filterable cause.
+    const message =
+      "cancelled\n[approval] held for user approval (cancelled); " +
+      "calls that ran in this wave meanwhile under the wave-start verdict: none";
+    const rows = await runWithFixedResult("w-cancel-approval", (call) => ({
+      kind: "execution_failed",
+      toolUseId: call.id,
+      message,
+    }));
+
+    const [row] = toolCallRows(rows);
+    expect(row!["cause"]).toBe("cancelled");
+    // Only the cause reads the first line; the model-facing message is intact.
+    expect((row!["error"] as { message: string }).message).toBe(message);
+  });
 });
 
 describe("loop-engine records the process-tree cleanup verdict", () => {
@@ -201,7 +221,9 @@ describe("loop-engine records the process-tree cleanup verdict", () => {
     // The reason is carried twice on purpose: structurally in cleanup.reason,
     // and as a cause a reader can filter on without parsing the cleanup body.
     expect(row!["cause"]).toBe("cleanup_unconfirmed");
-    expect((row!["cleanup"] as { reason: string }).reason).toBe("teardown_failed");
+    expect((row!["cleanup"] as { reason: string }).reason).toBe(
+      "teardown_failed"
+    );
   });
 
   it("a result with no cleanup evidence leaves the field absent", async () => {

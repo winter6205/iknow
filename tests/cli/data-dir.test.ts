@@ -49,12 +49,13 @@ describe("parseArgs --data-dir", () => {
 });
 
 describe("usageText — --data-dir advertisement", () => {
-  it("usageText mentions --data-dir <dir> (bilingual)", () => {
+  it("usageText mentions --data-dir <dir> and its published default root", () => {
     const t = usageText();
     assert.match(t, /--data-dir <dir>/);
-    // Both languages should appear next to the flag in the Options block.
+    // One English-only data table: the flag's role and the default it falls back to
+    // are both part of what the help publishes.
     assert.match(t, /session pool root/i);
-    assert.match(t, /会话池|共享池/i);
+    assert.match(t, /~\/\.iknow/);
   });
 
   it("usageText preserves the existing --port / --host entries (no regression)", () => {

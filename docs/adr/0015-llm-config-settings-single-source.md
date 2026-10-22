@@ -3,6 +3,8 @@
 Date: 2026-08-12
 Status: accepted
 
+> **Amendment 2026-10-17** (ADR-0145): §1 now names the sole source of the **default model**. A conversation snapshots the default at creation into `SessionFileV1.model` and never reads `settings.llm.model` again; editing it affects new conversations only.
+
 > **Amendment 2026-09-22** (ADR-0122): §1 still holds for the **main session**. Optional user-layer `settings.subagent.model` is a worker route only; it is not a second source for `settings.llm.model`.
 >
 > **Amendment 2026-09-19** (ADR-0113): §1 still holds — the **main-session** `settings.llm.model` is fail-fast when missing. The optional `settings.llm.liteModel` does not change this clause.

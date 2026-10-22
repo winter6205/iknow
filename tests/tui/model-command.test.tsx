@@ -380,11 +380,15 @@ describe("applyModelPickerKey 的 fix 落地（宿主提交面）", () => {
 describe("/model 端到端（真实键盘投递）", () => {
   test("↑↓ 移焦点 + Enter → onPersistModel 收到 {model} 且面板关闭", async () => {
     const calls: Array<{ model: string }> = [];
+    // ADR-0145: the callback also receives the ACTIVE conversation's id (a
+    // draft has none yet).
+    const convIds: Array<string | undefined> = [];
     const app = await mountAsync({
       providers: PROVIDERS,
       env: { model: "minimax-cn/MiniMax-M3", defaultThinking: BASELINE_OFF },
-      onPersistModel: (patch) => {
+      onPersistModel: (patch, conversationId) => {
         calls.push(patch);
+        convIds.push(conversationId);
         return Promise.resolve({ ok: true as const });
       },
     });
@@ -425,6 +429,8 @@ describe("/model 端到端（真实键盘投递）", () => {
     await until(() => calls.length === 1, 8000, "persist-called");
     // persistence patch = the selected routing ID.
     expect(calls[0]).toEqual({ model: "volcengine-ark/deepseek-v3-250324" });
+    // ADR-0145: a draft has no conversation yet → no id to set the route on.
+    expect(convIds[0]).toBeUndefined();
     // picker closed (selection is done; write-back is a background action).
     await untilFrame(
       app.setup,

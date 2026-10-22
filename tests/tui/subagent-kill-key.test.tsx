@@ -153,6 +153,7 @@ async function mountApp(subagents: ReadonlyArray<SubagentInfo>): Promise<{
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
+    listLiveBackgroundTasks: () => [],
     listSubagents: () => current,
     abortSubagentTask: (taskId) => {
       killed.push({ taskId });

@@ -42,6 +42,12 @@ import type {
 interface MakeToolOpts {
   readonly name: string;
   readonly category: AciCategory;
+  /**
+   * The optional PER-CALL concurrency-safety predicate. Absent = the tool
+   * declares no predicate (the projected def must then carry no
+   * `isConcurrencySafeForInput` key at all).
+   */
+  readonly isConcurrencySafeForInput?: (input: unknown) => boolean;
 }
 
 function makeAciTool(opts: MakeToolOpts): AciToolDef {
@@ -54,6 +60,9 @@ function makeAciTool(opts: MakeToolOpts): AciToolDef {
     aci: Object.freeze({
       category,
       isConcurrencySafe: category === "read-only",
+      ...(opts.isConcurrencySafeForInput
+        ? { isConcurrencySafeForInput: opts.isConcurrencySafeForInput }
+        : {}),
       interruptBehavior:
         category === "write" ? ("block" as const) : ("cancel" as const),
       timeoutTier: "default" as const,
@@ -684,5 +693,45 @@ describe("createAciCatalog", () => {
     assert.equal(got!.aci.category, "read-only");
     const all = cat.all();
     assert.equal(all.length, 1);
+  });
+
+  it("projects the per-call concurrency predicate (same function reference)", () => {
+    // The production path reads the PROJECTED def: `createAciExecutor` does
+    // `opts.catalog ?? createAciCatalog(registry)` and then `catalog.get(name)`.
+    // If the projection dropped `isConcurrencySafeForInput`, the wave splitter
+    // would fall back to the static default and every bash call would become
+    // a singleton wave — silently.
+    const predicate = (input: unknown): boolean =>
+      (input as { readonly safe?: unknown }).safe === true;
+    const tool = makeAciTool({
+      name: "bash",
+      category: "execute",
+      isConcurrencySafeForInput: predicate,
+    });
+    const cat = createAciCatalog(makeRegistry([tool]));
+    const got = cat.get("bash");
+    assert.ok(got);
+    // Same reference, not a copy: the projected def carries the DECLARED
+    // predicate itself.
+    assert.equal(got!.aci.isConcurrencySafeForInput, predicate);
+    // And it is live on the projected def — it decides for a call.
+    assert.equal(got!.aci.isConcurrencySafeForInput!({ safe: true }), true);
+    assert.equal(got!.aci.isConcurrencySafeForInput!({ safe: false }), false);
+  });
+
+  it("a def WITHOUT a predicate projects to a def with NO isConcurrencySafeForInput key", () => {
+    // Byte-for-byte the same projection as before the per-call predicate
+    // existed: the key is ABSENT (not present-and-undefined), and the rest of
+    // the projected meta is exactly the pre-change field set.
+    const tool = makeAciTool({ name: "grep", category: "read-only" });
+    const cat = createAciCatalog(makeRegistry([tool]));
+    const got = cat.get("grep");
+    assert.ok(got);
+    assert.equal("isConcurrencySafeForInput" in got!.aci, false);
+    assert.deepEqual(Object.keys(got!.aci).sort(), [
+      "category",
+      "interruptBehavior",
+      "isConcurrencySafe",
+    ]);
   });
 });

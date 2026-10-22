@@ -4,14 +4,18 @@
  * AskUser implementations for the three CLI inlets (equal footing).
  *  - chat TTY REPL: createTtyAskUser (readline y/N prompt).
  *  - ask oneshot:   createFailClosedAskUser (always false; user can't interact).
- *  - serve SPA:     createServeAskUser (queue-based; fail-closed after
- *                   bounded timeout unless explicitly resolved via
- *                   resolveAsk(id, approved)). NO auto-approve.
+ *  - serve SPA:     createServeAskUser (queue-based; only an explicit
+ *                   resolveAsk(id, approved) admits a call — no auto-approve,
+ *                   and no default timeout: an unanswered question waits).
  *  - tests:         createNoAskUser (always true).
+ *
+ * "Fail-closed" means no ending other than an explicit approval admits the
+ * call; it does not mean a timer. A timeout exists only when `timeoutMs` is
+ * configured (ADR-0147 R4).
  */
 
 import * as readline from "node:readline";
-import type { AskUser } from "./types.js";
+import type { AskUser, AskUserOutcome } from "./types.js";
 
 /* -----------------------------------------------------------------------------
  * TTY (chat) — readline y/N prompt
@@ -136,18 +140,20 @@ export function createNoAskUser(): AskUser {
 }
 
 /* -----------------------------------------------------------------------------
- * Serve (SPA) — queue-based, FAIL-CLOSED on timeout
+ * Serve (SPA) — queue-based, fail-closed (no default timeout)
  *
  * #115 H3 fix: the previous stub auto-approved every ask on the next
  * microtask, making `iknow serve` a permanent-approval path. This is now
- * fail-closed: an ask only resolves via `resolveAsk(id, approved)`. If no
- * answer arrives within `timeoutMs` (default 5_000ms), the ask resolves
- * `false`. The timer uses `unref()` so it never holds the process alive.
+ * fail-closed: an ask only resolves via `resolveAsk(id, approved)`. There is
+ * no default timeout (ADR-0147 R4): an unanswered question stays pending
+ * until the user answers it or the caller aborts. When `timeoutMs` is a
+ * positive number the ask ends as `{kind:"timeout", afterMs}` after that
+ * budget; the timer uses `unref()` so it never holds the process alive.
  *
- * The handle exposes `{ ask, resolveAsk, pendingCount }` — surface is
- * backwards-compatible with the prior shape; production callers that did
- * `createServeAskUser().ask` keep working; the behavior changes from
- * auto-approve → fail-closed-on-timeout.
+ * The handle exposes `{ ask, resolveAsk, pendingCount, pendingAll }` —
+ * surface is backwards-compatible with the prior shape; production callers
+ * that did `createServeAskUser().ask` keep working; the behavior changes from
+ * auto-approve → fail-closed.
  *
  * `id` format: `ask-N` where N is a monotonic counter. The id is returned
  * out-of-band via the handle's `pendingCount` / `resolveAsk`; tests pull it
@@ -155,7 +161,8 @@ export function createNoAskUser(): AskUser {
  * -------------------------------------------------------------------------- */
 
 export interface ServeAskUserOpts {
-  /** How long (ms) to wait for `resolveAsk` before failing closed. Default 5_000. */
+  /** How long (ms) to wait for `resolveAsk` before ending as `timeout`.
+   *  Absent or `0` → no timer: wait until answered or cancelled. */
   readonly timeoutMs?: number;
 }
 
@@ -164,17 +171,21 @@ export interface PendingAskView {
   readonly id: string;
   readonly tool: string;
   readonly summaryHint: string;
+  /** The `tool_use` id of the call this question is about (ADR-0147 R1). */
+  readonly toolUseId: string;
+  /** The wave's conversation; absent only for a caller that has none. */
+  readonly conversationId?: string;
 }
 
 interface PendingAsk extends PendingAskView {
   readonly ctx: Parameters<AskUser>[0];
-  readonly resolve: (v: boolean) => void;
-  readonly timer: NodeJS.Timeout;
+  readonly resolve: (v: boolean | AskUserOutcome) => void;
+  readonly timer: NodeJS.Timeout | undefined;
   readonly onAbort: () => void;
 }
 
 export interface ServeAskUserHandle {
-  /** Trigger an ask; returns a Promise that resolves only via resolveAsk or timeout. */
+  /** Trigger an ask; resolves via resolveAsk, a configured timeout, or abort. */
   ask: AskUser;
   /**
    * Resolve a pending ask by id. Returns true if a pending entry existed and
@@ -183,20 +194,20 @@ export interface ServeAskUserHandle {
   resolveAsk: (id: string, approved: boolean) => boolean;
   /** Pending count — mainly for diagnostics / tests. */
   pendingCount: () => number;
-  /** Snapshot of all pending asks (id + context). Process-global: the serving
-   *  process owns a single in-flight turn at a time in v0, so no conversation
-   *  scope is needed at this layer (hub can filter if desired). */
+  /** Snapshot of all pending asks (id + call identity + context). Process-global:
+   *  the serving process owns a single in-flight turn at a time in v0, so no
+   *  conversation scope is needed at this layer (hub can filter if desired). */
   pendingAll: () => ReadonlyArray<PendingAskView>;
 }
-
-const DEFAULT_SERVE_TIMEOUT_MS = 5_000;
 
 /**
  * Build a serve-side AskUser that FAILS CLOSED. Each `ask(ctx)`:
  *   1. allocates `ask-N`,
- *   2. stores a PendingAsk (resolve + reject + timer),
- *   3. arms a `setTimeout(timeoutMs).unref()` that resolves `false`,
- *   4. only resolves truthy via `resolveAsk(id, true)`.
+ *   2. stores a PendingAsk (resolve + call identity + no-timer-or-configured),
+ *   3. when `timeoutMs` > 0, arms a `setTimeout(timeoutMs).unref()` that ends
+ *      the ask as `{kind:"timeout", afterMs}`,
+ *   4. only resolves as approved via `resolveAsk(id, true)`; abort →
+ *      `{kind:"cancelled"}`.
  *
  * Tests use `pendingCount()` to wait, then call `resolveAsk(id, true|false)`
  * to drive the outcome deterministically.
@@ -204,17 +215,19 @@ const DEFAULT_SERVE_TIMEOUT_MS = 5_000;
 export function createServeAskUser(
   opts: ServeAskUserOpts = {}
 ): ServeAskUserHandle {
-  const timeoutMs = opts.timeoutMs ?? DEFAULT_SERVE_TIMEOUT_MS;
+  const configured = opts.timeoutMs;
+  const timeoutMs =
+    configured !== undefined && configured > 0 ? configured : undefined;
   const pending = new Map<string, PendingAsk>();
   let counter = 0;
 
-  function settle(id: string, approved: boolean): boolean {
+  function settle(id: string, outcome: boolean | AskUserOutcome): boolean {
     const p = pending.get(id);
     if (!p) return false;
     pending.delete(id);
-    clearTimeout(p.timer);
+    if (p.timer !== undefined) clearTimeout(p.timer);
     p.ctx.signal?.removeEventListener("abort", p.onAbort);
-    p.resolve(approved);
+    p.resolve(outcome);
     return true;
   }
 
@@ -225,29 +238,43 @@ export function createServeAskUser(
         id: p.id,
         tool: p.ctx.tool,
         summaryHint: p.ctx.summaryHint,
+        toolUseId: p.ctx.toolUseId,
+        ...(p.ctx.conversationId !== undefined
+          ? { conversationId: p.ctx.conversationId }
+          : {}),
       });
     }
     return out;
   }
 
   const askImpl: AskUser = (ctx) => {
-    if (ctx.signal?.aborted === true) return Promise.resolve(false);
+    if (ctx.signal?.aborted === true) {
+      return Promise.resolve({ kind: "cancelled" } as const);
+    }
     counter += 1;
     const id = `ask-${counter}`;
-    return new Promise<boolean>((resolve) => {
-      // Arm the fail-closed timer FIRST so a resolveAsk within the same tick
-      // (synchronous in tests) still wins: settle() clears the timer.
-      const timer = setTimeout(() => {
-        settle(id, false);
-      }, timeoutMs);
-      if (timer.unref) timer.unref();
+    return new Promise<boolean | AskUserOutcome>((resolve) => {
+      // Arm a configured timer FIRST so a resolveAsk within the same tick
+      // (synchronous in tests) still wins: settle() clears the timer. No
+      // configured timeout → no timer at all.
+      let timer: NodeJS.Timeout | undefined;
+      if (timeoutMs !== undefined) {
+        timer = setTimeout(() => {
+          settle(id, { kind: "timeout", afterMs: timeoutMs });
+        }, timeoutMs);
+        if (timer.unref) timer.unref();
+      }
       const onAbort = (): void => {
-        settle(id, false);
+        settle(id, { kind: "cancelled" });
       };
       pending.set(id, {
         id,
         tool: ctx.tool,
         summaryHint: ctx.summaryHint,
+        toolUseId: ctx.toolUseId,
+        ...(ctx.conversationId !== undefined
+          ? { conversationId: ctx.conversationId }
+          : {}),
         ctx,
         resolve,
         timer,
@@ -255,7 +282,7 @@ export function createServeAskUser(
       });
       if (ctx.signal !== undefined) {
         ctx.signal.addEventListener("abort", onAbort, { once: true });
-        if (ctx.signal.aborted) settle(id, false);
+        if (ctx.signal.aborted) settle(id, { kind: "cancelled" });
       }
     });
   };
@@ -263,7 +290,7 @@ export function createServeAskUser(
   return Object.freeze({
     ask: Object.freeze(askImpl),
     resolveAsk: (id: string, approved: boolean): boolean =>
-      settle(id, approved),
+      settle(id, { kind: approved ? "approved" : "declined" }),
     pendingCount: () => pending.size,
     pendingAll: () => snapshot(),
   });

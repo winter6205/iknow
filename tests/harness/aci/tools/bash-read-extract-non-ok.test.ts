@@ -23,6 +23,12 @@
  * Every row is two-sided: the shape first proves it carries the verdict
  * it names through `parseForSecurity`, then the extractor answers, and a
  * same-words `ok` control still books where the contract allows.
+ *
+ * #1188 split the old backslash-whitespace row in two: the odd-parity
+ * escaped SPACE and the word-separator LF continuation now reach this
+ * consumer's `ok` arm, so they are asserted as positive rows; the RETAINED
+ * roster (mid-word join, backslash+TAB, even-parity run) keeps the
+ * record-nothing contract.
  */
 
 import assert from "node:assert/strict";
@@ -104,9 +110,48 @@ describe("入账提取器 non-ok 普查 — 一律不入账（SC-S4-1）", () =>
     const zeroWidth = "cat a.ts\u200B";
     assert.equal(parseForSecurity(zeroWidth).kind, "vetoed");
     assert.equal(extractSingleReadPath(zeroWidth), undefined);
-    const backslash = "cat\\ a.ts";
-    assert.equal(parseForSecurity(backslash).kind, "vetoed");
-    assert.equal(extractSingleReadPath(backslash), undefined);
+  });
+
+  it("backslash-whitespace → undefined（保留类：词内折行、反斜杠+TAB、反斜杠偶数串）", () => {
+    // #1188 admitted the odd-parity escaped SPACE and the word-separator LF
+    // continuation, so `cat\ a.ts` is no longer this consumer's non-`ok`
+    // premise — it moved to the admitted row below. The RETAINED roster is
+    // what must still record nothing, and each row is a shape whose word
+    // boundaries or static value are provably wrong or incomplete.
+    for (const shape of [
+      "cat a\\\nb.ts", // 词内折行：bash 并词，解析器也并词，但词法切分不一致
+      "cat a\\\tb.ts", // 反斜杠 + TAB：实测与 bash 词法不一致
+      "cat a\\\\ b.ts", // 偶数串：空白是真实分隔符，形状未证明
+    ]) {
+      assert.equal(parseForSecurity(shape).kind, "vetoed", shape);
+      assert.equal(extractSingleReadPath(shape), undefined, shape);
+    }
+  });
+
+  it("反斜杠空格（#1188 放行）到达 `ok` 分支并如实入账", () => {
+    // 放行后的正例：转义空格折进一个词内，静态值完整，提取器按 `ok` 事实
+    // 入账折叠后的路径，而不是走 non-ok 的一律不入账。
+    const admitted = "cat foo\\ bar.ts";
+    const parsed = parseForSecurity(admitted);
+    assert.equal(parsed.kind, "ok");
+    assert.equal(extractSingleReadPath(admitted), "foo bar.ts");
+
+    // `cat\ a.ts` 现在也是 `ok`，但它只有一个词 `cat a.ts`——命令名不是
+    // `cat`，所以不入账。这条与上面的 non-ok 断言是两回事：不入账来自
+    // 命令名，不是来自判定。
+    const oneWord = "cat\\ a.ts";
+    const oneWordParse = parseForSecurity(oneWord);
+    assert.equal(oneWordParse.kind, "ok");
+    assert.deepEqual(
+      oneWordParse.kind === "ok"
+        ? oneWordParse.words.map((word) => word.value)
+        : [],
+      ["cat a.ts"],
+      "转义空格在命令词内，没有分隔符"
+    );
+    assert.equal(extractSingleReadPath(oneWord), undefined);
+    // 对照：真的加分隔符就是两个词，照常入账。
+    assert.equal(extractSingleReadPath("cat a.ts"), "a.ts");
   });
 
   it("aborted → undefined（READY 之后的解析故障），解除后同词照常入账", () => {

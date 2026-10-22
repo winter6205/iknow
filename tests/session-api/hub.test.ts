@@ -47,7 +47,10 @@ import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { SubagentWakeError } from "../../src/harness/subagent/host-wake.ts";
 import { ValidationError } from "../../src/shared/errors.ts";
-import { TransportRetryExhaustedError } from "../../src/harness/errors.ts";
+import {
+  MessageCommitError,
+  TransportRetryExhaustedError,
+} from "../../src/harness/errors.ts";
 import { OUTPUT_LIMIT_NOTICE } from "../../src/session-api/contract.ts";
 import {
   makeTestLlmEnv,
@@ -116,6 +119,35 @@ afterAll(async () => {
 
 function makeHub(deps: LoopEngineDeps): SessionHub {
   return new SessionHub({ store, deps, workspaceRoot: process.cwd() });
+}
+
+/** The raw `outcome` records of one session's JSONL, in write order. */
+async function outcomeStopReasons(
+  id: string
+): Promise<Array<{ turnId: string; stopReason: string }>> {
+  const dir = resolveConversationDir({
+    projectDir: sessionDir,
+    conversationId: id,
+  });
+  const raw = await readFile(join(dir, `${id}${SESSION_JSONL_EXT}`), "utf8");
+  return raw
+    .split("\n")
+    .filter((l) => l.trim().length > 0)
+    .map((l) => JSON.parse(l) as Record<string, unknown>)
+    .filter((r) => r["type"] === "outcome")
+    .map((r) => ({
+      turnId: String(r["turnId"]),
+      stopReason: String(r["stopReason"]),
+    }));
+}
+
+/** The raw JSONL text of one session (observable persisted bytes). */
+function jsonlOf(id: string): Promise<string> {
+  const dir = resolveConversationDir({
+    projectDir: sessionDir,
+    conversationId: id,
+  });
+  return readFile(join(dir, `${id}${SESSION_JSONL_EXT}`), "utf8");
 }
 
 describe("askUser inlet", () => {
@@ -1015,19 +1047,19 @@ describe("drop-context stop reasons keep user message only", () => {
     assert.equal(typeof cp?.interruptedAt, "string");
   });
 
-  it("protocolError mid tool loop → tool_result-only continuation is not persisted as an orphan", async () => {
-    // The discriminating shape for conditionalSave's partial_user_only arm
-    // (hub.ts: `[...diskPrior, ...delta.filter(isTurnQuery)]`): a protocol
-    // error that lands AFTER one tool round-trip leaves a delta containing
-    // BOTH a genuine user query and a tool_result-only user message. The SSOT
-    // predicate (turn-projection.isTurnQuery) keeps only the query; a bare
-    // `role === "user"` filter would also keep the tool_result-only message —
-    // whose paired assistant tool_use is dropped on this path — and orphan it
-    // on disk.
+  it("protocolError mid tool loop → the settled tool round-trip stays on disk and a tool_result is never orphaned", async () => {
+    // The discriminating shape for conditionalSave's disk baseline. Exactly one
+    // scripted response (a tool_call) → step 1 commits [assistant(tool_use),
+    // user(tool_result)] to the head chain; step 2 finds the queue empty and
+    // throws ProtocolError. The failed assistant is therefore the model call
+    // that never reached the commit — it has no message on disk — while
+    // everything already committed stays. Building the projection from the
+    // turn-start snapshot instead of the chain dropped the committed pair and
+    // moved the persisted head backward, which only reset / rewind may do.
     //
-    // Exactly one scripted response (a tool_call) → step 1 appends
-    // [assistant(tool_use), user(tool_result)]; step 2 finds the queue empty
-    // and throws ProtocolError.
+    // The pair invariant is what the `isTurnQuery` SSOT protects: a
+    // tool_result-only user message is a continuation, not a query, so it is
+    // never spliced on disk ahead of its paired assistant tool_use.
     const deps = makeDeps([
       assistantResult({
         texts: [],
@@ -1042,29 +1074,40 @@ describe("drop-context stop reasons keep user message only", () => {
     });
     assert.equal(res.turn.answer.stopReason, "protocolError");
     const loaded = await store.load(session.conversation_id);
-    // Exactly the user query — neither the failed assistant tool_use nor the
-    // tool_result-only continuation message.
-    assert.equal(loaded.messages.length, 1);
-    assert.equal(loaded.messages[0]?.role, "user");
+    // The user query, then the committed tool round-trip. Nothing else: no
+    // second assistant turn (the failed model call never reached the commit).
+    assert.deepEqual(
+      loaded.messages.map((m) => m.role),
+      ["user", "assistant", "user"]
+    );
     assert.equal(
       loaded.messages[0]?.content[0]?.type === "text"
         ? loaded.messages[0].content[0].text
         : "",
       "keep my sentence"
     );
-    assert.ok(
-      !loaded.messages.some((m) =>
-        m.content.some((b) => b.type === "tool_result")
-      ),
-      "a tool_result-only user message must not be spliced onto disk as an orphan"
+    assert.equal(
+      loaded.messages.filter((m) => m.role === "assistant").length,
+      1,
+      "only the committed assistant turn reaches disk"
     );
-    assert.ok(
-      !loaded.messages.some(
-        (m) =>
-          m.role === "assistant" && m.content.some((b) => b.type === "tool_use")
-      ),
-      "the failed assistant tool_use must not reach disk"
+    const settledToolUseIds = new Set(
+      loaded.messages
+        .filter((m) => m.role === "assistant")
+        .flatMap((m) => m.content.filter((b) => b.type === "tool_use"))
+        .map((b) => (b as { id: string }).id)
     );
+    const toolResultIds = loaded.messages
+      .filter((m) => m.content.some((b) => b.type === "tool_result"))
+      .flatMap((m) => m.content.filter((b) => b.type === "tool_result"))
+      .map((b) => (b as { tool_use_id: string }).tool_use_id);
+    assert.equal(toolResultIds.length, 1);
+    assert.ok(
+      toolResultIds.every((id) => settledToolUseIds.has(id)),
+      "a tool_result must never be persisted without its paired tool_use"
+    );
+    // The head is the last committed event, not a rewound earlier one.
+    assert.equal(await store.readHead(session.conversation_id), "e2");
     // The completed tool round-trip advanced finalState.turnCount; only the
     // failed assistant TEXT turn never entered history.
     assert.equal(loaded.turnCount, 1);
@@ -1072,6 +1115,84 @@ describe("drop-context stop reasons keep user message only", () => {
       loaded.checkpoints?.map((c) => c.interruptReason),
       ["protocolError"]
     );
+    // A `none` persist decision (nothing new to append) still keeps the
+    // interrupt record, anchored on the chain tip the turn left behind.
+    const cp = loaded.checkpoints?.[0];
+    assert.equal(cp?.messagesCount, 3);
+    assert.equal(cp?.anchorEventId, "e2");
+  });
+
+  it("emptyFinalResponse after a committed tool round-trip keeps the chain and leaves the settled head alone", async () => {
+    // A turn whose tool round-trip SETTLED and whose next model call came back
+    // empty: run() committed [query, tool_use, tool_result] to the head chain,
+    // so the close has no message left to append. The failed assistant is the
+    // model call that never reached the commit (spec invariant 8) — it has no
+    // message on disk, and nothing that was committed may be dropped.
+    const deps = makeDeps([
+      assistantResult({ texts: ["a1"] }),
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "t1", name: "noop", input: {} }],
+      }),
+      assistantResult({ texts: [], toolCalls: [], supplierStop: "success" }),
+    ]);
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    // A settled first turn gives this close a previous settled head it must
+    // not stamp onto.
+    await hub.postMessage({ conversationId: id, text: "q1" });
+    const settledHead = await store.readHead(id);
+    assert.equal(settledHead, "e1");
+
+    const res = await hub.postMessage({ conversationId: id, text: "q2" });
+    assert.equal(res.turn.answer.stopReason, "emptyFinalResponse");
+
+    // The committed tool round-trip stays on the current chain.
+    const loaded = await store.load(id);
+    assert.deepEqual(
+      loaded.messages.map((m) => m.role),
+      ["user", "assistant", "user", "assistant", "user"]
+    );
+    assert.ok(
+      loaded.messages[3]!.content.some((b) => b.type === "tool_use"),
+      "the committed assistant tool_use must stay on the head chain"
+    );
+    assert.ok(
+      loaded.messages[4]!.content.some((b) => b.type === "tool_result"),
+      "the committed tool_result must stay on the head chain"
+    );
+    // The head keeps the last committed event: neither rewound to this turn's
+    // query event nor back onto the previous turn's settled head.
+    assert.equal(await store.readHead(id), "e4");
+    const jsonlFile = join(
+      resolveConversationDir({ projectDir: sessionDir, conversationId: id }),
+      `${id}.jsonl`
+    );
+    const log = parseSessionJsonl(await readFile(jsonlFile, "utf8"));
+    assert.equal(log.head, "e4");
+    assert.equal(log.events.length, 5, "append-only: no event is dropped");
+    // The close persisted nothing new, so it must not stamp an
+    // emptyFinalResponse outcome onto a head ANOTHER turn settled on. The turn's
+    // own stop reason rides its own terminal event instead (ADR-0126: the head
+    // is this turn's terminal message event), which is what keeps the reopened
+    // answer honest without moving disk's head.
+    const outcomes = await outcomeStopReasons(id);
+    assert.deepEqual(
+      outcomes.filter((o) => o.turnId === settledHead),
+      [{ turnId: settledHead, stopReason: "completed" }],
+      "the previous settled head keeps its own outcome"
+    );
+    assert.deepEqual(
+      outcomes.filter((o) => o.stopReason === "emptyFinalResponse"),
+      [{ turnId: "e4", stopReason: "emptyFinalResponse" }],
+      "the stop reason is anchored on this turn's own terminal event"
+    );
+    // Reopen fidelity: the stop reason is durable on its own anchor instead of
+    // being lost together with the projection this close declined to write.
+    const reopened = await hub.getSession(id);
+    assert.equal(reopened.turns.length, 2);
+    assert.equal(reopened.turns[1]!.answer.stopReason, "emptyFinalResponse");
   });
 
   it("emptyFinalResponse → user message on disk, no assistant turn", async () => {
@@ -1174,6 +1295,397 @@ describe("drop-context stop reasons keep user message only", () => {
   });
 });
 
+// -- the closing save builds on the persisted head chain, not a snapshot -----
+
+describe("closing save starts from the head chain", () => {
+  const interruptMsg = (): AnthropicNativeMessage => ({
+    role: "system",
+    content: [{ type: "text", text: "Interrupted by user." }],
+  });
+
+  it("/continue keeps the on-disk interrupt AND the tool batch it commits during the continue", async () => {
+    // Spec invariant 6 / SC3: the model prior for this run omits the trailing
+    // interrupt while disk keeps it. The run then commits a tool round-trip, so
+    // the file loaded before the run is already behind the chain: a close built
+    // on it would drop that batch. protocolError → the close adds nothing, so
+    // the head must stay on the committed tool_result.
+    const deps = makeDeps([
+      assistantResult({
+        texts: [],
+        toolCalls: [{ id: "t1", name: "noop", input: {} }],
+      }),
+    ]); // next step: queue empty → ProtocolError
+    const hub = makeHub(deps);
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          turnCount: 1,
+          messages: [userMsg("do the thing"), interruptMsg()],
+        },
+      }),
+    });
+    assert.equal(await store.readHead(id), "e1");
+
+    const res = await hub.continueSession(id);
+    assert.equal(res.turn.answer.stopReason, "protocolError");
+
+    const loaded = await store.load(id);
+    assert.deepEqual(
+      loaded.messages.map((m) => m.role),
+      ["user", "system", "assistant", "user"]
+    );
+    assert.ok(
+      loaded.messages[1] !== undefined && loaded.messages[1]!.role === "system",
+      "the trailing interrupt the model prior omitted stays on disk"
+    );
+    assert.ok(
+      loaded.messages[2]!.content.some((b) => b.type === "tool_use") &&
+        loaded.messages[3]!.content.some((b) => b.type === "tool_result"),
+      "the batch committed during the continue is not rewound away"
+    );
+    assert.equal(await store.readHead(id), "e3");
+    assert.deepEqual(
+      loaded.checkpoints?.map((c) => c.interruptReason),
+      ["protocolError"]
+    );
+  });
+
+  it("a full close whose history coalesces committed tool_results stays honest when it falls behind", async () => {
+    // The fail-open the hub could not see: `store.load()` projects ONE message
+    // per chain event while the engine's history concatenates a settled
+    // tool_result batch into one user message, so an elementwise prefix test
+    // mismatches at exactly the batch that is still aligned. The close therefore
+    // declares `keepHead` and the store's own alignment decides: a projection
+    // that accounts for fewer events than the head chain holds is rejected with
+    // the typed error and nothing is written.
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["a1"] })]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await hub.postMessage({ conversationId: id, text: "q1" });
+    assert.equal(await store.readHead(id), "e1");
+    // A concurrent committer grew the chain past this run's knowledge: a second
+    // assistant with two tool_use blocks, then ONE tool_result event per settled
+    // call — the shape the engine coalesces into a single user message.
+    await store.appendEvents({
+      id,
+      events: [
+        {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "t1", name: "noop", input: {} },
+            { type: "tool_use", id: "t2", name: "noop", input: {} },
+          ],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t1", content: "ok" }],
+        },
+        {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: "t2", content: "ok" }],
+        },
+        {
+          role: "assistant",
+          content: [{ type: "text", text: "late" }],
+        },
+      ],
+    });
+    const diskBefore = await store.load(id);
+    assert.deepEqual(
+      diskBefore.messages.map((m) => m.role),
+      ["user", "assistant", "assistant", "user", "user", "assistant"]
+    );
+    const headBefore = await store.readHead(id);
+    assert.equal(headBefore, "e5");
+    const jsonlBefore = await jsonlOf(id);
+    const turnStart = diskBefore.messages.slice(0, 2);
+    const api = hub as unknown as {
+      conditionalSave(opts: {
+        readonly conversationId: string;
+        readonly session: SessionFileV1;
+        readonly result: {
+          readonly finalText: string | null;
+          readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+          readonly turnCount: number;
+          readonly stopReason: string;
+          readonly lastUsage: null;
+        };
+        readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+      }): Promise<boolean>;
+    };
+    // The engine's history: the two tool_result events COALESCED into one user
+    // message, and it stops short of the "late" commit.
+    const coalescedBatch: AnthropicNativeMessage = {
+      role: "user",
+      content: [
+        ...diskBefore.messages[3]!.content,
+        ...diskBefore.messages[4]!.content,
+      ],
+    };
+    const projection = [...diskBefore.messages.slice(0, 3), coalescedBatch];
+    assert.ok(
+      projection.length < diskBefore.messages.length,
+      "the close is behind the chain"
+    );
+    assert.notDeepEqual(
+      projection[3],
+      diskBefore.messages[3],
+      "an elementwise prefix test cannot see this shape: it mismatches at the coalesced batch"
+    );
+
+    await assert.rejects(
+      () =>
+        api.conditionalSave({
+          conversationId: id,
+          session: { ...diskBefore, messages: turnStart },
+          result: {
+            finalText: null,
+            messages: projection,
+            turnCount: 1,
+            // A "full" close: the arm that writes the engine history wholesale.
+            stopReason: "maxTurns",
+            lastUsage: null,
+          },
+          priorMessages: turnStart,
+        }),
+      (err: unknown) => {
+        const e = err as { kind?: string; conversation_id?: string };
+        assert.equal(e.kind, "concurrent_write");
+        assert.equal(e.conversation_id, id);
+        return true;
+      }
+    );
+
+    // Nothing moved: the committed chain is intact and `head` is still the tip.
+    const after = await store.load(id);
+    assert.deepEqual(
+      after.messages.map((m) => m.role),
+      ["user", "assistant", "assistant", "user", "user", "assistant"],
+      "the close must not abandon the committed events"
+    );
+    assert.equal(await store.readHead(id), headBefore, "head stays at the tip");
+    assert.equal(
+      await jsonlOf(id),
+      jsonlBefore,
+      "the refused close wrote no bytes"
+    );
+    assert.equal(parseSessionJsonl(jsonlBefore).head, "e5");
+  });
+
+  it("dirty-root save on a none decision writes the root onto the loaded file and leaves the head alone", async () => {
+    // The narrow seam conditionalSave owns: a `none` decision with a pending
+    // worktree rebind must persist the root onto the LOADED file, keeping the
+    // chain it loaded instead of the turn-start snapshot's (shorter) message
+    // list, and without moving the head.
+    const hub = makeHub(makeDeps([assistantResult({ texts: ["a1"] })]));
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    await hub.postMessage({ conversationId: id, text: "q1" });
+    const turnStart = await store.load(id);
+    assert.equal(await store.readHead(id), "e1");
+    // The interrupted turn committed a tool round-trip before it stopped, so
+    // disk is already past the snapshot the close would otherwise build on.
+    await store.save({
+      id,
+      file: sampleFile({
+        id,
+        overrides: {
+          turnCount: 1,
+          messages: [
+            ...turnStart.messages,
+            userMsg("q2"),
+            {
+              role: "assistant",
+              content: [
+                { type: "tool_use", id: "t1", name: "noop", input: {} },
+              ],
+            },
+            {
+              role: "user",
+              content: [
+                { type: "tool_result", tool_use_id: "t1", content: "ok" },
+              ],
+            },
+          ],
+        },
+      }),
+    });
+    const headBefore = await store.readHead(id);
+    assert.equal(headBefore, "e4");
+    const chainNow = await store.load(id);
+    const api = hub as unknown as {
+      markWorktreeRootDirty(opts: {
+        readonly conversationId: string;
+        readonly currentRoot: string;
+        readonly provisionedRoot: string;
+      }): void;
+      conditionalSave(opts: {
+        readonly conversationId: string;
+        readonly session: SessionFileV1;
+        readonly result: {
+          readonly finalText: string | null;
+          readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+          readonly turnCount: number;
+          readonly stopReason: string;
+          readonly lastUsage: null;
+        };
+        readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
+      }): Promise<boolean>;
+    };
+    const reboundRoot = join(process.cwd(), "rebound-by-test");
+    const currentRoot = turnStart.workspaceRoot ?? process.cwd();
+    api.markWorktreeRootDirty({
+      conversationId: id,
+      currentRoot,
+      provisionedRoot: reboundRoot,
+    });
+
+    const saved = await api.conditionalSave({
+      conversationId: id,
+      session: turnStart,
+      result: {
+        finalText: null,
+        // Nothing here is absent from the chain: the close is `none`.
+        messages: chainNow.messages,
+        turnCount: 0,
+        stopReason: "protocolError",
+        lastUsage: null,
+      },
+      priorMessages: turnStart.messages,
+    });
+
+    assert.equal(saved, true);
+    const after = await store.load(id);
+    assert.equal(after.workspaceRoot, reboundRoot);
+    assert.deepEqual(
+      after.messages.map((m) => m.role),
+      ["user", "assistant", "user", "assistant", "user"],
+      "the none write must not replace the chain with the turn-start snapshot"
+    );
+    assert.equal(await store.readHead(id), headBefore, "head unchanged");
+    assert.deepEqual(
+      after.checkpoints?.map((c) => c.interruptReason),
+      ["protocolError"]
+    );
+    const cp = after.checkpoints?.[0];
+    assert.equal(cp?.messagesCount, 5);
+    assert.equal(cp?.anchorEventId, "e4");
+    // The settled turn keeps its own outcome; this turn's stop reason rides
+    // its own terminal event, never the head turn 1 settled on.
+    assert.deepEqual(await outcomeStopReasons(id), [
+      { turnId: "e1", stopReason: "completed" },
+      { turnId: "e4", stopReason: "protocolError" },
+    ]);
+  });
+
+  it("a mid-run append refusal bootstraps without moving the head backward", async () => {
+    // The commit hook's bootstrap save is the store failure whose save path
+    // still reads a non-null log: this turn's accepted input already grew the
+    // chain past the caller's turn-start snapshot, so that stale projection
+    // aligns as a strict prefix. The refusal is the store's own typed
+    // write_failed for a denied append (shape proven by boundary.test.ts).
+    // WHY intercept the append instead of chmod'ing it 0o444: uid 0 ignores
+    // mode bits, so only this denial is uid-independent, and the real store
+    // still does every read, the input commit and the bootstrap save.
+    const jsonl: { current: string } = { current: "" };
+    let sealed = "";
+    let armed = false;
+    let refusals = 0;
+
+    class RefusingOnceStore extends SessionStore {
+      override async appendEvents(
+        opts: Parameters<SessionStore["appendEvents"]>[0]
+      ): Promise<void> {
+        if (armed) {
+          armed = false;
+          refusals += 1;
+          throw {
+            kind: "write_failed",
+            conversation_id: opts.id,
+            cause: "EACCES: permission denied, append (injected refusal)",
+          } satisfies SessionStoreError;
+        }
+        return super.appendEvents(opts);
+      }
+    }
+
+    const deps = makeDeps([assistantResult({ texts: ["a1"] })]);
+    const baseAdapter = deps.adapter;
+    const hub = new SessionHub({
+      store: new RefusingOnceStore(baseDir, process.cwd()),
+      deps: {
+        ...deps,
+        adapter: {
+          ...baseAdapter,
+          step: async (state, request, signal) => {
+            // Arm once the accepted input is on disk, so the assistant commit
+            // below is the first append that gets refused.
+            if (sealed === "") {
+              sealed = await readFile(jsonl.current, "utf8");
+              armed = true;
+            }
+            return baseAdapter.step(state, request, signal);
+          },
+        },
+      },
+      workspaceRoot: process.cwd(),
+    });
+    const { session } = await hub.createSession();
+    const id = session.conversation_id;
+    jsonl.current = join(
+      resolveConversationDir({ projectDir: sessionDir, conversationId: id }),
+      `${id}${SESSION_JSONL_EXT}`
+    );
+
+    const thrown: unknown = await hub
+      .postMessage({ conversationId: id, text: "go" })
+      .then(
+        () => undefined,
+        (err: unknown) => err
+      );
+
+    assert.equal(
+      refusals,
+      1,
+      "exactly one append must be refused, later calls pass through"
+    );
+    assert.equal(
+      parseSessionJsonl(sealed).head,
+      "e0",
+      "the accepted input was committed before the denial"
+    );
+    assert.equal(
+      await store.readHead(id),
+      "e0",
+      "the bootstrap save must not move the head backward"
+    );
+    assert.equal(
+      await jsonlOf(id),
+      sealed,
+      "the refused bootstrap must write no bytes"
+    );
+    const after = await store.load(id);
+    assert.deepEqual(
+      after.messages.map((m) => m.role),
+      ["user"],
+      "the committed input stays the head chain of the aborted turn"
+    );
+    assert.ok(
+      thrown instanceof MessageCommitError,
+      `expected MessageCommitError, got ${String(thrown)}`
+    );
+    assert.equal(
+      (thrown.cause as SessionStoreError).kind,
+      "concurrent_write",
+      "the bootstrap denial surfaces the store's own typed reason"
+    );
+  });
+});
+
 // -- getSession / resetSession / listSessions --------------------------------
 
 describe("getSession", () => {
@@ -1215,6 +1727,9 @@ describe("resetSession", () => {
     const loaded = await store.load(session.conversation_id);
     assert.equal(loaded.messages.length, 0);
     assert.equal(loaded.turnCount, 0);
+    // resetSession is one of the two owners of a backward head move: the head
+    // pointer itself goes to null (the chain records stay in the file).
+    assert.equal(await store.readHead(session.conversation_id), null);
   });
 });
 
@@ -1906,10 +2421,26 @@ describe("postMessage onStream forwarding (#188)", () => {
       onStream: (e) => received.push(e),
     });
     assert.equal(resp.turn.answer.finalText, "hello world");
-    assert.deepEqual(received, [
-      { type: "text_delta", text: "hello " },
-      { type: "text_delta", text: "world" },
-    ]);
+    // The stub's deltas reach the caller verbatim. ADR-0118: the engine's own
+    // occupancy beat rides the same channel, so the delta assertion is scoped
+    // to the stub's events and the beat is asserted on its own.
+    assert.deepEqual(
+      received.filter((event) => event.type === "text_delta"),
+      [
+        { type: "text_delta", text: "hello " },
+        { type: "text_delta", text: "world" },
+      ]
+    );
+    const usageBeats = received.filter(
+      (event) => event.type === "context_usage"
+    );
+    assert.equal(usageBeats.length > 0, true);
+    assert.equal(
+      usageBeats.every(
+        (event) => event.phase !== "pre_call" || event.source === "measured"
+      ),
+      true
+    );
   });
 
   it("without onStream: stub still emits but no caller-side capture (zero behavior change)", async () => {
@@ -1969,11 +2500,16 @@ describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
       tool: "bash",
       input: { command: "ls -la" },
       summaryHint: 'bash "ls -la"',
+      toolUseId: "toolu_pending_1",
+      conversationId: "conv-pending-1",
     });
     await Promise.resolve();
     const list = hub.listPendingAsks();
     assert.equal(list.length, 1);
     assert.equal(list[0]!.tool, "bash");
+    // ADR-0147 R1: the snapshot is call-addressed, not just tool-addressed.
+    assert.equal(list[0]!.toolUseId, "toolu_pending_1");
+    assert.equal(list[0]!.conversationId, "conv-pending-1");
     // Settle so the timer does not leak.
     handle.resolveAsk(list[0]!.id, true);
     await pending;
@@ -1985,26 +2521,28 @@ describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
       tool: "edit_file",
       input: {},
       summaryHint: "e",
+      toolUseId: "toolu_edit_1",
     });
     await Promise.resolve();
     const id = hub.listPendingAsks()[0]!.id;
     assert.equal(hub.resolveAsk(id, "allow-once"), true);
     assert.equal(grants.list().length, 0);
-    assert.equal(await pending, true);
+    assert.deepEqual(await pending, { kind: "approved" });
   });
 
-  it("resolveAsk(deny) releases the waiter with false (fail-closed)", async () => {
+  it("resolveAsk(deny) releases the waiter as declined (fail-closed)", async () => {
     const { hub, handle, grants } = makeHubWithHandle({});
     const pending = handle.ask({
       tool: "write_file",
       input: {},
       summaryHint: "w",
+      toolUseId: "toolu_write_1",
     });
     await Promise.resolve();
     const id = hub.listPendingAsks()[0]!.id;
     assert.equal(hub.resolveAsk(id, "deny"), true);
     assert.equal(grants.list().length, 0);
-    assert.equal(await pending, false);
+    assert.deepEqual(await pending, { kind: "declined" });
   });
 
   it("resolveAsk(always-allow) writes a session-grants rule scoped to the tool", async () => {
@@ -2013,6 +2551,7 @@ describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
       tool: "grep",
       input: { pattern: "x" },
       summaryHint: "g",
+      toolUseId: "toolu_grep_grants",
     });
     await Promise.resolve();
     const id = hub.listPendingAsks()[0]!.id;
@@ -2023,7 +2562,7 @@ describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
     assert.equal(rule.decision, "allow");
     assert.equal(rule.match({ tool: "grep", input: {} }), true);
     assert.equal(rule.match({ tool: "bash", input: {} }), false);
-    assert.equal(await pending, true);
+    assert.deepEqual(await pending, { kind: "approved" });
   });
 
   it("resolveAsk with unknown id returns false and does not add a rule", () => {
@@ -2036,14 +2575,19 @@ describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
 
   it("resolveAsk after timeout returns false and does not resurrect the rule", async () => {
     const { hub, handle, grants } = makeHubWithHandle({ askTimeoutMs: 10 });
-    const pending = handle.ask({ tool: "bash", input: {}, summaryHint: "b" });
+    const pending = handle.ask({
+      tool: "bash",
+      input: {},
+      summaryHint: "b",
+      toolUseId: "toolu_timeout_1",
+    });
     await Promise.resolve();
     const id = hub.listPendingAsks()[0]!.id;
-    // Wait past the fail-closed timeout.
+    // Wait past the configured (non-default) timeout.
     await new Promise((r) => setTimeout(r, 30));
     assert.equal(hub.resolveAsk(id, "always-allow"), false);
     assert.equal(grants.list().length, 0);
-    assert.equal(await pending, false);
+    assert.deepEqual(await pending, { kind: "timeout", afterMs: 10 });
   });
 
   it("session-grants allow rule flips checkPermission(grep) → allow", async () => {
@@ -2051,7 +2595,12 @@ describe("commit B: SessionHub.listPendingAsks + resolveAsk", () => {
     // by checkPermission (the policy engine reads sources.session?.rules()
     // fresh per call — no cached invalidation required).
     const { hub, handle, grants } = makeHubWithHandle({});
-    const pending = handle.ask({ tool: "grep", input: {}, summaryHint: "g" });
+    const pending = handle.ask({
+      tool: "grep",
+      input: {},
+      summaryHint: "g",
+      toolUseId: "toolu_grep_gate",
+    });
     await Promise.resolve();
     const id = hub.listPendingAsks()[0]!.id;
     hub.resolveAsk(id, "always-allow");

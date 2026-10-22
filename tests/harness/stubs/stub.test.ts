@@ -60,6 +60,7 @@ describe("createStubModel", () => {
       },
       supplierStop: "success",
       needsTools: false,
+      hasThinking: false,
       isEmptyFinalResponse: false,
     };
     const model = createStubModel({ responses: [r1] });
@@ -94,6 +95,7 @@ const buildR1 = (): AssistantTurnResult => {
     },
     supplierStop: "success",
     needsTools: false,
+    hasThinking: false,
     isEmptyFinalResponse: false,
   };
 };

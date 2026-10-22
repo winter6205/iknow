@@ -147,14 +147,15 @@ export function wrapWithViolationHook(
       ownedWork: opts.ownedWork ?? createTurnWorkRegistry(),
       interrupt: new AbortController(),
       interrupted: false,
-    } satisfies ViolationTurnScope);
+    }) satisfies ViolationTurnScope;
   // With no resolver and no supplied scope, the wrapper owns one scope for its
   // whole lifetime — the caller's turn is the wrapper's lifetime. Building it
   // per call instead would silently reset the streak on every wave, which is
   // exactly the cross-turn leak ADR-0135 forbids, one layer down.
-  const owned = opts.turnScopeFor === undefined && opts.turnScope === undefined
-    ? ownScope()
-    : undefined;
+  const owned =
+    opts.turnScopeFor === undefined && opts.turnScope === undefined
+      ? ownScope()
+      : undefined;
   // Resolved once per executeAll (a wave belongs to exactly one turn), so the
   // hook, the abort and the ledger all agree on which turn they serve.
   const resolveScope = (): ViolationTurnScope =>
@@ -190,7 +191,8 @@ export function wrapWithViolationHook(
       turnId?: string,
       onStream?: (event: HarnessStreamEvent) => void,
       messages?: ToolExecutionContext["messages"],
-      parentThinking?: ToolExecutionContext["parentThinking"]
+      parentThinking?: ToolExecutionContext["parentThinking"],
+      parentModelRoute?: ToolExecutionContext["parentModelRoute"]
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       const seen = new Set<number>();
       const scope = resolveScope();
@@ -268,7 +270,8 @@ export function wrapWithViolationHook(
         turnId,
         onStream,
         messages,
-        parentThinking
+        parentThinking,
+        parentModelRoute
       );
       for (let i = 0; i < out.length; i += 1) {
         const r = out[i];
@@ -311,7 +314,9 @@ export function buildViolationWiring(
     inner,
     counter,
     onKill,
-    ...(opts.onInterrupt !== undefined ? { onInterrupt: opts.onInterrupt } : {}),
+    ...(opts.onInterrupt !== undefined
+      ? { onInterrupt: opts.onInterrupt }
+      : {}),
     ...(opts.ownedWork !== undefined ? { ownedWork: opts.ownedWork } : {}),
   });
   return { executor, counter };

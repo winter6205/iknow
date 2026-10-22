@@ -5,9 +5,12 @@ import { join } from "node:path";
 
 import { SessionHub } from "../../src/session-api/hub.ts";
 import { SessionStore } from "../../src/session-api/store/index.ts";
-import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubagentInfo } from "../../src/harness/subagent/manager.ts";
-import { createSubAgentMailbox } from "../../src/harness/subagent/mailbox.ts";
+import {
+  makeManagerRig,
+  subagentInfo as info,
+  type ManagerRig,
+} from "./_helpers/subagent-manager-rig.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 
 /**
@@ -31,60 +34,6 @@ import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
  * waitFor). Real manager abortTask behavior belongs to
  * tests/subagent/manager.test.ts.
  */
-
-interface ManagerRig {
-  readonly manager: SubAgentManager;
-  readonly abortCalls: string[];
-  setRows: (rows: ReadonlyArray<SubagentInfo>) => void;
-}
-
-function makeManagerRig(
-  initialRows: ReadonlyArray<SubagentInfo>,
-  abortResults: Record<string, boolean> = {}
-): ManagerRig {
-  let rows = initialRows;
-  const abortCalls: string[] = [];
-  const mailbox = createSubAgentMailbox();
-  const manager: SubAgentManager = {
-    spawn: () => ({ taskId: "unused" }),
-    queryBuffer: () => ({ status: "not_found" }),
-    waitFor: async () => {
-      throw new Error("unused");
-    },
-    shutdown: async () => {},
-    drainCompleted: () => [],
-    listActive: () => [],
-    abortTask: (taskId) => {
-      abortCalls.push(taskId);
-      return abortResults[taskId] ?? true;
-    },
-    getCapacity: () => 15,
-    listSubagents: (conversationId?: string) =>
-      conversationId === undefined
-        ? rows
-        : rows.filter((row) => row.conversationId === conversationId),
-    subscribe: mailbox.subscribe,
-  };
-  return {
-    manager,
-    abortCalls,
-    setRows: (next) => {
-      rows = next;
-    },
-  };
-}
-
-function info(
-  taskId: string,
-  overrides: Partial<SubagentInfo> & Pick<SubagentInfo, "state">
-): SubagentInfo {
-  return {
-    taskId,
-    taskPreview: taskId,
-    startedAt: "2026-09-17T00:00:00.000Z",
-    ...overrides,
-  };
-}
 
 const FORE_RUNNING = (taskId: string, conversationId: string): SubagentInfo =>
   info(taskId, { state: "running", conversationId, foreground: true });

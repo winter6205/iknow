@@ -225,3 +225,115 @@ describe("parseProtocol — invalid input never succeeds silently", () => {
     );
   });
 });
+
+/**
+ * The optional child environment (#1221 follow-up).
+ *
+ * WHY it exists: the driver launched the measured child with NO env, so it
+ * inherited the runner's. A real-product regression has to run the product
+ * against a hermetic stub model, which is only possible if the protocol can
+ * say what the child must see. Absent is not "empty" — absent means "inherit
+ * exactly what the runner has", which is what every existing protocol does.
+ *
+ * The parser stays strict for the same reason the rest of this file is strict:
+ * a silently coerced value is a run whose identity nobody can reconstruct. An
+ * unexpanded `${...}` is the classic case — a shell-style template that was
+ * never expanded would hand the child a literal, and the child would fail
+ * somewhere far from the protocol that caused it.
+ */
+describe("parseProtocol — the optional child environment", () => {
+  it("leaves an ABSENT env undefined, so the child inherits the runner's env", () => {
+    const p = parseProtocol(validProtocol());
+
+    assert.equal(
+      p.child.env,
+      undefined,
+      "absent must stay absent; an empty object would be a DIFFERENT environment"
+    );
+  });
+
+  it("treats an explicit null the same as absent", () => {
+    const p = parseProtocol(
+      validProtocol({ child: { command: "true", args: [], env: null } })
+    );
+
+    assert.equal(p.child.env, undefined);
+  });
+
+  it("accepts a flat string-to-string map verbatim", () => {
+    const p = parseProtocol(
+      validProtocol({
+        child: {
+          command: "true",
+          args: [],
+          env: { IKNOW_LLM_BASE_URL: "http://127.0.0.1:9", NO_COLOR: "1" },
+        },
+      })
+    );
+
+    assert.deepEqual(p.child.env, {
+      IKNOW_LLM_BASE_URL: "http://127.0.0.1:9",
+      NO_COLOR: "1",
+    });
+  });
+
+  it("accepts an empty map as a real, explicit environment", () => {
+    const p = parseProtocol(
+      validProtocol({ child: { command: "true", args: [], env: {} } })
+    );
+
+    assert.deepEqual(
+      p.child.env,
+      {},
+      "an explicit empty env is not the same as absent"
+    );
+  });
+
+  const bad: readonly [string, unknown][] = [
+    ["a non-object env", ["A=1"]],
+    ["a string env", "A=1"],
+    ["a numeric env value", { A: 1 }],
+    ["a null env value", { A: null }],
+    ["an unexpanded template value", { IKNOW_LLM_API_KEY: "${API_KEY}" }],
+    [
+      "an unexpanded template in the middle of a value",
+      { A: "prefix-${HOME}-suffix" },
+    ],
+    ["an empty env name", { "": "x" }],
+    ["an env name carrying an assignment", { "A=B": "x" }],
+  ];
+
+  for (const [name, env] of bad) {
+    it(`rejects ${name}`, () => {
+      assert.throws(
+        () =>
+          parseProtocol(
+            validProtocol({ child: { command: "true", args: [], env } })
+          ),
+        ProtocolError,
+        `expected ${name} to be rejected; a silently coerced env would misreport the run's identity`
+      );
+    });
+  }
+
+  it("never puts a value into the error message, only the offending name", () => {
+    assert.throws(
+      () =>
+        parseProtocol(
+          validProtocol({
+            child: {
+              command: "true",
+              args: [],
+              env: { IKNOW_LLM_API_KEY: "${API_KEY}" },
+            },
+          })
+        ),
+      (err: unknown) =>
+        err instanceof ProtocolError &&
+        /IKNOW_LLM_API_KEY/.test(err.message) &&
+        !err.message.includes("API_KEY}") &&
+        !/\$\{/.test(err.message),
+      "a rejected credential-shaped value must not be echoed back into the error"
+    );
+  });
+});

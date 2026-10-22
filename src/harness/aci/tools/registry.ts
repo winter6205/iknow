@@ -14,7 +14,8 @@
  * from build-engine.ts; memory_recall / memory_save (conditional: omitted
  * without memoryDir) come after them; `tool_search` is appended last.
  */
-import { yoloHolderSpread } from "../../sandbox/yolo.js";
+import { fenceRetiredSpread } from "../../sandbox/yolo.js";
+import type { EgressAgent } from "../../sandbox/egress/agent.js";
 import type { IknowEnv } from "../../../config/env.js";
 import { createAciRegistry, type AciRegistry } from "../aci-registry.js";
 import type { AciToolDef } from "../types.js";
@@ -36,7 +37,7 @@ import { createSymbolQueryToolSet } from "./symbol.js";
 import { createSymbolMutateToolSet } from "./symbol-mutate.js";
 import type { LspCtx } from "../../lsp/types.js";
 import type { FsModeContext } from "../../sandbox/fs-mode.js";
-import type { YoloContext } from "../../sandbox/yolo.js";
+import type { FenceRetirementReader } from "../../sandbox/yolo.js";
 import { createSkillTool } from "./skill.js";
 import { createSpawnSubAgentTool } from "../../subagent/spawn-subagent-tool.js";
 import { createSubAgentResultTool } from "../../subagent/subagent-result-tool.js";
@@ -504,15 +505,14 @@ export interface CreateDefaultAciRegistryOptions {
    */
   readonly fsMode?: FsModeContext;
   /**
-   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder — same shape as
-   * `fsMode` (holder pass-through, handler `get()` read once per call).
-   * Present and reading true → the bash fence emits bare argv, `requireBwrap`
-   * is skipped at assembly, and the egress seam retires entirely (ADR-0119
-   * ruling 3). Absent / false → today's shape byte-for-byte unchanged (V1
-   * baseline). The assembly layer (build-engine) passes the session-level
-   * holder once.
+   * ADR-0141: the derived fence posture — same shape as `fsMode` (get-only
+   * reader, handler `get()` read once per call). Reading true → the bash fence
+   * emits bare argv, `requireBwrap` is skipped at assembly, and the egress
+   * seam retires entirely (ADR-0119 ruling 3). Absent / false → today's shape
+   * byte-for-byte unchanged (V1 baseline). The assembly layer (build-engine)
+   * passes the session-level reader once.
    */
-  readonly yolo?: YoloContext;
+  readonly fenceRetired?: FenceRetirementReader;
   /**
    * ADR-0092: workspace-tier home ro-bind source, a host absolute path.
    * Default: the build-engine assembly layer derives it from `userHome`
@@ -539,6 +539,20 @@ export interface CreateDefaultAciRegistryOptions {
    */
   readonly egressPolicyFactory?: () =>
     import("../../sandbox/egress/session.js").EgressPolicyInput | undefined;
+  /**
+   * The session-resident egress agent (one per engine assembly) — threaded to
+   * the bash factory, which opens ONE per-call endpoint per call from it.
+   *
+   * Production: build-engine creates the agent and hands the same instance to
+   * every registry of the assembly (main / ask / worker base tools) plus the
+   * background manager, so the session-level half of the seam (relay
+   * resolution, durable CA + trust bundle, credential mint) is loaded once
+   * per engine instead of once per call.
+   *
+   * Absent → the bash factory keeps the legacy per-call session path (the
+   * compatibility path the worker's own assembly uses today).
+   */
+  readonly egressAgent?: EgressAgent;
   /**
    * ADR-0097: first-domain approval ask inlet — threaded to the bash
    * factory, where the factory closure wraps it into an
@@ -669,7 +683,7 @@ function resolvePreimageRootIdentity(
 
 /**
  * Spread-guard for the bash factory's name-pattern scan scope, shaped like
- * `yoloHolderSpread`: the "emit the key only when the caller supplied a root"
+ * `fenceRetiredSpread`: the "emit the key only when the caller supplied a root"
  * branch lives here so the `factories` object literal stays branch-free (the
  * S5 gate counts a per-site ternary).
  *
@@ -682,6 +696,22 @@ function workspaceRootSpread(root: string | undefined): {
   readonly workspaceRoot?: string;
 } {
   return root !== undefined ? { workspaceRoot: root } : {};
+}
+
+/**
+ * Spread-guard for the bash factory's session-resident egress agent, shaped
+ * like `workspaceRootSpread`: the "emit the key only when the caller supplied
+ * an agent" branch lives here so the `factories` object literal stays
+ * branch-free (the S5 gate counts a per-site ternary).
+ *
+ * Absent must emit NOTHING, not `undefined`: the bash factory reads the agent
+ * with an `!== undefined` check, and an explicit `egressAgent: undefined`
+ * would be indistinguishable from an assembly that deliberately passed one.
+ */
+function egressAgentSpread(agent: EgressAgent | undefined): {
+  readonly egressAgent?: EgressAgent;
+} {
+  return agent !== undefined ? { egressAgent: agent } : {};
 }
 
 /**
@@ -856,12 +886,12 @@ export function createDefaultAciRegistry(
         // global mode (V1 baseline). homeRoot is derived from userHome by the
         // assembly layer.
         ...(opts.fsMode !== undefined ? { fsMode: opts.fsMode } : {}),
-        // ADR-0119 / specs/yolo-mode.md: yolo holder pass-through — same shape
+        // ADR-0141: fence-posture pass-through — same shape
         // as the fsMode line above (the key is produced only when the holder
-        // is present). The projection is extracted into yoloHolderSpread to
+        // is present). The projection is extracted into fenceRetiredSpread to
         // keep this arrow under the S5 complexity gate (the branch lives in
         // the helper).
-        ...yoloHolderSpread(opts.yolo),
+        ...fenceRetiredSpread(opts.fenceRetired),
         ...(opts.homeRoot !== undefined ? { homeRoot: opts.homeRoot } : {}),
         // Name-pattern scan scope (specs/effect-boundary-protection.md "Scan
         // scope"): the registry's own resolved per-root anchor, frozen by the
@@ -879,6 +909,11 @@ export function createDefaultAciRegistry(
         ...(opts.egressPolicyFactory !== undefined
           ? { egressPolicyFactory: opts.egressPolicyFactory }
           : {}),
+        // The session-resident egress agent — the bash factory opens this
+        // call's endpoint from it (the profile behind it is loaded once per
+        // engine, not once per call). The spread guard lives in
+        // egressAgentSpread to keep this arrow under the S5 complexity gate.
+        ...egressAgentSpread(opts.egressAgent),
         ...(opts.askApproval !== undefined
           ? { askApproval: opts.askApproval }
           : {}),

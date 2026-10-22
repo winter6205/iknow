@@ -18,6 +18,12 @@
  * `unknown-syntax` command the user then approves at the ask prompt).
  * The zero-width `vetoed` row replaces a shape that fired too — the
  * closed-set declaration in SC-S4-1 covers it.
+ *
+ * #1188 split the old backslash-whitespace row in two: the odd-parity
+ * escaped SPACE and the word-separator LF continuation now reach this
+ * gate's `ok` arm, so they are asserted as positive rows (the gate fires
+ * again on `grep x\ f`); the RETAINED roster (backslash+TAB, even-parity
+ * run) keeps the stay-silent contract.
  */
 
 import assert from "node:assert/strict";
@@ -93,13 +99,45 @@ describe("替岗闸 non-ok 普查 — 一律沉默（SC-S4-1）", () => {
     assert.equal(detectBashGrepSubstitution(shape), undefined);
   });
 
-  it("vetoed → undefined（反斜杠空白 与 零宽字符 两类前解析否决）", () => {
-    const backslash = "grep x\\ f";
-    assert.equal(parseForSecurity(backslash).kind, "vetoed");
-    assert.equal(detectBashGrepSubstitution(backslash), undefined);
+  it("vetoed → undefined（零宽字符前解析否决）", () => {
     const zeroWidth = "grep x f\u200B";
     assert.equal(parseForSecurity(zeroWidth).kind, "vetoed");
     assert.equal(detectBashGrepSubstitution(zeroWidth), undefined);
+  });
+
+  it("backslash-whitespace → undefined（保留类：反斜杠+TAB、词内折行、反斜杠偶数串）", () => {
+    // #1188 admitted the odd-parity escaped SPACE and the word-separator LF
+    // continuation, so `grep x\ f` is no longer this consumer's non-`ok`
+    // premise — it moved to the admitted row below. The RETAINED roster must
+    // still stay silent, and each of these three was a shape the old text
+    // splitter fired on.
+    for (const shape of [
+      "grep x\\\t f", // 反斜杠 + TAB：旧拆段会触发
+      "grep x\\\tf", // 反斜杠 + TAB，词内
+      "grep x\\\\ f", // 偶数串：空白是真实分隔符，形状未证明
+    ]) {
+      assert.equal(parseForSecurity(shape).kind, "vetoed", shape);
+      assert.equal(detectBashGrepSubstitution(shape), undefined, shape);
+    }
+  });
+
+  it("反斜杠空格（#1188 放行）到达 `ok` 分支并如实识别", () => {
+    // 放行后的正例：转义空格折进 pattern 这个词，段首 grep 词照常被识别。
+    // 修复前这条被 `backslash-whitespace` 前解析否决吞掉，闸门是沉默的。
+    const admitted = "grep x\\ f";
+    const parsed = parseForSecurity(admitted);
+    assert.equal(parsed.kind, "ok");
+    assert.deepEqual(
+      parsed.kind === "ok" ? parsed.words.map((word) => word.value) : [],
+      ["grep", "x f"],
+      "转义空格折进 pattern 词内，命令词与 pattern 仍是两个词"
+    );
+    assert.equal(detectBashGrepSubstitution(admitted), "grep");
+
+    // 同样放行的词分隔折行：段首 grep 词跨过折行仍被识别。
+    const continued = "grep x \\\n f";
+    assert.equal(parseForSecurity(continued).kind, "ok");
+    assert.equal(detectBashGrepSubstitution(continued), "grep");
   });
 
   it("aborted → undefined（READY 之后的解析故障），解除后同词照常识别", () => {

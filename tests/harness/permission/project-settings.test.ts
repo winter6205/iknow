@@ -784,3 +784,44 @@ describe("bash network specifier compiles as a command glob (opt-in axis retired
     }
   });
 });
+
+// ADR-0141 §5: the new write-back target must not weaken ADR-0090. A posture
+// the write-back CAN write stays loadable, and the one it cannot write is still
+// refused on the project-settings side.
+describe("ADR-0090 holds for the permission write-back target", () => {
+  it("a written permissions.defaultMode loads back unchanged", () => {
+    const dir = scratchDir();
+    try {
+      const path = join(dir, "settings.json");
+      writeFileSync(
+        path,
+        JSON.stringify({ permissions: { defaultMode: "plan" } }),
+        "utf8"
+      );
+      assert.equal(readProjectDefaultMode({ filePath: path }), "plan");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("a project file self-granting full_auto is still refused", () => {
+    const dir = scratchDir();
+    try {
+      const path = join(dir, "settings.json");
+      writeFileSync(
+        path,
+        JSON.stringify({ permissions: { defaultMode: "full_auto" } }),
+        "utf8"
+      );
+      assert.throws(
+        () => readProjectDefaultMode({ filePath: path }),
+        (err: unknown) =>
+          err instanceof ProjectSettingsError &&
+          (err as { kind?: string }).kind === "forbidden_default_mode",
+        "ADR-0090: automatic mode is never conferred by a file"
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

@@ -23,7 +23,7 @@
  * by the fake client, keeping real HTTP out of scope.
  */
 
-import { describe, it } from "vitest";
+import { afterEach, describe, it, vi } from "vitest";
 import assert from "node:assert/strict";
 import {
   AnthropicError,
@@ -82,6 +82,17 @@ const initState = (msgs: AnthropicNativeMessage[] = []): LoopState => ({
   messages: msgs,
   turnCount: 0,
 });
+
+/** The streaming arm adds the wall-clock `generationMs`; the non-streaming
+ *  baseline has no clock to measure. Compare the message shape without it and
+ *  pin the measurement separately (dedicated cases below). */
+function withoutGenerationMs(
+  result: AssistantTurnResult
+): Omit<AssistantTurnResult, "generationMs"> {
+  const { generationMs: _ignored, ...shape } = result;
+  void _ignored;
+  return shape;
+}
 
 type FakeOp =
   | { kind: "text"; text: string }
@@ -375,7 +386,11 @@ describe("RealAnthropicAdapter — streaming arm normal flow (T3 #176, D1)", () 
     );
     // — finalMessage → interpretMessage yields the same shape as the non-stream fixture —
     const expected = interpretMessage(final);
-    assert.deepEqual(result, expected);
+    assert.deepEqual(withoutGenerationMs(result), expected);
+    assert.ok(
+      typeof result.generationMs === "number" && result.generationMs > 0,
+      "streaming arm measured generationMs"
+    );
     assert.equal(result.supplierStop, "success");
     assert.equal(result.needsTools, true);
     assert.deepEqual(result.projection.texts, ["Hello world"]);
@@ -411,8 +426,9 @@ describe("RealAnthropicAdapter — streaming arm normal flow (T3 #176, D1)", () 
       initState([userMsg("hi")]),
       {}
     )) as AssistantTurnResult;
-    // Byte-identical to interpretMessage(final) — shape guard for the usage row.
-    assert.deepEqual(result, interpretMessage(final));
+    // Byte-identical to interpretMessage(final) apart from the stream-only
+    // generation clock — shape guard for the usage row.
+    assert.deepEqual(withoutGenerationMs(result), interpretMessage(final));
     // usage is still on the finalMessage object — no layer dropped or wrapped
     // it. Compared against the very fixture that was dispatched, so any layer
     // that dropped, added to, or rewrote a usage field still fails here.
@@ -695,9 +711,10 @@ describe("RealAnthropicAdapter — streaming arm overflow class (T3 #176, byte-i
         chunks[i]
       );
     }
-    // Streaming result is byte-identical to the non-stream fixture —
-    // interpretMessage(final) is the reference baseline.
-    assert.deepEqual(result, interpretMessage(final));
+    // Streaming result is byte-identical to the non-stream fixture apart from
+    // the stream-only generation clock — interpretMessage(final) is the
+    // reference baseline.
+    assert.deepEqual(withoutGenerationMs(result), interpretMessage(final));
   });
 
   it("max_tokens truncation (stop_reason=max_tokens) → supplierStop='truncation' (与离线臂一致)", async () => {
@@ -1317,5 +1334,133 @@ describe("RealAnthropicAdapter — T1 tool_input_delta streaming arm extension",
       false,
       "未登记的 index 不 emit tool_input_delta"
     );
+  });
+});
+
+// ─── 12. generationMs (T5: machine-measured generation time) ────────────────
+//
+// generationMs = finalMessage() resolution − first non-empty output delta
+// (text_delta / thinking_delta / tool_input_delta). The tests own
+// `performance.now()` so the measured delta is deterministic — no wall-clock
+// sleeps. `tool_call_start` does NOT mark: it ends thinking (markEnd), not
+// generation.
+
+describe("RealAnthropicAdapter — generationMs measurement (T5)", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  function adapterFor(
+    stream: FakeStreamHandle
+  ): ReturnType<typeof createRealAnthropicAdapter> {
+    const client = makeStreamingClientFactory({
+      captured: [],
+      streamFactory: () => stream,
+    });
+    return createRealAnthropicAdapter({
+      client: client as unknown as Parameters<
+        typeof createRealAnthropicAdapter
+      >[0]["client"],
+      model: "claude-stream-test",
+      maxTokens: 256,
+      stream: true,
+    });
+  }
+
+  function controlledClock(start: number): { now: number } {
+    const clock = { now: start };
+    vi.spyOn(globalThis.performance, "now").mockImplementation(() => clock.now);
+    return clock;
+  }
+
+  it("first non-empty text_delta at t0, finalMessage at t1 → generationMs = t1 - t0", async () => {
+    const final = wellShapedFinal({ text: "hi", stop_reason: "end_turn" });
+    const clock = controlledClock(1_000);
+    const { stream } = makeFakeStream({});
+    const adapter = adapterFor(stream);
+    const stepPromise = adapter.step(initState([userMsg("hi")]), {});
+    stream.pushText("hi"); // first output fragment at t0
+    clock.now = 1_250; // finalMessage resolves at t1
+    stream.complete(final);
+    const result = (await stepPromise) as AssistantTurnResult;
+    assert.equal(result.generationMs, 250);
+  });
+
+  it("no delta at all → generationMs absent (never a zero placeholder)", async () => {
+    const final = wellShapedFinal({ text: "hi", stop_reason: "end_turn" });
+    const { stream } = makeFakeStream({});
+    const adapter = adapterFor(stream);
+    const stepPromise = adapter.step(initState([userMsg("hi")]), {});
+    stream.complete(final);
+    const result = (await stepPromise) as AssistantTurnResult;
+    assert.equal("generationMs" in result, false);
+    assert.equal("thinkingMs" in result, false);
+  });
+
+  it("empty deltas (text / thinking / input_json) do not mark the first output", async () => {
+    const final = wellShapedFinal({ text: "hi", stop_reason: "end_turn" });
+    const clock = controlledClock(2_000);
+    const { stream } = makeFakeStream({});
+    const adapter = adapterFor(stream);
+    const stepPromise = adapter.step(initState([userMsg("hi")]), {});
+    stream.pushText("");
+    stream.pushStreamEvent(thinkingDelta(""));
+    stream.pushStreamEvent(inputJsonDelta(0, ""));
+    clock.now = 2_999;
+    stream.complete(final);
+    const result = (await stepPromise) as AssistantTurnResult;
+    assert.equal("generationMs" in result, false);
+  });
+
+  it("tool_call_start alone does not mark (it ends thinking, not generation)", async () => {
+    const final = wellShapedFinal({
+      text: "ok",
+      toolUse: { id: "toolu_1", name: "echo", input: { value: "x" } },
+      stop_reason: "end_turn",
+    });
+    const clock = controlledClock(3_000);
+    const { stream } = makeFakeStream({});
+    const adapter = adapterFor(stream);
+    const stepPromise = adapter.step(initState([userMsg("hi")]), {});
+    stream.pushStreamEvent(toolUseStart("echo", "toolu_1"));
+    clock.now = 3_500;
+    stream.complete(final);
+    const result = (await stepPromise) as AssistantTurnResult;
+    assert.equal("generationMs" in result, false);
+  });
+
+  it("thinking_delta marks the first output; thinkingMs keeps its thinking-start → first-non-thinking measurement", async () => {
+    const final = wellShapedFinal({ text: "answer", stop_reason: "end_turn" });
+    const clock = controlledClock(4_000);
+    const { stream } = makeFakeStream({});
+    const adapter = adapterFor(stream);
+    const stepPromise = adapter.step(initState([userMsg("hi")]), {});
+    stream.pushStreamEvent(thinkingDelta("think")); // generation starts at 4000
+    clock.now = 4_100;
+    stream.pushText("answer"); // thinking ends at 4100
+    clock.now = 4_500;
+    stream.complete(final); // generation = 4500 - 4000
+    const result = (await stepPromise) as AssistantTurnResult;
+    assert.equal(result.thinkingMs, 100);
+    assert.equal(result.generationMs, 500);
+  });
+
+  it("non-empty tool_input_delta marks the first output", async () => {
+    const final = wellShapedFinal({
+      text: "ok",
+      toolUse: { id: "toolu_2", name: "bash", input: { command: "ls" } },
+      stop_reason: "end_turn",
+    });
+    const clock = controlledClock(6_000);
+    const { stream } = makeFakeStream({});
+    const adapter = adapterFor(stream);
+    const stepPromise = adapter.step(initState([userMsg("hi")]), {});
+    stream.pushStreamEvent(toolUseStart("bash", "toolu_2"));
+    clock.now = 6_100;
+    stream.pushStreamEvent(inputJsonDelta(0, '{"command":'));
+    clock.now = 6_400;
+    stream.complete(final);
+    const result = (await stepPromise) as AssistantTurnResult;
+    assert.equal(result.generationMs, 300);
   });
 });

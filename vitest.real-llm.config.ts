@@ -52,6 +52,17 @@ const TRACKED_INCLUDE = [
   // (tests/subagent/subagent-output-handoff.test.ts + .fixtures.ts). HAS_KEY
   // guard — no key → explicit Not run.
   "real-llm/subagent-output-handoff.test.ts",
+  // Real-model half of the user-pasted top-level image-block set. A
+  // `type: "image"` block on a USER message (not nested in a tool_result) goes
+  // through the production outbound projection to a live provider, which then
+  // answers about a colour the text never names. HAS_KEY guard — no key →
+  // explicit Not run.
+  "real-llm/user-image-block.test.ts",
+  // Context occupancy Plan A: image token-cost calibration. Two live calls
+  // (text-only, then the same prompt + one synthetic 800x600 PNG) measure the
+  // occupancy delta and bound it at pixel scale, proving the route does not
+  // charge base64/4. HAS_KEY guard — no key → explicit Not run.
+  "real-llm/image-token-cost.test.ts",
 ];
 
 const LOCAL_ONLY_INCLUDE = [

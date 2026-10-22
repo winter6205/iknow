@@ -83,6 +83,7 @@ function makeTextAdapter(responses: string[]): LoopAdapter & {
         projection: { nativeMessage: native, texts: [text], toolCalls: [] },
         supplierStop: "success",
         needsTools: false,
+        hasThinking: false,
         isEmptyFinalResponse: false,
       };
     },
@@ -492,6 +493,7 @@ describe("loop engine ADR-0081 SC7: compact 重试属同一 run → 不追加第
           projection: { nativeMessage: native, texts: [text], toolCalls: [] },
           supplierStop: "success",
           needsTools: false,
+          hasThinking: false,
           isEmptyFinalResponse: false,
         };
       },

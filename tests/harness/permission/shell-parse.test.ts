@@ -38,6 +38,8 @@ import type {
 const CAP_BYTES = 65_536;
 const FROZEN_BUDGET_MICROS = 200_000;
 const SMALL_BUDGET_MICROS = 5_000;
+/** Named so the escape spellings below read as shapes rather than byte soup. */
+const LF = String.fromCharCode(0x0a);
 const SOURCE_ROOT = join(
   dirname(fileURLToPath(import.meta.url)),
   "../../../src"
@@ -511,7 +513,10 @@ describe("the memo cache follows the per-arm table", () => {
 
   it("concurrent: 两条不同命令交错调用互不污染", () => {
     const clean = "> /tmp/f";
-    const divergent = "echo\\ test";
+    // This arm must stay `vetoed`, so it takes a genuinely retained shape; an
+    // admitted spelling would collapse it to `ok` and stop testing non-pollution
+    // at all. See the roster nail above for why the even-parity run qualifies.
+    const divergent = "a \\\\ b";
     for (const order of [
       [clean, divergent],
       [divergent, clean],
@@ -543,6 +548,14 @@ describe("the memo cache follows the per-arm table", () => {
 });
 
 describe("the pre-parse veto roster", () => {
+  /**
+   * The `backslash-whitespace` nail needs a shape that is refused at the
+   * PRE-PARSE arm, so the zero-construction pin below measures something real.
+   * An even-parity run qualifies: real bash reads `a \\ b` as three words, the
+   * escaped site is unproven, and an even run is never a provable candidate, so
+   * no parse is constructed. A mid-word LF would NOT qualify — it is a provable
+   * candidate that the parse settles before reinstating the veto.
+   */
   const nails: Readonly<
     Record<VetoClass, { readonly command: string; readonly marker: string }>
   > = {
@@ -555,7 +568,7 @@ describe("the pre-parse veto roster", () => {
       marker: "Unicode 空白/零宽",
     },
     "backslash-whitespace": {
-      command: "echo\\ divergent-backslash",
+      command: "a \\\\ b",
       marker: "引号",
     },
   };
@@ -582,14 +595,41 @@ describe("the pre-parse veto roster", () => {
     }
   });
 
-  it("carries the rewrite hint to the quoted form for echo\\ test", () => {
-    const verdict = parseForSecurity("echo\\ test");
-    if (verdict.kind !== "vetoed") {
-      throw new Error(`expected vetoed, got ${verdict.kind}`);
+  it("names the class and the limitation, and suggests no rewritten command", () => {
+    // A retained denial must name its class and its limitation while carrying
+    // nothing executable: the `例如 <rewritten>` marker and the command's own
+    // bytes are both absent. A generated rewrite would be a reconstruction the
+    // module has not measured, so quoting one back would invent a command.
+    // The shapes the spec names as the former unsound suggestions, plus the
+    // parity and redirect rows. Each is a RETAINED shape — an escaped space in a
+    // whole word is admitted now, so the pipeline / semicolon / `&&` rows carry
+    // an unprovable even-parity run to stay on this side of the roster. The
+    // reason is one frozen string, so the no-rewrite property is structural; the
+    // loop states it across every retained class of shape, not one sample each.
+    const shapes = [
+      `a\\${LF}b`,
+      "cat > a\\ b",
+      "$X\\ b",
+      "a \\\\ b",
+      "echo a | grep a \\\\ b",
+      "echo a ; cat a \\\\ b",
+      "echo a && cat a \\\\ b",
+      `printf 'x\\${LF}y'`,
+      `printf x\\${LF}`,
+    ];
+    for (const command of shapes) {
+      const verdict = parseForSecurity(command);
+      if (verdict.kind !== "vetoed") {
+        throw new Error(`expected vetoed, got ${verdict.kind}`);
+      }
+      expect(verdict.class, command).toBe("backslash-whitespace");
+      expect(verdict.reason, command).toContain("backslash-whitespace");
+      expect(verdict.reason, command).toContain("引号");
+      expect(verdict.reason, command).toContain("bash");
+      expect(verdict.reason, command).not.toContain("例如");
+      expect(verdict.reason, command).not.toContain(command);
+      expect(verdict.reason, command).not.toContain('"');
     }
-    expect(verdict.class).toBe("backslash-whitespace");
-    expect(verdict.reason).toContain("引号");
-    expect(verdict.reason).toContain('echo "test"');
   });
 
   it("names zero-width, BOM and non-ASCII whitespace as one registered class", () => {
@@ -634,7 +674,8 @@ describe("the pre-parse veto roster", () => {
     for (const command of [
       "echo\u001b[0m colour-alias",
       "echo\u200dhi",
-      "echo\\ hi",
+      // The even-parity run stands for the class; see the roster nail above.
+      "a \\\\ b",
       "echo\u0000nul",
       "echo\u0085next-line",
     ]) {

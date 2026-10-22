@@ -119,6 +119,7 @@ function makeFakeManager(): {
       cause: null,
     })),
     output: vi.fn(),
+    listLiveTasks: vi.fn(() => []),
     stop: vi.fn(async (): Promise<CleanupEvidence> => ({
       state: "not_started",
     })),
@@ -598,7 +599,13 @@ describe("bash background tier 对照（timeoutMsOverride seam）", () => {
       );
       assert.equal(result.kind, "execution_failed");
       if (result.kind === "execution_failed") {
-        assert.equal(result.message, "timeout");
+        // ADR-0147 R3: single-call wave, question shown and approved, so the
+        // appended note names no sibling call.
+        assert.equal(
+          result.message,
+          "timeout\n" +
+            "[approval] held for user approval (approved); calls that ran in this wave meanwhile under the wave-start verdict: none"
+        );
       }
     }
   );

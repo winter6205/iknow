@@ -151,6 +151,7 @@ async function mountApp(initialTasks: SubagentInfo[]): Promise<Rig> {
     },
     inflight: createInflightRegistry(),
     contextWindow: 200_000,
+    listLiveBackgroundTasks: () => [],
     // Fresh array per call, like the real projection: the app's 1Hz poll feeds
     // React state and a stable reference would bail out the re-render.
     listSubagents: () => [...tasks],

@@ -26,6 +26,46 @@
  *     pass only the cwdReadonly flag while dropping fenceEnv).
  *   - background: module-level vi.mock("node:child_process", ...) intercepts
  *     spawn; call defaultBackgroundSpawn directly to capture the real fence.argv.
+ *
+ * #D2 (per-call concurrency safety) — what this file's foreground mirror
+ * mirrors, and what it does not:
+ *
+ *   The production foreground fence env is assembled in the `bash` handler
+ *   (`src/harness/aci/tools/bash.ts`, the `fenceEnv` spread next to
+ *   `applyCwdReadonlyFenceEnv`): the handler computes the per-call
+ *   concurrency-safety verdict for the call's RAW input with
+ *   `isReadonlyBashConcurrencySafe`
+ *   (`src/harness/aci/tools/bash-concurrency.ts`) and injects
+ *   `GIT_OPTIONAL_LOCKS=0` into the fence env WHEN THAT VERDICT IS TRUE AND
+ *   the command actually runs git
+ *   (`...gitOptionalLocksFenceEnv(command, concurrencySafe)`). A call the
+ *   predicate rejects gets nothing added — the env stays exactly as it was;
+ *   and so does a read-only call that never runs git (`ls`, `pwd`), because
+ *   the variable is git-specific.
+ *
+ *   This file's `foregroundFenceArgv` reproduces that assembly:
+ *     - it CALLS the production predicate for the verdict instead of
+ *       re-implementing its rules, so the mirror cannot drift from the
+ *       predicate (a re-implementation of the decision rule would be a second
+ *       copy of the policy tables, free to diverge silently);
+ *     - it CALLS the production `gitOptionalLocksFenceEnv` for the #D2
+ *       injection itself (imported from `bash.ts` below), so the trigger
+ *       rule — verdict AND git invocation — has exactly ONE copy in the
+ *       repository and this file cannot drift from it;
+ *     - it applies the same two guards in the same order — the readonly
+ *       guard (`applyCwdReadonlyFenceEnv`) and then the #D2 concurrency
+ *       guard;
+ *     - it does NOT reproduce the handler's `TMPDIR` wiring nor the secret
+ *       registry's restore step: neither reaches an axis this file compares
+ *       (the comparison is over isolation-axis FLAGS, not env values), and
+ *       the background side builds its own `TMPDIR` from its fs policy.
+ *
+ *   Consequence for the fg/bg comparison: the background arm of the handler
+ *   returns BEFORE the fence-env assembly (bash.ts), and the predicate
+ *   rejects every `background: true` call, so the background fence never
+ *   carries the #D2 injection. The two fences are therefore set-equal only
+ *   for a call the predicate REJECTS — the parity fixture below uses such a
+ *   command, and the fg-only injection is covered on its own.
  */
 
 import { EventEmitter } from "node:events";
@@ -52,6 +92,16 @@ import {
   createEnvIsolation,
   createFsPolicy,
 } from "../../../src/harness/sandbox/index.ts";
+// The production per-call concurrency verdict the bash handler uses (#D2).
+// The mirror below CALLS it, so the mirror cannot drift from the predicate.
+import {
+  commandInvokesGit,
+  isReadonlyBashConcurrencySafe,
+} from "../../../src/harness/aci/tools/bash-concurrency.ts";
+// The production #D2 fence-env trigger itself (the narrow rule: the verdict
+// AND a command that runs git). The mirror CALLS it — there is no second
+// copy of the trigger rule in this file.
+import { gitOptionalLocksFenceEnv } from "../../../src/harness/aci/tools/bash.ts";
 
 // Must precede the manager import: module-level vi.mock is hoisted by vitest,
 // but placing it here also shows the interception point plainly — manager.ts's
@@ -96,7 +146,10 @@ function makeFakeChild(pid = 99001) {
 /**
  * Mirrors bash.ts foreground fence assembly (ADR-0092 global mode).
  * - env: envIsolation.filter(...), then GIT_OPTIONAL_LOCKS=0 when cwdReadonly
- *   (product seam bash.ts, post-filter additive)
+ *   (product seam bash.ts, post-filter additive), then the #D2 concurrency
+ *   guard: GIT_OPTIONAL_LOCKS=0 when the production predicate
+ *   (`isReadonlyBashConcurrencySafe`, the same call bash.ts makes with the
+ *   call's RAW input) judges the call concurrency-safe
  * - fence options: cwdReadonly passes through from opts; no network opt-in
  *   (`--unshare-net` is a constant)
  * - fsPolicy: global mode carries only tmpRoot, it does not shape argv mounts
@@ -104,15 +157,26 @@ function makeFakeChild(pid = 99001) {
 function foregroundFenceArgv(opts: {
   readonly cwd: string;
   readonly cwdReadonly: boolean;
+  /** The command the call runs — the verdict is computed FROM it. */
+  readonly command: string;
 }): readonly string[] {
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
-  const fenceEnv = applyCwdReadonlyFenceEnv(
-    envIsolation.filter({ PATH: "/bin" }),
-    opts.cwdReadonly
-  );
+  // The production verdict, computed the way bash.ts computes it: the
+  // predicate takes the call's RAW input (a foreground call carries
+  // `command` and no `background`).
+  const concurrencySafe = isReadonlyBashConcurrencySafe({
+    command: opts.command,
+  });
+  const fenceEnv = {
+    ...applyCwdReadonlyFenceEnv(
+      envIsolation.filter({ PATH: "/bin" }),
+      opts.cwdReadonly
+    ),
+    ...gitOptionalLocksFenceEnv(opts.command, concurrencySafe),
+  };
   return createBwrapFence({
     command: "bash",
-    args: ["-c", "echo hi"],
+    args: ["-c", opts.command],
     fsPolicy: createFsPolicy({ tmpDir: tmpdir() }),
     env: fenceEnv,
     cwd: opts.cwd,
@@ -155,7 +219,8 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
   if (argv.some((arg, idx) => arg === "--ro-bind" && argv[idx + 1] === CWD)) {
     flags.add("cwd-ro-bind");
   }
-  // GIT_OPTIONAL_LOCKS=0 (injected by foreground cwdReadonly, bash.ts).
+  // GIT_OPTIONAL_LOCKS=0 (injected by foreground cwdReadonly and by the #D2
+  // concurrency-safe verdict, bash.ts).
   // Scan every --setenv triple: indexOf would hit earlier keys like PATH and miss this axis.
   for (let i = 0; i < argv.length; i++) {
     if (
@@ -179,10 +244,12 @@ function isolationAxisFlags(argv: readonly string[]): Set<string> {
 async function backgroundFenceArgv(opts: {
   readonly cwd: string;
   readonly cwdReadonly: boolean;
+  /** The command the call runs — the same command the foreground side runs. */
+  readonly command: string;
 }): Promise<readonly string[]> {
   spawnMock.mockImplementation(() => makeFakeChild());
   await defaultBackgroundSpawn({
-    command: "echo hi",
+    command: opts.command,
     cwd: opts.cwd,
     env: { PATH: "/bin" },
     ...(opts.cwdReadonly ? { cwdReadonly: true } : {}),
@@ -209,6 +276,21 @@ afterEach(() => {
 // The contract root (cwd) is validated on disk → the fixture uses a real directory.
 const CWD = mkdtempSync(join(tmpdir(), "bash-fence-parity-"));
 
+/**
+ * The command both sides of the fg/bg comparison run.
+ *
+ * It is deliberately a command the #D2 predicate REJECTS. The background arm
+ * of the handler returns BEFORE the fence-env assembly (bash.ts), and the
+ * predicate rejects every `background: true` call, so the background fence
+ * never carries the concurrency injection: the two fences are set-equal only
+ * for a call the predicate rejects. `touch` is not readonly-safe (the
+ * command roster denies it), so the verdict is false.
+ *
+ * Nothing is ever executed — the background side's spawn is intercepted by
+ * the vi.mock above, and the foreground side only builds an argv.
+ */
+const PARITY_COMMAND = "touch parity-probe.txt";
+
 afterAll(() => {
   rmSync(CWD, { recursive: true, force: true });
 });
@@ -228,10 +310,12 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
       const fg = foregroundFenceArgv({
         cwd: CWD,
         cwdReadonly: fx.cwdReadonly,
+        command: PARITY_COMMAND,
       });
       const bg = await backgroundFenceArgv({
         cwd: CWD,
         cwdReadonly: fx.cwdReadonly,
+        command: PARITY_COMMAND,
       });
       const fgFlags = [...isolationAxisFlags(fg)].sort();
       const bgFlags = [...isolationAxisFlags(bg)].sort();
@@ -243,10 +327,25 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
     });
   }
 
+  it("fixture precondition: the parity command is NOT concurrency-safe (fg and bg fences must agree)", () => {
+    // The fg/bg set-equality above is only truthful for a call the #D2
+    // predicate REJECTS: the background arm of the handler returns before the
+    // fence-env assembly, so the background fence never carries the #D2
+    // injection. If the predicate ever starts accepting this command, the
+    // fixture must change — the equality would otherwise assert a parity the
+    // product does not have.
+    assert.equal(
+      isReadonlyBashConcurrencySafe({ command: PARITY_COMMAND }),
+      false,
+      "the parity fixture command must be one the #D2 predicate rejects"
+    );
+  });
+
   it("cwdReadonly:true → bg argv contains --ro-bind <cwd>", async () => {
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       cwdReadonly: true,
+      command: PARITY_COMMAND,
     });
     const hasBgRoBind = bg.some(
       (arg, idx) => arg === "--ro-bind" && bg[idx + 1] === CWD
@@ -261,6 +360,7 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     const hasBgRoBind = bg.some(
       (arg, idx) => arg === "--ro-bind" && bg[idx + 1] === CWD
@@ -277,10 +377,12 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
     const fg = foregroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     assert.ok(fg.includes("--unshare-net"), "fg must carry --unshare-net");
     assert.ok(bg.includes("--unshare-net"), "bg must carry --unshare-net");
@@ -299,6 +401,7 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       cwdReadonly: true,
+      command: PARITY_COMMAND,
     });
     const injected = bg.some(
       (arg, idx) =>
@@ -316,6 +419,7 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     const injected = bg.some(
       (arg, idx) => arg === "--setenv" && bg[idx + 1] === "GIT_OPTIONAL_LOCKS"
@@ -324,6 +428,110 @@ describe("bash fence parity (foreground vs background argv isolation axis SETS)"
       injected,
       false,
       "bg must not inject GIT_OPTIONAL_LOCKS when cwdReadonly is false"
+    );
+  });
+});
+
+// ── #D2: the foreground fence env carries the per-call concurrency injection ──
+
+describe("bash fence parity — #D2 concurrency-safe fence env (foreground)", () => {
+  /** Does the argv carry the `--setenv GIT_OPTIONAL_LOCKS 0` triple? */
+  function injectsGitOptionalLocks(argv: readonly string[]): boolean {
+    return argv.some(
+      (arg, idx) =>
+        arg === "--setenv" &&
+        argv[idx + 1] === "GIT_OPTIONAL_LOCKS" &&
+        argv[idx + 2] === "0"
+    );
+  }
+
+  it("a concurrency-safe GIT call → fg fence injects GIT_OPTIONAL_LOCKS=0 (mirror bash.ts)", () => {
+    // The production condition (bash.ts): the handler computes the per-call
+    // concurrency-safety verdict for the command AND asks whether the
+    // command runs git; GIT_OPTIONAL_LOCKS=0 goes into the fence env only
+    // when BOTH hold.
+    const fg = foregroundFenceArgv({
+      cwd: CWD,
+      cwdReadonly: false,
+      command: "git status",
+    });
+    assert.ok(
+      injectsGitOptionalLocks(fg),
+      `fg fence must carry GIT_OPTIONAL_LOCKS=0 for a concurrency-safe git call, got ${JSON.stringify(fg)}`
+    );
+  });
+
+  it("a concurrency-safe NON-git call → fg fence does NOT inject GIT_OPTIONAL_LOCKS", () => {
+    // The variable is git-specific: `ls` is concurrency-safe but never runs
+    // git, so it must not carry it. Widening the trigger back to "the
+    // verdict alone" turns this case RED.
+    const fg = foregroundFenceArgv({
+      cwd: CWD,
+      cwdReadonly: false,
+      command: "ls",
+    });
+    assert.equal(
+      injectsGitOptionalLocks(fg),
+      false,
+      "fg fence must not inject GIT_OPTIONAL_LOCKS for a call that does not run git"
+    );
+  });
+
+  it("a rejected call → fg fence does NOT inject GIT_OPTIONAL_LOCKS", () => {
+    const fg = foregroundFenceArgv({
+      cwd: CWD,
+      cwdReadonly: false,
+      command: PARITY_COMMAND,
+    });
+    assert.equal(
+      injectsGitOptionalLocks(fg),
+      false,
+      "fg fence must not inject GIT_OPTIONAL_LOCKS for a call the predicate rejects"
+    );
+  });
+
+  it("fg injection follows the production rule exactly (mirror cannot drift)", () => {
+    // The production rule is the AND of two facts: the per-call verdict and
+    // "the command runs git" (`commandInvokesGit`). The mirror calls both
+    // production functions, so this case pins the COMPOSITION as well.
+    for (const command of [
+      "git status",
+      "git log --oneline -5",
+      "pwd",
+      "ls",
+      "cat file",
+      PARITY_COMMAND,
+    ]) {
+      const expected =
+        isReadonlyBashConcurrencySafe({ command }) &&
+        commandInvokesGit(command);
+      const fg = foregroundFenceArgv({
+        cwd: CWD,
+        cwdReadonly: false,
+        command,
+      });
+      assert.equal(
+        injectsGitOptionalLocks(fg),
+        expected,
+        `fg fence env disagrees with the production rule for ${JSON.stringify(command)}`
+      );
+    }
+  });
+
+  it("bg fence never carries the injection (the bg arm returns before the fg fence env)", async () => {
+    // The background arm of the handler returns BEFORE the fence-env
+    // assembly, and the predicate rejects every `background: true` call —
+    // so the bg fence never carries the #D2 injection. This is why the
+    // fg/bg set-equality fixture uses a command the predicate rejects.
+    const bg = await backgroundFenceArgv({
+      cwd: CWD,
+      cwdReadonly: false,
+      command: "pwd",
+    });
+    assert.equal(
+      injectsGitOptionalLocks(bg),
+      false,
+      "the background arm of the handler never reaches the fg fence-env assembly"
     );
   });
 });
@@ -342,10 +550,12 @@ describe("bash fence parity — global-mode mounts (host root + system ro-binds)
     const fg = foregroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     const isRootBind = (argv: readonly string[]): boolean =>
       argv.some(
@@ -360,10 +570,12 @@ describe("bash fence parity — global-mode mounts (host root + system ro-binds)
     const fg = foregroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     for (const path of READ_ONLY_SYSTEM_PATHS) {
       assert.notEqual(roBindIndex(fg, path), -1, `fg must ro-bind ${path}`);
@@ -375,10 +587,12 @@ describe("bash fence parity — global-mode mounts (host root + system ro-binds)
     const fg = foregroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     const bg = await backgroundFenceArgv({
       cwd: CWD,
       cwdReadonly: false,
+      command: PARITY_COMMAND,
     });
     for (const argv of [fg, bg]) {
       assert.equal(

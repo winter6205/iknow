@@ -404,9 +404,13 @@ describe("(d) a degraded ask surface refuses — existing guards, no new code", 
       },
     });
     assert.equal(innerCalls.length, 0);
+    // ADR-0147 R2: a throwing inlet is its own ending, not "the user declined".
+    // No `[approval]` note here: this file drives `createPermissionExecutor`
+    // directly, and the R3 line is appended by the ACI wave's approval arm.
     assert.equal(
       messageOf(result),
-      "[user_denied] user declined tool call: edit_file"
+      "[user_denied] approval prompt failed (Error: approval inlet failed): edit_file",
+      "the cause is sanitized to class + message, and the tool is named"
     );
   });
 });

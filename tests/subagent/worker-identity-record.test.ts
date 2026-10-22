@@ -702,7 +702,9 @@ function makeFailClosedManager(
     sandboxRoot: subagentsDir,
     runtimePersistence: {
       bind: () => ({
-        publishSavedState: async () => {},
+        // This fake writes nothing, so it reports "skipped", never a durable
+        // write (the manager only appends facts here anyway).
+        publishSavedState: async () => false,
         appendOperationFact: async () => {},
       }),
     },

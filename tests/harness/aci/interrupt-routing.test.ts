@@ -858,7 +858,13 @@ describe("SC13 — bash real spawn partial output preserved", () => {
       const r = results[0]!;
       assert.equal(r.kind, "execution_failed");
       if (r.kind === "execution_failed") {
-        assert.equal(r.message, "cancelled");
+        // ADR-0147 R3: the call was asked (approved) and no sibling call had
+        // started before the question settled, so the note names `none`.
+        assert.equal(
+          r.message,
+          "cancelled\n" +
+            "[approval] held for user approval (approved); calls that ran in this wave meanwhile under the wave-start verdict: none"
+        );
         assert.ok(
           r.partial && r.partial.stdout && r.partial.stdout.length > 0,
           `expected partial.stdout, got: ${JSON.stringify(r.partial)}`
@@ -937,7 +943,12 @@ describe("SC15 — block 工具完成不被 caller abort 打断(已在上文覆�
     // the caller still gets a cancelled result once the blocked tool finishes
     assert.equal(results[0]!.kind, "execution_failed");
     if (results[0]!.kind === "execution_failed") {
-      assert.equal(results[0]!.message, "cancelled");
+      // ADR-0147 R3: single-call wave, approved question, no sibling started.
+      assert.equal(
+        results[0]!.message,
+        "cancelled\n" +
+          "[approval] held for user approval (approved); calls that ran in this wave meanwhile under the wave-start verdict: none"
+      );
     }
   });
 });
@@ -968,6 +979,33 @@ describe("SC16 — computeToolStopFlags:回合 timeout 只认 signal 时钟标�
     const flags = computeToolStopFlags({ results: [r], signal: undefined });
     assert.equal(flags.timedOut, false);
     assert.equal(flags.cancelled, true);
+  });
+
+  it("ADR-0147 R3:首行 'cancelled' + 追加 [approval] 行仍标 cancelled", () => {
+    // The appended R3 line names the approval outcome, not why the call
+    // failed, so a whole-message comparison would drop the cancel this result
+    // still carries and the turn would not stop.
+    const r: ToolExecutionResult = {
+      kind: "execution_failed",
+      toolUseId: "u1",
+      message:
+        "cancelled\n[approval] held for user approval (cancelled); calls that ran in this wave meanwhile under the wave-start verdict: none",
+    };
+    const flags = computeToolStopFlags({ results: [r], signal: undefined });
+    assert.equal(flags.timedOut, false);
+    assert.equal(flags.cancelled, true);
+  });
+
+  it("标签只认首行:追加行里的 'cancelled' 不升级,别的首行也不匹配", () => {
+    const r: ToolExecutionResult = {
+      kind: "execution_failed",
+      toolUseId: "u1",
+      message:
+        "spawn_subagent: task t1 hit its wall-clock timeout\n[approval] held for user approval (cancelled); calls that ran in this wave meanwhile under the wave-start verdict: none",
+    };
+    const flags = computeToolStopFlags({ results: [r], signal: undefined });
+    assert.equal(flags.timedOut, false);
+    assert.equal(flags.cancelled, false);
   });
 
   it("result 标签 'preempted' / 'timeout:bash'(无 signal)全不误判", () => {
@@ -1192,7 +1230,13 @@ describe("SC13 — bash tier timeout (via timeoutMsOverride seam)", () => {
       const r = results[0]!;
       assert.equal(r.kind, "execution_failed");
       if (r.kind === "execution_failed") {
-        assert.equal(r.message, "timeout");
+        // ADR-0147 R3: single-call wave, approved question, no sibling started;
+        // the tier-timeout ending text itself is unchanged.
+        assert.equal(
+          r.message,
+          "timeout\n" +
+            "[approval] held for user approval (approved); calls that ran in this wave meanwhile under the wave-start verdict: none"
+        );
         assert.ok(
           r.partial && r.partial.stdout && r.partial.stdout.length > 0,
           `expected partial.stdout on tier timeout, got: ${JSON.stringify(r.partial)}`

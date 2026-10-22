@@ -51,6 +51,7 @@ import {
   useSelectionHandler,
   useTerminalDimensions,
 } from "@opentui/react";
+import stringWidth from "string-width";
 import type { HarnessStreamEvent } from "../harness/stream.js";
 import { summarizeTransportCause } from "../harness/errors.js";
 import {
@@ -66,6 +67,12 @@ import type { TuiToolEvent, TuiMcpViewExt } from "./deps.js";
 import type { McpServerStatus } from "../harness/mcp/manager.js";
 import { isDoubleEsc, type TuiBridge } from "./hub-bridge.js";
 import type { TuiAskUserBridge, TuiPendingAsk } from "./ask-user.js";
+import type {
+  RemoteInputBindings,
+  RemoteInputPort,
+  RemoteSendResult,
+} from "./remote/input-port.js";
+import type { ProjectionActiveState } from "./remote/projector.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
 import type {
   PermissionMode,
@@ -77,11 +84,22 @@ import {
   PERMISSION_ANSWERS,
   permissionModalRows,
   reduceModalKey,
+  shortToolUseId,
   wrapModalLines,
   type ModalKeyEvent,
   type PermissionAnswer,
 } from "./modal.js";
-import { abortForegroundTurnOnQuit } from "./quit-abort.js";
+import {
+  abortOwnedWorkOnQuit,
+  removeOwnedTurnController,
+  trackOwnedTurnController,
+} from "./quit-abort.js";
+import {
+  planQuitBusy,
+  quitConfirmationRefreshLines,
+  quitBusyFingerprint,
+  quitBusyNoticeLines,
+} from "./quit-busy.js";
 import {
   DRAFT_SESSION_ID,
   appendInputHistory,
@@ -96,11 +114,24 @@ import {
   switchedTo,
   turnFinished,
   turnStarted,
+  withSessionRoute,
   userMessageEchoed,
-  withLastUsage,
+  withContextUsageBeat,
   type TuiSessionState,
   type TuiView,
 } from "./session-state.js";
+import {
+  INITIAL_TOKEN_SPEED_STATE,
+  TOKEN_SPEED_WINDOW_MS,
+  ZERO_TOKEN_SPEED_READING,
+  beginTokenSpeedTurn,
+  finishTokenSpeedTurn,
+  readTokenSpeed,
+  refreshTokenSpeed,
+  transitionTokenSpeed,
+  type TokenSpeedReading,
+  type TokenSpeedState,
+} from "./token-speed.js";
 import {
   codeRestoreNoticeLines,
   reduceRewindKey,
@@ -131,7 +162,7 @@ import {
   type SlashCandidate,
   type TuiSlashCommand,
 } from "./slash.js";
-import { activeToolNameOf, liveToolReduce } from "./live-tool-state.js";
+import { liveToolReduce } from "./live-tool-state.js";
 import type { LiveToolRun } from "./live-tool-state.js";
 import {
   ADJUSTABLE_EFFORT_LEVELS,
@@ -201,6 +232,7 @@ import {
 import { shouldTriggerContinueFromNl } from "../session-api/continue-pending.js";
 import type {
   ThinkingEffortWire,
+  UserContentBlock,
   WireThinkingOverride,
 } from "../session-api/contract.js";
 import { ChatView } from "./chat-view.js";
@@ -208,7 +240,7 @@ import type { StreamDraft } from "../cli/stream-draft.js";
 import { createStreamDraft } from "../cli/stream-draft.js";
 import { ListView, relativeTime, type TuiListEntry } from "./list-view.js";
 import { McpView, type McpToolEntry } from "./mcp-view.js";
-import { ContextBar } from "./context-bar.js";
+import { ContextBar, displayedModelRoute } from "./context-bar.js";
 import {
   EMPTY_ENV_DISPLAY_STORE,
   type EnvDisplayStore,
@@ -289,10 +321,35 @@ import {
 import { renderBannerLines, VERSION } from "./banner.js";
 import { copyToClipboard, type CopyResult } from "./clipboard.js";
 import {
-  isSubagentTool,
-  summarizeToolCall,
-  formatLiveToolEvent,
-} from "./tool-summary.js";
+  PASTE_IMAGE_PROBE_TIMEOUT_MS,
+  readClipboardImage,
+  type ClipboardImageResult,
+  type ReadClipboardImageOptions,
+} from "./clipboard-image.js";
+import {
+  createComposerDraft,
+  draftText,
+  pasteHasLineBreak,
+  skillImageContent,
+  toUserContentBlocks,
+  transcriptEchoText,
+  type ComposerDraft,
+  type DraftPayload,
+} from "./composer-draft.js";
+import {
+  emptyGapQueue,
+  enqueueGap,
+  gapCount,
+  gapQueueLine,
+  recallNewestGap,
+  resolveGapKey,
+  restoreGapHead,
+  takeOldestGap,
+  type GapDraft,
+  type GapQueue,
+} from "./turn-gap-queue.js";
+import { ValidationError } from "../shared/errors.js";
+import { summarizeToolCall, formatLiveToolEvent } from "./tool-summary.js";
 import {
   SubagentPanel,
   projectSubagentLines,
@@ -302,6 +359,7 @@ import {
   DONE_FADE_WINDOW_S,
 } from "./subagent-panel.js";
 import type { SubagentInfo } from "../harness/subagent/manager.js";
+import type { BackgroundLiveTask } from "../harness/background/manager.js";
 import type {
   SubagentCapacityHolder,
   SubagentCapacityValue,
@@ -341,6 +399,11 @@ import {
 // among them (ADR-0139); this component never rebuilds them and never
 // writes the holder directly.
 import type { YoloContext, YoloController } from "../harness/sandbox/yolo.js";
+import {
+  clearOverlayForUserChange,
+  type PresetId,
+  type PresetOverlay,
+} from "../harness/sandbox/no-sandbox-marker.js";
 import { buildSkillLoadText, createSkillBody } from "../harness/skill/body.js";
 import type { SkillRescanner } from "../harness/skill/rescan.js";
 import {
@@ -370,6 +433,129 @@ import { RECOVERY_IN_PROGRESS_LABEL } from "../session-api/store/recovery-status
  *  inputWrapLineCount (wrap-aware visual line count) — fixes the regression
  *  where long text without `\n` kept the input box at one line. */
 export { inputVisibleLineCount, inputWrapLineCount, MAX_INPUT_LINES };
+
+/** What one turn carries: the text the command parser, the text cap and the
+ *  memory query read, plus the ordered payload when the draft holds folded
+ *  attachments. `content` absent keeps the hub's single-text-block path. */
+type TurnInput = {
+  readonly text: string;
+  readonly content?: readonly UserContentBlock[];
+  /** Who submitted the message (specs/remote-sync.md §4.1); absent → local. */
+  readonly origin?: "local" | "remote";
+};
+
+/** The Ctrl+V clipboard-image seam: `readClipboardImage` in the product path, a
+ *  cue-resolved stub in tests. Takes the reader's own options so the chord's
+ *  AbortSignal is the caller's, not a private one. */
+export type ClipboardImageReader = (
+  options?: ReadClipboardImageOptions
+) => Promise<ClipboardImageResult>;
+
+/**
+ * Every reader outcome except a payload, in the operator's words. A cancelled
+ * read is the discard path itself (the draft already moved on), so it says
+ * nothing; a failure says why nothing was added — never a text fallback.
+ */
+function clipboardImageFailureLines(
+  result: Exclude<ClipboardImageResult, { kind: "ok" }>
+): ReadonlyArray<string> {
+  switch (result.kind) {
+    case "empty":
+      return ["剪贴板里没有图片。"];
+    case "too-large":
+      return [`剪贴板图片 ${result.bytes} 字节，超过大小上限，未添加。`];
+    case "unsupported":
+      return ["剪贴板图片格式不支持（jpeg / png / gif / webp），未添加。"];
+    case "error":
+      // The reader already flattened this message: no payload, no raw stderr.
+      return [`剪贴板读取失败：${result.message}`];
+    case "cancelled":
+      return [];
+  }
+}
+
+/**
+ * Which buffer span this paste owns, or -1 for none. The first arm is the bytes
+ * this insert just wrote. The second matches on content, not position, so after
+ * an earlier substitution shifted the recorded span it lands on the pasted
+ * string wherever it sits at the end of the buffer — which cannot tell a
+ * byte-identical retype, or a tail that predates the paste, from bytes this
+ * paste wrote. A span that matches nowhere is left alone.
+ */
+function locatePastedSpan(buffer: string, start: number, text: string): number {
+  return buffer.slice(start, start + text.length) === text
+    ? start
+    : buffer.endsWith(text)
+      ? buffer.length - text.length
+      : -1;
+}
+
+/**
+ * The caret rides along a label substitution: a caret before the span does not
+ * move, one after it shifts by the length difference, one inside it lands on the
+ * label. The replaced length travels as `to - at`, the span's own bounds.
+ */
+function caretAfterLabel(
+  cursor: number,
+  at: number,
+  to: number,
+  labelLength: number
+): number {
+  return cursor <= at
+    ? cursor
+    : cursor >= to
+      ? cursor - (to - at) + labelLength
+      : at + labelLength;
+}
+
+/** One submit awaiting its turn outcome, together with what it took from the
+ *  draft: this is what a rejection hands back. */
+type SubmittedDraft = TurnInput & {
+  readonly displayText: string;
+  readonly payloads: readonly DraftPayload[];
+};
+
+/**
+ * The draft resolves exactly once, at submit: static slash commands keep
+ * reading the label form the user saw (`displayText`), while the model gets
+ * the real payload. A `/skill` prompt is built from the restored paste
+ * instead, with image labels left in place. The transcript echo expands
+ * paste labels from those payloads; `displayText` itself stays the input
+ * buffer so a rejection can put the fold back. Ordered blocks travel only
+ * when a genuine attachment is
+ * present, so a text-only draft stays on the hub's single-text-block path.
+ * Taking the payloads out of the draft rather than clearing it is what lets a
+ * rejection that happened before the turn was accepted hand them back — a pasted
+ * clipboard image cannot be re-obtained. Extracted because every branch of it
+ * counts against `handleSubmit`'s standing complexity budget.
+ */
+function resolveSubmittedDraft(
+  draft: ComposerDraft,
+  text: string
+): SubmittedDraft {
+  const blocks = toUserContentBlocks(draft.expand(text));
+  const messageText = draftText(blocks);
+  const hasAttachment = blocks.some((block) => block.type === "image");
+  return {
+    text: messageText,
+    displayText: text,
+    payloads: draft.takeSubmission(text),
+    ...(hasAttachment ? { content: blocks } : {}),
+  };
+}
+
+/**
+ * The rejection classes split at the hub's accepted-input commit: every throw
+ * site reached before it (input validation, the `## GOAL:` directive plus the
+ * block refusal, the adapter that cannot carry a block, deps and workspace-root
+ * guards) is a ValidationError, and after it the classes are
+ * RuntimeStatePersistenceError, a provider API error or a SessionStoreError —
+ * never a ValidationError. Restoring on anything else would hand the composer a
+ * second copy of a message that IS in history.
+ */
+function isPreAcceptanceRejection(err: unknown): boolean {
+  return err instanceof ValidationError;
+}
 
 /**
  * Row count after wrapping notice text by visual width (line-account SSOT,
@@ -464,22 +650,105 @@ export function compactNoticeFor(
   }
 }
 
-export function noticeRenderRows(
+/**
+ * True when a row painted with `wrapMode="none"` would fill the terminal's last
+ * column with the right half of a double-width glyph. That is the shape the
+ * renderer mishandles: the following row is spilled onto the same frame row
+ * (measured with two stacked texts in a 56-column box — 28 `中` = string-width
+ * 56 merges with the next row, while 56 latin characters, or 55 columns of `中`,
+ * keep their rows). A row narrower than the box never reaches that cell, and a
+ * row the box fits exactly but closed by a single-width glyph does not either.
+ */
+export function endsOnWideGlyphInLastCell(row: string, cols: number): boolean {
+  if (stringWidth(row) !== cols) return false;
+  const codePoints = Array.from(row);
+  return stringWidth(codePoints[codePoints.length - 1] ?? "") === 2;
+}
+
+/**
+ * Fold one logical notice line into painted rows. Copy whose full-width fold
+ * keeps the last cell free folds at `cols`; a line that would land a wide glyph
+ * there re-folds one cell narrower, which is enough for every row of that line
+ * because a row of at most `cols - 1` cells cannot close on a wide glyph. Below
+ * 3 columns no width both folds and keeps that cell free (one wide glyph alone
+ * equals the box), so those widths pass the line through untouched.
+ */
+function foldNoticeLine(line: string, cols: number): ReadonlyArray<string> {
+  // EXIT: cols < 3 — no width both folds and keeps the last cell free.
+  if (cols < 3) return wrapModalLines(line, 0);
+  const rows = wrapModalLines(line, cols);
+  // EXIT: a row would close on a wide glyph — refold one cell narrower.
+  return rows.some((row) => endsOnWideGlyphInLastCell(row, cols))
+    ? wrapModalLines(line, cols - 1)
+    : rows;
+}
+
+/**
+ * Fold notice copy into the physical rows the lane paints (one entry = one
+ * row). The lane box has no border and no horizontal padding, so this fold is
+ * also the width the lane paints at: the row account and the painted lane read
+ * one array instead of two different wrap rules.
+ */
+export function noticePhysicalLines(
   lines: ReadonlyArray<string> | undefined,
   cols: number
+): ReadonlyArray<string> {
+  if (lines === undefined || lines.length === 0) return [];
+  const folded: string[] = [];
+  for (const line of lines) folded.push(...foldNoticeLine(line, cols));
+  return folded;
+}
+
+/**
+ * Transcript minimum height. The chat box is a fixed-height scroll viewport;
+ * the notice lane is clipped against this floor so the column never asks the
+ * terminal for more rows than it has (unclaimed overflow makes Yoga shrink the
+ * bottom chrome, which paints the notice over the prompt).
+ */
+const CHAT_MIN_VIEWPORT_ROWS = 5;
+
+/**
+ * Panel-slot marginBottom (SSOT): `panelSlotRows` books `rows + this` for every
+ * panel-type slot (notice / modal / picker / compact), so lane geometry that
+ * needs that row subtracts this constant instead of a second literal.
+ */
+const PANEL_SLOT_MARGIN_ROWS = 1;
+
+/**
+ * Rows the notice lane can paint: what the terminal has left once the rest of
+ * the bottom chrome (chromeReserveRows with `noticeRows: 0`) and the lane's own
+ * marginBottom row are taken, and the transcript floor is kept.
+ */
+export function noticeLaneBodyRows(
+  chromeRowsWithoutNotice: number,
+  terminalRows: number
 ): number {
-  if (lines === undefined || lines.length === 0) return 0;
-  // notice render box inner width = cols - 2 (1 per side), matched to ListView measurements.
-  const inner = Math.max(0, cols - 2);
-  let rows = 0;
-  for (const line of lines) {
-    if (line.length === 0) {
-      rows += 1;
-      continue;
-    }
-    rows += wrapModalLines(line, inner).length;
-  }
-  return rows;
+  return Math.max(
+    0,
+    terminalRows -
+      chromeRowsWithoutNotice -
+      CHAT_MIN_VIEWPORT_ROWS -
+      PANEL_SLOT_MARGIN_ROWS
+  );
+}
+
+/**
+ * Clip folded notice lines to the lane's body rows: keep the head and replace
+ * the tail with `… +N` (the subagent panel's form), so the painted row count
+ * still equals the booked row count after clipping.
+ */
+export function noticeClippedLines(
+  folded: ReadonlyArray<string>,
+  bodyRows: number
+): ReadonlyArray<string> {
+  if (folded.length <= bodyRows) return folded;
+  // EXIT: bodyRows ≤ 0 — chrome + transcript floor already fill the terminal,
+  // so the lane paints nothing and books nothing.
+  if (bodyRows <= 0) return [];
+  return [
+    ...folded.slice(0, bodyRows - 1),
+    `… +${folded.length - (bodyRows - 1)}`,
+  ];
 }
 
 /**
@@ -499,7 +768,9 @@ export function noticeRenderRows(
  *     scrollbox, which scrolls on its own — reserving a chrome row for it
  *     would shrink the viewport without buying a bottom row
  *   - slash candidate rows (inputValue.trim().startsWith("/") ? … : 0)
- *   - notice body + its own marginBottom=1
+ *   - notice body + its own marginBottom=1 (`noticeRows` is the clipped count
+ *     from `noticeClippedLines`, never the raw fold count: an unclipped lane
+ *     overflows the terminal and Yoga shrinks the chrome below it)
  *   - modal body + its own marginBottom=1
  *   - thinking-picker panel + its own marginBottom=1 (pickerRows follows the modalRows convention)
  *   - compact progress panel + its own marginBottom=1 (compactRows same convention)
@@ -518,7 +789,7 @@ export function noticeRenderRows(
  */
 function panelSlotRows(rows: number | undefined): number {
   const n = rows ?? 0;
-  return n > 0 ? n + 1 : 0;
+  return n > 0 ? n + PANEL_SLOT_MARGIN_ROWS : 0;
 }
 
 /**
@@ -662,21 +933,93 @@ export function modeRowYoloMarker(cols: number): string {
 }
 
 /**
+ * ADR-0141: the YOLO badge — shown only while the yolo preset is unmodified.
+ * One word states all three axes, which is why the row suppresses the axis
+ * labels it already names (ADR-0141 ruling 5).
+ */
+export function yoloBadge(cols: number): string {
+  return modeRowYoloMarker(cols);
+}
+
+/**
+ * ADR-0141: the 无沙箱 marker — shown whenever the fence is retired, from the
+ * effective configuration or a live bare descendant. Independent of the badge:
+ * `--no-sandbox` has no badge and still shows it.
+ */
+export function noSandboxMarker(cols: number): string {
+  return cols < 40 ? "[无沙箱]" : " · 无沙箱";
+}
+
+/**
  * The full mode-row pure projection (specs/yolo-mode.md assertion surface):
- * when yolo is ON both forms contain the YOLO text; when OFF it equals the
- * existing label byte-for-byte. The render slot (mode-row JSX) splits into two
- * text nodes by this projection — the red marker is colored pal.error
- * separately (no new theme token, no new bottom-bar row, the row budget is
- * unchanged).
+ * the base axis labels, then the two DERIVED indicators.
+ *
+ * Suppression rule (ADR-0141 ruling 5): a per-axis label is dropped only for an
+ * axis a VISIBLE indicator already states. The badge states all three axes, so
+ * under the yolo preset the row is just the badge plus 无沙箱; a bare fence with
+ * no preset has no badge, so every axis label stays.
  */
 export function modeRowText(opts: {
-  readonly yoloOn: boolean;
+  /** The preset in force, or undefined. Drives the badge, never the marker. */
+  readonly preset?: PresetId;
+  /** Whether the fence is retired — from effective config or a live descendant. */
+  readonly fenceRetired: boolean;
   readonly graphOn: boolean;
   readonly permMode: PermissionMode;
   readonly cols: number;
 }): string {
+  const badge = opts.preset === "yolo" ? yoloBadge(opts.cols) : "";
+  const marker = opts.fenceRetired ? noSandboxMarker(opts.cols) : "";
+  // The badge names all three axes, so the axis labels drop out only under it.
+  const base = badge === "" ? modeRowBaseLabel(opts) : "";
+  return base + badge + marker;
+}
+
+/**
+ * ADR-0141: the two derived indicators, read in one place. The 无沙箱 marker
+ * follows the fence posture; the YOLO badge follows the declared preset —
+ * neither is entry-sourced. An absent overlay (test entries that build no
+ * session) falls back to the `yoloOn` mirror, which is exactly the pre-ADR
+ * display.
+ */
+function readPresetIndicators(
+  overlay: PresetOverlay | undefined,
+  yoloOn: boolean
+): { readonly fenceRetired: boolean; readonly preset: PresetId | undefined } {
+  return {
+    fenceRetired: overlay?.fenceRetired() ?? yoloOn,
+    preset: overlay?.preset(),
+  };
+}
+
+/**
+ * The same projection as `modeRowText`, as renderable nodes. The base labels
+ * and the two indicators stay in SEPARATE nodes because they are colored
+ * differently (`pal.dim` / `pal.running` for labels, `pal.error` for both
+ * indicators) — a single concatenated string cannot carry two colors, so this
+ * returns the same three strings the projection concatenates, in the same order.
+ *
+ * A component rather than inline JSX so the suppression branches do not sit
+ * inside `TuiApp` (S5: that function is already over the complexity limit at
+ * master and must not get worse).
+ */
+function ModeRowIndicators(props: {
+  readonly preset: PresetId | undefined;
+  readonly fenceRetired: boolean;
+  readonly graphOn: boolean;
+  readonly permMode: PermissionMode;
+  readonly cols: number;
+}): ReactNode {
+  const { preset, fenceRetired, graphOn, permMode, cols } = props;
+  const pal = tuiPalette;
   return (
-    modeRowBaseLabel(opts) + (opts.yoloOn ? modeRowYoloMarker(opts.cols) : "")
+    <>
+      <text fg={graphOn || permMode === "full_auto" ? pal.running : pal.dim}>
+        {preset === "yolo" ? "" : modeRowBaseLabel({ graphOn, permMode, cols })}
+      </text>
+      {preset === "yolo" && <text fg={pal.error}>{yoloBadge(cols)}</text>}
+      {fenceRetired && <text fg={pal.error}>{noSandboxMarker(cols)}</text>}
+    </>
   );
 }
 
@@ -698,7 +1041,12 @@ function modalRowsForBudget(opts: {
       }
     | undefined;
   readonly ask:
-    { readonly tool: string; readonly summaryHint: string } | undefined;
+    | {
+        readonly tool: string;
+        readonly summaryHint: string;
+        readonly toolUseId?: string;
+      }
+    | undefined;
   readonly cols: number;
 }): number {
   if (opts.yoloConfirmOpen) return yoloModalRows(opts.cols);
@@ -854,6 +1202,17 @@ export function applyConfigPickerKey(
 }
 
 /**
+ * ADR-0141: the clear hook both permission-flip surfaces pass down — `/permissions
+ * set` and the Shift+Tab wheel. Built once here so both call sites read the same
+ * closure, and so the branch does not sit inside `TuiApp` (S5).
+ */
+function permissionClearHook(overlay: PresetOverlay | undefined): () => void {
+  return (): void => {
+    clearOverlayForUserChange(overlay, "permission");
+  };
+}
+
+/**
  * Ctrl+O key check (toggle thinking fold): folded out of host useKeyboard
  * inline to keep the branch budget intact for the config-panel guard.
  */
@@ -870,11 +1229,16 @@ function isThinkingFoldKey(e: KeyEvent): boolean {
  * (it already took effect at runtime; the file state follows the next read).
  */
 function toggleFsModeAndPersist(
-  props: Pick<TuiAppProps, "fsMode" | "onPersistFsMode">,
+  props: Pick<TuiAppProps, "fsMode" | "onPersistFsMode" | "presetOverlay">,
   setNotice: (notice: Notice) => void
 ): void {
   const fsCtx = props.fsMode;
   if (fsCtx === undefined) return;
+  // ADR-0141: clear the overlay SYNCHRONOUSLY, before the holder write and
+  // before the write-back is issued — not inside the persist callback. A
+  // rejected write-back leaves the user's choice effective and never re-seeds
+  // the overlay (spec §1).
+  clearOverlayForUserChange(props.presetOverlay, "fsMode");
   const next = toggleFsMode(fsCtx.get());
   fsCtx.set(next);
   void props.onPersistFsMode?.(next).catch((err: unknown) => {
@@ -1078,7 +1442,7 @@ function runGraphSlashCommand(
  * Module-level for the same reason as `runGraphSlashCommand` (case-body branches live in a helper).
  */
 function runConfigSlashCommand(
-  props: Pick<TuiAppProps, "fsMode" | "onPersistFsMode">,
+  props: Pick<TuiAppProps, "fsMode" | "onPersistFsMode" | "presetOverlay">,
   text: string,
   setNotice: (notice: Notice) => void,
   setConfigPickerOpen: (open: boolean) => void,
@@ -1112,6 +1476,10 @@ function runConfigSlashCommand(
   // The app side parses once and the same result drives both the notice and the persist decision.
   // `applyFsModeCommand` internally parses again for the "modify holder" path — that is part of the command SSOT; merging it would require fs-mode.ts to expose `kind` in its return value (out of scope for this entry point).
   const cmd = parseConfigCommand(args);
+  // ADR-0141: the same hook, same ordering, on the args path.
+  if (cmd.kind === "set") {
+    clearOverlayForUserChange(props.presetOverlay, "fsMode");
+  }
   const res = applyFsModeCommand(fsCtx, args);
   setNotice({ lines: [res.text] });
   // Persist only on a successful switch (usage / status must not write the file). fire-and-forget: failure never throws (UI fallback), success never blocks input.
@@ -1168,7 +1536,13 @@ function runHolderSlashCommand(
         setters.permissionMode,
         text,
         setters.setPermMode,
-        setters.setNotice
+        setters.setNotice,
+        // ADR-0141: the overlay clears a declared permission axis; the persist
+        // closure carries the user's choice to the user layer.
+        {
+          presetOverlay: props.presetOverlay,
+          onPersistPermissionMode: props.onPersistPermissionMode,
+        }
       );
       return;
   }
@@ -1192,16 +1566,37 @@ function runPermissionsSlashCommand(
   permissionMode: PermissionModeContext,
   text: string,
   setPermMode: (mode: PermissionMode) => void,
-  setNotice: (notice: Notice) => void
+  setNotice: (notice: Notice) => void,
+  opts?: {
+    /**
+     * ADR-0141: the session overlay — passed through so `/permissions set`
+     * clears a declared permission axis, and the persist closure below carries
+     * the user's choice to the user layer.
+     */
+    readonly presetOverlay?: PresetOverlay;
+    readonly onPersistPermissionMode?: (mode: PermissionMode) => Promise<void>;
+  }
 ): void {
   const res = applyPermissionsCommand(
     permissionMode,
-    splitPermissionArgs(slashRemainder(text))
+    splitPermissionArgs(slashRemainder(text)),
+    {
+      onUserPermissionChange: permissionClearHook(opts?.presetOverlay),
+    }
   );
   // The permMode mirror has no subscription to the holder, so every writer
   // re-reads it after the flip (same discipline as the yolo and Shift+Tab arms).
   setPermMode(permissionMode.get());
   setNotice({ lines: [res.text] });
+  // ADR-0141 §5: user-layer write-back only, and only for a posture settings
+  // may hold. `full_auto` is a per-session operator choice (ADR-0090), so it is
+  // applied in memory and never persisted.
+  if (res.ok && permissionMode.get() !== "full_auto") {
+    const next = permissionMode.get();
+    void opts?.onPersistPermissionMode?.(next).catch((err: unknown) => {
+      setNotice({ lines: [`权限模式保存失败：${describeError(err)}`] });
+    });
+  }
 }
 
 /**
@@ -1212,6 +1607,234 @@ function runPermissionsSlashCommand(
  * Pinned by tests/tui/chrome-footer-order.test.tsx (frame row indices).
  */
 export const BOTTOM_MARGIN_ROWS = 1;
+
+interface QuitConfirmationSnapshot {
+  readonly fingerprint: string;
+  readonly waitSet: ReadonlyArray<Promise<unknown>>;
+}
+
+function quitConfirmationChanged(
+  previous: QuitConfirmationSnapshot | undefined,
+  current: QuitConfirmationSnapshot
+): boolean {
+  return (
+    previous === undefined ||
+    previous.fingerprint !== current.fingerprint ||
+    previous.waitSet.length !== current.waitSet.length ||
+    previous.waitSet.some((turn, index) => turn !== current.waitSet[index])
+  );
+}
+
+function clearQuitConfirmationOnOtherInput(
+  pending: boolean,
+  text: string,
+  clear: () => void
+): void {
+  if (!pending || text === "/quit" || text === "/exit") return;
+  clear();
+}
+
+function shouldIgnoreSubmit(text: string, quitting: boolean): boolean {
+  return text.length === 0 || quitting;
+}
+
+function continueKeyRoutingAfterQuitConfirmation(
+  eventType: string,
+  key: string,
+  pending: boolean,
+  cancel: () => void
+): boolean {
+  if (eventType !== "press") return false;
+  if (!pending || key !== "escape") return true;
+  cancel();
+  return false;
+}
+
+function backgroundTaskChromeLines(
+  tasks: ReadonlyArray<BackgroundLiveTask>
+): ReadonlyArray<string> {
+  const visible = tasks
+    .slice(0, 3)
+    .map(
+      (task) => `本 TUI 后台任务 ${task.task_id} · 会话 ${task.conversation_id}`
+    );
+  if (tasks.length > visible.length) {
+    return [
+      ...visible,
+      `… 本 TUI 还有 ${tasks.length - visible.length} 个后台任务`,
+    ];
+  }
+  return visible;
+}
+
+function backgroundTaskLinesForView(
+  view: TuiView,
+  tasks: ReadonlyArray<BackgroundLiveTask>
+): ReadonlyArray<string> {
+  return view === "chat" ? backgroundTaskChromeLines(tasks) : [];
+}
+
+function acceptedTurnTarget(
+  targetId: string | undefined,
+  quitting: boolean
+): string | undefined {
+  if (targetId === undefined || quitting) return undefined;
+  return targetId;
+}
+
+async function ensureSessionForOpenTurn(
+  isQuitting: () => boolean,
+  ensureSession: () => Promise<string | undefined>
+): Promise<string | undefined> {
+  if (isQuitting()) return undefined;
+  const conversationId = await ensureSession();
+  return isQuitting() ? undefined : conversationId;
+}
+
+function createQuitConfirmationSnapshot(input: {
+  readonly plan: ReturnType<typeof planQuitBusy>;
+  readonly sessions: Readonly<Record<string, TuiSessionState>>;
+  readonly inflightTurns: ReadonlyMap<string, ReadonlySet<Promise<unknown>>>;
+  readonly liveBackgroundTasks: ReadonlyArray<BackgroundLiveTask>;
+  readonly liveSubagents: ReturnType<TuiAppProps["bridge"]["listSubagents"]>;
+}): QuitConfirmationSnapshot {
+  return {
+    fingerprint: quitBusyFingerprint({
+      sessions: input.sessions,
+      inflightTurns: input.inflightTurns,
+      liveBackgroundTasks: input.liveBackgroundTasks,
+      subagents: input.liveSubagents,
+    }),
+    waitSet: input.plan.waitSet,
+  };
+}
+
+function confirmQuitIfNeeded(input: {
+  readonly plan: ReturnType<typeof planQuitBusy>;
+  readonly pending: boolean;
+  readonly previous: QuitConfirmationSnapshot | undefined;
+  readonly snapshot: QuitConfirmationSnapshot;
+  readonly save: (snapshot: QuitConfirmationSnapshot) => void;
+  readonly show: (lines: ReadonlyArray<string>) => void;
+}): boolean {
+  const changed =
+    input.pending && quitConfirmationChanged(input.previous, input.snapshot);
+  if (!(input.plan.needsSecondConfirm && !input.pending) && !changed) {
+    return false;
+  }
+  input.save(input.snapshot);
+  input.show(
+    changed
+      ? quitConfirmationRefreshLines()
+      : quitBusyNoticeLines(input.plan.hasStoppableWork)
+  );
+  return true;
+}
+
+function backgroundTaskFingerprint(
+  tasks: ReadonlyArray<BackgroundLiveTask>
+): string {
+  return JSON.stringify(
+    tasks
+      .map((task) => JSON.stringify([task.task_id, task.conversation_id]))
+      .sort()
+  );
+}
+
+/**
+ * 1Hz subagent poll signature. It must cover the union of the fields the two
+ * hosts render: the card projection (`subagent-message-lines.ts` — toolUseId,
+ * state, role, title, activity) and the bottom panel (taskPreview, startedAt,
+ * endedAt, summary / reason, conversationId / foreground). The wall-clock
+ * values (`elapsedSec` / `ageSec` / retention windows) are derived at render
+ * time, not stored on `SubagentInfo`; `subagentPollSignature` adds the current
+ * second while any row renders them. Per-item strings are sorted so a shuffled
+ * list still matches.
+ *
+ * The ref compare in `refreshLiveProjections` uses this to skip
+ * `setSubagents` when nothing visible changed, avoiding a whole-tree repaint
+ * every tick. `subagentCardsKey` is the card host's narrower signature; this
+ * one intentionally adds the panel-only fields.
+ */
+export function subagentFingerprint(list: ReadonlyArray<SubagentInfo>): string {
+  return JSON.stringify(
+    list
+      .map((s) =>
+        JSON.stringify([
+          s.taskId,
+          s.state,
+          s.startedAt,
+          s.endedAt ?? null,
+          s.summary ?? null,
+          s.reason ?? null,
+          s.role ?? null,
+          s.title ?? null,
+          s.activity ?? null,
+          s.toolUseId ?? null,
+          s.conversationId ?? null,
+          s.foreground === true,
+          s.taskPreview,
+        ])
+      )
+      .sort()
+  );
+}
+
+/**
+ * Whether the subagent projection's rendered text depends on the wall clock
+ * at `nowMs`. A live row prints elapsed seconds; a terminal row stays visible
+ * (failed, 30 s window) or counted (`✓ N 完成`, 5 s window) only until its
+ * retention window elapses. The 1Hz poll must repaint while this holds even
+ * when every content field is unchanged, or the elapsed time freezes and an
+ * expired row lingers. Once no row depends on the clock (or the list is
+ * empty), the content fingerprint alone can gate the poll.
+ */
+function subagentsNeedClockTick(
+  list: ReadonlyArray<SubagentInfo>,
+  nowMs: number
+): boolean {
+  return list.some((s) => {
+    if (isLiveSubagent(s)) return true;
+    if (s.endedAt === undefined) return false;
+    const ageMs = nowMs - Date.parse(s.endedAt);
+    if (!Number.isFinite(ageMs)) return false;
+    return s.state === "failed"
+      ? ageMs <= FAILED_VISIBLE_WINDOW_S * 1000
+      : ageMs <= DONE_FADE_WINDOW_S * 1000;
+  });
+}
+
+/**
+ * Poll signature = content fingerprint + (when the projection is clock-
+ * sensitive) the current second. Two lists with identical content but a live
+ * (or still-retained) row therefore differ between consecutive seconds, so
+ * the elapsed timer and the retention windows keep advancing; a fully static
+ * projection keeps one signature. Exported for tests.
+ */
+export function subagentPollSignature(
+  list: ReadonlyArray<SubagentInfo>,
+  nowMs: number
+): string {
+  const content = subagentFingerprint(list);
+  return subagentsNeedClockTick(list, nowMs)
+    ? `${content}|t${Math.floor(nowMs / 1000)}`
+    : content;
+}
+
+/**
+ * Gate for the 1Hz poll: returns the new signature when `setSubagents` must
+ * run, or `null` when repainting would be a no-op (same content AND no
+ * clock-sensitive row). Exported so the skip behavior is pinned by a unit
+ * test without rendering the whole TuiApp.
+ */
+export function subagentPollSignatureIfChanged(
+  previousSignature: string,
+  list: ReadonlyArray<SubagentInfo>,
+  nowMs: number
+): string | null {
+  const signature = subagentPollSignature(list, nowMs);
+  return signature === previousSignature ? null : signature;
+}
 
 export function chromeReserveRows(opts: {
   readonly noticeRows: number;
@@ -1249,6 +1872,10 @@ export function chromeReserveRows(opts: {
   readonly degradeRows?: number;
   /** Compact progress panel rows (compactProgressRows(), 6). Default 0 → no rows when the panel is closed (legacy callers / non-compaction paths unaffected). */
   readonly compactRows?: number;
+  /** One row for the unread turn-gap line above the composer. Default 0. */
+  readonly queueRows?: number;
+  /** Visible owner-labelled live background task rows. Default 0. */
+  readonly backgroundTaskRows?: number;
 }): number {
   const inputContentRows = Math.max(
     1,
@@ -1271,6 +1898,8 @@ export function chromeReserveRows(opts: {
       opts.verifyRows,
       opts.graphRows,
       opts.degradeRows,
+      opts.queueRows,
+      opts.backgroundTaskRows,
     ]) +
     (opts.bgLine ? 1 : 0); // background-run marker row
   return (
@@ -1328,6 +1957,25 @@ export interface TuiAppProps {
   readonly bridge: TuiBridge;
   readonly askBridge: TuiAskUserBridge;
   readonly toolEventSink: TuiToolEventSink;
+  /**
+   * Specs/remote-sync.md §4.3: the seat's input port. Bound once on mount to
+   * the latest-render handlers and unbound on unmount. Absent (remote
+   * disabled / fixture entries) → nothing is bound.
+   */
+  readonly remoteInputPort?: RemoteInputPort;
+  /**
+   * Active-projection publisher (specs/remote-sync.md §4.4): one state per
+   * change of active conversation / run state / gap-queue count, and
+   * undefined on unmount.
+   */
+  readonly onProjectionActive?: (
+    state: ProjectionActiveState | undefined
+  ) => void;
+  /**
+   * Seat notice sink: the seat registers a `show` callback whose lines enter
+   * the existing notice lane; the returned cleanup runs on unmount.
+   */
+  readonly onRemoteNoticeSink?: (show: (line: string) => void) => () => void;
   /** Session already persisted, passed in by the `iknow tui <session-id>` resume entry; absent = draft. */
   readonly initialSession?: TuiSessionState;
   readonly cwd: string;
@@ -1362,6 +2010,19 @@ export interface TuiAppProps {
    */
   readonly yolo?: YoloContext;
   /**
+   * ADR-0141: the session overlay — the single carrier both derived indicators
+   * read. Absent (test / fixture entries) → both markers fall back to the yolo
+   * mirror, which is the pre-overlay behaviour.
+   */
+  readonly presetOverlay?: PresetOverlay;
+  /**
+   * ADR-0141 §5: the user-layer permission write-back. Same shape as
+   * `onPersistFsMode` — fire-and-forget, failure renders a notice and never
+   * rolls the holder back. Product path injects a closure over
+   * `persistPermissionModeChanges` from run.tsx.
+   */
+  readonly onPersistPermissionMode?: (mode: PermissionMode) => Promise<void>;
+  /**
    * ADR-0119 / specs/yolo-mode.md: the yolo enter / exit action single point
    * (fsMode snapshot + global, exit restores the snapshot, symmetric bwrap
    * probe on both the enter and exit sides). The permission axis is not part
@@ -1382,12 +2043,22 @@ export interface TuiAppProps {
   readonly onPersistFsMode?: (mode: FsIsolationMode) => Promise<void>;
   /** Persistence target for the permission modal "always allow" — session-level grants registry. */
   readonly sessionGrants?: SessionGrants;
+  /**
+   * Clipboard-image reader behind the Ctrl+V chord. Absent → the real
+   * `readClipboardImage` (host interop + temp file); tests inject a stub that
+   * resolves on cue, because a test process cannot reach the host clipboard.
+   * The chord owns no other configuration surface: no setting, no timeout knob.
+   */
+  readonly clipboardImageReader?: ClipboardImageReader;
   /** Test injection: optional initial view (default chat). */
   readonly initialView?: TuiView;
   /** Test / mock injection: callback triggered on renderer.destroy; default = no-op.
    *  Argument = conversationId of the sessions active at quit time (undefined for an
    *  unpersisted draft), so the host can print a resume hint after terminal restore. */
-  readonly onQuit?: (conversationId?: string) => void;
+  readonly onQuit?: (
+    conversationId?: string,
+    inflightTurns?: ReadonlyArray<Promise<unknown>>
+  ) => void;
   /** Skill catalog (mixed into slash candidates + /skill-name load-and-send).
    *  Optional: default = empty catalog (fixture / test compat; the product path
    *  injects via run.tsx through TuiExtensions.skillCatalog). This value is an
@@ -1526,20 +2197,30 @@ export interface TuiAppProps {
    */
   readonly providers?: ReadonlyArray<IknowSettingsLlmProvider>;
   /**
-   * ADR-0093: persist channel after Enter-selection in the `/model` panel. The
-   * host must **explicitly refresh env and rebuild the adapter** after writing
-   * settings.json (the self-write sentinel swallows the watcher event caused by
-   * its own writeback, so reloadFromEnv is not triggered automatically). A
-   * `{ ok: false; reason }` return or a throw → the app renders a notice; no
-   * notice on success (writeback is a background act). Default undefined →
-   * selection only closes the panel (pure UI, test compat).
+   * ADR-0093 / ADR-0145: persist channel after Enter-selection in the `/model`
+   * panel. The host must **explicitly refresh env and rebuild the adapter** after
+   * writing settings.json (the self-write sentinel swallows the watcher event
+   * caused by its own writeback, so reloadFromEnv is not triggered
+   * automatically). A `{ ok: false; reason }` return or a throw → the app
+   * renders a notice; no notice on success (writeback is a background act).
+   * Default undefined → selection only closes the panel (pure UI, test compat).
+   *
+   * `conversationId` is the ACTIVE conversation (undefined for a draft — a
+   * draft has no conversation yet). ADR-0145: the host sets THIS conversation's
+   * route first (the conversation owns it) and then writes the default for
+   * conversations started later. `stage: "route"` = the route did not resolve:
+   * nothing changed (the conversation kept its old route, the default was not
+   * written either).
    */
-  readonly onPersistModel?: (patch: { readonly model: string }) => Promise<
+  readonly onPersistModel?: (
+    patch: { readonly model: string },
+    conversationId: string | undefined
+  ) => Promise<
     | { ok: true }
     | {
         ok: false;
         reason: string;
-        stage?: "write" | "reload";
+        stage?: "route" | "write" | "reload";
       }
   >;
   /**
@@ -1558,6 +2239,11 @@ interface Notice {
   readonly lines: ReadonlyArray<string>;
 }
 
+/** Remote-input notices (specs/remote-sync.md §4.3): the seat's message gets
+ *  one line in the same lane as every other TUI notice. */
+const REMOTE_SENT_NOTICE = "远程输入：消息已发送";
+const REMOTE_QUEUED_NOTICE = "远程输入：消息已排队，将在当前回合结束后发送";
+
 /**
  * UI-feedback throttle: how long the streaming arm may go without onStream
  * events before the notice copy changes to "waiting for model output". The
@@ -1575,6 +2261,19 @@ interface Notice {
  * nextToolPhaseActive / armSilenceTimer) and must not land in the notice.
  */
 const DEFAULT_STREAMING_SILENCE_NOTICE_MS = 60_000;
+
+/**
+ * Plan A T6: repaint cadence of the live token-speed suffix. The 800 ms
+ * cadence keeps every repaint strictly inside the one-second sample window
+ * (a 1 s cadence races the window edge and can miss a short burst), so the
+ * rate refreshes ~1.25 times per second instead of per fragment. The timer
+ * only runs while a call is generating (cleared on post_call / tool phase /
+ * turn end).
+ *
+ * Exported so the repaint cadence is pinned by the TUI tests instead of a
+ * duplicated literal.
+ */
+export const TOKEN_SPEED_REPAINT_MS = 800;
 
 /**
  * Silence-threshold resolution, pushed down to this leaf function so the
@@ -1619,6 +2318,33 @@ export function nextToolPhaseActive(
   }
   if (event.type === "tool_call_start") return true;
   return active;
+}
+
+/**
+ * Apply stream events to the pure per-turn speed reducer. The reducer owns
+ * call boundaries and rate math; the host supplies time and owns its timer.
+ * `tool_call_start` stays in generation because tool-input deltas follow it.
+ * `agent_status` / `env_snapshot` mark the next model call when a pre-call
+ * usage beat is unavailable. Projected usage never changes speed.
+ */
+export function tokenSpeedTransition(
+  state: TokenSpeedState,
+  event: HarnessStreamEvent,
+  now: number
+): TokenSpeedState {
+  return transitionTokenSpeed(state, event, now);
+}
+
+/**
+ * The active conversation always renders a speed, including zero while a
+ * draft has no conversation id or a model call has not emitted output.
+ */
+function tokenSpeedReadingFor(
+  readings: Record<string, TokenSpeedReading>,
+  conversationId: string | undefined
+): TokenSpeedReading {
+  if (conversationId === undefined) return ZERO_TOKEN_SPEED_READING;
+  return readings[conversationId] ?? ZERO_TOKEN_SPEED_READING;
 }
 
 /**
@@ -2113,6 +2839,60 @@ function shellParseDegradeNotice(view: TuiView): ReactNode {
   );
 }
 
+function GapQueueLine(props: {
+  readonly line: string | undefined;
+  readonly color: string;
+}): ReactNode {
+  if (props.line === undefined) return null;
+  return <text fg={props.color}>{props.line}</text>;
+}
+
+function gapChromeRows(line: string | undefined): number {
+  return line === undefined ? 0 : 1;
+}
+
+function viewGapLine(
+  view: string,
+  queue: GapQueue,
+  sessionKey: string,
+  cols: number
+): string | undefined {
+  if (view !== "chat") return undefined;
+  return gapQueueLine(queue, sessionKey, cols);
+}
+
+/** Interrupt copy, unless a queued draft will take the next gap. */
+function cancelledTurnNotice(
+  queuedDraftWaiting: boolean,
+  uncancellable: string | undefined,
+  interrupted: boolean | undefined
+): { lines: string[] } | undefined {
+  if (queuedDraftWaiting) return undefined;
+  if (uncancellable !== undefined) return { lines: [uncancellable] };
+  if (interrupted === true) return { lines: ["已打断，checkpoint 已保存"] };
+  if (interrupted === false) {
+    return { lines: ["已打断（无新内容，未落 checkpoint）"] };
+  }
+  return { lines: ["已打断当前 turn"] };
+}
+
+/** Inline ask line for the transcript tail (single source for the host's
+ *  non-modal permission hint). The modal owns the question while it is up, so
+ *  the inline line exists only when a question is pending and no modal shows
+ *  it. Empty hint / empty call id drop their segment; spacing stays fixed. */
+export function askLineFor(
+  pending: TuiPendingAsk | undefined,
+  modalActive: boolean
+): string | undefined {
+  if (pending === undefined || modalActive) return undefined;
+  const hint = pending.summaryHint ? ` ${pending.summaryHint}` : "";
+  const call =
+    pending.toolUseId.length > 0
+      ? ` · call ${shortToolUseId(pending.toolUseId)}`
+      : "";
+  return `[ask] 允许 ${pending.tool}？${hint}${call} 输入 y/a/n（a=总是允许）`;
+}
+
 export function TuiApp(props: TuiAppProps): ReactNode {
   const pal = tuiPalette;
   const permissionMode = props.permissionMode ?? defaultPermissionModeContext;
@@ -2128,6 +2908,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     () => ({ [initialKey]: initial })
   );
   const [activeKey, setActiveKey] = useState(initialKey);
+  const [backgroundTasks, setBackgroundTasks] = useState<
+    ReadonlyArray<BackgroundLiveTask>
+  >(() => props.bridge.listLiveBackgroundTasks());
+  const backgroundTasksSignatureRef = useRef(
+    backgroundTaskFingerprint(backgroundTasks)
+  );
   const [view, setView] = useState<TuiView>(props.initialView ?? "chat");
   const [inputValue, setInputValue] = useState("");
   // Input history (in-memory, never persisted) keyed per session
@@ -2353,6 +3139,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // branch (mirrored after exit() returns); startup `--yolo` is read once by
   // the useState seed.
   const [yoloOn, setYoloOn] = useState(() => seedYoloOn(props));
+  // ADR-0141: the 无沙箱 marker reads the fence posture and the YOLO badge
+  // reads the declared preset — both off the overlay, so neither is
+  // entry-sourced. Absent overlay (test entries) falls back to the yolo mirror.
+  const { fenceRetired, preset } = readPresetIndicators(
+    props.presetOverlay,
+    yoloOn
+  );
   // Highlighted row of the three confirm actions. Only read while confirming,
   // and armed to the first action on every entry into the confirm state, so it
   // never carries a stale choice across pickers.
@@ -2378,6 +3171,282 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // keypress), bypassing React state queuing (for the race, see the header
   // note in tests/tui/input-interleave-race.test.tsx).
   const promptInputRef = useRef<PromptInputHandle | null>(null);
+  // A clipboard read is async, so the draft a payload belongs to is the one that
+  // was current when Ctrl+V was pressed. This counter names that draft: every
+  // change that invalidates it bumps the counter and aborts what is in flight,
+  // so a result that arrives late is discarded instead of labelling a composer
+  // the user has already replaced. Bumped when the draft discards a payload
+  // (submit / Ctrl+C clear / unit deletion, through the draft's own observer)
+  // and by the session-switch effect below.
+  const clipboardImageGenRef = useRef(0);
+  const clipboardImageAbortRef = useRef<AbortController | null>(null);
+  // One read at a time, in press order: the host round trip has no fixed
+  // duration, so serializing is what makes `[image#N]` numbering — and the
+  // submitted block order — follow the gestures.
+  const clipboardImageQueueRef = useRef<Promise<void>>(Promise.resolve());
+
+  function invalidateClipboardImageReads(): void {
+    clipboardImageGenRef.current += 1;
+    clipboardImageAbortRef.current?.abort();
+    clipboardImageAbortRef.current = null;
+  }
+
+  // Folded-unit table for the composer: the buffer shows `[paste#N …]` /
+  // `[image#N]`, this holds the real payload until submit. PromptInput deletes
+  // a label as one unit and toggles it with Ctrl+G through the same instance.
+  const composerDraftRef = useRef(
+    createComposerDraft({
+      onPayloadsDiscarded: invalidateClipboardImageReads,
+    })
+  );
+  // The submit whose turn outcome is still unknown, with the payloads it took
+  // out of the draft. One slot: a new submit replaces the previous, and every
+  // route that consumed the draft settles it — accepted turns drop it, a
+  // pre-acceptance rejection hands it back. It is not dropped when `activeKey`
+  // changes: the first message of a draft session remaps that key mid-send, and
+  // that turn's rejection is exactly the case that must be restorable.
+  const pendingSubmissionRef = useRef<SubmittedDraft | null>(null);
+  const gapQueueRef = useRef<GapQueue>(emptyGapQueue());
+  const [gapQueue, setGapQueue] = useState<GapQueue>(emptyGapQueue());
+  const liveTurnsRef = useRef(new Set<string>());
+  const drainLockRef = useRef(false);
+  // Composer text as it is *now*, for the restore gate: a rejection
+  // continuation runs inside the render the submit closure was created in, where
+  // `inputValue` still holds the text that was just submitted.
+  const composerValueRef = useRef(inputValue);
+  useEffect(() => {
+    composerValueRef.current = inputValue;
+  }, [inputValue]);
+
+  /** The composer's own report, buffer-first: a keystroke counts as touching the
+   *  composer before the render that carries it lands. */
+  function reportComposerValue(value: string): void {
+    composerValueRef.current = value;
+    setInputValue(value);
+  }
+
+  function claimPendingSubmission(): SubmittedDraft | null {
+    const claimed = pendingSubmissionRef.current;
+    pendingSubmissionRef.current = null;
+    return claimed;
+  }
+
+  /** A turn nobody submitted (a background wake, a slash command) must not hand
+   *  back the draft an earlier route spent: drop that claim with it. */
+  function dropPendingSubmission(): void {
+    pendingSubmissionRef.current = null;
+  }
+
+  /**
+   * Put a rejected submit back, but only while the composer is still untouched:
+   * text the user typed since the submit is the worse loss, and pasting the
+   * failed draft over it would destroy that. A visibly non-empty composer is
+   * its own notice, so no extra message here. The refill sets the controlled
+   * value and, when the composer can take it, the buffer: Enter may already
+   * have emptied the buffer, and a setState back to the string React had
+   * committed does not re-run the sync effect. A disabled composer skips that
+   * imperative write, which would be dropped and would leave the adopted
+   * payloads with no label to show for them.
+   */
+  function restoreClaimedSubmission(submitted: SubmittedDraft): void {
+    if (promptInputRef.current === null) return;
+    if (composerValueRef.current.length > 0) return;
+    if (composerDraftRef.current.heldPayloadCount() > 0) return;
+    composerDraftRef.current.adoptSubmission(submitted.payloads);
+    setInputValue(submitted.displayText);
+    // Enter may already have emptied the native buffer. If this restore
+    // returns the same string React had committed, setState bails out and
+    // the sync effect never runs, so the buffer would stay empty. Write it
+    // when the composer can take the write; a disabled one still follows
+    // the state-first path above (the imperative write would be dropped).
+    if (promptInputRef.current.isEditable()) {
+      promptInputRef.current.replaceBuffer(
+        submitted.displayText,
+        submitted.displayText.length
+      );
+    }
+  }
+
+  /** A submit that never started a turn: its draft was never spent. */
+  function restoreRejectedDraft(): void {
+    const claimed = claimPendingSubmission();
+    if (claimed !== null) restoreClaimedSubmission(claimed);
+  }
+
+  /** A turn that threw: only a rejection from before the accepted user message
+   *  gives the draft back, anything else may already be in history. A remote
+   *  draft never writes the composer (spec §4.3), so it is dropped instead. */
+  function settleRejectedDraftTurn(err: unknown): void {
+    const claimed = claimPendingSubmission();
+    if (
+      claimed === null ||
+      claimed.origin === "remote" ||
+      !isPreAcceptanceRejection(err)
+    ) {
+      return;
+    }
+    restoreClaimedSubmission(claimed);
+  }
+
+  /** One Ctrl+V press: queue a single clipboard-image read for the live draft. */
+  function pasteClipboardImage(): void {
+    const generation = clipboardImageGenRef.current;
+    clipboardImageQueueRef.current = clipboardImageQueueRef.current.then(() =>
+      receiveClipboardImage(generation)
+    );
+  }
+
+  /** A single-line paste may be an image copy's text flavor, so it queues a
+   *  clipboard probe behind the chord: one serialized gesture stream keeps
+   *  `[image#N]` numbering in press order whether the user pressed Ctrl+V or let
+   *  the terminal paste. Numbering is what the queue guarantees; buffer position
+   *  and submitted block order are not, because a chord writes its label at the
+   *  live caret and can therefore land after a paste that was pressed later (see
+   *  the `order（已知倒置）` case in `tests/tui/composer-clipboard-image.test.tsx`).
+   *  The paste's own text is already in the buffer by the time this runs — a
+   *  probe must never hold, reorder, or swallow what the user pasted. */
+  function probePastedImage(start: number, text: string): void {
+    const generation = clipboardImageGenRef.current;
+    clipboardImageQueueRef.current = clipboardImageQueueRef.current.then(() =>
+      receivePastedImageProbe(generation, start, text)
+    );
+  }
+
+  /** One clipboard read for a queued gesture, handed the caller's generation
+   *  token. `timeoutMs` is the paste probe's bounded budget; the chord omits it
+   *  so the reader's own default applies. Null means the gesture went stale: the
+   *  caller has no payload to deliver and nothing to say about it. */
+  async function readClipboardSnapshot(
+    generation: number,
+    timeoutMs?: number
+  ): Promise<ClipboardImageResult | null> {
+    // A paste or press queued behind an invalidation never starts its read.
+    if (clipboardImageGenRef.current !== generation) return null;
+    const controller = new AbortController();
+    clipboardImageAbortRef.current = controller;
+    const read = props.clipboardImageReader ?? readClipboardImage;
+    let result: ClipboardImageResult;
+    try {
+      result = await read({
+        signal: controller.signal,
+        ...(timeoutMs === undefined ? {} : { timeoutMs }),
+      });
+    } catch {
+      // A throwing reader breaks its own never-rejects contract, and a rejected
+      // link would strand every later press: answer the failure arm instead.
+      result = { kind: "error", message: "读取未给出结果" };
+    }
+    if (clipboardImageAbortRef.current === controller) {
+      clipboardImageAbortRef.current = null;
+    }
+    // The draft moved on while the bytes were in flight — drop the payload and
+    // stay silent, since what it was meant for is already gone by the user's
+    // own hand. `{kind:"cancelled"}` alone is not enough here: a reader that
+    // had already resolved is not aborted by the signal, only stale.
+    if (clipboardImageGenRef.current !== generation) return null;
+    return result;
+  }
+
+  /** The clipboard half of a single-line paste. When the snapshot turns out to
+   *  hold a supported bitmap, the text the terminal forwarded was a byproduct of
+   *  that same copy, so those exact bytes in the buffer are replaced in place by
+   *  `[image#N]`. */
+  async function receivePastedImageProbe(
+    generation: number,
+    start: number,
+    text: string
+  ): Promise<void> {
+    const result = await readClipboardSnapshot(
+      generation,
+      PASTE_IMAGE_PROBE_TIMEOUT_MS
+    );
+    // A gesture too stale to deliver is the same outcome as one that found no
+    // bitmap: the paste stays exactly as it is.
+    if (result === null) return;
+    // Anything but a real bitmap leaves the paste exactly as the terminal put it
+    // there. Silence is the point: an ordinary text copy is the common answer,
+    // and a probe that finds nothing is not a failure the user caused — a read
+    // that threw is answered as nothing found, since the paste is already in the
+    // buffer either way.
+    if (result.kind !== "ok") {
+      // A bitmap that is there but refused for size is the one case where the
+      // user really did copy an image, so the refusal is reported the way the
+      // chord reports it and the pasted link stays put.
+      if (result.kind === "too-large") {
+        const lines = clipboardImageFailureLines(result);
+        if (lines.length > 0) setNotice({ lines });
+      }
+      return;
+    }
+    // No composer mounted (list / mcp view), or one that went disabled while the
+    // bytes were in flight (focus moved to the chrome, a picker opened) → nothing
+    // to substitute into, and the draft stays untouched so no label number is
+    // spent on a payload the buffer can never name.
+    const input = promptInputRef.current;
+    if (input === null || !input.isEditable()) return;
+    const buffer = composerValueRef.current;
+    const at = locatePastedSpan(buffer, start, text);
+    if (at < 0) return;
+    const to = at + text.length;
+    const label = composerDraftRef.current.addImage({
+      mediaType: result.mediaType,
+      data: result.data,
+    });
+    const next = buffer.slice(0, at) + label + buffer.slice(to);
+    // replaceBuffer is the deliberate-caret buffer write the fold and label
+    // paths already use: it reports the new buffer through onChange, so display
+    // and payload table move together in one write.
+    input.replaceBuffer(
+      next,
+      caretAfterLabel(input.getCursorOffset(), at, to, label.length)
+    );
+  }
+
+  async function receiveClipboardImage(generation: number): Promise<void> {
+    const result = await readClipboardSnapshot(generation);
+    if (result === null) return;
+    if (result.kind === "ok") {
+      // No composer mounted (list / mcp view), or one that went disabled while
+      // the bytes were in flight → nothing to attach to, and the draft stays
+      // untouched so no label number is spent on a payload no buffer names.
+      const input = promptInputRef.current;
+      if (input === null || !input.isEditable()) return;
+      const label = composerDraftRef.current.addImage({
+        mediaType: result.mediaType,
+        data: result.data,
+      });
+      // insertText lands the label at the caret as it is *now*; a caret position
+      // captured at press time would drop it mid-word after typing during the
+      // read. The buffer is display truth: nothing is ever inserted on failure.
+      input.insertText(label);
+      return;
+    }
+    const lines = clipboardImageFailureLines(result);
+    if (lines.length > 0) setNotice({ lines });
+  }
+
+  // The composer buffer and the draft are app-global, so switching the active
+  // session is the point where a read in flight stops targeting what the user is
+  // looking at. Mounted on the key, not on `[activeKey, active.runState]`: a
+  // turn starting or finishing leaves the draft exactly as it was.
+  useEffect(() => {
+    invalidateClipboardImageReads();
+  }, [activeKey]);
+
+  // Ctrl+V: fold one clipboard image into the composer. Its own listener, not an
+  // arm in the big global key handler, because this chord has no modal or
+  // focus precedence to negotiate — PromptInput yields every ctrl/meta chord
+  // except its own Ctrl+G. A bracketed paste does probe the clipboard now, but
+  // only when the terminal emitted one: a `Win+Shift+S` screenshot puts a bitmap
+  // on the clipboard with no text flavor, so nothing is pasteable and this chord
+  // stays the only gesture that can read it. The paste probe covers the image
+  // copies that *do* carry a text flavor.
+  useKeyboard((e) => {
+    if (e.eventType !== "press") return;
+    if (!e.ctrl || e.name !== "v") return;
+    e.preventDefault();
+    pasteClipboardImage();
+  });
 
   // ── Streaming draft (mounted while the single session is in flight; bg sessions
   //    get their final text through the persistence refresh) ───────────────────
@@ -2404,10 +3473,81 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // (mode row clears, stats move to the trailing Crunched line in the message flow).
   const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
   const [runElapsed, setRunElapsed] = useState(0);
+  // Plan A T6 token speed. The reducer state lives in a ref: a per-fragment
+  // update must not re-render the whole tree on every token. The reading the
+  // bar renders lives in React state, keyed by conversation (the same key
+  // discipline as liveToolRuns) so a background turn never overwrites the
+  // foreground session's suffix.
+  const tokenSpeedRef = useRef<Record<string, TokenSpeedState>>({});
+  const [tokenSpeedReadings, setTokenSpeedReadings] = useState<
+    Record<string, TokenSpeedReading>
+  >({});
+
+  /**
+   * Plan A T6: store the speed state of one conversation. The reducer state
+   * lives in the ref; the bar renders the published reading. Storing does not
+   * publish: the live path stores the reducer state on every fragment and
+   * publishes only on the repaint tick, so this is the single writer of the
+   * ref slot.
+   */
+  function storeTokenSpeed(
+    conversationId: string,
+    state: TokenSpeedState
+  ): TokenSpeedReading {
+    tokenSpeedRef.current[conversationId] = state;
+    return readTokenSpeed(state);
+  }
+
+  /**
+   * Plan A T6: publish one reading of a conversation to the bar. The
+   * published value is rounded to whole tok/s, so the tree re-renders only
+   * when the number the user sees actually changes (a per-fragment
+   * re-render of the whole TUI would be wasteful).
+   */
+  function publishTokenSpeedReading(
+    conversationId: string,
+    reading: TokenSpeedReading
+  ): void {
+    setTokenSpeedReadings((prev) => {
+      const current = prev[conversationId];
+      if (
+        current !== undefined &&
+        current.estimated === reading.estimated &&
+        Math.round(current.value) === Math.round(reading.value)
+      ) {
+        return prev; // EXIT: same rounded reading → keep the published one, no re-render
+      }
+      return { ...prev, [conversationId]: reading };
+    });
+  }
+
+  /**
+   * Plan A T6: store the speed state of one conversation and publish its
+   * reading. Used by the boundaries and call ends, which show a zero or an
+   * average right away; the live path stores without publishing (the repaint
+   * tick publishes).
+   */
+  function publishTokenSpeed(
+    conversationId: string,
+    state: TokenSpeedState
+  ): void {
+    publishTokenSpeedReading(
+      conversationId,
+      storeTokenSpeed(conversationId, state)
+    );
+  }
   // Subagent read-only projection (host = bridge.listSubagents). Starts as an
   // empty array — bridge is not called before the first frame, and watch
   // derived false so no timer starts.
   const [subagents, setSubagents] = useState<ReadonlyArray<SubagentInfo>>([]);
+  // 1Hz poll signature (mirrors backgroundTasksSignatureRef): the mount effect
+  // seeds it so the first poll tick does not repeat the mount set. The poll
+  // only calls setSubagents when the signature changes, so an unchanged static
+  // set no longer drives a whole-tree repaint every second. A live row or one
+  // inside a terminal retention window still ticks each second — its elapsed /
+  // expiry text is wall-clock derived (subagentPollSignature appends the
+  // current second while that holds).
+  const subagentsSignatureRef = useRef("");
   // Session ownership + snapshot seconds of the last finished turn. Cleared
   // at runTurnOnce entry (no stale summary while running), written in finally;
   // ChatView only accepts crunchedSeconds when `crunchedOf === activeKey`,
@@ -2440,7 +3580,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
 
   // ── Quit / interrupt / inflight bookkeeping ─────────────────────────────────
   const aborters = useRef(new Map<string, AbortController>());
-  const inflightPromises = useRef(new Set<Promise<unknown>>());
+  const ownedTurnControllers = useRef(new Set<AbortController>());
+  const quittingRef = useRef(false);
+  const pendingQuitSnapshotRef = useRef<QuitConfirmationSnapshot | undefined>(
+    undefined
+  );
+  // Turn promises attributed per conversation: /quit's wait set has to be able
+  // to say which session it is waiting on.
+  const inflightTurns = useRef(new Map<string, Set<Promise<unknown>>>());
   const sessionsRef = useRef(sessions);
   sessionsRef.current = sessions;
   const activeKeyRef = useRef(activeKey);
@@ -2769,9 +3916,35 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // longer interleave into a race.
     event.preventDefault();
     const text = decodePasteBytes(event.bytes) ?? "";
-    if (text.length > 0) {
-      promptInputRef.current?.insertText(text);
+    if (text.length === 0) return;
+    // A composer that cannot take the write has not received a paste. Both
+    // imperative writes drop silently while it is disabled (picker, ask modal,
+    // chrome focus elsewhere), so folding or probing from that state would spend
+    // a draft label and a host round trip on bytes that never reached the buffer
+    // — an orphan payload the buffer no longer names, which is also what blocks a
+    // later rejected draft from being handed back.
+    const input = promptInputRef.current;
+    if (input === null || !input.isEditable()) return;
+    // A multiline paste is never an image copy, so it needs no clipboard probe
+    // and stays on the immediate path it always had. It folds into a summary
+    // label; the payload stays in the draft table and is restored verbatim at
+    // submit. The break may be LF or CR: Windows Terminal delivers clipboard
+    // CRLF as CR, and the editor then paints that CR as a real line — a gate
+    // that only looks for LF leaves the paste expanded. Manually typed newlines
+    // never reach here, so hand-edited multiline text stays expanded.
+    if (pasteHasLineBreak(text)) {
+      input.insertText(composerDraftRef.current.foldPaste(text).label);
+      return;
     }
+    // A single-line paste cannot tell an image copy's byproduct text (a URL, a
+    // file path) from the text the user meant, because the discriminator is the
+    // clipboard snapshot rather than the text's shape — so it is the snapshot
+    // that gets asked, through the same queue as the chord. The text goes in
+    // first: that round trip must never delay the paste, reorder it against a
+    // keystroke that follows it, or swallow it when Enter comes right after.
+    const start = input.getCursorOffset();
+    input.insertText(text);
+    probePastedImage(start, text);
   });
 
   // ── Tool-event subscription (structured state + legacy string-line fallback) ──
@@ -2830,6 +4003,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
 
   // ── Derived: active session + input candidates + permissionIndex/active ──
   const active = sessions[activeKey] ?? initial;
+  /**
+   * ADR-0145: the model the CURRENT conversation uses. A conversation owns
+   * its route; the env store carries only the DEFAULT (for conversations
+   * started later). A conversation without a route yet (a draft, or a session
+   * file written before the route existed) falls back to that default.
+   *
+   * The precedence rule lives in `displayedModelRoute` — the one rule the
+   * ContextBar uses too: the conversation's route first, the snapshot's
+   * default second. The route is render-time state; the default is read at
+   * call time (the store publishes outside the React tree, so this closure
+   * never re-renders with it).
+   */
+  function activeModel(): string | undefined {
+    return displayedModelRoute(active.model, envDisplay.get().model);
+  }
   // 1Hz runtime tick: running-fg and stamped → increment runElapsed (same
   // discipline as the thinking-seconds tick — read-only refs/state, no extra
   // setState storms).
@@ -2868,14 +4056,34 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // spawn-card lines / panel in the first frame instead of waiting for a tick
   // that watch=false would never start.
   useEffect(() => {
-    setSubagents(props.bridge.listSubagents());
+    const initial = props.bridge.listSubagents();
+    subagentsSignatureRef.current = subagentPollSignature(initial, Date.now());
+    setSubagents(initial);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [props.bridge]);
   useEffect(() => {
-    if (active.runState !== "running-fg" && !subagentWatch) return;
-    const tick = setInterval(() => {
-      setSubagents(props.bridge.listSubagents());
-    }, 1000);
+    const refreshLiveProjections = (): void => {
+      const nextTasks = props.bridge.listLiveBackgroundTasks();
+      const nextSignature = backgroundTaskFingerprint(nextTasks);
+      if (nextSignature !== backgroundTasksSignatureRef.current) {
+        backgroundTasksSignatureRef.current = nextSignature;
+        setBackgroundTasks(nextTasks);
+      }
+      if (active.runState === "running-fg" || subagentWatch) {
+        const nextSubagents = props.bridge.listSubagents();
+        const nextSignature = subagentPollSignatureIfChanged(
+          subagentsSignatureRef.current,
+          nextSubagents,
+          Date.now()
+        );
+        if (nextSignature !== null) {
+          subagentsSignatureRef.current = nextSignature;
+          setSubagents(nextSubagents);
+        }
+      }
+    };
+    refreshLiveProjections();
+    const tick = setInterval(refreshLiveProjections, 1000);
     return () => clearInterval(tick);
   }, [active.runState, subagentWatch, props.bridge]);
   // chrome-focus clamp: when subagent row counts change (live subagents exit /
@@ -2924,11 +4132,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
   const askModalActive =
     view === "chat" && askPending !== undefined && !askModalDismissed;
-  const activeToolName = active.conversationId
-    ? activeToolNameOf(liveToolRuns[active.conversationId] ?? [])
-    : undefined;
   // Active session's status snapshot (keyed by conversationId, same derivation
-  // shape as activeToolName) — draft has no conversationId / the session has no
+  // shape as other live session state) — draft has no conversationId / the session has no
   // events yet → null, panel not rendered → nothing stale on switch-away, restored on switch-back.
   const agentStatus = active.conversationId
     ? (agentStatuses[active.conversationId] ?? null)
@@ -2936,16 +4141,6 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   const graphProgress = active.conversationId
     ? (graphProgresses[active.conversationId] ?? null)
     : null;
-  // Subagent-tool symmetry — ContextBar must not carry a subagent suffix (pinned
-  // by acceptance). For subagent tools (spawn_subagent /
-  // subagent_result) activeToolName → undefined; subagent status is expressed
-  // by the two lines on the spawn card (title + activity slot)
-  // + SubagentPanel (the task list below the input box). Regular tools keep
-  // their activeToolName; when absent it stays undefined.
-  const activeToolLabel =
-    activeToolName !== undefined && !isSubagentTool(activeToolName)
-      ? activeToolName
-      : undefined;
   // Chrome-focus reducer input — `visibleLiveRowCount` is the "live row count
   // still visible after folding" (starting + running, capped by
   // SUBAGENT_PANEL_MAX_ROWS; same source as the projectSubagentLines
@@ -2970,9 +4165,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   // ── Permission modal answer landing ──────────────────────────────
   function resolvePermissionAsk(
     pending: TuiPendingAsk,
-    answer: PermissionAnswer
+    answer: PermissionAnswer,
+    origin: "local" | "remote" = "local"
   ): void {
-    const settled = props.askBridge.resolveAsk(pending.id, answer !== "reject");
+    const settled = props.askBridge.resolveAsk(
+      pending.id,
+      answer !== "reject",
+      origin,
+      answer
+    );
     if (!settled) return;
     if (answer === "always") {
       const tool = pending.tool;
@@ -3067,6 +4268,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // DRAFT key to [], so /new must not leak the previous draft's history.
     setInputHistories((prev) => ({ ...prev, [DRAFT_SESSION_ID]: [] }));
     setActiveKey(DRAFT_SESSION_ID);
+    publishProjectionActive({
+      conversationId: null,
+      running: false,
+      queued: 0,
+    });
     setView("chat");
     setNotice(undefined);
     setRewindTargets(undefined);
@@ -3101,7 +4307,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           setNotice({ lines: recoveryNoticeLines({ messages: [], recovery }) });
           return;
         }
-        const attached = attachSession(file, recovery);
+        // ADR-0145: the conversation's OWN route. The hub knows it (its map
+        // entry, else the route the file carries, else the current default);
+        // the state must carry it, so the model row / `/info` / `/model`
+        // cursor show the route this conversation RUNS on, not the default.
+        const route = await props.bridge.getSessionModel?.(id);
+        const attached = withSessionRoute(attachSession(file, recovery), route);
         opened = attached;
         setSessions((prev) => ({ ...prev, [id]: attached }));
         // First attach seeds input history from the transcript so ↑ recall
@@ -3130,6 +4341,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       return next;
     });
     setActiveKey(id);
+    const activated = existing === undefined ? opened : sessionsRef.current[id];
+    publishProjectionActive({
+      conversationId: id,
+      running: (activated?.runState ?? "idle") !== "idle",
+      queued: gapCount(gapQueueRef.current, id),
+    });
     setView("chat");
     // A reopened session brings its last settled turn's durable notice into
     // the lane the live turn used; any other outcome (unknown included) clears
@@ -3145,34 +4362,254 @@ export function TuiApp(props: TuiAppProps): ReactNode {
   }
 
   // ── Turn send ───────────────────────────────────────────────────
-  // Echo and sent text can diverge: displayText is the transient stand-in
-  // shown in the live session, while text goes to the model history verbatim.
-  // skill-load passes a compact "[loading skill X] [remainder]" placeholder
-  // so the skill body doesn't leak into the running view; on turn end
-  // turnFinished atomically swaps in the persisted messages, so the finished
-  // session always matches the session file.
-  async function sendTurn(text: string, displayText?: string): Promise<void> {
-    if (active.runState !== "idle") {
-      setNotice({
-        lines: ["当前会话正在运行；导航命令仍可用，消息请等本轮结束。"],
-      });
-      return;
+  // Echo and sent text diverge only for skill-load: displayText is the compact
+  // chip shown while the turn runs, and text is the envelope the model
+  // receives. A folded paste in that prompt is already restored before the
+  // envelope is built, so the chip remainder and the model text are the
+  // payload; an image stays `[image#N]` in the remainder and travels as a
+  // content block. On turn end, turnFinished swaps in the persisted messages.
+  function publishGap(next: GapQueue): void {
+    gapQueueRef.current = next;
+    setGapQueue(next);
+  }
+
+  function gapKeyNow(): string {
+    const key = activeKeyRef.current;
+    return resolveGapKey({
+      activeKey: key,
+      conversationId: sessionsRef.current[key]?.conversationId,
+      draftKey: DRAFT_SESSION_ID,
+      liveKeys: [...liveTurnsRef.current],
+    });
+  }
+
+  function conversationIdForSend(
+    key: string,
+    gapKey: string
+  ): string | undefined {
+    const conversationId = sessionsRef.current[key]?.conversationId;
+    if (conversationId !== undefined) return conversationId;
+    if (key !== DRAFT_SESSION_ID) return key;
+    return gapKey === DRAFT_SESSION_ID ? undefined : gapKey;
+  }
+
+  function liveKeyHeld(key: string): boolean {
+    return liveTurnsRef.current.has(key);
+  }
+
+  function turnIsLive(key: string): boolean {
+    if (liveKeyHeld(key)) return true;
+    const direct = sessionsRef.current[key];
+    if (direct !== undefined && direct.runState !== "idle") return true;
+    const activeSession = sessionsRef.current[activeKeyRef.current];
+    return (
+      activeSession !== undefined &&
+      activeSession.runState !== "idle" &&
+      (activeKeyRef.current === key || activeSession.conversationId === key)
+    );
+  }
+
+  function toGapDraft(pending: SubmittedDraft): GapDraft {
+    return {
+      text: pending.text,
+      displayText: pending.displayText,
+      payloads: pending.payloads,
+      ...(pending.content !== undefined ? { content: pending.content } : {}),
+      ...(pending.origin !== undefined ? { origin: pending.origin } : {}),
+    };
+  }
+
+  function holdRunningSubmit(
+    gapKey: string,
+    text: string,
+    displayText: string | undefined,
+    content: readonly UserContentBlock[] | undefined,
+    origin: "local" | "remote"
+  ): void {
+    // A remote message never spends the composer's in-flight submission: that
+    // slot belongs to the running keyboard submit, and its rejection restore
+    // must keep the text it took.
+    const pending: SubmittedDraft =
+      origin === "remote"
+        ? {
+            text,
+            displayText: displayText ?? text,
+            payloads: [],
+            ...(content !== undefined ? { content } : {}),
+            origin,
+          }
+        : (pendingSubmissionRef.current ?? {
+            text,
+            displayText: displayText ?? text,
+            payloads: [],
+            ...(content !== undefined ? { content } : {}),
+          });
+    if (origin !== "remote") pendingSubmissionRef.current = null;
+    publishGap(enqueueGap(gapQueueRef.current, gapKey, toGapDraft(pending)));
+  }
+
+  function putGapBack(gapKey: string): void {
+    const pending = claimPendingSubmission();
+    if (pending === null) return;
+    publishGap(
+      restoreGapHead(gapQueueRef.current, gapKey, toGapDraft(pending))
+    );
+  }
+
+  function settleGapHold(
+    fromGap: boolean,
+    gapKey: string,
+    text: string,
+    displayText: string | undefined,
+    content: readonly UserContentBlock[] | undefined,
+    origin: "local" | "remote"
+  ): boolean {
+    if (!fromGap && turnIsLive(gapKey)) {
+      holdRunningSubmit(gapKey, text, displayText, content, origin);
+      return true;
     }
-    const startedKey = activeKey;
-    let conversationId = active.conversationId;
+    if (fromGap && liveKeyHeld(gapKey)) {
+      putGapBack(gapKey);
+      return true;
+    }
+    return false;
+  }
+
+  function armLiveTurn(key: string): void {
+    liveTurnsRef.current.add(key);
+  }
+
+  function disarmLiveTurn(key: string): void {
+    liveTurnsRef.current.delete(key);
+  }
+
+  function retargetLiveTurn(holdKey: string, targetId: string): void {
+    if (holdKey === targetId) return;
+    liveTurnsRef.current.delete(holdKey);
+    liveTurnsRef.current.add(targetId);
+  }
+
+  function recordGapHistory(fromGap: boolean, key: string, text: string): void {
+    if (!fromGap || text.length === 0) return;
+    setInputHistories((prev) => ({
+      ...prev,
+      [key]: appendInputHistory(prev[key] ?? [], text),
+    }));
+  }
+
+  function noteGapSend(fromGap: boolean): void {
+    if (fromGap) setNotice(undefined);
+  }
+
+  function recallQueuedDraft(): boolean {
+    if (composerValueRef.current.length > 0) return false;
+    if (composerDraftRef.current.heldPayloadCount() > 0) return false;
+    const taken = recallNewestGap(gapQueueRef.current, gapKeyNow());
+    if (taken.draft === undefined) return false;
+    publishGap(taken.queue);
+    restoreClaimedSubmission(toGapDraft(taken.draft));
+    return true;
+  }
+
+  function gapDrainAllowed(opts?: {
+    readonly skipIdleCheck?: boolean;
+  }): boolean {
+    if (drainLockRef.current) return false;
+    if (compactingControllerRef.current !== null) return false;
+    if (opts?.skipIdleCheck !== true) {
+      const session = sessionsRef.current[activeKeyRef.current];
+      if (session === undefined || session.runState !== "idle") return false;
+    }
+    return !liveKeyHeld(gapKeyNow());
+  }
+
+  function tryDrainGap(opts?: { readonly skipIdleCheck?: boolean }): void {
+    if (quittingRef.current) return;
+    if (!gapDrainAllowed(opts)) return;
+    const key = gapKeyNow();
+    const taken = takeOldestGap(gapQueueRef.current, key);
+    if (taken.draft === undefined) return;
+    drainLockRef.current = true;
+    publishGap(taken.queue);
+    const draft = taken.draft;
+    pendingSubmissionRef.current = toGapDraft(draft);
+    // The queue line keeps the folded label; the message that actually sends
+    // renders the paste, same as a submit that did not wait.
+    void sendTurn(
+      draft.text,
+      transcriptEchoText(draft.displayText, draft.payloads),
+      draft.content,
+      true,
+      draft.origin ?? "local"
+    ).finally(() => {
+      drainLockRef.current = false;
+    });
+  }
+
+  function releaseTurnGap(targetId: string): void {
+    const key = activeKeyRef.current;
+    const session = sessionsRef.current[key];
+    if (targetId !== key && session?.conversationId !== targetId) return;
+    tryDrainGap({ skipIdleCheck: true });
+  }
+
+  function consumeLeadingEscape(): boolean {
+    if (compactingControllerRef.current !== null) {
+      compactingControllerRef.current.abort();
+      return true;
+    }
+    if (gapCount(gapQueueRef.current, gapKeyNow()) === 0) return false;
+    interruptForegroundTurn();
+    tryDrainGap();
+    return true;
+  }
+
+  async function sendTurn(
+    text: string,
+    displayText?: string,
+    content?: readonly UserContentBlock[],
+    fromGap = false,
+    origin: "local" | "remote" = "local"
+  ): Promise<RemoteSendResult> {
+    const gapKey = gapKeyNow();
+    if (settleGapHold(fromGap, gapKey, text, displayText, content, origin)) {
+      if (origin === "remote") setNotice({ lines: [REMOTE_QUEUED_NOTICE] });
+      return "queued";
+    }
+    const startedKey = activeKeyRef.current;
+    armLiveTurn(gapKey);
+    let conversationId = conversationIdForSend(startedKey, gapKey);
     try {
-      conversationId = await props.bridge.ensureSession(conversationId);
+      conversationId = await ensureSessionForOpenTurn(
+        () => quittingRef.current,
+        () => props.bridge.ensureSession(conversationId)
+      );
     } catch (err) {
+      disarmLiveTurn(gapKey);
       setNotice({ lines: [`建档失败：${describeError(err)}`] });
-      return;
+      if (origin !== "remote") restoreRejectedDraft();
+      // No turn started: report the refusal so the seat does not claim one.
+      return { failed: true };
     }
-    if (startedKey === DRAFT_SESSION_ID && conversationId !== undefined) {
+    if (
+      startedKey === DRAFT_SESSION_ID &&
+      !fromGap &&
+      conversationId !== undefined
+    ) {
+      // ADR-0145: the conversation the draft became owns a route — the hub
+      // stamped it when it created the session. The TUI state must carry it,
+      // so the model row / `/info` / `/model` cursor show THAT route, not the
+      // default (which another conversation's `/model` act can move).
+      const createdRoute = await props.bridge.getSessionModel?.(conversationId);
       setSessions((prev) => {
         const draft = prev[DRAFT_SESSION_ID];
         if (!draft) return prev;
         const next = {
           ...prev,
-          [conversationId as string]: { ...draft, conversationId },
+          [conversationId as string]: withSessionRoute(
+            { ...draft, conversationId },
+            createdRoute
+          ),
         };
         delete next[DRAFT_SESSION_ID];
         return next;
@@ -3191,9 +4628,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         };
       });
       setActiveKey(conversationId);
+      publishProjectionActive({
+        conversationId,
+        running: true,
+        queued: 0,
+      });
     }
-    const targetId = conversationId;
-    if (targetId === undefined) return;
+    const targetId = acceptedTurnTarget(conversationId, quittingRef.current);
+    if (targetId === undefined) {
+      disarmLiveTurn(gapKey);
+      if (origin !== "remote") restoreRejectedDraft();
+      // No target conversation: nothing was accepted, so nothing "sent".
+      return { failed: true };
+    }
+    retargetLiveTurn(gapKey, targetId);
+    recordGapHistory(fromGap, targetId, text);
+    noteGapSend(fromGap);
+    if (origin === "remote") setNotice({ lines: [REMOTE_SENT_NOTICE] });
     setSessions((prev) => {
       const current = prev[targetId];
       if (!current) return prev;
@@ -3206,7 +4657,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       };
     });
     const controller = new AbortController();
-    aborters.current.set(targetId, controller);
+    trackOwnedTurnController(
+      aborters.current,
+      ownedTurnControllers.current,
+      targetId,
+      controller
+    );
     // Drop the previous turn's verify verdict at the turn boundary so the
     // banner never shows a stale judgment (same discipline as crunchedOf).
     setVerifySlots((prev) => {
@@ -3215,13 +4671,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       delete next[targetId];
       return next;
     });
-    const promise = runTurnOnce(targetId, text, controller);
-    inflightPromises.current.add(promise);
-    void promise.finally(() => inflightPromises.current.delete(promise));
+    const promise = runTurnOnce(
+      targetId,
+      {
+        text,
+        content,
+        ...(origin === "remote" ? { origin } : {}),
+      },
+      controller
+    );
+    trackInflightTurn(targetId, promise);
+    return "sent";
   }
 
   async function runContinueTurn(): Promise<void> {
     if (
+      quittingRef.current ||
       tuiContinueBusy({
         runState: active.runState,
         compacting: compactingControllerRef.current !== null,
@@ -3242,16 +4707,20 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       return { ...prev, [targetId]: turnStarted(current) };
     });
     const controller = new AbortController();
-    aborters.current.set(targetId, controller);
+    trackOwnedTurnController(
+      aborters.current,
+      ownedTurnControllers.current,
+      targetId,
+      controller
+    );
     setVerifySlots((prev) => {
       if (!(targetId in prev)) return prev;
       const next = { ...prev };
       delete next[targetId];
       return next;
     });
-    const promise = runTurnOnce(targetId, "", controller, "continue");
-    inflightPromises.current.add(promise);
-    void promise.finally(() => inflightPromises.current.delete(promise));
+    const promise = runTurnOnce(targetId, { text: "" }, controller, "continue");
+    trackInflightTurn(targetId, promise);
   }
 
   async function sessionPendingFromStore(): Promise<boolean> {
@@ -3266,7 +4735,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
 
   async function runTurnOnce(
     targetId: string,
-    text: string,
+    input: TurnInput,
     controller: AbortController,
     mode: "append" | "continue" | "wake" = "append"
   ): Promise<void> {
@@ -3297,6 +4766,57 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     );
     let silenceTimerId: ReturnType<typeof setTimeout> | undefined;
     let silenceNoticeShown = false;
+    // Live speed repaints while recent output remains in the one-second
+    // window. A call can begin without a pre-call usage beat, so its first
+    // output delta arms the timer. An expired window clears it until another
+    // delta arrives.
+    let speedTimerId: ReturnType<typeof setInterval> | undefined;
+    let tokenSpeedRunActive = true;
+    const clearSpeedTimer = (): void => {
+      if (speedTimerId !== undefined) {
+        clearInterval(speedTimerId);
+        speedTimerId = undefined;
+      }
+    };
+    const armSpeedTimer = (): void => {
+      if (speedTimerId !== undefined) return;
+      speedTimerId = setInterval(() => {
+        if (!tokenSpeedRunActive) return;
+        const current = tokenSpeedRef.current[targetId];
+        if (current === undefined) return;
+        const now = Date.now();
+        publishTokenSpeed(targetId, refreshTokenSpeed(current, now));
+        if (
+          current.lastOutputAt !== null &&
+          now - current.lastOutputAt > TOKEN_SPEED_WINDOW_MS
+        ) {
+          clearSpeedTimer();
+        }
+      }, TOKEN_SPEED_REPAINT_MS);
+    };
+    /**
+     * Apply one stream event to this conversation's speed state and keep the
+     * repaint timer in phase with the reducer: recent generation → armed,
+     * waiting/tool/done → cleared. Live publishing is deferred to the repaint
+     * tick; boundaries and call ends publish immediately.
+     */
+    const applyTokenSpeedEvent = (event: HarnessStreamEvent): void => {
+      if (!tokenSpeedRunActive) return;
+      const current =
+        tokenSpeedRef.current[targetId] ?? INITIAL_TOKEN_SPEED_STATE;
+      const next = tokenSpeedTransition(current, event, Date.now());
+      if (next === current) return;
+      // Live rates are published only on the repaint tick: publishing per
+      // fragment makes the number flicker and re-renders the tree far too
+      // often. Boundaries and call ends publish now (zero / average).
+      if (next.phase === "generating" && next.firstOutputAt !== null) {
+        storeTokenSpeed(targetId, next); // live branch: store only, the tick publishes
+        armSpeedTimer();
+      } else {
+        clearSpeedTimer();
+        publishTokenSpeed(targetId, next); // EXIT: not generating (boundary / call end / tool) → publish the zero or average now
+      }
+    };
     // Phase tracking (see nextToolPhaseActive): a turn starts in model
     // phase and flips to tool phase when tool_use is emitted.
     let toolPhaseActive = false;
@@ -3344,6 +4864,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     const startedAt = Date.now();
     setRunStartedAt(startedAt);
     setRunElapsed(0);
+    publishTokenSpeed(targetId, beginTokenSpeedTurn());
     // The in-memory thinking-seconds channel is gone; folded rows read
     // thinkingMs from the persisted file. Clear the previous "Crunched"
     // summary so a new turn doesn't show the old one at the stream tail.
@@ -3356,6 +4877,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // the turn to model phase, tool_call_start enters tool phase (see
       // nextToolPhaseActive).
       toolPhaseActive = nextToolPhaseActive(toolPhaseActive, event);
+      // Plan A T6: feed the pure speed reducer (call boundary, output
+      // fragments, tool phase, call end). Display only — nothing here
+      // touches usage, messages, or persistence.
+      applyTokenSpeedEvent(event);
       // Any onStream event counts as "bytes arrived" → re-arm the silence
       // timer (one notice per episode, see armSilenceTimer).
       armSilenceTimer();
@@ -3431,13 +4956,22 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // #1079 call-beat: replace this conversation's usage reading mid-run
         // (pre-call measurement, then post-call correction of the same call).
         // UI-only display input; never feeds model-facing fields.
+        //
+        // Plan A T4 / 2026-10-22 confirmed-only amendment: the confirmed usage
+        // lands in `lastUsage` (the only reading that reaches the session file
+        // and `/info`); the bar-facing reading lands in `displayOccupancy`
+        // (UI-only). A `projected` beat carries no `usage` at all, so it can
+        // never become `lastUsage` (ADR-0008 D6), and it no longer repaints
+        // the bar either — it is the image-bearing gate's input only. When the
+        // beat is projected or identical to what is already on screen,
+        // `withContextUsageBeat` returns the same session object, so we return
+        // the unchanged `prev` map instead of a new one (no whole-tree
+        // re-render).
         setSessions((prev) => {
           const current = prev[targetId];
           if (!current) return prev;
-          return {
-            ...prev,
-            [targetId]: withLastUsage(current, event.usage),
-          };
+          const next = withContextUsageBeat(current, event);
+          return next === current ? prev : { ...prev, [targetId]: next };
         });
       }
       const nextGraph = graphProgressFromEvent(event);
@@ -3495,10 +5029,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               })
             : await props.bridge.postMessage({
                 conversationId: targetId,
-                text,
+                text: input.text,
+                content: input.content,
                 signal: controller.signal,
                 onStream,
                 ...(thinkingOverride ? { thinking: thinkingOverride } : {}),
+                ...(input.origin !== undefined ? { origin: input.origin } : {}),
               });
       if (resp === undefined) {
         skipTurnRefresh = true;
@@ -3516,6 +5052,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // truncation). Carried through the lane and the session snapshot so the
       // live turn and a reopen read one identical line.
       outputLimitNotice = resp.outputLimitNotice;
+      // The turn ran to an answer: the accepted message and its attachments are
+      // durably in history, so the draft this submit took stays spent.
+      pendingSubmissionRef.current = null;
       // Verify verdict into its slot. verifyFromWire validates the wire
       // shape at the runtime boundary; invalid wire → unavailable (degraded
       // render, no throw into React); none → drop the key, banner silent.
@@ -3547,13 +5086,29 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         skipTurnRefresh = true;
       }
       setNotice({ lines: [...outcome.noticeLines] });
+      settleRejectedDraftTurn(err);
     } finally {
-      aborters.current.delete(targetId);
+      liveTurnsRef.current.delete(targetId);
+      removeOwnedTurnController(
+        aborters.current,
+        ownedTurnControllers.current,
+        targetId,
+        controller
+      );
       // Turn over (success / cancelled / throw): clear the silence timer so a
       // stuck "still waiting" timer can't fire setNotice later. Do NOT clear
       // the notice text — sticky handling belongs to the teardown branches
       // below, not this finally.
       clearSilenceTimer();
+      // Plan A T6: the live-speed repaint stops with the turn — no interval
+      // may outlive it. Any partial output becomes a whole-call estimate;
+      // the final weighted average remains visible until the next turn.
+      tokenSpeedRunActive = false;
+      clearSpeedTimer();
+      publishTokenSpeed(
+        targetId,
+        finishTokenSpeedTurn(tokenSpeedRef.current[targetId], Date.now())
+      );
       // Failsafe compact-panel sweep: still non-terminal at turn end means
       // terminal events were missed → clear it immediately rather than
       // leaving a fake in-flight panel. Already terminal → the HOLD_MS timer
@@ -3588,6 +5143,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           [targetId]: Object.freeze({ ...current, runState: "idle" }),
         };
       });
+      releaseTurnGap(targetId);
       return;
     }
     try {
@@ -3617,24 +5173,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             // previous turn's (absent = cleared), so the session snapshot
             // always describes the same turn a reopen would re-read.
             outputLimitNotice,
+            // ADR-0145: the persisted file carries the conversation's own
+            // route (a backfilled one included), so the display follows the
+            // route this conversation RUNS on. Absent (a file written before
+            // conversations owned a route) → turnFinished keeps the old value.
+            model: file.model,
           }),
         };
       });
       setLiveToolLines((prev) => ({ ...prev, [targetId]: [] }));
       setLiveToolRuns((prev) => ({ ...prev, [targetId]: [] }));
       if (stopReason === "cancelled") {
-        // interrupted=true → checkpoint saved (delta>0); false → nothing new,
-        // no checkpoint; undefined → legacy path/unknown, keep fallback text.
-        setNotice({
-          lines:
-            uncancellableOperationNotice !== undefined
-              ? [uncancellableOperationNotice]
-              : interrupted === true
-                ? ["已打断，checkpoint 已保存"]
-                : interrupted === false
-                  ? ["已打断（无新内容，未落 checkpoint）"]
-                  : ["已打断当前 turn"],
-        });
+        setNotice(
+          cancelledTurnNotice(
+            gapCount(gapQueueRef.current, targetId) > 0,
+            uncancellableOperationNotice,
+            interrupted
+          )
+        );
       } else if (
         stopReason === "protocolError" ||
         stopReason === "timeout" ||
@@ -3645,8 +5201,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // 429/network failures are flattened by loop-engine into a normal
         // return (protocolError, empty finalText); without this branch the
         // turn would end silently. Abnormal stopReasons share the notice lane
-        // so the user sees the turn did not succeed. maxTurns is excluded —
-        // it has its own completion feedback. ADR-0094: protocolError +
+        // so the user sees the turn did not succeed. maxTurns takes its own arm
+        // below — a cap is not a fault, so it must not borrow this wording.
+        // ADR-0094: protocolError +
         // apiError render the dedicated "API error (status): message" text
         // (single point = abnormalStopNoticeLines). An output-limit stop
         // replaces only the generic line: the hub's own English notice is what
@@ -3658,17 +5215,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             outputLimitNotice
           ),
         });
-      } else if (retryNoticeShown) {
-        // completed / maxTurns teardown: clear only this turn's transient
-        // transport_retry notice so "backing off…" doesn't linger on a
-        // successful turn; stop_summary and friends must survive maxTurns.
-        setNotice(undefined);
       } else {
-        // The silence-wait text is transient too: clear it on a successful
-        // finish unless a stronger source (stop_summary etc.) replaced it;
-        // the identity check returns other notices untouched, no re-render.
         setNotice((prev) =>
-          isStreamingSilenceNotice(prev) ? undefined : prev
+          turnTeardownNotice(prev, stopReason, retryNoticeShown)
         );
       }
     } catch (err) {
@@ -3692,6 +5241,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       });
       setNotice({ lines: [`刷新会话失败：${describeError(err)}`] });
     }
+    releaseTurnGap(targetId);
   }
 
   // Terminal worker notices wake only the active idle session. The
@@ -3706,10 +5256,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       isIdle: () => {
         const current = sessionsRef.current[activeKeyRef.current];
         return (
-          current?.runState === "idle" && current.conversationId !== undefined
+          !quittingRef.current &&
+          current?.runState === "idle" &&
+          current.conversationId !== undefined &&
+          !liveTurnsRef.current.has(current.conversationId)
         );
       },
       wake: async () => {
+        if (quittingRef.current) return;
         const current = sessionsRef.current[activeKeyRef.current];
         const targetId = current?.conversationId;
         if (targetId === undefined || current.runState !== "idle") return;
@@ -3722,10 +5276,21 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           };
         });
         const abortController = new AbortController();
-        aborters.current.set(targetId, abortController);
-        const promise = runTurnOnce(targetId, "", abortController, "wake");
-        inflightPromises.current.add(promise);
-        void promise.finally(() => inflightPromises.current.delete(promise));
+        trackOwnedTurnController(
+          aborters.current,
+          ownedTurnControllers.current,
+          targetId,
+          abortController
+        );
+        dropPendingSubmission();
+        liveTurnsRef.current.add(targetId);
+        const promise = runTurnOnce(
+          targetId,
+          { text: "" },
+          abortController,
+          "wake"
+        );
+        trackInflightTurn(targetId, promise);
         await promise;
       },
       onError: (error) => {
@@ -3742,6 +5307,10 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     };
   }, [props.bridge]);
 
+  useEffect(() => {
+    tryDrainGap();
+  }, [active.runState, activeKey, gapQueue]);
+
   // A background turn can make the active session idle after a notice was
   // queued. Flush on the state transition rather than waiting for another
   // worker event.
@@ -3749,25 +5318,72 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     subagentWakeRef.current?.flush();
   }, [activeKey, active.runState]);
 
-  async function quit(): Promise<void> {
-    const hasBg = Object.values(sessions).some(
-      (s) => s.runState === "running-bg"
-    );
-    if (hasBg && !pendingQuit) {
-      setPendingQuit(true);
-      setNotice({
-        lines: ["存在后台运行中的会话；再次 /quit 确认退出（将等待落盘）。"],
-      });
+  /**
+   * Register a turn promise under its conversation id and drop it when it
+   * settles. A conversation can hold more than one at a time (a gap send lands
+   * while the previous turn is still settling), so this is a set, not a slot.
+   */
+  function trackInflightTurn(
+    conversationId: string,
+    promise: Promise<unknown>
+  ): void {
+    const promises =
+      inflightTurns.current.get(conversationId) ?? new Set<Promise<unknown>>();
+    promises.add(promise);
+    inflightTurns.current.set(conversationId, promises);
+    void promise.finally(() => {
+      const live = inflightTurns.current.get(conversationId);
+      if (live === undefined) return;
+      live.delete(promise);
+      if (live.size === 0) inflightTurns.current.delete(conversationId);
+    });
+  }
+
+  function quit(): void {
+    if (quittingRef.current) return;
+    const liveBackgroundTasks = props.bridge.listLiveBackgroundTasks();
+    const liveSubagents = props.bridge.listSubagents();
+    const plan = planQuitBusy({
+      sessions: sessionsRef.current,
+      inflightTurns: inflightTurns.current,
+      liveBackgroundTasks,
+      subagents: liveSubagents,
+      interruptibleConversationId: canInterrupt(active)
+        ? active.conversationId
+        : undefined,
+    });
+    const snapshot = createQuitConfirmationSnapshot({
+      plan,
+      sessions: sessionsRef.current,
+      inflightTurns: inflightTurns.current,
+      liveBackgroundTasks,
+      liveSubagents,
+    });
+    if (
+      confirmQuitIfNeeded({
+        plan,
+        pending: pendingQuit,
+        previous: pendingQuitSnapshotRef.current,
+        snapshot,
+        save: (next) => {
+          pendingQuitSnapshotRef.current = next;
+          setPendingQuit(true);
+        },
+        show: (lines) => setNotice({ lines: [...lines] }),
+      })
+    ) {
       return;
     }
-    // Abort the current foreground turn before teardown: an inflight
-    // spawn_subagent(wait:true) promise would otherwise wait the subagent's
-    // per-task wall clock (default 7200s) and hang the exit. Background
-    // sessions are untouched (the /quit confirm branch waits for them).
-    // See the header note in quit-abort.ts.
-    abortForegroundTurnOnQuit({ session: active, aborters: aborters.current });
-    await Promise.allSettled([...inflightPromises.current]);
-    props.onQuit?.(active.conversationId);
+    quittingRef.current = true;
+    pendingQuitSnapshotRef.current = undefined;
+    setPendingQuit(false);
+    abortOwnedWorkOnQuit({
+      aborters: ownedTurnControllers.current,
+      compaction: compactingControllerRef.current,
+    });
+    subagentWakeRef.current?.dispose();
+    subagentWakeRef.current = undefined;
+    props.onQuit?.(active.conversationId, plan.waitSet);
     if (!renderer.isDestroyed) renderer.destroy();
   }
 
@@ -3791,32 +5407,135 @@ export function TuiApp(props: TuiAppProps): ReactNode {
    * Returns whether the foreground really had live work, judged by the action
    * itself rather than stale React state; callers use it to decide whether to
    * fall through to the double-Esc rewind check. Both arms empty → zero side
-   * effects, returns false.
+   * effects, returns `{ interrupted: false }`.
    */
-  function interruptForegroundTurn(): boolean {
+  function interruptForegroundTurn(): { interrupted: boolean } {
     const id = active.conversationId;
     const abortedSubagents =
       id === undefined ? [] : props.bridge.abortSessionForegroundWork(id);
-    if (!canInterrupt(active)) return abortedSubagents.length > 0;
-    if (id !== undefined) {
-      aborters.current.get(id)?.abort();
-    }
-    return true;
+    const controller = id === undefined ? undefined : aborters.current.get(id);
+    if (!canInterrupt(active))
+      return { interrupted: abortedSubagents.length > 0 };
+    controller?.abort();
+    return { interrupted: true };
+  }
+
+  // ── Remote seat bindings (specs/remote-sync.md §4.3) ────────────
+  // The port is bound once per port instance; the bound shims read this ref so
+  // every call lands on the latest render's sendTurn / resolvePermissionAsk /
+  // interruptForegroundTurn closures (they read render-scoped state).
+  const remoteBindingsRef = useRef<RemoteInputBindings>({
+    getActiveConversationId: () => null,
+    sendMessage: () => "sent",
+    answerApproval: () => "not_pending",
+    abort: () => ({ interrupted: false }),
+  });
+  remoteBindingsRef.current = {
+    getActiveConversationId: () => {
+      const key = activeKeyRef.current;
+      return sessionsRef.current[key]?.conversationId ?? null;
+    },
+    sendMessage: (text) =>
+      sendTurn(text, undefined, undefined, false, "remote"),
+    answerApproval: (toolUseId, answer) => {
+      const pending = props.askBridge
+        .pendingAll()
+        .find((ask) => ask.toolUseId === toolUseId);
+      if (pending === undefined) return "not_pending";
+      resolvePermissionAsk(pending, answer, "remote");
+      return "ok";
+    },
+    abort: () => interruptForegroundTurn(),
+  };
+  useEffect(() => {
+    const port = props.remoteInputPort;
+    if (port === undefined) return undefined;
+    return port.bind({
+      getActiveConversationId: () =>
+        remoteBindingsRef.current.getActiveConversationId(),
+      sendMessage: (text) =>
+        remoteBindingsRef.current.sendMessage(text, "remote"),
+      answerApproval: (toolUseId, answer) =>
+        remoteBindingsRef.current.answerApproval(toolUseId, answer, "remote"),
+      abort: () => remoteBindingsRef.current.abort(),
+    });
+  }, [props.remoteInputPort]);
+
+  const projectionActiveRef = useRef(props.onProjectionActive);
+  projectionActiveRef.current = props.onProjectionActive;
+
+  /**
+   * Publish an active-conversation identity change synchronously, before any
+   * work that can emit bus events for it. The effect below still owns
+   * running / queued changes; an identity change must not wait for its pass,
+   * or the projector drops the new conversation's first turn events.
+   */
+  function publishProjectionActive(next: ProjectionActiveState): void {
+    projectionActiveRef.current?.(next);
+  }
+
+  const projectionQueued = gapCount(gapQueue, gapKeyNow());
+  useEffect(() => {
+    projectionActiveRef.current?.({
+      conversationId: active.conversationId ?? null,
+      running: active.runState !== "idle",
+      queued: projectionQueued,
+    });
+  }, [activeKey, active.conversationId, active.runState, projectionQueued]);
+  useEffect(
+    () => () => {
+      projectionActiveRef.current?.(undefined);
+    },
+    []
+  );
+
+  useEffect(() => {
+    const register = props.onRemoteNoticeSink;
+    if (register === undefined) return undefined;
+    return register((line) => setNotice({ lines: [line] }));
+  }, [props.onRemoteNoticeSink]);
+
+  /**
+   * The copy action shared by rungs 1 and 2: reset the renderer selection cache
+   * (the same reset the mouse-up path performs, so a second Ctrl+C cannot repeat
+   * a stale copy) and report whatever the clipboard accepted. `text` is already
+   * read out of the cache by the caller, so clearing here cannot truncate it.
+   */
+  function copySelectedText(text: string): void {
+    cachedSelectionTextRef.current = "";
+    void doCopy(text).then((result) => setNoticeFromCopyResult(text, result));
   }
 
   /**
-   * Ctrl+C's sole duty: copy the selection. Interrupt moved wholesale to the
-   * Esc branch (interruptForegroundTurn, incl. foreground-subagent fan-out).
-   * Selection → copy with the same tail cleanup as handleMouseUp; no
-   * selection → show copy-usage text (Ctrl+C no longer means interrupt).
+   * Ctrl+C priority chain (interrupt lives on Esc, so this arm never interrupts):
+   *   1. live composer selection → copy it;
+   *   2. renderer (transcript) selection cache → copy it;
+   *   3. non-empty draft → clear the whole draft (buffer text + folded
+   *      attachments) and stop there;
+   *   4. nothing above → the existing copy-usage notice.
+   * The editor selection is live buffer state while the renderer selection is a
+   * cache only reset on a successful copy or mouse-up, so it survives a focus
+   * change and can be stale — the editor therefore wins when both exist.
    */
   function handleCtrlCCopy(): void {
+    const editorSelection = promptInputRef.current?.getSelection() ?? "";
+    if (editorSelection.length > 0) {
+      copySelectedText(editorSelection);
+      return;
+    }
     const selectedText = cachedSelectionTextRef.current;
     if (selectedText.length > 0) {
-      cachedSelectionTextRef.current = "";
-      void doCopy(selectedText).then((result) =>
-        setNoticeFromCopyResult(selectedText, result)
-      );
+      copySelectedText(selectedText);
+      return;
+    }
+    // Whole-draft clear: the label form is what the buffer holds, so forgetting
+    // the payload table is what makes the cleared attachments really gone.
+    // The gate reads the synchronous mirror, not `inputValue`: a keystroke and
+    // this Ctrl+C can arrive in the same task, where the render this closure was
+    // created in still holds the pre-keystroke text.
+    if (composerValueRef.current.trim().length > 0) {
+      promptInputRef.current?.replaceBuffer("", 0);
+      composerDraftRef.current.clear();
       return;
     }
     setNotice({
@@ -3913,27 +5632,55 @@ export function TuiApp(props: TuiAppProps): ReactNode {
 
   // ── Submit routing ────────────────────────────────────────────────
   async function handleSubmit(raw: string): Promise<void> {
-    setInputValue("");
     const text = raw.trim();
-    if (text.length === 0) return;
+    if (shouldIgnoreSubmit(text, quittingRef.current)) return;
+    // Through the composer's own report, not just the state setter: the restore
+    // gate reads this same tick, when no render has carried the clear yet.
+    reportComposerValue("");
+    // Whatever the submit becomes, the buffer the composer was showing is gone:
+    // a clipboard read still in flight was started for that draft, not for the
+    // text the user types next — with no folded unit there is nothing taken for
+    // the draft's own observer to report.
+    invalidateClipboardImageReads();
+    clearQuitConfirmationOnOtherInput(pendingQuit, text, () => {
+      pendingQuitSnapshotRef.current = undefined;
+      setPendingQuit(false);
+    });
+    // Folded units resolve exactly once, here: static-command routing keeps
+    // reading the label text it was written for, the model receives the
+    // payload. A `/skill` prompt is the exception that still needs the
+    // restored paste: the skill name stays the typed token, and the
+    // remainder is the payload the bubble and the model both read. Image
+    // labels stay in that remainder; the bytes travel as content blocks.
+    const submitted = resolveSubmittedDraft(composerDraftRef.current, text);
+    const messageText = submitted.text;
+    pendingSubmissionRef.current = submitted;
     // With askPending, y/n/a answer directly (modal yielded keys → input fallback).
     if (applyAskShortcut(askPending, text, resolvePermissionAsk)) return;
     // Exact /skill-name [prompt] match → deterministic skill-load send
     // (static commands win first: parseSkillLoad returns undefined on a hit,
     // falling through to normal routing). Re-scan once at submit time: the
     // async rescan from panel opening may not land before a fast Enter.
+    // The source is the transcript form, not the input label: a folded paste
+    // in the prompt must already be the payload before the envelope is built.
+    const skillSource = transcriptEchoText(text, submitted.payloads);
     const skillOutcome = await resolveSkillLoadSubmit({
-      text,
+      text: skillSource,
       catalog: skillCatalog,
       rescanner: props.skillRescanner,
     });
     if (skillOutcome.kind === "notice") {
       setNotice({ lines: [...skillOutcome.lines] });
+      restoreRejectedDraft();
       return;
     }
     if (skillOutcome.kind === "send") {
       setNotice(undefined);
-      await sendTurn(skillOutcome.sendText, skillOutcome.displayText);
+      await sendTurn(
+        skillOutcome.sendText,
+        skillOutcome.displayText,
+        skillImageContent(skillOutcome.sendText, submitted.payloads)
+      );
       return;
     }
     const parsed = parseTuiInput(text);
@@ -3941,10 +5688,12 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       // Only real messages enter history (no y/n / slash / busy-guard
       // noise), keyed by activeKey for per-session isolation;
       // appendInputHistory skips blanks, dedupes adjacent, same-ref on no-op.
-      if (!askPending && active.runState === "idle" && parsed.text.length > 0) {
+      // History keeps the resolved text, not the label: recalling a folded
+      // paste must give back editable multiline text, not an inert summary.
+      if (!askPending && active.runState === "idle" && messageText.length > 0) {
         setInputHistories((prev) => ({
           ...prev,
-          [activeKey]: appendInputHistory(prev[activeKey] ?? [], parsed.text),
+          [activeKey]: appendInputHistory(prev[activeKey] ?? [], messageText),
         }));
       }
       try {
@@ -3955,16 +5704,25 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         }
       } catch (err) {
         setNotice({ lines: [`读取会话失败：${describeError(err)}`] });
+        restoreRejectedDraft();
         return;
       }
       setNotice(undefined);
-      await sendTurn(parsed.text);
+      // Routing already read the label form. The model and the transcript
+      // both get the paste payload; the folded label stays on the draft so a
+      // rejection can put it back in the input.
+      await sendTurn(
+        messageText,
+        transcriptEchoText(text, submitted.payloads),
+        submitted.content
+      );
       return;
     }
     if (parsed.kind === "unknown") {
       setNotice({
         lines: [`未知命令：${parsed.raw}（/help 查看词表）`],
       });
+      restoreRejectedDraft();
       return;
     }
     // The session-holder commands resolve before the switch: three extra
@@ -4000,7 +5758,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         return;
       case "quit":
       case "exit":
-        await quit();
+        quit();
         return;
       case "help":
         setNotice({ lines: helpLines(skillNamesForHelp(skillList)) });
@@ -4015,10 +5773,13 @@ export function TuiApp(props: TuiAppProps): ReactNode {
               enabled: thinkingEnabled,
               effort: thinkingEffort,
             },
-            // Read the live snapshot at call time (not render-captured):
-            // env changes publish through the store only and this closure
-            // never re-renders with them.
-            envDisplay.get().model
+            // ADR-0145: the conversation's own route wins over the default.
+            // The default half is read live at call time (not
+            // render-captured): env changes publish through the store only
+            // and this closure never re-renders with them. The route half is
+            // render-captured state — the conversation's own route, as the
+            // TUI knows it.
+            activeModel()
           ),
         });
         return;
@@ -4088,9 +5849,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         // (0 if not found). Decision lives inside openModelPickerCommand.
         openModelPickerCommand({
           providers: props.providers,
-          // Focus seeds from the live snapshot: the picker shows the
-          // currently effective model (the closure doesn't subscribe to the store).
-          model: envDisplay.get().model,
+          // Focus seeds from the conversation's own route, falling back to
+          // the live snapshot (the default): the picker shows the model the
+          // current conversation actually uses (the closure doesn't subscribe
+          // to the store).
+          model: activeModel(),
           onEmpty: (lines) => setNotice({ lines }),
           onOpen: (focusIndex) => {
             // Panel exclusivity: opening the model picker closes sibling panels.
@@ -4212,6 +5975,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           // timer only arms on settle). Already terminal → sweep is a no-op.
           sweepCompactPanel(targetId);
           compactingControllerRef.current = null;
+          tryDrainGap();
         }
         return;
       }
@@ -4229,6 +5993,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           setNotice({ lines: continueNoticeFor("usage") });
           return;
         }
+        dropPendingSubmission();
         await runContinueTurn();
         return;
       }
@@ -4323,29 +6088,77 @@ export function TuiApp(props: TuiAppProps): ReactNode {
    * self-write sentinel swallows the watcher event its own write triggers,
    * so reloadFromEnv won't fire automatically). Failures surface as a
    * notice; the panel is already closed.
+   *
+   * ADR-0145: `conversationId` is the ACTIVE conversation (undefined for a
+   * draft) — the host sets that conversation's own route. On success the
+   * conversation's state carries the new route, so the display follows it
+   * immediately instead of waiting for the next env publish.
+   *
+   * A route failure changed NOTHING, so the conversation keeps its old route
+   * and the display keeps showing it. Any other failure happened AFTER the
+   * route was set: the conversation KEEPS the new route, so the display must
+   * follow it — exactly what the notice says ("Model switched (this
+   * session), but failed to write settings.json").
    */
-  function persistModelFromCommit(model: string): Promise<void> {
+  function persistModelFromCommit(
+    model: string,
+    conversationId: string | undefined
+  ): Promise<void> {
     const cb = props.onPersistModel;
     if (cb === undefined) return Promise.resolve();
-    return cb({ model }).then(
+    /** The conversation's route changed → the state carries it (ADR-0145). */
+    const adoptRoute = (): void => {
+      if (conversationId === undefined) return;
+      setSessions((prev) => {
+        const current = prev[conversationId];
+        if (current === undefined) return prev;
+        return {
+          ...prev,
+          [conversationId]: withSessionRoute(current, model),
+        };
+      });
+    };
+    return cb({ model }, conversationId).then(
       (res) => {
         if (!res.ok) {
           setNotice({
             lines: [persistModelFailNotice(res.stage, res.reason)],
           });
         }
+        if (!res.ok && res.stage === "route") return;
+        adoptRoute();
       },
       (err) => {
+        // The act reports a route failure as a result, never as a rejection —
+        // so a rejection means the DEFAULT write failed, after the route was
+        // set. The notice says the session switched; the display agrees.
         setNotice({
           lines: [persistModelFailNotice("write", describeError(err))],
         });
+        adoptRoute();
       }
     );
   }
 
   // ── Global keys (Ctrl+C / Shift+Tab / Ctrl+O / modal) ────
   useKeyboard((e) => {
-    if (e.eventType !== "press") return;
+    if (
+      !continueKeyRoutingAfterQuitConfirmation(
+        e.eventType,
+        e.name,
+        pendingQuit,
+        () => {
+          pendingQuitSnapshotRef.current = undefined;
+          setPendingQuit(false);
+          setNotice({
+            lines: ["已取消退出；当前 TUI 的后台任务继续运行"],
+          });
+          e.preventDefault();
+        }
+      )
+    ) {
+      return;
+    }
     const isCtrlC = e.ctrl && e.name === "c";
 
     if (graphViewOpen && graphProgress !== null) {
@@ -4458,6 +6271,14 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         },
         permission: permissionMode,
         graph: props.graphMode,
+        // ADR-0141: a permission step clears a declared axis out of the
+        // overlay; the wheel's start point is the effective posture.
+        onUserPermissionChange: permissionClearHook(props.presetOverlay),
+        ...(props.presetOverlay !== undefined
+          ? {
+              effectivePermission: props.presetOverlay.effectivePermission(),
+            }
+          : {}),
         onFlip: (next) => {
           setPermMode(next.permission);
           setGraphOn(next.graph);
@@ -4513,7 +6334,8 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         entries: modelPickerEntries(props.providers),
         focusedIndex: modelFocusIndex,
         onMove: setModelFocusIndex,
-        onSelect: (routeId) => void persistModelFromCommit(routeId),
+        onSelect: (routeId) =>
+          void persistModelFromCommit(routeId, active.conversationId),
         onClose: () => setModelPickerOpen(false),
       });
       return;
@@ -4685,20 +6507,17 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     // second Esc within REWIND_DOUBLE_ESC_WINDOW_MS opens the L3 picker.
     // With askModalActive the block below dismisses the modal — no interception.
     if (e.name === "escape" && !askModalActive) {
-      // Compaction in progress → Esc is its cancel key. Checked before
-      // foreground interrupt: runState is idle during compaction, so
-      // interruptForegroundTurn would wrongly reach double-Esc rewind.
-      if (compactingControllerRef.current !== null) {
-        compactingControllerRef.current.abort();
-        return;
-      }
+      // Compaction cancel, or a queued draft's interrupt, consumes this Esc
+      // before it can arm rewind. Compaction stays first: runState is idle
+      // while compacting, so a bare interrupt would open the rewind picker.
+      if (consumeLeadingEscape()) return;
       const nowMs = Date.now();
       const last = lastEscAtRef.current;
       // Interrupt first when the foreground has work: the criterion is
       // interruptForegroundTurn()'s own result (fresh hub-side foreground
       // accounting + aborter registry), not the TUI 1Hz projection, which
       // would miss wait:true children whose parent just went idle.
-      if (interruptForegroundTurn()) {
+      if (interruptForegroundTurn().interrupted) {
         lastEscAtRef.current = nowMs;
         return;
       }
@@ -4757,6 +6576,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     (s) => s.runState === "running-bg"
   );
   const bgLine = bgSession !== undefined;
+  const backgroundTaskLines = backgroundTaskLinesForView(view, backgroundTasks);
   const modalAsk =
     view === "chat" && askModalDismissed === false ? askPending : undefined;
   // The picker highlights the anchor row while selecting and an action row
@@ -4872,46 +6692,68 @@ export function TuiApp(props: TuiAppProps): ReactNode {
     view === "chat"
       ? projectVerifyBanner(verifySlot, verifyMode, cols).length
       : 0;
+  // Bottom chrome slots other than the notice lane: the lane's clipped row
+  // count must be booked through the same ledger twice (once to learn what the
+  // rest of the chrome costs, once for the final reserve), so the slot list is
+  // built here and spread into both calls.
+  const gapKey = resolveGapKey({
+    activeKey,
+    conversationId: active.conversationId,
+    draftKey: DRAFT_SESSION_ID,
+    liveKeys: [...liveTurnsRef.current],
+  });
+  const gapLine = viewGapLine(view, gapQueue, gapKey, cols);
+  const chromeSlots = {
+    inputHintRows: hintRows,
+    bgLine,
+    inputRows: inputContentRows,
+    modalRows,
+    pickerRows: pickerRows,
+    compactRows:
+      view === "chat" && activeCompact !== undefined
+        ? compactProgressRows()
+        : 0,
+    // SubagentPanel rows are budgeted (collapsed height = render height);
+    // see specs/tui-subagent-transcript-live.md for the superseded record.
+    panelRows: subagentPanelRows,
+    // Per specs/tui-subagent-transcript-live.md those two lines moved
+    // onto the spawn card inside the transcript (scroll area), so this no
+    // longer reserves chrome and subagentRowBudget stays 0. The call site
+    // is kept so re-budgeting later needs no signature churn.
+    subagentRows: subagentRowBudget(view, subagents),
+    agentStatusRows: agentStatusRowBudget,
+    envPaneRows: envPaneRowBudget,
+    verifyRows: verifyRowBudget,
+    graphRows: graphChromeRows(graphProgress),
+    degradeRows: shellParseDegradeNoticeShown(view) ? 1 : 0,
+    queueRows: gapChromeRows(gapLine),
+    backgroundTaskRows: backgroundTaskLines.length,
+  };
+  // The lane's physical rows: folded once, clipped to what the terminal has
+  // left, then booked and rendered from that same array.
+  const noticeLines = noticeClippedLines(
+    noticePhysicalLines(notice?.lines, cols),
+    noticeLaneBodyRows(
+      chromeReserveRows({ ...chromeSlots, noticeRows: 0 }),
+      rows
+    )
+  );
   const viewportRows = Math.max(
-    5,
+    CHAT_MIN_VIEWPORT_ROWS,
     rows -
       chromeReserveRows({
-        noticeRows: noticeRenderRows(notice?.lines, cols),
-        inputHintRows: hintRows,
-        bgLine,
-        inputRows: inputContentRows,
-        modalRows,
-        pickerRows: pickerRows,
-        compactRows:
-          view === "chat" && activeCompact !== undefined
-            ? compactProgressRows()
-            : 0,
-        // SubagentPanel rows are budgeted (collapsed height = render height);
-        // see specs/tui-subagent-transcript-live.md for the superseded record.
-        panelRows: subagentPanelRows,
-        // Per specs/tui-subagent-transcript-live.md those two lines moved
-        // onto the spawn card inside the transcript (scroll area), so this no
-        // longer reserves chrome and subagentRowBudget stays 0. The call site
-        // is kept so re-budgeting later needs no signature churn.
-        subagentRows: subagentRowBudget(view, subagents),
-        agentStatusRows: agentStatusRowBudget,
-        envPaneRows: envPaneRowBudget,
-        verifyRows: verifyRowBudget,
-        graphRows: graphChromeRows(graphProgress),
-        degradeRows: shellParseDegradeNoticeShown(view) ? 1 : 0,
+        ...chromeSlots,
+        noticeRows: noticeLines.length,
       })
   );
-  // List view (ListView): only the notice occupies the bottom, plus 2 headroom rows.
-  const listViewRows = Math.max(
-    5,
-    rows - 2 - noticeRenderRows(notice?.lines, cols)
-  );
-  // MCP dashboard view: input / mode row / ContextBar are not rendered
-  // (view !== "chat"); bottom is notice + blank line, same budget as the list.
-  const mcpViewRows = Math.max(
-    5,
-    rows - 2 - noticeRenderRows(notice?.lines, cols)
-  );
+  // List and MCP views render no input box, mode row or ContextBar, so the only
+  // bottom chrome they book is the notice lane plus these 2 headroom rows.
+  const noticeLaneOnlyRows = (laneRows: number): number =>
+    Math.max(CHAT_MIN_VIEWPORT_ROWS, rows - 2 - laneRows);
+  // List view (ListView): only the notice occupies the bottom.
+  const listViewRows = noticeLaneOnlyRows(noticeLines.length);
+  // MCP dashboard view: same budget as the list.
+  const mcpViewRows = noticeLaneOnlyRows(noticeLines.length);
 
   return (
     <box
@@ -4966,13 +6808,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                   : []
               }
               subagents={subagents}
-              askLine={
-                askPending !== undefined && !askModalActive
-                  ? `[ask] 允许 ${askPending.tool}？${
-                      askPending.summaryHint ? ` ${askPending.summaryHint}` : ""
-                    } 输入 y/a/n（a=总是允许）`
-                  : undefined
-              }
+              askLine={askLineFor(askPending, askModalActive)}
               thinkingExpanded={thinkingExpanded}
               bannerLines={bannerLines}
               crunchedSeconds={
@@ -4986,10 +6822,15 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           </box>
         </>
       )}
-      {notice !== undefined && (
+      {/* Notice lane: renders exactly the clipped physical rows the ledger
+          booked (`noticeLines` is the single array both sides read, folded at
+          the lane's own inner width and painted with wrapMode="none"), so a
+          booked row is a painted row and an over-tall notice can only fold
+          itself away, never crush the chrome below it. */}
+      {noticeLines.length > 0 && (
         <box flexDirection="column" marginBottom={1}>
-          {notice.lines.map((line, i) => (
-            <text key={`notice-${i}`} fg={pal.dim}>
+          {noticeLines.map((line, i) => (
+            <text key={`notice-${i}`} fg={pal.dim} wrapMode="none">
               {line}
             </text>
           ))}
@@ -5066,6 +6907,7 @@ export function TuiApp(props: TuiAppProps): ReactNode {
                       kind: "permission",
                       tool: askPending.tool,
                       summaryHint: askPending.summaryHint,
+                      toolUseId: askPending.toolUseId,
                       selectedIndex: permissionIndex,
                     }
                   : undefined
@@ -5078,20 +6920,23 @@ export function TuiApp(props: TuiAppProps): ReactNode {
       )}
       {view === "chat" && (
         <box flexDirection="row">
-          <text
-            fg={graphOn || permMode === "full_auto" ? pal.running : pal.dim}
-          >
-            {modeRowBaseLabel({ graphOn, permMode, cols })}
-          </text>
-          {/* ADR-0119: the yolo red marker (pal.error, no new theme token, no
-              new bottom-bar row — it rides the existing mode row). When yolo
-              is OFF this node is not rendered (the mode row is byte-identical
-              to before). The two-form projection lives in modeRowText /
-              modeRowYoloMarker. */}
-          {yoloOn && <text fg={pal.error}>{modeRowYoloMarker(cols)}</text>}
+          {/* ADR-0141: the base labels come from the SAME derived projection as
+              the two indicators, so the suppression rule (a label drops out only
+              for an axis a visible indicator states) is decided in one place.
+              Each indicator keeps its own node because the indicators are red
+              while the base labels are not — one projection cannot color them
+              as one run. */}
+          <ModeRowIndicators
+            preset={preset}
+            fenceRetired={fenceRetired}
+            graphOn={graphOn}
+            permMode={permMode}
+            cols={cols}
+          />
           {/* Live run seconds to the right of mode (`· Xs`, ticks per
               second); cleared at turn end — stats move to the trailing
-              `Crunched for X` line. Real-time token counting is not done. */}
+              `Crunched for X` line. The live generation rate is NOT shown
+              here: it is the context-bar suffix (`42 tok/s`, Plan A T6). */}
           {cols >= 40 &&
             active.runState === "running-fg" &&
             runStartedAt !== null && (
@@ -5111,9 +6956,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
           transcript (see specs/tui-subagent-transcript-live.md), so no
           subagent chrome rows remain here (subagentRowBudget stays 0). */}
       {shellParseDegradeNotice(view)}
+      <GapQueueLine line={gapLine} color={pal.dim} />
       {view === "chat" && (
         <PromptInput
           ref={promptInputRef}
+          draft={composerDraftRef.current}
           value={inputValue}
           cols={cols}
           maxLines={MAX_INPUT_LINES}
@@ -5148,8 +6995,9 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             chromeFocus.kind !== "input" ||
             graphViewOpen
           }
-          onChange={setInputValue}
+          onChange={reportComposerValue}
           onSubmit={(v) => void handleSubmit(v)}
+          onRecallQueued={recallQueuedDraft}
           onSelectHint={(candidate) => {
             // candidate is the SlashCandidate union: static command →
             // handleSubmit(`/${cmd}`) routing; skill → skill-load send. With
@@ -5218,14 +7066,24 @@ export function TuiApp(props: TuiAppProps): ReactNode {
         <box flexDirection="row" justifyContent="flex-start">
           <ContextBar
             lastUsage={active.lastUsage}
+            // Confirmed measured reading only (ADR-0008 2026-10-22);
+            // absent → the bar falls back to `lastUsage`.
+            displayOccupancy={active.displayOccupancy}
+            // Plan A T6: the live / final generation rate (`42 tok/s`).
+            tokenSpeed={tokenSpeedReadingFor(
+              tokenSpeedReadings,
+              active.conversationId
+            )}
             contextWindow={props.bridge.contextWindow}
             running={active.runState === "running-fg"}
             cols={cols}
-            activeToolName={activeToolLabel}
             // ContextBar subscribes to envDisplay itself: env changes never
             // re-render this tree, so the model name needn't be threaded via
             // props. providers is a startup constant and still comes via props.
             envDisplay={envDisplay}
+            // ADR-0145: the current conversation's own route wins over the
+            // store's default; absent (a draft / no route yet) → the store's.
+            model={active.model}
             providers={props.providers}
             effortLabel={
               thinkingEnabled ? formatEffortLabel(thinkingEffort) : "off"
@@ -5252,6 +7110,11 @@ export function TuiApp(props: TuiAppProps): ReactNode {
             {line.text}
           </text>
         ))}
+      {backgroundTaskLines.map((line, idx) => (
+        <text key={`background-task-${idx}`} wrapMode="none">
+          {line}
+        </text>
+      ))}
       {/* Subagent panel under the location row; its rows count into the
           chrome budget (collapsed at SUBAGENT_PANEL_MAX_ROWS). focusedRow
           expands that live row's full taskPreview with a `> ` prefix while
@@ -5436,6 +7299,55 @@ function turnLaneNoticeFor(
   return {
     lines: [...recovery, ...(notice === undefined ? [] : [notice])],
   };
+}
+
+/**
+ * The notice lane's line for a run that stopped at the turn cap: what ended, and
+ * what is still open. English per docs/CONTEXT.md "sticky notice"; one line,
+ * shorter than the notice box inner width, so it never re-wraps the chrome.
+ */
+const TURN_CAP_NOTICE_LINES: ReadonlyArray<string> = [
+  "⚠ Turn cap reached (maxTurns) — send a message to continue.",
+];
+
+/**
+ * Compose the cap line with what this turn's stream already left in the lane. A
+ * wrap-up summary stays above it (it says what got done before the cap); a
+ * transport_retry or silence heartbeat is dropped, since both describe a run
+ * that is no longer running.
+ */
+function turnCapNotice(
+  notice: Notice | undefined,
+  transportRetryShown: boolean
+): Notice {
+  const carried =
+    notice === undefined ||
+    transportRetryShown ||
+    isStreamingSilenceNotice(notice)
+      ? []
+      : notice.lines;
+  return { lines: [...carried, ...TURN_CAP_NOTICE_LINES] };
+}
+
+/**
+ * End-of-turn notice-lane decision for stops that are neither interrupted nor
+ * an abnormal fault. `maxTurns` keeps its own line: the cap stopped this run,
+ * not the session, and a cap is not a fault, so it must not borrow the
+ * abnormal-stop wording. Otherwise teardown clears only this turn's transient
+ * texts — a completed turn must not keep "backing off…" lingering, and the
+ * silence-wait text goes too unless a stronger source (stop_summary etc.)
+ * replaced it; the identity check returns other notices untouched, no
+ * re-render. A turn-cap line clears at the next run's own boundary
+ * (handleSubmit).
+ */
+function turnTeardownNotice(
+  notice: Notice | undefined,
+  stopReason: string | undefined,
+  retryNoticeShown: boolean
+): Notice | undefined {
+  if (stopReason === "maxTurns") return turnCapNotice(notice, retryNoticeShown);
+  if (retryNoticeShown) return undefined;
+  return isStreamingSilenceNotice(notice) ? undefined : notice;
 }
 
 /**

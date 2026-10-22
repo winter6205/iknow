@@ -46,6 +46,11 @@ import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
 import { installTestSettingsSource } from "../_helpers/install-test-settings-source.ts";
 import { assistantResult, makeDeps } from "../cli/_fixtures.ts";
 import {
+  MINIMAL_MESSAGE_RESPONSE,
+  startHttpCapture,
+  type HttpCapture,
+} from "../_helpers/http-capture.ts";
+import {
   MINIMAL_SDK_MESSAGE,
   startLlmCapture,
   type LlmCapture,
@@ -64,6 +69,17 @@ vi.mock("../../src/harness/sandbox/runner.js", async (importOriginal) => {
 let baseDir: string;
 let listening: ListeningServer | undefined;
 let settingsSource: ReturnType<typeof installTestSettingsSource>;
+/**
+ * ADR-0145：会话创建时快照当前默认 → 拥有自己的路由 → turn 走路由 adapter
+ * （provider 的 baseUrl），注入的 fixture adapter 不再被使用。需要发消息的
+ * 用例因此要自带一个指向本地 capture server 的 provider 目录（见
+ * trace-health 用例）。
+ */
+let routeCapture: HttpCapture | undefined;
+let routeHome: string | undefined;
+/** capture server 只回非流式响应 → 这类用例要关掉流式臂（IKNOW_LLM_STREAM）。 */
+let routeStreamPrev: string | undefined;
+let routeStreamSet = false;
 
 beforeAll(() => {
   // IKNOW_LLM_MODEL was retired: the only model source is settings.llm.model.
@@ -75,8 +91,17 @@ beforeAll(() => {
 
 afterEach(async () => {
   if (listening) await listening.close();
+  if (routeCapture) await routeCapture.close();
+  if (routeHome) await rm(routeHome, { recursive: true, force: true });
   if (baseDir) await rm(baseDir, { recursive: true, force: true });
+  if (routeStreamSet) {
+    if (routeStreamPrev === undefined) delete process.env["IKNOW_LLM_STREAM"];
+    else process.env["IKNOW_LLM_STREAM"] = routeStreamPrev;
+    routeStreamSet = false;
+  }
   listening = undefined;
+  routeCapture = undefined;
+  routeHome = undefined;
 });
 
 afterAll(() => {
@@ -203,8 +228,39 @@ describe("startSessionServe — trace health wiring", () => {
     const traceOut = join(baseDir, "trace-out-file");
     await writeFile(traceOut, "", "utf8");
 
+    // ADR-0145：会话创建时快照当前默认 → 拥有自己的路由 → turn 走路由
+    // adapter（provider 的 baseUrl），注入的 fixture adapter 不再被使用。
+    // 本用例要断言的是 trace 写入失败计数，所以给一份指向本地 capture
+    // server 的 provider 目录 —— turn 有确定的快响应，且不碰真实 provider。
+    routeCapture = await startHttpCapture(MINIMAL_MESSAGE_RESPONSE);
+    routeHome = await mkdtemp(join(tmpdir(), "iknow-serve-trace-home-"));
+    await mkdir(join(routeHome, ".iknow"), { recursive: true });
+    // capture server 只回非流式响应 → 关掉流式臂。
+    routeStreamPrev = process.env["IKNOW_LLM_STREAM"];
+    routeStreamSet = true;
+    process.env["IKNOW_LLM_STREAM"] = "off";
+    await writeFile(
+      join(routeHome, ".iknow", "settings.json"),
+      JSON.stringify({
+        llm: {
+          model: "cap/model",
+          providers: [
+            {
+              id: "cap",
+              baseUrl: routeCapture.origin,
+              // installTestSettingsSource 已经把这个变量设成占位串。
+              apiKeyEnv: "IKNOW_TEST_API_KEY",
+              models: [{ id: "model", maxTokens: 128 }],
+            },
+          ],
+        },
+      }),
+      "utf8"
+    );
+
     const out = await startSessionServe({
       dataDir: baseDir,
+      home: routeHome,
       port: 0,
       traceOut,
       hubOptions: {
@@ -563,15 +619,18 @@ describe("startSessionServe — port fallback", () => {
 // -- runtime LLM env wiring (SC6 / ADR-0094) ----------------------------------
 //
 // Acceptance: the serve entry assembles EnvLoader → envProvider injected into
-// the hub → after editing llm.model in the user-level settings.json, the next
-// POST /messages' wire model follows the new env (no longer a one-shot
-// loadIknowEnv at startup).
+// the hub → editing llm.model in the user-level settings.json is picked up at
+// runtime (no longer a one-shot loadIknowEnv at startup) and applies to NEW
+// conversations. A live conversation owns its route (ADR-0145): it keeps
+// sending its own wire model; only a session created afterwards starts on
+// the new default.
 //
 // Shape: a local LLM capture server as the SDK's baseURL endpoint → the
 // captured request body's `model` field = wire model. The provider `prov`
 // carries two model ids, initial settings.json = prov/m1, first POST → hits
 // m1; rewrite settings.json = prov/m2, wait for the EnvLoader watcher to
-// trigger reload + hub.adapter hot rebuild, second POST → hits m2.
+// trigger reload + hub.adapter hot rebuild, the same session's second POST
+// still hits m1, a session created after the switch hits m2.
 //
 // Note: this test relies on the wire-model tail split (ADR-0094) — route
 // `prov/m1` hits the provider registry → SDK wire = `m1`.
@@ -697,7 +756,7 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
     else process.env["IKNOW_LLM_MAX_OUTPUT_TOKENS"] = sc6PrevMaxTokens;
   });
 
-  it("改用户层 settings.json 后,下一条 POST /messages 的 wire model 跟 EnvLoader 更新", async () => {
+  it("改用户层 settings.json 后,已有会话保留自己的路由,新会话用新默认", async () => {
     // (a) initial settings = prov/m1 → start serve.
     await writeProvSettings("prov/m1");
     const out = await startSessionServe({
@@ -752,7 +811,33 @@ describe("startSessionServe — runtime LLM env wiring (SC6)", () => {
     );
     assert.equal(second.status, 200);
 
+    // ADR-0145：会话拥有自己的路由（创建时快照的 prov/m1），默认改了也不动它 →
+    // 同一条会话的下一条消息仍带旧 wire model。
     const secondBody = await waitForBodyWithUserText("second");
-    assert.equal(secondBody.model, "m2");
+    assert.equal(secondBody.model, "m1");
+
+    // 改完之后新建的会话 → 起点是新默认 prov/m2 → wire model = m2。
+    const createdAfter = await fetch(`${origin}/api/v1/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(createdAfter.status, 201);
+    const sessionIdAfter = (
+      (await createdAfter.json()) as { session: { conversation_id: string } }
+    ).session.conversation_id;
+
+    const third = await fetch(
+      `${origin}/api/v1/sessions/${sessionIdAfter}/messages`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ text: "third" }),
+      }
+    );
+    assert.equal(third.status, 200);
+
+    const thirdBody = await waitForBodyWithUserText("third");
+    assert.equal(thirdBody.model, "m2");
   });
 });

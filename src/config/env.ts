@@ -223,6 +223,14 @@ export interface LlmEnv {
    * same reason as `idleTimeoutMs`.
    */
   hardCapMs?: number;
+  /**
+   * The provider registry this env was resolved from (`settings.llm.providers`).
+   * It travels with the env so a model route can be resolved against it
+   * (`resolveLlmEnvForRoute`) without re-reading the settings file per route.
+   * Absent when the env was hand-written instead of loaded — a route then has
+   * no registry to resolve against and the resolver throws.
+   */
+  providers?: ReadonlyArray<IknowSettingsLlmProvider>;
 }
 
 /**
@@ -597,6 +605,63 @@ function resolveOptionalRoute(
   };
 }
 
+/**
+ * Resolve a conversation's model route against the default env (ADR-0145 §7,
+ * spec invariant 5).
+ *
+ * The route's own transport comes from the registry the default env carries
+ * (`LlmEnv.providers`), through the same `resolveLlmTransport` chain
+ * `resolveOptionalRoute` uses: same provider lookup, same api-key env rule,
+ * same `models[]` budget entry, same trailing-slash normalization. Every other
+ * field (temperature / stream / thinking / thinkingEffort / fallback / limits)
+ * stays the default env's — a route chooses the model, not the request policy.
+ *
+ * A route that does not resolve (provider unregistered, api-key env unset,
+ * malformed route ID) throws the typed `LlmProviderConfigError`, the same error
+ * `loadIknowEnv` throws for the default route. It **never** falls back to the
+ * default env: a silent fallback would run the conversation on a model it did
+ * not choose.
+ *
+ * The result is the default env with its `llm` replaced. The declared type
+ * keeps only `llm` because the tier a caller resolves against is the
+ * `{ llm }`-shaped env the hub and the thinking override already use
+ * (`overrideEnv`), not a whole `IknowEnv`; the remaining fields travel along
+ * at runtime but are not part of this contract.
+ */
+export function resolveLlmEnvForRoute(
+  defaultEnv: { readonly llm: LlmEnv },
+  route: string
+): { readonly llm: LlmEnv } {
+  const routeId = route.trim();
+  const transport = resolveLlmTransport(
+    { llm: { providers: defaultEnv.llm.providers } },
+    routeId
+  );
+  // The default route's headers and budget belong to the default route: they
+  // are dropped here, so the route's own values (or their absence) are what the
+  // result carries.
+  const {
+    headers: _defaultHeaders,
+    routeMaxTokens: _defaultBudget,
+    ...restLlm
+  } = defaultEnv.llm;
+  return {
+    ...defaultEnv,
+    llm: {
+      ...restLlm,
+      model: routeId,
+      baseUrl: transport.baseUrl,
+      apiKey: transport.apiKey,
+      ...(transport.headers === undefined
+        ? {}
+        : { headers: transport.headers }),
+      ...(transport.maxTokens === undefined
+        ? {}
+        : { routeMaxTokens: transport.maxTokens }),
+    },
+  };
+}
+
 /** `settings.llm.liteModel` → routing result; illegal states silently absent. */
 function resolveLlmLite(
   mergedSettings: IknowSettings
@@ -606,8 +671,9 @@ function resolveLlmLite(
 
 /**
  * `settings.subagent.model` → sub-agent worker route; an unusable route is
- * silently absent so the worker starts on `settings.llm.model` and the parent
- * spawn is never failed.
+ * silently absent so the worker starts on the parent conversation's route (the
+ * process default when the envelope carries none) and the parent spawn is never
+ * failed.
  */
 function resolveSubagentModel(
   mergedSettings: IknowSettings
@@ -645,6 +711,20 @@ function spreadRouteMaxTokens(
   maxTokens: number | undefined
 ): Pick<LlmEnv, "routeMaxTokens"> {
   return maxTokens === undefined ? {} : { routeMaxTokens: maxTokens };
+}
+
+/**
+ * Produce `{ providers }` only when the registry is present; absent → `{}`
+ * (no key). The registry travels with the env so a model route can be resolved
+ * against it later (`resolveLlmEnvForRoute`) without re-reading the settings
+ * file. Same "absent = not produced" discipline as the other optional arms,
+ * and kept out of loadIknowEnv so its complexity does not grow.
+ */
+function spreadProviders(
+  mergedSettings: IknowSettings
+): Pick<LlmEnv, "providers"> {
+  const providers = mergedSettings.llm?.providers;
+  return providers === undefined ? {} : { providers };
 }
 
 export interface WebEnv {
@@ -685,7 +765,7 @@ export interface WebEnv {
  *
  * `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS`: proactive auto-compact threshold
  * (optional integer). Unset / empty / non-numeric → undefined (threshold.ts
- * derives `floor(0.95 × contextWindow)` by default at derive time, with the
+ * derives `floor(0.9 × contextWindow)` by default at derive time, with the
  * hard check `threshold < window`). Early validation belongs to threshold.ts,
  * not the env loader. Whoever sets the denominator to the vendor's real cap
  * should lower this env themselves.
@@ -766,6 +846,14 @@ export interface IknowEnv {
   /** Subagent config arm (per-task wallclock; consumed by the manager SIGTERM timer). */
   subagent: IknowSubagentEnv;
   /**
+   * Approval-inlet wait timeout (ms). `timeoutMs` is `undefined` or `0` when no
+   * limit is configured — there is no default timeout. Resolution:
+   * `IKNOW_APPROVAL_TIMEOUT_MS` > `settings.approval.timeoutMs` (user and
+   * project layers, project wins). Optional so hand-written `IknowEnv`
+   * literals that do not care about approvals stay valid.
+   */
+  approval?: { timeoutMs: number | undefined };
+  /**
    * Tool loop detection (on by default). env `IKNOW_TOOL_LOOP_DETECTION` and settings.loop.detectToolLoop.
    */
   loop?: { detectToolLoop: boolean };
@@ -792,7 +880,13 @@ export interface IknowEnv {
 /** Placeholder values treated as "no real secret set" (case-insensitive). */
 const API_KEY_PLACEHOLDERS = new Set(["yes"]);
 
-function parseEnvFile(path: string): Record<string, string> {
+/**
+ * Parse one dotenv file into a key→value map (missing file → empty; unfilled
+ * `<...>` placeholders skipped). Exported so other literal/`${VAR}` secret
+ * resolvers (`remote.notify.token`) reuse the exact `.env` / `.env.local`
+ * fallback instead of growing a second parser.
+ */
+export function parseEnvFile(path: string): Record<string, string> {
   if (!existsSync(path)) return {};
   const out: Record<string, string> = {};
   for (const raw of readFileSync(path, "utf8").split(/\r?\n/)) {
@@ -889,6 +983,44 @@ function envOptionalInt(opts: EnvOptionalIntOpts): number | undefined {
 function envOptionalPositiveInt(opts: EnvOptionalIntOpts): number | undefined {
   const n = envOptionalInt(opts);
   return n !== undefined && n > 0 ? n : undefined;
+}
+
+/**
+ * Optional non-negative integer env value (approval wait timeout). Unlike
+ * `envOptionalInt` this does not truncate: a fractional value is not a
+ * millisecond count the operator configured, so it is invalid. `0` is kept —
+ * it is the "wait without limit" spelling. Negative / fractional / non-numeric
+ * → undefined (falls through to the settings layer).
+ */
+function envOptionalNonNegativeInt(
+  opts: EnvOptionalIntOpts
+): number | undefined {
+  const raw = envGet({ file: opts.file, key: opts.key });
+  if (raw.trim() === "") return undefined;
+  const n = Number(raw);
+  return Number.isFinite(n) && Number.isInteger(n) && n >= 0 ? n : undefined;
+}
+
+/** Approval-inlet timeout env override (ms; `0` = wait without limit). */
+export const APPROVAL_TIMEOUT_ENV_KEY = "IKNOW_APPROVAL_TIMEOUT_MS";
+
+/**
+ * Resolve the approval-inlet wait timeout: env override > settings, no default.
+ * `undefined` means "wait without limit" (there is no timeout unless one is
+ * configured). The settings value is already validated by `parseApproval`;
+ * this resolver does not re-parse settings.
+ *
+ * An explicitly passed factory argument (for example a bridge profile) is
+ * applied by the caller and takes precedence over this result.
+ */
+export function resolveApprovalTimeoutMs(
+  file: Record<string, string>,
+  settings: IknowSettings | undefined
+): number | undefined {
+  return (
+    envOptionalNonNegativeInt({ file, key: APPROVAL_TIMEOUT_ENV_KEY }) ??
+    settings?.approval?.timeoutMs
+  );
 }
 
 interface EnvNumberOpts {
@@ -1173,8 +1305,8 @@ export function loadIknowEnv(
   // process.env still wins via envGet; among files, .env.local overrides .env.
   // The settings parameter is a test injection seam; when omitted the real
   // settings files are read. Under the project allowlist, project files
-  // contribute only verify / secrets / permissions; the `llm` consumed here is
-  // a user-layer key (sole source = `~/.iknow/settings.json`).
+  // contribute only verify / secrets / permissions / approval; the `llm`
+  // consumed here is a user-layer key (sole source = `~/.iknow/settings.json`).
   // The home parameter is passed through to loadIknowSettings: for isolating
   // user-level settings in tests. Explicit injection pins this layer instead
   // of relying on ambient process.env.HOME; on POSIX os.homedir() does follow
@@ -1236,7 +1368,10 @@ export function loadIknowEnv(
   // field name stays vendor-neutral: a config written for exa keeps working if the
   // selection changes to a backend that later becomes real. Keyed by the same closed
   // set as searchBackend; "bing" has no key and therefore no settings slot.
-  const settingsWebKey = expandPlaceholders(mergedSettings.web?.backendKey, file);
+  const settingsWebKey = expandPlaceholders(
+    mergedSettings.web?.backendKey,
+    file
+  );
   const settingsKeyFor = (id: SearchBackendId): string | undefined =>
     id === webSearchBackend ? settingsWebKey : undefined;
 
@@ -1263,6 +1398,10 @@ export function loadIknowEnv(
       // keeps the key absent, so the 32,000 fallback stays one place (assembly)
       // and no other route's number can be read as this one's cap.
       ...spreadRouteMaxTokens(transport.maxTokens),
+      // The registry this env was resolved from, carried so a route can be
+      // resolved against it later (`resolveLlmEnvForRoute`) without re-reading
+      // the settings file.
+      ...spreadProviders(mergedSettings),
       // Per-call LLM racing cap (env > settings > 300_000 fallback). Mirrors
       // the maxTurns pattern (envOptionalPositiveInt ?? settings); third layer
       // 5 min: thinking + 32k generations commonly exceed 60s. MCP
@@ -1367,16 +1506,20 @@ export function loadIknowEnv(
       // always were, which is what `assertBackendConfig`'s `backend_unset_with_key` guard
       // names.
       exaApiKey:
-        expandPlaceholders(envOptional({ file, key: EXA_API_KEY_ENV_KEY }), file) ??
-        settingsKeyFor("exa"),
-      tavilyApiKey: expandPlaceholders(
-        envOptional({ file, key: TAVILY_API_KEY_ENV_KEY }),
-        file
-      ) ?? settingsKeyFor("tavily"),
-      braveApiKey: expandPlaceholders(
-        envOptional({ file, key: BRAVE_API_KEY_ENV_KEY }),
-        file
-      ) ?? settingsKeyFor("brave"),
+        expandPlaceholders(
+          envOptional({ file, key: EXA_API_KEY_ENV_KEY }),
+          file
+        ) ?? settingsKeyFor("exa"),
+      tavilyApiKey:
+        expandPlaceholders(
+          envOptional({ file, key: TAVILY_API_KEY_ENV_KEY }),
+          file
+        ) ?? settingsKeyFor("tavily"),
+      braveApiKey:
+        expandPlaceholders(
+          envOptional({ file, key: BRAVE_API_KEY_ENV_KEY }),
+          file
+        ) ?? settingsKeyFor("brave"),
     },
     // Auto-compact config arm (passed through to harness/compress/ via LoopEngineDeps.compress).
     // Threshold sanity validation (threshold >= window rejected) belongs to
@@ -1433,6 +1576,12 @@ export function loadIknowEnv(
       ...(mergedSettings.subagent?.thinkingEffort !== undefined
         ? { thinkingEffort: mergedSettings.subagent.thinkingEffort }
         : {}),
+    },
+    // Approval-inlet wait timeout: env > settings, no third-layer default
+    // (undefined / 0 = wait without limit). Explicit factory arguments are
+    // applied at the assembly point and win over this value.
+    approval: {
+      timeoutMs: resolveApprovalTimeoutMs(file, mergedSettings),
     },
     // Workspace-root per-root state anchor (registered at env SSOT;
     // `envOptional` canonical reader — empty/unset → undefined; the consumer

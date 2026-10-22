@@ -73,6 +73,7 @@ function makeTextAdapter(responses: string[]): LoopAdapter & {
         projection: { nativeMessage: native, texts: [text], toolCalls: [] },
         supplierStop: "success",
         needsTools: false,
+        hasThinking: false,
         isEmptyFinalResponse: false,
       };
     },
@@ -355,6 +356,7 @@ describe("loop engine H2: reactive compact 重试前同样检测 graph 翻转", 
           projection: { nativeMessage: native, texts: [text], toolCalls: [] },
           supplierStop: "success",
           needsTools: false,
+          hasThinking: false,
           isEmptyFinalResponse: false,
         };
       },

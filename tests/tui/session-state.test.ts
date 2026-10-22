@@ -18,6 +18,7 @@ import {
   appendInputHistory,
   attachSession,
   canInterrupt,
+  contextUsageDisplayReading,
   createDraftSession,
   isTuiHiddenUserMessage,
   seedInputHistory,
@@ -28,7 +29,11 @@ import {
   turnFinished,
   turnStarted,
   userMessageEchoed,
+  withContextUsageBeat,
   withLastUsage,
+  withOccupancy,
+  withSessionRoute,
+  type ContextUsageEvent,
   type TuiSessionState,
 } from "../../src/tui/session-state.js";
 import {
@@ -42,8 +47,12 @@ import {
   isSkillIndexDeltaText,
 } from "../../src/harness/skill/index-delta.js";
 import { buildAgentStatusText } from "../../src/harness/agent-status.js";
+import { infoLines } from "../../src/tui/app.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
-import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
+import type {
+  AnthropicNativeMessage,
+  TokenUsage,
+} from "../../src/harness/model-adapter/types.js";
 
 const msg = (
   text: string,
@@ -165,6 +174,45 @@ describe("session-state: 三态转换表（Q1a）", () => {
     expect(done.messages).toHaveLength(2);
     expect(done.lastStopReason).toBe("completed");
     expect(Object.isFrozen(done.messages)).toBe(true);
+  });
+
+  test("withSessionRoute：写入会话自己的路由；没有路由时保持原样", () => {
+    const draft = createDraftSession();
+    const seeded = withSessionRoute(draft, "prov-a/model-2");
+    expect(seeded.model).toBe("prov-a/model-2");
+    expect(Object.isFrozen(seeded)).toBe(true);
+    // The original state is never mutated (whole-object replacement).
+    expect(draft.model).toBeUndefined();
+    // No route yet → the state stays as it is (same reference).
+    expect(withSessionRoute(draft, undefined)).toBe(draft);
+  });
+
+  test("turnFinished：带上持久化文件里的路由；文件没有路由时保留旧值", () => {
+    const started = {
+      ...turnStarted(createDraftSession()),
+      model: "prov-a/model-2",
+    };
+    const moved = turnFinished(started, {
+      conversationId: "conv-9",
+      messages: [msg("问"), msg("答", "assistant")],
+      turnCount: 1,
+      updatedAt: "2026-08-05T00:00:00.000Z",
+      jsonMode: false,
+      stopReason: "completed",
+      model: "prov-b/model-3",
+    });
+    expect(moved.model).toBe("prov-b/model-3");
+    // A file written before conversations owned a route → the current value
+    // is kept, never cleared.
+    const kept = turnFinished(started, {
+      conversationId: "conv-9",
+      messages: [],
+      turnCount: 1,
+      updatedAt: "2026-08-05T00:00:00.000Z",
+      jsonMode: false,
+      stopReason: "completed",
+    });
+    expect(kept.model).toBe("prov-a/model-2");
   });
 
   test("withLastUsage：mid-run 用量替换 —— 新冻结整体，原 state 不动，其余字段保留", () => {
@@ -881,15 +929,203 @@ describe("session-state: message reference reuse", () => {
   test("turnFinished on a messages-less state with empty input keeps freeze discipline", () => {
     // prev missing + next empty: the fully-equal exit leg must hand back a
     // frozen array too (never the mutable [] produced by the guard).
-    const done = turnFinished({} as never, {
-      conversationId: "conv-empty",
-      messages: [],
-      turnCount: 0,
-      updatedAt: "",
-      jsonMode: false,
-      stopReason: "cancelled",
-    } as never);
+    const done = turnFinished(
+      {} as never,
+      {
+        conversationId: "conv-empty",
+        messages: [],
+        turnCount: 0,
+        updatedAt: "",
+        jsonMode: false,
+        stopReason: "cancelled",
+      } as never
+    );
     expect(done.messages).toHaveLength(0);
     expect(Object.isFrozen(done.messages)).toBe(true);
+  });
+});
+
+/**
+ * Plan A T4 + 2026-10-22 confirmed-only amendment + verification invariant
+ * "TUI display state isolation":
+ *  - `displayOccupancy` is UI-only: null on a draft, null on attach, never
+ *    part of the persisted session file;
+ *  - `withOccupancy` writes ONLY the display slot, `withLastUsage` ONLY the
+ *    confirmed slot (the two readings never overwrite each other);
+ *  - a `projected` beat is gate-only: it never repaints the bar (the display
+ *    reading is null, the reducer returns the SAME session) and can never
+ *    become `lastUsage` (ADR-0008 D6) — the event carries no `usage` at all;
+ *  - the bar-facing reading is the CONFIRMED input-side occupancy only:
+ *    `projectedNext` on a measured beat is ignored for display (the flicker
+ *    root cause — outputTokens are not guaranteed to be replayed);
+ *  - `/info` (infoLines) still reads the confirmed `lastUsage` only.
+ */
+function tokenUsage(input: number, output = 0): TokenUsage {
+  return {
+    inputTokens: input,
+    outputTokens: output,
+    cacheCreationInputTokens: null,
+    cacheReadInputTokens: null,
+  };
+}
+
+function occupancyFile(overrides?: Partial<SessionFileV1>): SessionFileV1 {
+  const now = new Date().toISOString();
+  return {
+    schemaVersion: 2,
+    conversation_id: "conv-occupancy",
+    messages: [],
+    jsonMode: false,
+    turnCount: 1,
+    updatedAt: now,
+    title: "occupancy",
+    cwd: "/tmp/proj",
+    sanitized_at: now,
+    ...overrides,
+  };
+}
+
+describe("displayOccupancy（UI-only 读数）", () => {
+  test("draft 默认 null；withOccupancy 只写显示槽，不动 lastUsage", () => {
+    const draft = createDraftSession();
+    expect(draft.displayOccupancy).toBeNull();
+
+    const reading = { tokens: 12_800, source: "projected" as const };
+    const next = withOccupancy(draft, reading);
+    expect(next.displayOccupancy).toEqual(reading);
+    // The confirmed slot is untouched by the display reducer.
+    expect(next.lastUsage).toBeNull();
+    // Whole-replacement freeze discipline (like every other reducer here).
+    expect(next).not.toBe(draft);
+    expect(Object.isFrozen(next)).toBe(true);
+  });
+
+  test("withLastUsage 只写确认槽，保留显示读数", () => {
+    const withReading = withOccupancy(createDraftSession(), {
+      tokens: 26_000,
+      source: "projected",
+    });
+    const confirmed = tokenUsage(25_600, 9);
+    const next = withLastUsage(withReading, confirmed);
+    expect(next.lastUsage).toEqual(confirmed);
+    expect(next.displayOccupancy).toEqual(withReading.displayOccupancy);
+  });
+
+  test("attach：重放持久化的确认读数，UI-only 槽从 null 开始", () => {
+    // The "never serialized" half of the acceptance point is pinned over a
+    // real store read (`tests/tui/context-usage-call-beat.test.tsx`) and the
+    // real persistence path
+    // (`tests/session-api/context-usage-projection-persistence.test.ts`).
+    const loaded = occupancyFile({ lastUsage: tokenUsage(25_600, 9) });
+
+    const attached = attachSession(loaded);
+    expect(attached.lastUsage).toEqual(tokenUsage(25_600, 9));
+    expect(attached.displayOccupancy).toBeNull();
+  });
+});
+
+describe("contextUsageDisplayReading / withContextUsageBeat（一拍 → 条上读数，confirmed-only）", () => {
+  test("projected 拍：条上不显示（读数 null），应用它返回同一 session、两槽都不动", () => {
+    const event: ContextUsageEvent = {
+      type: "context_usage",
+      phase: "projected",
+      occupancy: { tokens: 26_000, source: "projected" },
+    };
+    expect("usage" in event).toBe(false);
+    // Gate-only: a projected beat is never a display reading.
+    expect(contextUsageDisplayReading(event)).toBeNull();
+    // Applying it to a session that already holds a confirmed reading leaves
+    // both slots AND the object identity untouched (no repaint).
+    const seeded = withContextUsageBeat(createDraftSession(), {
+      type: "context_usage",
+      phase: "pre_call",
+      source: "measured",
+      usage: tokenUsage(12_800),
+    });
+    const applied = withContextUsageBeat(seeded, event);
+    expect(applied).toBe(seeded);
+    expect(applied.lastUsage).toEqual(tokenUsage(12_800));
+    expect(applied.displayOccupancy).toEqual({
+      tokens: 12_800,
+      source: "measured",
+    });
+  });
+
+  test("pre_call（measured，无 projectedNext）：条上读数 = 该拍确认占用", () => {
+    const event: ContextUsageEvent = {
+      type: "context_usage",
+      phase: "pre_call",
+      source: "measured",
+      usage: tokenUsage(12_800),
+    };
+    expect(contextUsageDisplayReading(event)).toEqual({
+      tokens: 12_800,
+      source: "measured",
+    });
+  });
+
+  test("post_call 带 projectedNext：条上读数忽略投影，仍是确认占用", () => {
+    const event: ContextUsageEvent = {
+      type: "context_usage",
+      phase: "post_call",
+      source: "measured",
+      usage: tokenUsage(12_800, 7),
+      projectedNext: { tokens: 12_807, source: "projected" },
+    };
+    // projectedNext ignored for display: the confirmed 12,800 (no `~`), never
+    // the 12,807 next-request projection — this is the flicker fix.
+    expect(contextUsageDisplayReading(event)).toEqual({
+      tokens: 12_800,
+      source: "measured",
+    });
+  });
+
+  test("measured 拍：完全相同返回同一 session；确认读数变化才替换两槽", () => {
+    const first: ContextUsageEvent = {
+      type: "context_usage",
+      phase: "post_call",
+      source: "measured",
+      usage: tokenUsage(12_800, 7),
+    };
+    const seeded = withContextUsageBeat(createDraftSession(), first);
+    expect(seeded.lastUsage).toEqual(tokenUsage(12_800, 7));
+    expect(seeded.displayOccupancy).toEqual({
+      tokens: 12_800,
+      source: "measured",
+    });
+    // An identical measured beat keeps object identity (no whole-tree re-render).
+    expect(withContextUsageBeat(seeded, first)).toBe(seeded);
+    // A changed confirmed usage moves both slots.
+    const second: ContextUsageEvent = {
+      type: "context_usage",
+      phase: "pre_call",
+      source: "measured",
+      usage: tokenUsage(19_200),
+    };
+    const moved = withContextUsageBeat(seeded, second);
+    expect(moved).not.toBe(seeded);
+    expect(moved.lastUsage).toEqual(tokenUsage(19_200));
+    expect(moved.displayOccupancy).toEqual({
+      tokens: 19_200,
+      source: "measured",
+    });
+  });
+});
+
+describe("/info 读确认值（ADR-0008 D6）", () => {
+  test("投影读数不进 /info；/info 仍读 lastUsage", () => {
+    const session = withOccupancy(
+      withLastUsage(createDraftSession(), tokenUsage(25_600, 9)),
+      { tokens: 999_999, source: "projected" }
+    );
+    const text = infoLines(
+      session,
+      "draft",
+      256_000,
+      { enabled: false, effort: "" },
+      undefined
+    ).join("\n");
+    expect(text).toContain("tokens in/out: 25600/9");
+    expect(text).not.toContain("999999");
   });
 });

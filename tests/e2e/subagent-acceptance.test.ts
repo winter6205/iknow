@@ -12,7 +12,7 @@
  * envelopes enter the host drain (foreground-arm terminal-channel exclusion:
  * tests/subagent/foreground-drain-exclusion.test.ts).
  *
- * Between-turn host drain = drainPendingSubagents(fakeMgr) → non-empty
+ * Between-turn host drain = peekPendingSubagents(fakeMgr) → non-empty
  * condensed string. Before the next run, splice drained into priorMessages —
  * assert the stub-model's next turn receives state.messages containing the
  * drained content ("## Sub-agent ...").
@@ -33,7 +33,7 @@ import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import { awaitAllTasksTerminal } from "../_helpers/await-terminal.ts";
 import { run } from "../../src/harness/loop-engine.ts";
-import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
+import { peekPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import type { LoopState } from "../../src/harness/model-adapter/types.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
@@ -171,7 +171,7 @@ describe("#356 T7 E2E A: stub-model host drain 全链路 (SC14)", () => {
     // Sync contract: tests/_helpers/await-terminal.ts (do not use the drain read side as sync).
     await awaitAllTasksTerminal(fakeMgr);
 
-    const drained = await drainPendingSubagents(fakeMgr);
+    const drained = await peekPendingSubagents(fakeMgr);
     assert.ok(drained.length > 0, "后景任务应被 host drain 收走");
     assert.match(
       drained,

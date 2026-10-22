@@ -7,8 +7,10 @@
  * Spec / Q4 decisions:
  *  - low  (e.g. permission_denied non-dangerous, user_denied) — one-shot deny,
  *         counter does NOT accumulate.
- *  - mid  (sensitive path, dangerous command, network denied without escape
- *         attempt) — reject + count; on Nth occurrence the turn is interrupted.
+ *  - mid  ([network_denied], [fs_denied], [permission_denied] dangerous) —
+ *         reject + count; on Nth occurrence the turn is interrupted.
+ *  - [hard_wall] fails that one tool call. It does not count and does not
+ *         interrupt the turn.
  *  - high (escape attempt, secret env access) — kill immediately.
  *  - ask path does NOT count — `[user_denied]` is recorded as low only.
  *
@@ -407,8 +409,9 @@ export interface CategorizedResult {
  * and `network-policy.ts`). Prefixes are consumed from
  * `permission/prefixes.ts` (SSOT) so the recognize side cannot drift from
  * the emit side:
- *   - `[hard_wall] dangerous command`            → mid (sensitive / dangerous)
- *   - `[hard_wall] sensitive path`               → mid
+ *   - `[hard_wall]` (including a denial that also carries
+ *     `[permission_denied]`)                     → uncounted: the tool call
+ *         fails, the streak is unchanged, the turn is not interrupted
  *   - `[permission_denied] dangerous`            → mid (dangerous command variant)
  *   - `[network_denied]`                         → mid (network denial)
  *   - `[fs_denied]`                              → mid
@@ -438,12 +441,13 @@ export function categorizeResult(result: {
     fsDenied,
   } = VIOLATION_PREFIXES;
 
-  // Order matters: check the more specific dangerous patterns first so
-  // "[permission_denied] dangerous command" doesn't fall through to generic
-  // permission_denied → low.
-  const hardWallRe = new RegExp(`\\${hardWall}\\s+(dangerous|sensitive)`);
-  if (hardWallRe.test(msg)) {
-    return { tier: "mid", detail: msg };
+  // Order matters: a [hard_wall] denial fails this call only. Returning
+  // before the other prefixes keeps "[permission_denied] [hard_wall] …"
+  // from falling through into the mid-tier streak. A non-hardwall
+  // "[permission_denied] dangerous …" must still be checked before the
+  // generic permission_denied → low arm.
+  if (msg.includes(hardWall)) {
+    return { tier: undefined, detail: msg };
   }
   const permDangerousRe = new RegExp(`\\${permissionDenied}\\s+dangerous`);
   if (permDangerousRe.test(msg)) {

@@ -147,7 +147,7 @@ describe("protected-target EROFS feedback wired at the bash result seam", () => 
     const tool = createBashTool(makeScratch("t10-root-"), {
       liveTaskRoot: createLiveTaskRoot("/tmp"),
       tmpDir: makeScratch("t10-pad-"),
-      yolo: { get: () => true, set: () => undefined },
+      fenceRetired: { get: () => true },
     });
     const out = parseBash(await tool.handler({ command: "echo probe" }));
     expect(out.stderr).not.toContain("an SSH private key");
@@ -222,7 +222,7 @@ describe("protected-target EBUSY feedback wired at the bash result seam", () => 
     const tool = createBashTool(makeScratch("t11-root-"), {
       liveTaskRoot: createLiveTaskRoot("/tmp"),
       tmpDir: makeScratch("t11-pad-"),
-      yolo: { get: () => true, set: () => undefined },
+      fenceRetired: { get: () => true },
     });
     const out = parseBash(await tool.handler({ command: "echo probe" }));
     expect(out.stderr).toBe(NETRC_EBUSY);
@@ -339,7 +339,7 @@ describe("fs-mode boundary EROFS feedback wired at the bash result seam", () => 
       tmpDir: makeScratch("t12-pad-"),
       homeRoot: MODE_HOME,
       fsMode: { get: () => "workspace", set: () => undefined },
-      yolo: { get: () => true, set: () => undefined },
+      fenceRetired: { get: () => true },
     });
     const out = parseBash(await tool.handler({ command: "echo probe" }));
     expect(out.stderr).toBe(OUT_OF_TIER);

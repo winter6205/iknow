@@ -48,7 +48,7 @@ is a curated snapshot; the complete development history lives in the git log.
   settled partial turn is itself the record, and a `tool_use` the limit left
   unexecuted is closed out with a synthetic `is_error` tool result stating the call
   never ran.
-- **Memory entry frontmatter is now written as real YAML (spec `frontmatter-shared-parser`, ADR-0123 amendment, 2026-09-23)**:
+- **Memory entry frontmatter is now written as real YAML (spec `frontmatter-shared-parser`, ADR-0144 amendment, 2026-09-23)**:
   `serializeMemoryEntry` emits `yaml.stringify` instead of unquoted `key: value`
   lines, because the shared parser made the read side strict and the old writer
   produced bytes that reader rejects — an unquoted plain scalar may not carry
@@ -62,7 +62,7 @@ is a curated snapshot; the complete development history lives in the git log.
   `computeSignature` stable in all 19. A memory file whose block cannot be parsed
   at all now throws on read, so the store quarantines it and GC leaves the
   original bytes untouched instead of soft-disabling a defaulted copy of them.
-- **Skill frontmatter degradation is block-atomic (ADR-0123)**: a `SKILL.md`
+- **Skill frontmatter degradation is block-atomic (ADR-0144)**: a `SKILL.md`
   whose block is not valid YAML now loses every field (plus one warn, name
   falling back to the directory basename, the skill still indexed) where the
   per-line parser previously kept the parseable lines. Authors must quote a
@@ -200,6 +200,110 @@ is a curated snapshot; the complete development history lives in the git log.
     archived.
 
 ### Added
+
+- **The TUI composer folds a multiline paste and sends clipboard images as real user
+  image blocks (2026-10-09)**:
+  a multiline paste collapses in the buffer to a `[paste#N · L lines · C chars]`
+  label and a clipboard image to `[image#N]`, while the payload waits in the
+  draft table (`src/tui/composer-draft.ts`). An image reaches that table either
+  through the `Ctrl+V` chord or through the clipboard probe behind a single-line
+  paste (see the #1238 correction below). The division is strict: the buffer
+  is display truth, the table is payload authority, and a label the table does
+  not know is ordinary text — so a hand-typed `[image#1]` never becomes an
+  attachment and `refold` refuses to guess the span of edited inline text
+  instead of swallowing the edit. Backspace / delete removes a folded label as
+  one unit; Ctrl+C copies a selection first and otherwise clears the whole
+  non-empty draft; submit expands the labels into ordered user content blocks.
+  A USER message can therefore carry a top-level Anthropic base64 `image`
+  block: the session store and the native-state mirror accept and replay it
+  verbatim (the `redacted_thinking` posture, so it survives resume), the
+  outbound projection emits it instead of failing closed on an unknown block
+  type, and token estimation charges its encoded length under the reserved
+  vision ceiling — an image estimating 0 would hide real context occupancy
+  from autocompact. Shape validation is one shared predicate
+  (`image-content.ts`) at persistence, at checkpoint publication and at
+  dispatch, so nothing the store accepts can be refused by the wire.
+  Image bytes come from the measured WSL2 gesture only
+  (`powershell.exe -NoProfile -ExecutionPolicy Bypass` with
+  `Get-Clipboard -Format Image` saving a PNG the process reads back,
+  `src/tui/clipboard-image.ts`): bytes travel only through the temp file
+  because interop stdout is not byte-safe, every host failure is a typed arm
+  (`empty` / `too-large` / `unsupported` / `cancelled` / `error`) rather than a
+  hang, and a host without the bridge reports `error` instead of guessing. What
+  an arm does to the draft is gesture-specific: the chord surfaces it as a
+  notice and adds nothing, while a paste probe leaves the text that paste
+  already inserted untouched and says nothing — one exception: a probe that
+  finds an over-size bitmap shows the chord's own refusal.
+  Format and size policy is one module (`aci/tools/image-format.ts`: the media-type
+  list, the 1 MiB cap, the magic-byte table) that both the path-based `read_image`
+  tool — whose contract is unchanged — and the clipboard reader import, so the two
+  paths cannot disagree about what a PNG is. The draft is spent when the turn is
+  accepted, not when Enter is pressed: submit takes the payload table out instead
+  of clearing it, and a rejection from before the hub's accepted-input commit (the
+  `ValidationError` family) hands it back, while any later failure leaves it spent
+  so a message that IS in history cannot be sent twice. A pasted image is
+  unreproducible, which is why the split is by error class, not by "it threw".
+  **The paste gesture was corrected the next day (issue #1238, 2026-10-10).**
+  This entry first recorded the two paths as strictly independent — a terminal
+  paste took the text and never the clipboard. On WSL2 / Ubuntu guest / Windows
+  Terminal an image copy is ONE clipboard snapshot carrying a bitmap _plus_ a
+  text flavor — a URL for a browser "copy image", a file path for Explorer —
+  while a `Win+Shift+S` screenshot carries no text flavor at all — a shape
+  measured on a snapshot assembled to it with
+  `Clipboard.SetDataObject($bmp, $true)` rather than captured from the
+  screenshot tool. The terminal's own paste
+  gesture bridges only the text flavor across the boundary: the composer showed
+  a link where the user meant an image, while the one chord that read the bitmap
+  was a key nobody presses on that terminal. A paste now asks the clipboard
+  snapshot instead of trusting the text's shape. A multiline paste never probes
+  — it is never an image copy, and it folds with zero clipboard reads. A
+  single-line non-empty paste inserts its text synchronously, exactly as before,
+  and only then runs one probe through the same reader and the same serialized
+  queue as the chord: a supported bitmap means the text the terminal forwarded
+  was a byproduct of that same copy, so those bytes in the buffer are
+  replaced in place by `[image#N]`; `empty` / `unsupported` / `error` /
+  `cancelled` leave the text untouched and say nothing; `too-large` leaves it in
+  place with the chord's own refusal notice. What finds the span is a match on
+  **content**, not on provenance: the recorded span, or that same string still at
+  the end of the buffer. Because that second arm keys on content rather than
+  position, it can land on bytes the paste never wrote, which is the cost
+  disclosed below. A span that matches nowhere is left alone,
+  and a probe answering after the draft moved on changes nothing. A composer
+  that cannot take the write has received no paste: `isEditable()` gates the
+  paste entry, so a disabled composer — a picker or the ask modal holds focus —
+  spends no `[paste#N]` or `[image#N]` label, no host round trip, and no held
+  payload the buffer cannot name, which is also what would otherwise block a
+  rejected draft from being handed back; `Ctrl+V` from that state still reads the
+  clipboard once, as it always did, and only its delivery is refused
+  (`tests/tui/composer-clipboard-image.test.tsx:1634` pins the spent read and the
+  unspent label). Two costs
+  are accepted and pinned as observed, not fixed: the content match also replaces
+  text the user deleted and then retyped byte-identically at the end of the
+  buffer (`tests/tui/composer-clipboard-image.test.tsx:870`), or a tail suffix
+  that was already at the end before the paste (disclosed, not tested); and the
+  serialized queue guarantees `[image#N]` **numbering** in press order only — a
+  chord read still in flight when a paste is pressed writes its label at the
+  live caret, so the buffer can read `[image#2][image#1]` and the model then
+  receives the blocks in that reversed order (same file, `:1396`). The snapshot, not the
+  shape, is the discriminator because a browser image copy pastes a URL no path
+  or extension sniff could recognise —
+  the semantics being image → placeholder, file → link, so a pasted `.pdf` or
+  `.zip` stays text. `Ctrl+V` stays: a screenshot carries no text flavor, so the
+  terminal emits no paste event at all and the chord is the only gesture that
+  can read it, and a chord read still has no text fallback. The earlier shape
+  for this same correction — hold the pasted text until the probe answers, then
+  insert or discard it — was rejected on three counts: it taxed the single most
+  common gesture in this composer, a one-line path or URL, with a host round
+  trip before anything appeared, reordered the paste against a keystroke typed
+  immediately after it, and silently dropped the whole paste when Enter was
+  pressed while the probe was in flight, because the discard rule fired before
+  the text ever reached the draft. The accepted cost is therefore one extra host
+  round trip per single-line paste, never a delayed or a lost one, against an
+  interop bridge measured as intermittently failing; the probe spends a shorter
+  budget than the chord (`PASTE_IMAGE_PROBE_TIMEOUT_MS = 2000` against
+  `DEFAULT_CLIPBOARD_IMAGE_TIMEOUT_MS = 5000`,
+  `src/tui/clipboard-image.ts:75`, `:66`) and a probe that finds no bitmap is
+  not a failure the user caused, so it makes no sound.
 
 - **Verify reads only the current turn, and its evidence checker reads what it claims
   to read (spec `verify-trust-boundary-and-goal-decoupling`, ADR-0137, 2026-10-05)**:
@@ -418,14 +522,14 @@ is a curated snapshot; the complete development history lives in the git log.
   through the executor wrappers and the worker envelope, the envelope is validated, and
   the legacy worker (no snapshot) still falls back to `env.llm` thinking. No TUI change.
 
-- **Shared frontmatter module (spec `frontmatter-shared-parser`, ADR-0123, 2026-09-23)**: `src/harness/frontmatter/`
+- **Shared frontmatter module (spec `frontmatter-shared-parser`, ADR-0144, 2026-09-23)**: `src/harness/frontmatter/`
   exposes two APIs that replace the four hand-rolled `---` parsers — `stripFence`
   (content-independent, never throws, returns the body as an exact byte slice) and
   `parseFrontmatter` (a real YAML parse plus the scalar coerce boundary: scalars to
   string, scalar sequences folded with `", "`, mappings skipped with a warning and
   never registered as a top-level key; a broken block yields an empty map plus a
   warning and never throws upward). This is the repo's first `yaml` production
-  dependency, exempted from the zero-new-dependency gate by ADR-0123's gate check.
+  dependency, exempted from the zero-new-dependency gate by ADR-0144's gate check.
 - **`when_to_use` as a second skill selection signal (spec `frontmatter-shared-parser`, 2026-09-23)**:
   an optional `SKILL.md` field rendered on its own line in the opening frozen
   `<available_skills>` table and in the in-session delta rows, with its own 1536
@@ -714,6 +818,26 @@ hardcoded defaults` for those three fields only; other fields unchanged.
 
 ### Changed
 
+- **`settings.llm.model` is only the default for NEW conversations; a conversation that switches its model owns that route (spec `session-model-isolation`, ADR-0145, 2026-10-19)**:
+  `/model` is one act with two writes — the current conversation's route first,
+  then the default that new conversations start on. A conversation that has
+  switched keeps its own route: editing `settings.llm.model` (or running
+  `/model` in another conversation) no longer retargets it, and the TUI's model
+  row, its `/info` line and its `/model` cursor show the conversation's own
+  route rather than the default. The route is persisted in the session file
+  (optional `model` field, schema version unchanged, a file without it stays
+  byte-identical) and restored when the conversation is reopened, so it survives
+  a restart. A conversation that never switched still follows the default,
+  hot-reload included. `provider/model` routes resolve through the env's
+  provider registry, and a route that does not resolve throws a typed error
+  instead of silently falling back to the default. The output mask becomes a
+  keyed contribution — each engine build under its root, each live route under
+  its route id — and the active set is the union of the live owners, so two
+  conversations on two routes no longer evict each other's credentials from the
+  mask. A sub-agent worker inherits the parent conversation's route when
+  `settings.subagent.model` does not name one.
+
+- **The auto-compact gate and the usage bar now measure the same request scope, and the default gate moves to 90% (spec `context-occupancy-autocompact`, ADR-0118 / ADR-0100 amendment, 2026-10-15)**: the proactive gate probed `countTokens({ messages })` while the bar probed `countTokens({ tools, system, messages })`, so the gate under-read the request by the entire system + tools share — ~18% of the payload bytes on a real trace — and a gate configured at 95% of the window actually fired around 102-103% on the display scale. The gate probe now sends the same triple, with `system` read from the run-scoped frozen prompt prefix rather than a fresh per-step assembly; `tools` counts from the first beat, `system` from step 2, so a resumed session already over the gate reaches it one step later than before. ADR-0118's "one occupancy numerator" is thereby delivered rather than merely asserted. Separately, the hardcoded default derivation drops `0.95 → 0.9` (243200 → 230400 at the 256k default window); precedence is unchanged and remains config-first (`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` > `llm.compress.thresholdTokens` > the hardcoded fallback), and the ratio is only ever a last-resort default. The EXIT fall-through contract, the window / full_summary compactors, manual `/compact` bypassing the gate, and the `threshold < window` validation are all unchanged.
 - **Proactive auto-compact gate reads context occupancy (spec `context-occupancy-autocompact`, ADR-0118, 2026-09-21)**: the bar and the gate now share one numerator — `evaluateCompactTrigger` compares in the priority chain this-beat `countTokens` (finite and > 0) → previous-beat occupancy (usage) → chars estimate; a missing / throwing / non-positive reading always falls through and never collapses into `below_token_threshold`. loop-engine probes the gate-visible messages before the gate and always passes `lastUsage`; hosts without `onStream` still measure and gate. Display readings are unchanged (the TUI numerator now uses the harness SSOT `occupancyFromUsage` directly; the Web keeps a cross-package mirror pinned to the same formula by a shared table). The denominator, the 95% formula, the window/full_summary compactors, and manual `/compact` bypassing the gate all keep their semantics.
 - **TUI `/model` switching no longer re-renders the whole tree and no longer resets manual thinking/effort overrides (2026-09-15)**:
   env-derived display snapshots (model routing string + thinking baseline) flow
@@ -906,6 +1030,23 @@ hardcoded defaults` for those three fields only; other fields unchanged.
 
 ### Fixed
 
+- **A clipboard image is scaled to a 2000 px long edge and, when still over the raw budget, re-encoded so its base64 form stays within 5 MiB; a result that cannot fit is refused and not stored.** The paste probe waits 4000 ms so that scale can finish.
+
+- **Pasting a copied image file becomes `[image#N]` when the clipboard holds the file and not a bitmap (2026-10-11)**:
+  an Explorer copy of an image file is one file drop with no bitmap and no text flavor, so the paste probe's `Get-Clipboard -Format Image` answered empty and the path the terminal inserted stayed. The reader now classifies that single dropped file with the same magic bytes: an admitted image replaces the pasted path, a non-image file stays text, and an image that cannot be fitted stays text with the existing size refusal. The host process is started with `-STA`.
+
+- **Enter submitted in the same read as the typed line sends that line and clears the composer (2026-10-11)**:
+  keystrokes land in the native buffer before React state catches up. Enter that arrived in that same turn submitted the previous commit, often empty, and the clear never reached the buffer, so the line stayed on screen and nothing was sent. Enter now submits the live buffer and clears it. A rejected submit still returns the draft, including when that text is the string React had already committed.
+
+- **A multiline paste folds when the terminal delivers CR line breaks (2026-10-10)**:
+  Windows Terminal turns clipboard CRLF into CR before the process reads it, and the
+  composer only treated LF as a line break, so pasting multiline text left the lines
+  expanded in the input. CR and CRLF now fold to the same `[paste#N · L lines · C chars]`
+  label as LF, and the draft stores the text with LF breaks.
+
+- **A hard-wall denial fails that tool call and no longer cancels the turn (ADR-0135 amendment, 2026-10-10)**:
+  three `[hard_wall]` denials used to feed the mid-tier streak and interrupt the turn. The deny stays non-overridable. It does not increment the streak. `[network_denied]`, `[fs_denied]`, and a dangerous `[permission_denied]` that is not a hard-wall denial still interrupt at three. Readonly bash admits a numeric file-descriptor duplication (`2>&1`) and still denies background `&` and output redirection. A trace error record keeps the upstream `apiError` text when that turn has one. Saving a session no longer forks a second parent chain when a closing projection is only the concatenation of tool results already written for that call.
+
 - **Hard-wall denials now separate a confirmed sensitive path from a fragment that merely occurs in code, and process teardown reports what it actually observed (ADR-0131/0132, 2026-10-01)**:
   a fragment match was treated as a verdict, so `node -e 'process.env.NODE_OPTIONS'` was
   denied for a string that is not a path. The wall now classifies a match as a confirmed
@@ -1024,7 +1165,7 @@ hardcoded defaults` for those three fields only; other fields unchanged.
   `message.hostInjected === true` and never on envelope text, so an unstamped message
   carrying the same words still renders as a normal bubble. The renderer is shared with
   the interrupt notice. Web-layer parity is still open.
-- **A memory write-back could drop a field it did not understand, and a quarantined file stayed silent (issue #1137, spec `memory-frontmatter-write-signals`, ADR-0123 residuals, 2026-09-26)**:
+- **A memory write-back could drop a field it did not understand, and a quarantined file stayed silent (issue #1137, spec `memory-frontmatter-write-signals`, ADR-0144 residuals, 2026-09-26)**:
   `serializeMemoryEntry` now throws a typed `MemorySchemaInvalid` naming the key when
   an unknown frontmatter extra is not a scalar — the old `isScalar` filter emitted the
   entry without that field — and `writeMemoryEntryAtomic` warns once (`[memory/save]`,
@@ -1040,7 +1181,7 @@ hardcoded defaults` for those three fields only; other fields unchanged.
   field changes, `computeSignature` stable 19/19 — evidence
   `docs/evidence/frontmatter-serialize-remeasure-1137.md`.
 
-- **Three valid YAML frontmatter shapes were misread, one of them silently (issue #1128, ADR-0123, 2026-09-23)**:
+- **Three valid YAML frontmatter shapes were misread, one of them silently (issue #1128, ADR-0144, 2026-09-23)**:
   the skill scanner's per-line parser dropped fields and miswarned on a block
   sequence, lost the body on a block scalar, and — the only unwarned data
   corruption in the set — let a nested mapping overwrite the top-level `name` and
@@ -1050,7 +1191,7 @@ hardcoded defaults` for those three fields only; other fields unchanged.
   the memory read side migrated with it, which also makes a block-scalar
   `description` and a YAML-list `disallowedTools` in a user agent file mean the
   same thing as their single-line and comma forms.
-- **A memory value containing a line break could split its own fence block (ADR-0123, 2026-09-23)**:
+- **A memory value containing a line break could split its own fence block (ADR-0144, 2026-09-23)**:
   `sanitizeMemoryFile` now folds `\r\n` / `\n` / `\r` in `title` and unknown
   scalar extras to a single space, and the fold is applied at
   `writeMemoryEntryAtomic` — the choke point all three writers (`memory_save`,

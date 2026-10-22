@@ -8,7 +8,13 @@
     "sourceMap": false,
     "allowImportingTsExtensions": true
   },
-  "include": ["src/**/*.ts", "src/**/*.tsx", "tests/**/*.ts", "tests/**/*.tsx"],
+  "include": [
+    "src/**/*.ts",
+    "src/**/*.tsx",
+    "tests/**/*.ts",
+    "tests/**/*.tsx",
+    "scripts/perf/subagent-spawn.ts"
+  ],
   "exclude": [
     "node_modules",
     "dist",

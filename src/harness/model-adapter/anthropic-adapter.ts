@@ -40,14 +40,15 @@ import Anthropic, {
   APIUserAbortError,
 } from "@anthropic-ai/sdk";
 import { randomUUID } from "node:crypto";
-import type {
-  AnthropicContentBlock,
-  AnthropicNativeMessage,
-  AssistantTurnResult,
-  LoopState,
-  ModelAdapter,
-  SdkDispatchEvidence,
-  TokenUsage,
+import {
+  isEmptyFinalResponseStop,
+  type AnthropicContentBlock,
+  type AnthropicNativeMessage,
+  type AssistantTurnResult,
+  type LoopState,
+  type ModelAdapter,
+  type SdkDispatchEvidence,
+  type TokenUsage,
 } from "./types.js";
 import type {
   Message as SdkMessage,
@@ -61,9 +62,13 @@ import type {
   Usage as SdkUsage,
 } from "@anthropic-ai/sdk/resources/messages.js";
 import type { MessageStreamEvent } from "@anthropic-ai/sdk/resources/messages.js";
+import type { ToolDef } from "../tools/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import { safeEmitStream } from "../stream.js";
-import { projectMessagesForWire } from "./outbound-projection.js";
+import {
+  projectMessagesForWire,
+  wireToolDescriptors,
+} from "./outbound-projection.js";
 
 /**
  * Minimal consumption surface of the SDK MessageStream returned by
@@ -201,6 +206,10 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
 
   const texts: string[] = [];
   const toolCalls: Array<{ id: string; name: string; input: unknown }> = [];
+  // thinking / redacted_thinking carry the model's progress even with no text
+  // and no tool_use, so they are tracked separately: they keep such a success
+  // from being read as a terminal empty answer (see isEmptyFinalResponseStop).
+  let hasThinking = false;
 
   for (const block of sdk.content as unknown as Array<
     Record<string, unknown>
@@ -231,6 +240,7 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
       // Foundation does not interpret thinking / redacted_thinking (they
       // never enter texts/toolCalls); nativeContent keeps all fields
       // verbatim (signature / data) so the authoritative history is replayable.
+      hasThinking = true;
     } else {
       throw new ProtocolError(
         `anthropic-adapter: unsupported assistant block type '${String(t)}'`
@@ -254,8 +264,15 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
       supplierStop = "other";
   }
 
-  const isEmptyFinalResponse =
-    supplierStop === "success" && texts.length === 0 && toolCalls.length === 0;
+  // A success whose blocks are only thinking / redacted_thinking is a normal
+  // intermediate step, not an empty final answer: only a turn with no displayable
+  // and no progress-bearing block (content: []) terminates as empty.
+  const isEmptyFinalResponse = isEmptyFinalResponseStop(
+    supplierStop,
+    texts,
+    toolCalls,
+    hasThinking
+  );
 
   const nativeContent: AnthropicContentBlock[] = (
     sdk.content as unknown as Array<Record<string, unknown>>
@@ -313,6 +330,7 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
     },
     supplierStop,
     needsTools: toolCalls.length > 0,
+    hasThinking,
     isEmptyFinalResponse,
     // ADR-0008: usage absent = Postel semantics — when the SDK returns no
     // usage, the key does not exist at all (not a null placeholder, not an
@@ -323,6 +341,9 @@ export function interpretMessage(sdk: SdkMessage): AssistantTurnResult {
 
 export interface AnthropicAdapter extends ModelAdapter {
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
+  readonly encodeUserContent: (
+    blocks: ReadonlyArray<AnthropicContentBlock>
+  ) => AnthropicNativeMessage;
   /**
    * Which call mode this adapter instance actually takes: true = stream
    * arm (`client.messages.stream`), false/undefined = non-stream arm
@@ -352,6 +373,25 @@ export function encodeUserText(userText: string): AnthropicNativeMessage {
   return {
     role: "user",
     content: [{ type: "text", text: userText }],
+  };
+}
+
+/**
+ * Encode an ordered user payload (text blocks plus a pasted image block) as a
+ * native Anthropic user message. Module-level export shared by both adapter
+ * factories (SSOT), so a block payload and a text payload take one encoder.
+ *
+ * The blocks pass through untouched: an image `source.data` is an opaque
+ * payload (the `redacted_thinking` posture) and this function is the only
+ * place a user payload becomes a native message, so nothing between the two
+ * can rewrite it.
+ */
+export function encodeUserContent(
+  blocks: ReadonlyArray<AnthropicContentBlock>
+): AnthropicNativeMessage {
+  return {
+    role: "user",
+    content: [...blocks],
   };
 }
 
@@ -457,6 +497,7 @@ export function createAnthropicAdapter(
   return Object.freeze({
     step,
     encodeUserText,
+    encodeUserContent,
     encodeToolResults,
   });
 }
@@ -505,7 +546,8 @@ export interface RealAnthropicAdapterOptions {
 }
 
 /**
- * Map harness ToolDef[] to SDK Tool[].
+ * Map harness ToolDef[] to SDK Tool[] via the one wire-shape projection
+ * (`wireToolDescriptors`), which the occupancy estimate also uses.
  *
  * - `inputSchema` (camelCase) → `input_schema` (snake_case)
  * - empty array / non-array → undefined, so the SDK never receives `tools: []`
@@ -515,19 +557,9 @@ export interface RealAnthropicAdapterOptions {
  *   sends the wire shape as-is, and real schema validation is the model's job.
  */
 function toSdkTools(tools: unknown): SdkTool[] | undefined {
-  if (!Array.isArray(tools) || tools.length === 0) return undefined;
-  return tools.map((t) => {
-    const def = t as {
-      name: string;
-      description: string;
-      inputSchema: Record<string, unknown>;
-    };
-    return {
-      name: def.name,
-      description: def.description,
-      input_schema: def.inputSchema,
-    } as unknown as SdkTool;
-  });
+  if (!Array.isArray(tools)) return undefined;
+  const wire = wireToolDescriptors(tools as ReadonlyArray<ToolDef>);
+  return wire as unknown as SdkTool[] | undefined;
 }
 
 /**
@@ -604,6 +636,10 @@ function isStreamIncompleteShape(e: unknown): boolean {
 type StreamMeasurement = {
   start?: number;
   end?: number;
+  /** First non-empty output delta (text / thinking / tool-input) — the
+   *  generationMs start. Deliberately separate from `end` (that marks the
+   *  end of thinking, and tool_call_start also calls it). */
+  firstOutputAt?: number;
   sawVisibleDelta?: boolean;
 };
 
@@ -648,6 +684,37 @@ function settleOnAbort<T>(
   });
 }
 
+/**
+ * Derive the optional timing fields from the stream measurement.
+ *
+ * thinkingMs: `start` (first thinking_delta) and `end` (first non-thinking
+ * delta) must both be present; the elapsed span is attached only when it is
+ * finite and > 0.
+ * generationMs: `firstOutputAt` (first non-empty output delta) minus the
+ * message completion point; attached only when finite and > 0.
+ * A missing boundary leaves the field absent — never 0 / NaN / Infinity.
+ */
+function deriveStreamTiming(
+  measurement: StreamMeasurement,
+  completedAt: number
+): { thinkingMs?: number; generationMs?: number } {
+  const timing: { thinkingMs?: number; generationMs?: number } = {};
+  const { start, end, firstOutputAt } = measurement;
+  if (typeof start === "number" && typeof end === "number") {
+    const elapsed = end - start;
+    if (Number.isFinite(elapsed) && elapsed > 0) {
+      timing.thinkingMs = elapsed;
+    }
+  }
+  if (typeof firstOutputAt === "number") {
+    const generation = completedAt - firstOutputAt;
+    if (Number.isFinite(generation) && generation > 0) {
+      timing.generationMs = generation;
+    }
+  }
+  return timing;
+}
+
 async function stepStreamArm(deps: {
   readonly client: Anthropic;
   readonly params: MessageCreateParamsNonStreaming;
@@ -672,22 +739,14 @@ async function stepStreamArm(deps: {
   // stream body cannot keep this promise pending past the caller's abort.
   try {
     const final = await settleOnAbort(stream.finalMessage(), deps.signal);
+    // Capture completion on the monotonic clock before interpretation so
+    // generationMs is "message complete − first output fragment".
+    const completedAt = performance.now();
     const result = interpretMessage(final);
-    // Derive thinkingMs. `start` absent (no thinking_delta) → not produced.
-    // `end` absent (thinking only, no follow-up) → not produced (both ends
-    // must be marked). Boundary shape pinned: diff <= 0 or non-finite →
-    // field absent (the store's persistence entry filters once more; never
-    // persist 0 / NaN / Infinity).
-    if (
-      typeof measurement.start === "number" &&
-      typeof measurement.end === "number"
-    ) {
-      const elapsed = measurement.end - measurement.start;
-      if (Number.isFinite(elapsed) && elapsed > 0) {
-        return { ...result, thinkingMs: elapsed };
-      }
-    }
-    return result;
+    const timing = deriveStreamTiming(measurement, completedAt);
+    return timing.thinkingMs !== undefined || timing.generationMs !== undefined
+      ? { ...result, ...timing }
+      : result;
   } catch (e) {
     // Content already emitted by wireStreamEvents is unaffected — the
     // whole-turn-not-submitted semantics come from step rejecting without
@@ -734,6 +793,9 @@ function wireStreamEvents(
    *  - first thinking_delta → `start` = `performance.now()`
    *  - first non-thinking delta (text_delta / input_json_delta /
    *    tool_call_start) → `end` = `performance.now()`
+   *  - first non-empty output delta (text / thinking / tool-input; NOT
+   *    tool_call_start) → `firstOutputAt` = `performance.now()` for
+   *    generationMs.
    *  Only the first point per end is recorded; with both ends present,
    *  stepStreamArm computes elapsed, and if the boundary shape is legal
    *  (> 0 and finite) attaches `thinkingMs`, otherwise the field is absent.
@@ -761,6 +823,14 @@ function wireStreamEvents(
       measurement.end = performance.now();
     }
   };
+  // generationMs start: first non-empty output delta (text / thinking /
+  // tool-input). Kept separate from markEnd — markEnd is the end of
+  // thinking, and tool_call_start (which has no output text yet) calls it.
+  const markFirstOutput = (): void => {
+    if (measurement !== undefined && measurement.firstOutputAt === undefined) {
+      measurement.firstOutputAt = performance.now();
+    }
+  };
   // ADR-0111: visible-delta flagging — same site as the timing marks,
   // called only on **non-empty** deltas (aligned with the empty-delta
   // discipline); the broken-stream translation to
@@ -776,6 +846,7 @@ function wireStreamEvents(
   const indexToBlockId = new Map<number, string>();
   stream.on("text", (textDelta) => {
     if (textDelta === "") return; // empty delta: do not emit (empty-class decision above)
+    markFirstOutput(); // first non-empty output delta → generationMs start
     markEnd(); // text_delta counts as the first non-thinking delta → record end
     markVisible(); // ADR-0111 — non-empty text delta = visible output
     safeEmit({ type: "text_delta", text: textDelta });
@@ -795,6 +866,7 @@ function wireStreamEvents(
       if (delta?.type === "thinking_delta") {
         const text = delta.thinking ?? "";
         if (text === "") return; // empty delta: do not emit — aligned with text_delta discipline
+        markFirstOutput(); // non-empty thinking delta is output → generationMs start
         markStart(); // first thinking_delta records start
         markVisible(); // ADR-0111 — non-empty thinking delta = visible output
         safeEmit({ type: "thinking_delta", text });
@@ -806,6 +878,7 @@ function wireStreamEvents(
       if (delta?.type === "input_json_delta") {
         const partialJson = delta.partial_json ?? "";
         if (partialJson === "") return; // empty delta: do not emit — aligned with text_delta discipline
+        markFirstOutput(); // non-empty tool-input delta is output → generationMs start
         markEnd(); // input_json_delta counts as the first non-thinking delta → record end
         markVisible(); // ADR-0111 — non-empty tool-input delta = visible output
         const id = indexToBlockId.get(event.index);
@@ -1058,6 +1131,7 @@ export function createRealAnthropicAdapter(
     step,
     countTokens,
     encodeUserText,
+    encodeUserContent,
     encodeToolResults,
     // Adapter-level mode declaration (stream is a static construction-time
     // decision; never switches within an instance).

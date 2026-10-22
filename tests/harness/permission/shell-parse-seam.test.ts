@@ -298,8 +298,12 @@ describe("the parsed arm", () => {
   it("hands the pre-parse veto through the parsed arm instead of the text scan", async () => {
     const mod = await freshShellParse();
     const probe = probeReturning([RM_HIT]);
+    // `echo\ seam-veto` used to stand in here; #1188 admits that spelling, so
+    // the arm is pinned on a retained one — the mid-word LF join, whose real
+    // Bash prints one argument where the facade models two words.
+    const seam = seamOf(mod);
 
-    const outcome = seamOf(mod)("echo\\ seam-veto", probe.scan);
+    const outcome = seam("printf '<%s>\\n' a\\\nb", probe.scan);
 
     expect(outcome.kind).toBe("parsed");
     expect(outcome.degraded).toBe(false);
@@ -307,7 +311,24 @@ describe("the parsed arm", () => {
       throw new Error(`expected parsed, got ${outcome.kind}`);
     }
     expect(outcome.result.kind).toBe("vetoed");
+    if (outcome.result.kind !== "vetoed") {
+      throw new Error(`expected vetoed, got ${outcome.result.kind}`);
+    }
+    expect(outcome.result.class).toBe("backslash-whitespace");
     expect(probe.commands).toEqual([]);
+
+    // The admitted spelling of the same class travels the SAME arm on the same
+    // terms: parsed, not degraded, and the legacy scanner is still never
+    // reached — an admission is an `ok` verdict, not a degrade.
+    const admitted = seam("echo\\ seam-admitted", probe.scan);
+    expect(admitted.kind).toBe("parsed");
+    expect(admitted.degraded).toBe(false);
+    if (admitted.kind !== "parsed") {
+      throw new Error(`expected parsed, got ${admitted.kind}`);
+    }
+    expect(admitted.result.kind).toBe("ok");
+    expect(probe.commands).toEqual([]);
+    expect(mod.parseFoundationState()).toEqual<ParseFoundationState>("READY");
   });
 
   it("routes a post-ready parse fault to the parsed arm with the aborted verdict, and provably never consults the scanner", async () => {

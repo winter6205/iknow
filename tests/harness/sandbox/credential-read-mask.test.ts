@@ -105,7 +105,7 @@ function argvAssemble(opts: {
   readonly home?: string;
   readonly protectCredentialReads?: boolean;
   readonly withInventory?: boolean;
-  readonly yolo?: boolean;
+  readonly fenceRetired?: boolean;
   readonly egress?: EgressFenceSpec;
   readonly tmpRoot?: string;
 }): {
@@ -134,7 +134,9 @@ function argvAssemble(opts: {
       ? {}
       : { protectCredentialReads: opts.protectCredentialReads }),
     ...(opts.egress === undefined ? {} : { egress: opts.egress }),
-    ...(opts.yolo === undefined ? {} : { yolo: opts.yolo }),
+    ...(opts.fenceRetired === undefined
+      ? {}
+      : { fenceRetired: opts.fenceRetired }),
     onProtectedTargetSkipped: (w) => warnings.push(w),
   }).argv;
   return { argv, warnings };
@@ -267,8 +269,11 @@ describe("T8 credential read mask — argv pins", () => {
     assert.ok(rebind < argv.indexOf("--proc"));
   });
 
-  it("yolo retires the mask with the fence (bare argv)", () => {
-    const { argv } = argvAssemble({ protectCredentialReads: true, yolo: true });
+  it("a retired fence retires the mask too (bare argv)", () => {
+    const { argv } = argvAssemble({
+      protectCredentialReads: true,
+      fenceRetired: true,
+    });
     assert.deepEqual([...argv], ["bash", "-c", "true"]);
   });
 });

@@ -13,6 +13,24 @@
  * Hook failure semantics: a throwing pre hook is fail-closed
  * (execution_failed + [hook_error], inner untouched, loop continues); a
  * throwing post hook is fire-and-forget (result unchanged, onHookError only).
+ *
+ * The gate is split so a wave can run its allowed calls before any approval
+ * is asked: `prepareOne` runs the gate's non-approval part — the hydrate
+ * path and the pre-hook — and stops before the question (an `ask` comes
+ * back as `needs_approval`, carrying the decision that asked).
+ * `approveOne` re-decides with the CURRENT policy state before asking.
+ * `gateOne` is the two in sequence, so the single-call behaviour — one
+ * decision, asked inline — is unchanged.
+ *
+ * The verdict a call is judged by is taken by the caller (the wave scan,
+ * right before the wave runs) and handed to `prepareOne`; the gate enforces
+ * exactly that verdict on the allow/deny path. The approval path re-decides
+ * before the prompt, so the enforced verdict there may differ from the one
+ * the caller observed. The ORDER inside one call is therefore: the verdict
+ * (taken by the scan) → the hydrate path → the pre-hook → the inner
+ * execution. The pre-hook is deny-only
+ * (`src/harness/permission/hooks.ts:33-36`), so it can block a call but
+ * never change a verdict.
  */
 
 import type {
@@ -25,15 +43,12 @@ import type {
 } from "../tools/types.js";
 import type { HarnessStreamEvent } from "../stream.js";
 import type { AciCatalog, AciToolDef } from "../aci/types.js";
-import {
-  checkPermission,
-  fsBoundaryOption,
-  type PermissionPolicy,
-} from "./policy.js";
-import type { CleanupRootSnapshot } from "./cleanup-roots.js";
+import { decidePermission, type PermissionPolicy } from "./policy.js";
 import { VIOLATION_PREFIXES } from "./prefixes.js";
 import type {
+  ApprovalOutcome,
   AskUser,
+  AskUserOutcome,
   PermissionOutcome,
   PreHookBlock,
   PreToolUseHook,
@@ -137,6 +152,11 @@ export function createAciCatalog(
  * decision reads `def.aci.lazy` to recognize retired builtins (no `mcp__`
  * prefix to identify them by name). Written only when `true`, keeping the
  * projection of resident tools byte-identical.
+ *
+ * The per-call concurrency-safety predicate (`isConcurrencySafeForInput`)
+ * must survive the projection too — the wave splitter reads it off the
+ * projected def. Written only when present, for the same byte-identical
+ * reason as `lazy`.
  */
 function project(def: ToolDef): AciToolDef {
   const aci = (def as { aci?: AciToolDef["aci"] }).aci!;
@@ -148,6 +168,9 @@ function project(def: ToolDef): AciToolDef {
     aci: Object.freeze({
       category: aci.category,
       isConcurrencySafe: aci.isConcurrencySafe,
+      ...(aci.isConcurrencySafeForInput
+        ? { isConcurrencySafeForInput: aci.isConcurrencySafeForInput }
+        : {}),
       interruptBehavior: aci.interruptBehavior,
       ...(aci.lazy === true ? { lazy: true as const } : {}),
     }),
@@ -196,15 +219,81 @@ const _SECURITY_REVIEW_OPTION_IS_FIELD: typeof SECURITY_REVIEW_OPTION extends ke
   : never = true;
 void _SECURITY_REVIEW_OPTION_IS_FIELD;
 
-export type PermissionGate =
+/**
+ * What a gate carries about the question that was actually shown
+ * (ADR-0147 amendment R1/R3). `approval` is set only by `askGate` — a
+ * silent §7 re-decision (admit or deny) shows no question and sets no
+ * ending; `redecidedDeny` marks the deny that re-decision produced where the
+ * wave scan had judged the call `ask`.
+ */
+interface ApprovalFields {
+  readonly approval?: { readonly outcome: ApprovalOutcome };
+  readonly redecidedDeny?: true;
+}
+
+export type PermissionGate = ApprovalFields &
+  (
+    | { readonly kind: "blocked"; readonly result: ToolExecutionResult }
+    | { readonly kind: "proceed"; readonly def: AciToolDef | undefined }
+  );
+
+/**
+ * The gate's answer BEFORE any approval is requested.
+ *
+ * `needs_approval` carries the decision that asked, so the caller can prompt
+ * with it (and only it) — the wave gate uses this arm to run the allowed
+ * calls first and to ask the remaining ones one at a time.
+ *
+ * No `ApprovalFields` here: `prepareOne` never shows a question and never
+ * re-decides, so this answer can carry neither a recorded ending nor a
+ * re-decided deny. Those belong to the post-approval gate only.
+ */
+export type PermissionPrepare =
   | { readonly kind: "blocked"; readonly result: ToolExecutionResult }
-  | { readonly kind: "proceed"; readonly def: AciToolDef | undefined };
+  | { readonly kind: "proceed"; readonly def: AciToolDef | undefined }
+  | {
+      readonly kind: "needs_approval";
+      readonly def: AciToolDef;
+      readonly outcome: PermissionOutcome;
+    };
+
+/**
+ * The approval arm's observation channel (ADR-0147 R1): the wave's
+ * conversation and its stream listener, so a shown question is emitted as a
+ * call-addressed event. Absent → no events (a caller with no host stream).
+ */
+export interface ApprovalContext {
+  readonly conversationId?: string;
+  readonly onStream?: (event: HarnessStreamEvent) => void;
+}
 
 export interface PermissionRuntime {
   readonly executor: Executor;
   readonly gateOne: (
     call: ToolCall,
     signal?: AbortSignal
+  ) => Promise<PermissionGate>;
+  /**
+   * The gate's non-approval part: the hydrate path and the pre-hook —
+   * WITHOUT asking. `decision` is the caller's already computed verdict; it
+   * is the verdict the gate enforces. Absent, the gate computes one itself.
+   */
+  readonly prepareOne: (
+    call: ToolCall,
+    decision?: PermissionOutcome
+  ) => Promise<PermissionPrepare>;
+  /**
+   * The approval arm: re-decide with the CURRENT policy state (a session
+   * grant an earlier "always allow" answer added is visible here), then
+   * proceed without prompting, block with the deny shape, or ask. `ctx`
+   * carries the wave's conversation and stream listener so a shown question
+   * is emitted as a call-addressed event pair.
+   */
+  readonly approveOne: (
+    call: ToolCall,
+    def: AciToolDef,
+    signal?: AbortSignal,
+    ctx?: ApprovalContext
   ) => Promise<PermissionGate>;
   readonly runAllowed: (
     call: ToolCall,
@@ -215,7 +304,8 @@ export interface PermissionRuntime {
     turnId?: string,
     onStream?: (event: HarnessStreamEvent) => void,
     messages?: ToolExecutionContext["messages"],
-    parentThinking?: ToolExecutionContext["parentThinking"]
+    parentThinking?: ToolExecutionContext["parentThinking"],
+    parentModelRoute?: ToolExecutionContext["parentModelRoute"]
   ) => Promise<ToolExecutionResult>;
 }
 
@@ -228,8 +318,10 @@ export interface PermissionRuntime {
  *  - allow → inner.executeAll([call]) and return its single result.
  *
  * gateOne / runAllowed are split so the ACI layer can gate serially then
- * run inner in parallel (pre-hook → permission never overlaps another
- * call's inner).
+ * run inner in parallel. Within one call the order is: the verdict (taken
+ * by the caller, the wave scan) → hydrate → pre-hook → inner; ACROSS calls
+ * it no longer holds: an allowed call's inner may now run while another
+ * call's question is pending (ADR-0147).
  */
 export function createPermissionRuntime(
   opts: PermissionExecutorOptions
@@ -257,6 +349,25 @@ export function createPermissionRuntime(
     return {
       kind: "blocked",
       result: { kind: "execution_failed", toolUseId: call.id, message },
+    };
+  }
+
+  /**
+   * One `blocked` outcome for a permission DENY — the one shape both the
+   * prepare pass and the approval pass build, so the two cannot drift on the
+   * prefix or on the reason.
+   */
+  function denyBlocked(
+    call: ToolCall,
+    outcome: PermissionOutcome
+  ): { readonly kind: "blocked"; readonly result: ToolExecutionResult } {
+    return {
+      kind: "blocked",
+      result: {
+        kind: "execution_failed",
+        toolUseId: call.id,
+        message: `${PERMISSION_DENIED_PREFIX} ${outcome.reason}`,
+      },
     };
   }
 
@@ -320,10 +431,34 @@ export function createPermissionRuntime(
     return { kind: "proceed", def };
   }
 
-  async function gateOne(
+  /**
+   * The effective decision for a call: the caller's own verdict when it has
+   * one (the wave gate takes the verdict in the wave scan, right before the
+   * wave runs), the freshly computed one otherwise.
+   */
+  function effectiveDecision(
+    def: AciToolDef,
+    input: unknown,
+    decision?: PermissionOutcome
+  ): PermissionOutcome {
+    if (decision !== undefined) return decision;
+    return decidePermission(policy, def, input);
+  }
+
+  /**
+   * The gate's non-approval part: the hydrate path, the pre-hook and the pure
+   * decision — WITHOUT asking. An `ask` decision comes back as
+   * `needs_approval` (with the decision that asked), so the caller decides
+   * when to prompt.
+   *
+   * `decision` is the caller's already computed verdict — the one the gate
+   * enforces. Absent, the gate computes it through the same
+   * `decidePermission` assembly, so the inputs are identical either way.
+   */
+  async function prepareOne(
     call: ToolCall,
-    signal?: AbortSignal
-  ): Promise<PermissionGate> {
+    decision?: PermissionOutcome
+  ): Promise<PermissionPrepare> {
     const def = catalog.get(call.name);
     if (!def) return { kind: "proceed", def: undefined };
 
@@ -358,10 +493,10 @@ export function createPermissionRuntime(
       }
       // Input fails the schema → non-error text projection: hand the schema
       // back explicitly so the model can complete the input (kind "ok", so
-      // is_error stays false). Shape stays inside gateOne's two-valued
-      // contract (blocked = decision done, inner not executed, result passed
-      // through); a third arm for type readability would force every gate
-      // call site to adapt — not worth it.
+      // is_error stays false). The `blocked` arm is prepareOne's three-armed
+      // contract: this one is "decided nothing, ran nothing, result passed
+      // through" — the hydrate path is not a user-permission question, so no
+      // verdict is taken and the caller's verdict is not consulted here.
       return {
         kind: "blocked",
         result: {
@@ -410,28 +545,54 @@ export function createPermissionRuntime(
       };
     }
 
-    const outcome = checkPermission({
-      def,
-      input: call.input,
-      sources: policy.sources,
-      hardWalls: policy.hardWalls,
-      defaultByCategory: policy.defaultByCategory,
-      mode: policy.mode,
-      ...hostRootsOption(policy),
-      ...fsBoundaryOption(policy),
-    });
+    const outcome = effectiveDecision(def, call.input, decision);
 
     if (outcome.decision === "ask") {
-      return await askGate(call, def, outcome, signal);
+      return { kind: "needs_approval", def, outcome };
     } else if (outcome.decision === "deny") {
-      return {
-        kind: "blocked",
-        result: {
-          kind: "execution_failed",
-          toolUseId: call.id,
-          message: `${PERMISSION_DENIED_PREFIX} ${outcome.reason}`,
-        },
-      };
+      return denyBlocked(call, outcome);
+    }
+    return { kind: "proceed", def };
+  }
+
+  /**
+   * The full gate for a call that is not coordinated with other calls:
+   * prepare, then answer the approval inline. The decision is evaluated ONCE,
+   * in the prepare pass, and the same decision is the one the prompt carries.
+   */
+  async function gateOne(
+    call: ToolCall,
+    signal?: AbortSignal
+  ): Promise<PermissionGate> {
+    const prepared = await prepareOne(call);
+    if (prepared.kind === "needs_approval") {
+      return await askGate(call, prepared.def, prepared.outcome, signal);
+    }
+    return prepared;
+  }
+
+  /**
+   * The approval arm of the wave gate: re-decide with the CURRENT policy
+   * state before prompting, so an "always allow" answer recorded by an
+   * earlier prompt (a tool-scoped session grant) reaches this call and no
+   * second question is asked.
+   *
+   * A fresh `deny` here is the §7 re-decision refusing a call the wave scan
+   * had judged `ask`: it carries `redecidedDeny` so the caller can tell the
+   * agent that the state changed while the wave ran (ADR-0147 R3).
+   */
+  async function approveOne(
+    call: ToolCall,
+    def: AciToolDef,
+    signal?: AbortSignal,
+    ctx?: ApprovalContext
+  ): Promise<PermissionGate> {
+    const outcome = decidePermission(policy, def, call.input);
+    if (outcome.decision === "ask") {
+      return await askGate(call, def, outcome, signal, ctx);
+    }
+    if (outcome.decision === "deny") {
+      return { ...denyBlocked(call, outcome), redecidedDeny: true };
     }
     return { kind: "proceed", def };
   }
@@ -441,65 +602,62 @@ export function createPermissionRuntime(
    * the route — checked BEFORE `askUser` is invoked, in every mode alike
    * (ADR-0127) — and everything else keeps the ordinary approval flow
    * (abort → deny, inlet failure → deny, explicit decline → `[user_denied]`).
+   *
+   * ADR-0147 R1/R2: a question that is actually shown is emitted as an
+   * `approval_pending` / `approval_resolved` pair (safe-emit: a listener
+   * fault never affects the gate), and the ending decides both the result
+   * text and the `approval` the returned gate carries. A security review is
+   * answered through its own route / inlet (reviewGate), not this one, so it
+   * shows no question here and emits no approval event pair; a pre-aborted
+   * wait emits nothing either, and neither records an ending.
    */
   async function askGate(
     call: ToolCall,
     def: AciToolDef,
     outcome: PermissionOutcome,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    ctx?: ApprovalContext
   ): Promise<PermissionGate> {
     if (outcome.securityReview !== undefined) {
       return await reviewGate(call, def, outcome.securityReview, signal);
     }
     if (isAborted(signal)) {
-      return {
-        kind: "blocked",
-        result: {
-          kind: "execution_failed",
-          toolUseId: call.id,
-          message: CANCELLED_RESULT_MESSAGE,
-        },
-      };
+      return cancelledBlocked(call);
     }
-    const hint = summarizeInput(call.input);
-    let approved = false;
+    const conversation = conversationField(ctx);
+    safeEmit(ctx, {
+      type: "approval_pending",
+      toolUseId: call.id,
+      tool: def.name,
+      ...conversation,
+    });
+    let ending: SettledEnding;
     try {
-      approved = await askUser({
+      const answer = await askUser({
         tool: def.name,
         input: call.input,
-        summaryHint: hint,
+        summaryHint: summarizeInput(call.input),
         ...(signal !== undefined ? { signal } : {}),
+        toolUseId: call.id,
+        ...conversation,
       });
-    } catch {
+      ending = normalizeAnswer(answer);
+    } catch (err) {
       // EXIT: an unavailable approval inlet must deny the call; never allow
       // a tool side effect merely because the user prompt failed.
-      approved = false;
+      ending = { kind: "prompt_failed", cause: errMsg(err, call.input) };
     }
     if (isAborted(signal)) {
-      // EXIT: caller cancellation wins over a late approval; AskUser cannot
+      // EXIT: caller cancellation wins over a late answer; AskUser cannot
       // revive a call after the permission wait has been cancelled.
-      return {
-        kind: "blocked",
-        result: {
-          kind: "execution_failed",
-          toolUseId: call.id,
-          message: CANCELLED_RESULT_MESSAGE,
-        },
-      };
+      ending = { kind: "cancelled" };
     }
-    if (!approved) {
-      return {
-        kind: "blocked",
-        result: {
-          kind: "execution_failed",
-          toolUseId: call.id,
-          message: isAborted(signal)
-            ? CANCELLED_RESULT_MESSAGE
-            : `${USER_DENIED_PREFIX} user declined tool call: ${def.name}`,
-        },
-      };
-    }
-    return { kind: "proceed", def };
+    safeEmit(ctx, {
+      type: "approval_resolved",
+      toolUseId: call.id,
+      outcome: ending.kind,
+    });
+    return settledGate(call, def, ending);
   }
 
   async function runAllowed(
@@ -511,7 +669,8 @@ export function createPermissionRuntime(
     turnId?: string,
     onStream?: (event: HarnessStreamEvent) => void,
     messages?: ToolExecutionContext["messages"],
-    parentThinking?: ToolExecutionContext["parentThinking"]
+    parentThinking?: ToolExecutionContext["parentThinking"],
+    parentModelRoute?: ToolExecutionContext["parentModelRoute"]
   ): Promise<ToolExecutionResult> {
     const [result] = await opts.inner.executeAll(
       [call],
@@ -522,7 +681,8 @@ export function createPermissionRuntime(
       turnId,
       onStream,
       messages,
-      parentThinking
+      parentThinking,
+      parentModelRoute
     );
     const r = result as ToolExecutionResult;
     if (!def) return r;
@@ -568,7 +728,8 @@ export function createPermissionRuntime(
     turnId?: string,
     onStream?: (event: HarnessStreamEvent) => void,
     messages?: ToolExecutionContext["messages"],
-    parentThinking?: ToolExecutionContext["parentThinking"]
+    parentThinking?: ToolExecutionContext["parentThinking"],
+    parentModelRoute?: ToolExecutionContext["parentModelRoute"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
@@ -585,7 +746,8 @@ export function createPermissionRuntime(
               turnId,
               onStream,
               messages,
-              parentThinking
+              parentThinking,
+              parentModelRoute
             );
       await onSettled?.(result, index);
       out.push(result);
@@ -596,6 +758,8 @@ export function createPermissionRuntime(
   return Object.freeze({
     executor: Object.freeze({ executeAll }),
     gateOne,
+    prepareOne,
+    approveOne,
     runAllowed,
   });
 }
@@ -619,6 +783,105 @@ function summarizeInput(input: unknown): string {
 
 function isAborted(signal: AbortSignal | undefined): boolean {
   return signal?.aborted === true;
+}
+
+/** A shown question's ending; `timeout` and `prompt_failed` keep their detail. */
+type SettledEnding =
+  | { readonly kind: "approved" }
+  | { readonly kind: "declined" }
+  | { readonly kind: "timeout"; readonly afterMs: number }
+  | { readonly kind: "prompt_failed"; readonly cause: string }
+  | { readonly kind: "cancelled" };
+
+/**
+ * Normalize the inlet's answer to a typed ending. A bare boolean stays
+ * accepted (`true` = approved, `false` = declined), so the TTY / fail-closed
+ * / no-ask inlets need no change (ADR-0147 R2).
+ */
+function normalizeAnswer(answer: boolean | AskUserOutcome): SettledEnding {
+  if (typeof answer === "boolean") {
+    return { kind: answer ? "approved" : "declined" };
+  }
+  if (answer.kind === "timeout") {
+    return { kind: "timeout", afterMs: answer.afterMs };
+  }
+  return { kind: answer.kind };
+}
+
+/** The blocked gate for a wait that was cancelled before/without an answer. */
+function cancelledBlocked(call: ToolCall): PermissionGate {
+  return {
+    kind: "blocked",
+    result: {
+      kind: "execution_failed",
+      toolUseId: call.id,
+      message: CANCELLED_RESULT_MESSAGE,
+    },
+  };
+}
+
+/**
+ * The gate for a question that settled: approved proceeds (recording the
+ * ending), every other ending blocks with its own text (ADR-0147 R2) and
+ * records the ending for the caller's `[approval]` note (R3).
+ */
+function settledGate(
+  call: ToolCall,
+  def: AciToolDef,
+  ending: SettledEnding
+): PermissionGate {
+  if (ending.kind === "approved") {
+    return { kind: "proceed", def, approval: { outcome: "approved" } };
+  }
+  return {
+    kind: "blocked",
+    result: {
+      kind: "execution_failed",
+      toolUseId: call.id,
+      message: endingMessage(def, ending),
+    },
+    approval: { outcome: ending.kind },
+  };
+}
+
+/** The distinct `[user_denied]` / `cancelled` text for each non-approved ending. */
+function endingMessage(def: AciToolDef, ending: SettledEnding): string {
+  switch (ending.kind) {
+    case "timeout":
+      return `${USER_DENIED_PREFIX} approval timed out after ${String(ending.afterMs / 1000)}s with no answer: ${def.name}`;
+    case "prompt_failed":
+      return `${USER_DENIED_PREFIX} approval prompt failed (${ending.cause}): ${def.name}`;
+    case "declined":
+      return `${USER_DENIED_PREFIX} user declined tool call: ${def.name}`;
+    default:
+      return CANCELLED_RESULT_MESSAGE;
+  }
+}
+
+/** The `conversationId` field of an approval event / inlet input, when present. */
+function conversationField(ctx: ApprovalContext | undefined): {
+  conversationId?: string;
+} {
+  return ctx?.conversationId !== undefined
+    ? { conversationId: ctx.conversationId }
+    : {};
+}
+
+/**
+ * Emit a stream event without letting a listener fault reach the gate: the
+ * permission decision must not depend on a host observer (ADR-0147 R1).
+ */
+function safeEmit(
+  ctx: ApprovalContext | undefined,
+  event: HarnessStreamEvent
+): void {
+  const listener = ctx?.onStream;
+  if (listener === undefined) return;
+  try {
+    listener(event);
+  } catch {
+    // EXIT: a stream listener's own failure is not a permission event.
+  }
 }
 
 /**
@@ -689,20 +952,4 @@ function getOrCompileValidator(def: AciToolDef): ValidateFunction {
   v = HYDRATE_AJV.compile(def.inputSchema);
   HYDRATE_VALIDATOR_CACHE.set(def, v);
   return v;
-}
-
-/**
- * ADR-0132/ADR-0133: the host's root context as the optional `checkPermission`
- * field, or nothing at all when the policy has none.
- *
- * An empty spread is the absent case and reaches `checkPermission` as a
- * missing field, not as a reader that could return an empty snapshot — the
- * difference between "no cleanup scope exists" and "a scope with no roots in
- * it", which the wall would otherwise have to tell apart.
- */
-function hostRootsOption(policy: PermissionPolicy): {
-  readonly hostRoots?: () => CleanupRootSnapshot;
-} {
-  if (policy.hostRoots === undefined) return {};
-  return { hostRoots: policy.hostRoots };
 }

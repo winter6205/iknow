@@ -132,6 +132,7 @@ async function mountApp(
     listRewindTargets: async () => [anchor("e1", "q2"), anchor(null, "q1")],
     inflight: createInflightRegistry(),
     contextWindow: 200_000,
+    listLiveBackgroundTasks: () => [],
     listSubagents: () => [],
     abortSubagentTask: () => true,
     abortSessionForegroundWork: () => [],

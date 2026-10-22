@@ -49,7 +49,7 @@ import { createBashTool } from "../../../src/harness/aci/tools/bash.ts";
 import { ToolExecutionError } from "../../../src/harness/errors.ts";
 import {
   createYoloContext,
-  type YoloContext,
+  type FenceRetirementReader,
 } from "../../../src/harness/sandbox/yolo.ts";
 
 /** The {fence, env} captured by the runInSandbox stand-in — fence comes from the real factory. */
@@ -89,14 +89,16 @@ afterEach(() => {
 });
 
 async function runBash(opts: {
-  readonly yolo?: YoloContext;
+  readonly fenceRetired?: FenceRetirementReader;
   readonly egressPolicyFactory?: () => unknown;
   readonly createEgressSessionFactory?: () => unknown;
   readonly command?: string;
 }): Promise<void> {
   const tool = createBashTool(FIX_CWD, {
     tmpDir: FIX_TMP,
-    ...(opts.yolo !== undefined ? { yolo: opts.yolo } : {}),
+    ...(opts.fenceRetired !== undefined
+      ? { fenceRetired: opts.fenceRetired }
+      : {}),
     ...(opts.egressPolicyFactory !== undefined
       ? { egressPolicyFactory: opts.egressPolicyFactory as never }
       : {}),
@@ -114,7 +116,7 @@ async function runBash(opts: {
 
 describe("foreground bash surface — yolo wiring (ADR-0119)", () => {
   it("yolo ON -> the foreground fence is bare argv (argv[0] = bash) and requireBwrap is never called", async () => {
-    await runBash({ yolo: createYoloContext(true) });
+    await runBash({ fenceRetired: createYoloContext(true) });
     expect(capturedRuns).toHaveLength(1);
     expect(capturedRuns[0]!.fence.argv).toEqual(["bash", "-c", "echo hi"]);
     expect(capturedRuns[0]!.cwd).toBe(FIX_CWD);
@@ -127,7 +129,7 @@ describe("foreground bash surface — yolo wiring (ADR-0119)", () => {
       throw new Error("egress session must not be started under yolo");
     });
     await runBash({
-      yolo: createYoloContext(true),
+      fenceRetired: createYoloContext(true),
       egressPolicyFactory: () => ({
         allowedDomains: ["example.com"],
         deniedDomains: [],
@@ -145,14 +147,15 @@ describe("foreground bash surface — yolo wiring (ADR-0119)", () => {
 
   it("yolo absent -> baseline bwrap argv; yolo:false is byte-identical to it (fail-closed, same shape)", async () => {
     await runBash({});
-    await runBash({ yolo: createYoloContext(false) });
+    await runBash({ fenceRetired: createYoloContext(false) });
     expect(capturedRuns).toHaveLength(2);
     const baseline = capturedRuns[0]!.fence.argv;
     expect(baseline[0]).toBe("bwrap");
     expect(baseline).toContain("--unshare-net");
     expect(capturedRuns[1]!.fence.argv).toEqual(baseline);
-    // Non-yolo: the factory probes as before (once per createBashTool).
-    expect(vi.mocked(sandboxRunner.requireBwrap)).toHaveBeenCalledTimes(2);
+    // ADR-0141 invariant 9: presence is rechecked on EVERY fenced call, so two
+    // fenced calls are two probes (factory + per call), not one at assembly.
+    expect(vi.mocked(sandboxRunner.requireBwrap)).toHaveBeenCalledTimes(4);
   });
 
   it("requireBwrap sequencing: on a host without bwrap non-yolo assembly throws typed, yolo assembly does not", () => {
@@ -169,7 +172,7 @@ describe("foreground bash surface — yolo wiring (ADR-0119)", () => {
     expect(() =>
       createBashTool(FIX_CWD, {
         tmpDir: FIX_TMP,
-        yolo: createYoloContext(false),
+        fenceRetired: createYoloContext(false),
       })
     ).toThrow(ToolExecutionError);
     // yolo ON: the assembly path skips the probe — a host without bwrap does not
@@ -177,7 +180,7 @@ describe("foreground bash surface — yolo wiring (ADR-0119)", () => {
     expect(() =>
       createBashTool(FIX_CWD, {
         tmpDir: FIX_TMP,
-        yolo: createYoloContext(true),
+        fenceRetired: createYoloContext(true),
       })
     ).not.toThrow();
   });

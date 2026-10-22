@@ -4,7 +4,8 @@
  * After the three permission layers graduated: pass_through was deleted
  * (decisions are now allow/deny/ask), and AciMeta.isReadOnly /
  * isDestructive were deleted (category is already the single authority).
- * Retained: category / isConcurrencySafe / interruptBehavior
+ * Retained: category / concurrency safety (isConcurrencySafe, plus the
+ * optional per-call isConcurrencySafeForInput) / interruptBehavior
  * (interruption & timeout semantics) plus timeoutTier — static per-tool
  * timeout tiers.
  *
@@ -13,6 +14,7 @@
  */
 
 import type { ToolDef } from "../tools/types.js";
+import type { ConcurrencySafetyMeta } from "../tools/concurrency-waves.js";
 
 /** The four safety categories (category is the source of truth for read-only / write / execute / collaborate). */
 export type AciCategory = "read-only" | "write" | "execute" | "collaborate";
@@ -92,10 +94,16 @@ export const TIMEOUT_TIER_MS: Readonly<Record<TimeoutTier, number>> =
     unbounded: 0,
   });
 
-/** ACI safety/scheduling metadata (lazy loading / concurrency safety / interrupt behavior / timeout tier / overflow candidacy). */
-export interface AciMeta {
+/**
+ * ACI safety/scheduling metadata (lazy loading / concurrency safety / interrupt behavior / timeout tier / overflow candidacy).
+ *
+ * The concurrency-safety part is inherited from `ConcurrencySafetyMeta`: the
+ * static per-tool default (`isConcurrencySafe`) plus the optional per-call
+ * predicate (`isConcurrencySafeForInput`), which decides for a call when it
+ * is declared. See that interface for the exact resolution rules.
+ */
+export interface AciMeta extends ConcurrencySafetyMeta {
   readonly category: AciCategory;
-  readonly isConcurrencySafe: boolean;
   readonly interruptBehavior: "cancel" | "block";
   /** true = lazy: stays out of the prompt schema by default and needs a
    *  discover() lookup to be injected (calling an undiscovered lazy tool

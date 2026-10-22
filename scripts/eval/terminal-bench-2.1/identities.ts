@@ -49,23 +49,95 @@ export const IDENTITY_FIELDS: ReadonlyArray<keyof RunIdentity> = [
 ];
 
 /**
- * Machine-specific defaults inherited from the #1212 scripts. Any of these appearing in
- * a config value means the value was never explicitly provided, so the run must refuse
- * to start rather than silently reading one operator's home directory.
+ * UNRESOLVED TEMPLATE — what this module means by "a placeholder" since issue 1219.
+ *
+ * A value is an unresolved template when its trimmed text still carries a substitution or a
+ * marker that NOTHING in this pipeline expands:
+ *
+ *  - `${VAR}` / `$VAR`: an unexpanded shell-style variable. Deliberately the same VAR-name
+ *    charset `src/config/settings.ts` `PLACEHOLDER_PATTERN` uses, so the two definitions
+ *    cannot drift into disagreeing about what an unexpanded variable looks like.
+ *  - `{{name}}`: an unexpanded mustache/handlebars slot.
+ *  - a whole `/`-separated segment that IS `TODO`, `FIXME`, `CHANGEME`, `TBD` or `XXX`
+ *    (case-insensitive) — a placeholder somebody left behind rather than filled in.
+ *
+ * WHAT WAS REMOVED, AND WHY (issue 1219 / the #1221 headless audit). This used to hold a
+ * blocklist of four literal host paths — the #1189/#1212 machine defaults — and `config.ts`
+ * applied it to every path parameter. That made the CLI unsatisfiable: `cli.ts` REQUIRES all
+ * four as mandatory explicit flags, and `main` calls `resolveConfig` BEFORE creating the run
+ * root, wiring Docker or dispatching a model, so the frozen #1221 run could only ever exit 1
+ * with four "still a placeholder" lines naming real, existing artifacts the operator had
+ * supplied by hand. Equality with a historical example is not evidence that anything was left
+ * unset, so those literals are now real values. `isInheritedDefaultLiteral` keeps the
+ * historical distinction available for a caller that WANTS to report it, without making valid
+ * configuration unusable.
+ *
+ * WHAT IS DELIBERATELY NOT HERE:
+ *  - A literal trailing `~`. Nothing in this tooling expands or normalizes `~`, so treating it
+ *    as unresolved would invent a rule the code does not actually have.
+ *  - Angle brackets. `outputLayout` legitimately IS a layout template — the frozen #1221
+ *    protocol manifest carries `tb2.1-slot-v1/<task>:<arm>:<maxTurns>` — so `<…>` is a PATH
+ *    rule, not an identity rule. See `isUnresolvedPathTemplate`.
+ *
+ * Existence and type of an artifact are NOT decided here: this module is pure, and a missing
+ * bundle tarball is a preflight/provisioning fact, not an input-shape fact.
  */
-const PLACEHOLDER_EXACT = new Set([
+const UNRESOLVED_TEMPLATE =
+  /\$\{?[A-Za-z_][A-Za-z0-9_]*\}?|\{\{[^{}]*\}\}|^(?:.*\/)?(?:TODO|FIXME|CHANGEME|TBD|XXX)(?:\/.*)?$/i;
+
+/**
+ * The #1212/#1189 machine-specific path defaults. DIAGNOSTIC ONLY.
+ *
+ * Exported so a report or an audit can say "this run was pointed at the literal the old
+ * scripts hardcoded" without that observation being able to REFUSE anything. Nothing in
+ * configuration resolution consults it; `isPlaceholder` deliberately does not.
+ */
+export const HISTORICAL_DEFAULT_LITERALS: ReadonlySet<string> = new Set([
   "/home/winner/eval-1189/dataset",
   "/home/winner/eval-1189/bundle/iknow-bundle-9fa88f57.tgz",
   "/home/winner/eval-1212/prov/node.tar.gz",
   "/home/winner/.iknow/settings.json",
 ]);
 
-/** True when a value is absent, blank, or one of the inherited machine defaults. */
+/**
+ * True when a value is one of the historical machine defaults. Diagnostic, NOT a validity
+ * check: every one of these is a real artifact an operator may legitimately name.
+ */
+export function isInheritedDefaultLiteral(value: unknown): boolean {
+  return (
+    typeof value === "string" && HISTORICAL_DEFAULT_LITERALS.has(value.trim())
+  );
+}
+
+/**
+ * True when a value is absent, blank, or an unresolved template (see `UNRESOLVED_TEMPLATE`).
+ *
+ * Applies to EVERY config value and every identity field, so a shas, a run id or an OCI
+ * reference carrying an unexpanded substitution is refused exactly as a path would be.
+ */
 export function isPlaceholder(value: unknown): boolean {
   if (typeof value !== "string") return true;
   const trimmed = value.trim();
   if (trimmed === "") return true;
-  return PLACEHOLDER_EXACT.has(trimmed);
+  return UNRESOLVED_TEMPLATE.test(trimmed);
+}
+
+/**
+ * `<…>`: an angle-bracket placeholder such as `<path>` or `<dataset-root>`. A PATH-only rule.
+ *
+ * Split out from `isPlaceholder` because a layout template is legitimately built from angle
+ * brackets — `tb2.1-slot-v1/<task>:<arm>:<maxTurns>` is the frozen #1221 `outputLayout` —
+ * while no real filesystem path contains one.
+ */
+const ANGLE_PLACEHOLDER = /<[^<>\s]+>/;
+
+/**
+ * True when a PATH parameter is absent, blank, an unresolved template, or an angle-bracket
+ * placeholder. This is the predicate `config.ts` applies to every path it is given.
+ */
+export function isUnresolvedPathTemplate(value: unknown): boolean {
+  if (isPlaceholder(value)) return true;
+  return ANGLE_PLACEHOLDER.test((value as string).trim());
 }
 
 /** Every identity field still holding a placeholder, in `IDENTITY_FIELDS` order. */

@@ -35,6 +35,7 @@
  */
 
 import type { AnthropicContentBlock, AnthropicNativeMessage } from "./types.js";
+import { isImageContentBlock } from "./image-content.js";
 import {
   AGENT_STATUS_CLOSE_TAG,
   AGENT_STATUS_OPEN_TAG,
@@ -162,6 +163,34 @@ export interface WireMessage {
   readonly content: ReadonlyArray<WireContentBlock>;
 }
 
+/** One tool descriptor in the wire shape. */
+export interface WireToolDescriptor {
+  readonly name: string;
+  readonly description: string;
+  readonly input_schema: Record<string, unknown>;
+}
+
+/**
+ * Project the registry's tool defs to the wire descriptors
+ * (`inputSchema` → `input_schema`). `undefined` when the set is empty: the
+ * adapter then sends no `tools` field at all, so a caller measuring the
+ * request (the occupancy estimate) must not charge for an empty array either.
+ */
+export function wireToolDescriptors(
+  tools: ReadonlyArray<{
+    readonly name: string;
+    readonly description: string;
+    readonly inputSchema: Record<string, unknown>;
+  }>
+): WireToolDescriptor[] | undefined {
+  if (tools.length === 0) return undefined;
+  return tools.map((tool) => ({
+    name: tool.name,
+    description: tool.description,
+    input_schema: tool.inputSchema,
+  }));
+}
+
 function invalidBlock(detail: string): OutboundProjectionError {
   return new OutboundProjectionError("invalid_content_block", detail);
 }
@@ -262,6 +291,26 @@ function projectAssistantOnlyBlock(
   }
 }
 
+function projectImageBlock(b: Record<string, unknown>): WireContentBlock {
+  if (!isImageContentBlock(b)) {
+    throw invalidBlock(
+      "image block is not a base64 source within the media_type / size policy"
+    );
+  }
+  // Rebuilt from the protocol fields only (never `{ ...b }`): the wire carries
+  // no non-protocol key, and `source.data` passes verbatim — neutralization is
+  // a TEXT rule, and a base64 payload has no official-frame syntax channel
+  // (same pass-through a nested image inside tool_result already gets).
+  return {
+    type: "image",
+    source: {
+      type: "base64",
+      media_type: b.source.media_type,
+      data: b.source.data,
+    },
+  };
+}
+
 function projectBlock(
   block: AnthropicContentBlock,
   neutralize: boolean
@@ -271,6 +320,7 @@ function projectBlock(
   }
   const b = block as unknown as Record<string, unknown>;
   if (b["type"] === "text") return projectTextBlock(b, neutralize);
+  if (b["type"] === "image") return projectImageBlock(b);
   if (b["type"] === "tool_result") {
     if (typeof b["tool_use_id"] !== "string") {
       throw invalidBlock("tool_result block missing string tool_use_id");

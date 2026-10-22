@@ -68,5 +68,7 @@ export {
 } from "./git-snapshot.js";
 export type {
   GitSnapshot,
+  GitExecResult,
+  GitExec,
   CreateGitSnapshotProviderOpts,
 } from "./git-snapshot.js";

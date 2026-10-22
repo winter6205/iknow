@@ -76,7 +76,12 @@ export function queryableSubagentTaskIds(
 ): readonly string[] {
   if (manager === undefined) return [];
   try {
-    return manager.drainCompleted(conversationId).map(({ taskId }) => taskId);
+    // Diagnostics only: a task whose digest was already delivered is still
+    // readable through `subagent_result`, so a failed later wake must report
+    // it rather than claim none existed (ADR-0150).
+    return manager
+      .drainCompleted(conversationId, { includeDelivered: true })
+      .map(({ taskId }) => taskId);
   } catch (error) {
     reportObserverDiagnostic("queryable task lookup failed", error);
     // EXIT: diagnostic lookup is fail-safe; no task ids can be asserted when

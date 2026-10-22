@@ -39,7 +39,7 @@ function countDecls(text) {
 }
 
 const changed = sh(
-  `git diff --name-only --diff-filter=ACMR ${base} HEAD -- 'tests/**/*.ts' 'tests/**/*.tsx'`
+  "git diff --name-only --diff-filter=ACMR HEAD -- 'tests/**/*.ts' 'tests/**/*.tsx'"
 )
   .split("\n")
   .filter(Boolean);

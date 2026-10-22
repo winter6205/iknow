@@ -30,7 +30,7 @@
  */
 import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
-import type { SubAgentDefinition } from "./role.js";
+import { parentFields, type SubAgentDefinition } from "./role.js";
 import type { SubAgentEnvelope } from "./envelope.js";
 import type { SubAgentManager } from "./manager.js";
 import {
@@ -208,9 +208,7 @@ function continueTurnFields(
   return {
     task: message,
     ...(ctx?.turnId !== undefined ? { parentTurnId: ctx.turnId } : {}),
-    ...(ctx?.parentThinking !== undefined
-      ? { parentThinking: ctx.parentThinking }
-      : {}),
+    ...parentFields(ctx),
     ...(ctx?.toolUseId !== undefined ? { toolUseId: ctx.toolUseId } : {}),
     ...foregroundDrainExclusion(wait),
   };

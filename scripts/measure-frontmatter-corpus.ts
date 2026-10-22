@@ -470,7 +470,7 @@ function frontmatterLine(key: string, value: string): string {
   return `${key}: ${value}\n`;
 }
 
-/** Key order pinned by ADR-0123's amendment: known fields, then the extra. */
+/** Key order pinned by ADR-0144's amendment: known fields, then the extra. */
 function frontmatterOf(row: Row): string {
   const lines = [
     frontmatterLine("id", row.id),

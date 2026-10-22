@@ -29,7 +29,7 @@ import type {
   SubAgentDefinition,
   SubAgentSpawn,
 } from "../../src/harness/subagent/manager.ts";
-import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
+import { peekPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
 import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import { ToolExecutionError } from "../../src/harness/errors.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
@@ -119,12 +119,12 @@ describe("C1: 第 5 个并发 spawn → capacity ToolExecutionError", () => {
 
 describe("C2: drain 空/多/运行中立即空返/异常不抛 (drain non-blocking)", () => {
   it("undefined manager → 立即返回 '' (无轮询)", async () => {
-    const out = await drainPendingSubagents(undefined);
+    const out = await peekPendingSubagents(undefined);
     expect(out).toBe("");
   });
 
   it("manager 内无 completed 且无 active → 立即返回 ''", async () => {
-    const out = await drainPendingSubagents(
+    const out = await peekPendingSubagents(
       baseManager({
         queryBuffer: () => ({ status: "running" }) as const,
         waitFor: () => new Promise(() => {}),
@@ -141,7 +141,7 @@ describe("C2: drain 空/多/运行中立即空返/异常不抛 (drain non-blocki
         { taskId: "b", envelope: { status: "ok", summary: "B", result: "rB" } },
       ],
     });
-    const out = await drainPendingSubagents(fakeManager);
+    const out = await peekPendingSubagents(fakeManager);
     expect(out).toBe(
       ["## Sub-agent a result: A\n\nA", "## Sub-agent b result: B\n\nB"].join(
         "\n\n"
@@ -158,7 +158,7 @@ describe("C2: drain 空/多/运行中立即空返/异常不抛 (drain non-blocki
       },
       listActive: () => ["pending-1"],
     });
-    expect(await drainPendingSubagents(fakeManager)).toBe("");
+    expect(await peekPendingSubagents(fakeManager)).toBe("");
     expect(waitCalls).toBe(0);
   });
 });
@@ -214,7 +214,7 @@ describe("C4: drain 不读取运行中任务且永不抛", () => {
       ],
       listActive: () => ["bad"],
     });
-    const out = await drainPendingSubagents(fakeManager);
+    const out = await peekPendingSubagents(fakeManager);
     expect(out).toContain("## Sub-agent good result: ok");
     expect(out).not.toContain("bad");
     expect(waitCalls).toBe(0);

@@ -109,6 +109,7 @@ vi.mock(
               },
               supplierStop: "success",
               needsTools: true,
+              hasThinking: false,
               isEmptyFinalResponse: false,
             },
             {
@@ -126,6 +127,7 @@ vi.mock(
               },
               supplierStop: "success",
               needsTools: false,
+              hasThinking: false,
               isEmptyFinalResponse: false,
             },
           ],

@@ -10,20 +10,28 @@
  *   - only running → return "" immediately, no polling at the run() boundary;
  *   - **drain never throws**: manager buffer or condensation failures
  *     silently return "";
- *   - does not modify manager buffer state (buffer is cached permanently
- *     until shutdown);
  *   - per-task condensation format:
  *       ## Sub-agent <taskId> result: <summary>
  *
  *       [result]
  *     multiple tasks separated by blank lines.
  *
- * Implementation constraint: consume results only via drainCompleted();
- * never call listActive() / waitFor(); never mutate the manager buffer.
+ * Two entrypoints (ADR-0150): `peekPendingSubagents` is the read-only view
+ * (diagnostics, no claim), and `claimPendingSubagents` atomically takes the
+ * undelivered terminal generations, returning a handle the host acknowledges
+ * only on the write that carries the digest (or releases). A view without the
+ * optional claim seam falls back to the read-only path, and its claims handle
+ * is a no-op.
+ *
+ * Implementation constraint: the drain/claim path consumes results only
+ * through the manager's drain/claim views and never calls listActive() /
+ * waitFor(); the pre-rebind closeout helper below is the one caller that
+ * reads the roster.
  *
  * The ask entrypoint has no manager → this function is not called → no
  * behavior change.
  */
+import type { ClaimedDelivery } from "./delivery-ledger.js";
 import type { SubagentManagerDrainView } from "./manager-registry.js";
 import {
   projectParentVisibleEnvelope,
@@ -105,18 +113,16 @@ export function formatDrainedResults(
 }
 
 /**
- * Condense terminal subagent results into a single user-message string.
+ * Read-only gate: condense terminal results that are still undelivered into a
+ * single user-message string. Never claims, so an emptiness check cannot take
+ * a result away from the delivery path.
  *
- * Background host drain only consumes already-completed buffer entries.
  * Returns "" when:
  *   - manager is undefined (ask-entry shape);
- *   - manager has no tasks or no terminal tasks;
+ *   - manager has no tasks or no undelivered terminal tasks;
  *   - the manager's read-only drain / condensation fails (never throws).
- *
- * `_opts` is kept only for existing-caller compatibility; running workers
- * never trigger a wait.
  */
-export async function drainPendingSubagents(
+export async function peekPendingSubagents(
   manager: SubagentManagerDrainView | undefined,
   opts?: DrainPendingSubagentsOpts
 ): Promise<string> {
@@ -130,6 +136,106 @@ export async function drainPendingSubagents(
     // separately by host-wake.
     void error;
     return "";
+  }
+}
+
+/** Opaque claims a host settles after the write that carries their digest. */
+export interface DeliveryClaims {
+  /** Mark the claimed generations delivered (idempotent). */
+  acknowledge(): void;
+  /** Return the claimed generations to the claimable state (idempotent). */
+  release(): void;
+}
+
+export interface ClaimedSubagentDrain {
+  /** Full formatted segment: freshly claimed text plus any pending closeout text. */
+  readonly text: string;
+  /** What this round claimed; the substring `writeCarriesDigest` searches for. */
+  readonly digestText: string;
+  /**
+   * `null` = no claim was taken (no manager / failure). A no-op handle means
+   * there is nothing to settle: nothing was claimed, or the view has no claim
+   * seam — the read-only fallback is a successful read, not a failed claim.
+   */
+  readonly claims: DeliveryClaims | null;
+}
+
+const NO_CLAIMS: DeliveryClaims = {
+  acknowledge: () => {},
+  release: () => {},
+};
+
+/** Hand a claim taken before a failure back to the claimable state. */
+function releaseTakenClaim(
+  manager: SubagentManagerDrainView,
+  claimed: ReadonlyArray<ClaimedDelivery<SubAgentEnvelope>> | undefined
+): void {
+  if (claimed === undefined || claimed.length === 0) return;
+  try {
+    manager.releaseDeliveries?.(claimed);
+  } catch (releaseError) {
+    // EXIT: the drain is non-throwing for its callers (the hub claims outside
+    // any try). A release seam that throws must not turn "deliver nothing
+    // this round" into an escaped error.
+    void releaseError;
+  }
+}
+
+function claimsOf(
+  claims: ReadonlyArray<ClaimedDelivery<unknown>>,
+  view: SubagentManagerDrainView | undefined
+): DeliveryClaims {
+  if (claims.length === 0 || view?.acknowledgeDeliveries === undefined) {
+    return NO_CLAIMS;
+  }
+  return {
+    acknowledge: () => view.acknowledgeDeliveries?.(claims),
+    release: () => view.releaseDeliveries?.(claims),
+  };
+}
+
+/**
+ * Delivery take: claim every undelivered terminal generation and format the
+ * text that will carry it. A view without the optional claim seam (structural
+ * fakes / ask surface) falls back to the read-only path with a no-op claim.
+ *
+ * The caller must settle the claims: `acknowledge()` after the write that
+ * actually carries `digestText`, `release()` on any earlier failure
+ * (ADR-0150).
+ */
+export async function claimPendingSubagents(
+  manager: SubagentManagerDrainView | undefined,
+  opts?: DrainPendingSubagentsOpts
+): Promise<ClaimedSubagentDrain> {
+  if (manager === undefined) {
+    return { text: "", digestText: "", claims: null };
+  }
+  // Hoisted so the failure path can hand back a claim it already took.
+  let claimed: ReadonlyArray<ClaimedDelivery<SubAgentEnvelope>> | undefined;
+  try {
+    claimed = manager.claimCompleted?.(opts?.conversationId) ?? [];
+    if (claimed.length === 0) {
+      // No claim seam, or genuinely nothing undelivered: stay readable so a
+      // seam-less view keeps today's behavior.
+      const text = formatDrainedResults(
+        manager.drainCompleted(opts?.conversationId)
+      );
+      return { text, digestText: text, claims: claimsOf([], manager) };
+    }
+    const text = formatDrainedResults(
+      claimed.map((claim) => ({
+        taskId: claim.taskId,
+        envelope: claim.envelope,
+      }))
+    );
+    return { text, digestText: text, claims: claimsOf(claimed, manager) };
+  } catch (error) {
+    // EXIT: host drain is intentionally non-throwing; an unreadable manager
+    // delivers nothing this round. A claim taken before the failure goes back
+    // to undelivered instead of being stranded in `claimed` forever.
+    releaseTakenClaim(manager, claimed);
+    void error;
+    return { text: "", digestText: "", claims: null };
   }
 }
 

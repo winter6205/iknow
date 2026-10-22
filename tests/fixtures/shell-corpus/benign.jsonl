@@ -11,7 +11,7 @@
 {"command": "find / -delete"}
 {"command": "[[ a == b ]]"}
 {"command": "echo hi &&"}
-{"command": "echo\\ test"}
+{"command": "printf '<%s>\\n' a\\\nb"}
 {"command": "mkfs -t ext4 /dev/sdb1"}
 {"command": "mkfs.ext4 /dev/sda1"}
 {"command": "shutdown -h now"}
@@ -46,3 +46,8 @@
 {"command": "eval \"rm -rf /tmp/x\""}
 {"command": "sudo bash <<'EOF'\nrm -rf /tmp/x\nEOF"}
 {"command": "rm \"-rf\" /tmp/x"}
+{"command": "ls -lt --time-style=+%m-%d\\ %H:%M docs/evidence"}
+{"command": "gh issue view 1188 --json number,title \\\n -q '.title'"}
+{"command": "printf '<%s>\\n' a\\ b"}
+{"command": "printf '<%s>\\n' a \\\n b"}
+{"command": "printf '<%s>\\n' a\\\tb"}

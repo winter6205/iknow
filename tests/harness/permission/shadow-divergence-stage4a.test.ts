@@ -128,9 +128,36 @@ describe("SC-S4-7 stage4a shadow divergence replay", () => {
       "[[ a == b ]]",
       "echo hi &&",
       "powershell -c Remove-Item -Recurse -Force C:\\",
-      "echo\\ test",
+      // `echo\ test` used to hold the backslash-whitespace seat here; #1188
+      // admits it, so the retained mid-word LF join holds it instead, with
+      // the corpus command that reads it as one Bash argument where the
+      // facade would model two words. Its own shadow rows stay in the fixture
+      // as the recorded consumer answers for the admitted spelling.
+      "printf '<%s>\\n' a\\\nb",
     ]) {
       expect(commands.has(censusRow), `census row ${censusRow}`).toBe(true);
+    }
+  });
+
+  it("keeps the admitted spelling's own shadow rows in the fixture", () => {
+    // The admitted spelling is not dropped from the ledger: its four decision
+    // inputs are all still recorded, and every one of them is a `same` row, so
+    // the admission moved no consumer answer. The replay above re-derives each
+    // `post` from the live tree, which is what makes that claim falsifiable.
+    const admitted = fixture.filter((row) => row.command === "echo\\ test");
+    expect(admitted).toHaveLength(7);
+    expect(admitted.map((row) => row.output)).toEqual([
+      "readonly",
+      "readpath",
+      "grep",
+      "declarative",
+      "declarative",
+      "declarative",
+      "declarative",
+    ]);
+    for (const row of admitted) {
+      expect(row.label, JSON.stringify(row.command)).toBe("same");
+      expect(row.pre, JSON.stringify(row.command)).toEqual(row.post);
     }
   });
 

@@ -56,14 +56,18 @@ describe("slash: the four /yolo vocabulary touch points", () => {
     ]);
   });
 
+  // ADR-0141 A1: `/help` glosses the preset, not "无沙箱模式" — 无沙箱 is the
+  // marker's name, and `/yolo` declares all three axes, so the old gloss made
+  // the help assert something false about the command.
   test("/help covers /yolo and stays emoji-free", () => {
     const joined = helpLines().join("\n");
     expect(joined).toContain("/yolo");
-    expect(joined).toContain("无沙箱模式");
+    expect(joined).toContain("yolo 姿态开关");
+    expect(joined).not.toContain("无沙箱模式");
     expect(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/u.test(joined)).toBe(false);
   });
 
   test("the suggestion blurb is registered (HINT_DESCRIPTIONS range completed)", () => {
-    expect(SLASH_HINT_DESCRIPTIONS.yolo).toBe("无沙箱模式（确认后切换）");
+    expect(SLASH_HINT_DESCRIPTIONS.yolo).toBe("yolo 姿态（确认后切换）");
   });
 });

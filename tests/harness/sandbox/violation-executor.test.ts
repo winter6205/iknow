@@ -74,7 +74,7 @@ describe("wrapWithViolationHook", () => {
     // The contract this name used to deny: under ADR-0135 the wrapper IS a
     // modifier, but of *scheduling and owned work*, not of results. Below the
     // threshold the returned result is the inner executor's byte-for-byte.
-    const inner = makeExecutor([denied("[hard_wall] dangerous command")]);
+    const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
     const wrapped = wrapWithViolationHook({
       inner,
       onKill: () => undefined,
@@ -84,12 +84,12 @@ describe("wrapWithViolationHook", () => {
     assert.equal(out[0]?.kind, "execution_failed");
     assert.equal(
       (out[0] as { message?: string }).message,
-      "[hard_wall] dangerous command"
+      "[network_denied] evil.com: not in allowlist"
     );
   });
 
   it("escalates to onKill after 3 mid-tier denials (default threshold)", async () => {
-    const inner = makeExecutor([denied("[hard_wall] dangerous command")]);
+    const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
     const kills: string[] = [];
     const tracked = wrapWithViolationHook({
       inner,
@@ -184,7 +184,7 @@ describe("wrapWithViolationHook", () => {
       ) => {
         const out: ToolExecutionResult[] = [];
         for (const [i, call] of calls.entries()) {
-          const r = denied(`[hard_wall] ${call.id}`, call.id);
+          const r = denied(`[network_denied] ${call.id}`, call.id);
           await onSettled?.(r, i);
           out.push(r);
         }
@@ -285,7 +285,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
   it("aborts the caller signal at the threshold and reports the interruption", async () => {
     const controller = new AbortController();
     const inner = abortAwareExecutor({
-      message: "[hard_wall] dangerous command",
+      message: "[network_denied] evil.com: not in allowlist",
     });
     const interruptions: string[] = [];
     const wrapped = wrapWithViolationHook({
@@ -311,7 +311,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
     // is what the abort delivers, and the next wave is refused outright.
     assert.equal(
       (out[0] as { message?: string }).message,
-      "[hard_wall] dangerous command"
+      "[network_denied] evil.com: not in allowlist"
     );
     // The next wave is never dispatched: the turn-local abort closed it.
     const refusedInner: ToolCall[][] = [];
@@ -347,7 +347,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
           const out = calls.map((c) => ({
             kind: "execution_failed" as const,
             toolUseId: c.id,
-            message: "[hard_wall] dangerous command",
+            message: "[network_denied] evil.com: not in allowlist",
           }));
           for (const [i, r] of out.entries()) await onSettled?.(r, i);
           return out;
@@ -358,7 +358,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
         const denial = {
           kind: "execution_failed" as const,
           toolUseId: calls[0]?.id ?? "denial",
-          message: "[hard_wall] dangerous command",
+          message: "[network_denied] evil.com: not in allowlist",
         };
         await onSettled?.(denial, 0);
         await new Promise((resolve) => setTimeout(resolve, 20));
@@ -414,7 +414,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
         return calls.map((c: ToolCall) => ({
           kind: "execution_failed" as const,
           toolUseId: c.id,
-          message: "[hard_wall] dangerous command",
+          message: "[network_denied] evil.com: not in allowlist",
         }));
       },
     });
@@ -466,7 +466,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
     });
     earlier.registerBackgroundTask("persistent-service");
 
-    const inner = makeExecutor([denied("[hard_wall] dangerous command")]);
+    const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
     const wrapped = wrapWithViolationHook({
       inner,
       onKill: () => undefined,
@@ -517,7 +517,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
             : {
                 kind: "execution_failed" as const,
                 toolUseId: c.id,
-                message: "[hard_wall] dangerous command",
+                message: "[network_denied] evil.com: not in allowlist",
               }
         ),
     });
@@ -542,10 +542,10 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
 
   it("neutral failures neither increment nor reset the streak", async () => {
     const outcomes: ReadonlyArray<string> = [
-      "[hard_wall] dangerous command",
+      "[network_denied] evil.com: not in allowlist",
       "timeout",
       "[permission_denied] category default",
-      "[hard_wall] dangerous command",
+      "[network_denied] evil.com: not in allowlist",
       "background cleanup unconfirmed",
     ];
     let index = 0;
@@ -595,7 +595,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
     owned.registerBackgroundTask("bg-1");
 
     const reports: string[] = [];
-    const inner = makeExecutor([denied("[hard_wall] sensitive path")]);
+    const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
     const wrapped = wrapWithViolationHook({
       inner,
       onKill: () => undefined,
@@ -644,7 +644,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
       },
     });
     owned.registerSubagent("worker-1");
-    const inner = makeExecutor([denied("[hard_wall] dangerous command")]);
+    const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
     const wrapped = wrapWithViolationHook({ inner, onKill: () => undefined, ownedWork: owned });
     for (let i = 0; i < 3; i += 1) {
       await wrapped.executeAll(CALLS);
@@ -655,7 +655,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
 
   it("names the engine turn id in the interruption report", async () => {
     const reports: string[] = [];
-    const inner = makeExecutor([denied("[hard_wall] dangerous command")]);
+    const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
     const wrapped = wrapWithViolationHook({
       inner,
       onKill: () => undefined,
@@ -681,7 +681,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
 
   it("omits turnId when the engine supplied none", async () => {
     const reports: string[] = [];
-    const inner = makeExecutor([denied("[hard_wall] dangerous command")]);
+    const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
     const wrapped = wrapWithViolationHook({
       inner,
       onKill: () => undefined,
@@ -700,7 +700,7 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
 
   it("an absent owned-work registry still interrupts, with an empty cleanup list", async () => {
     const reports: string[] = [];
-    const inner = makeExecutor([denied("[hard_wall] dangerous command")]);
+    const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
     const wrapped = wrapWithViolationHook({
       inner,
       onKill: () => undefined,
@@ -712,6 +712,47 @@ describe("wrapWithViolationHook turn interruption (ADR-0135)", () => {
     assert.equal(reports.length, 1);
     const parsed = JSON.parse(reports[0] ?? "{}") as { cleanup?: unknown };
     assert.deepEqual(parsed.cleanup, []);
+  });
+
+  it("three [hard_wall] denials do not increment the counter, emit an interruption, or cancel owned work", async () => {
+    const saved = process.exitCode;
+    process.exitCode = 0;
+    try {
+      const cancelled: string[] = [];
+      const reports: string[] = [];
+      const kills: string[] = [];
+      const owned = createTurnWorkRegistry({
+        cancelSubagent: (id) => {
+          cancelled.push(id);
+          return true;
+        },
+      });
+      owned.registerSubagent("worker-1");
+      const message = "[hard_wall] dangerous command rejected";
+      const inner = makeExecutor([denied(message)]);
+      const { executor, counter } = buildViolationWiring(inner, {
+        sink: (line) => kills.push(line),
+        onInterrupt: (reason) => reports.push(reason),
+        ownedWork: owned,
+      });
+      for (let i = 0; i < 3; i += 1) {
+        const out = await executor.executeAll(CALLS);
+        assert.equal((out[0] as { message?: string }).message, message);
+      }
+      assert.equal(counter.snapshot(), 0);
+      assert.deepEqual(kills, []);
+      assert.deepEqual(reports, []);
+      assert.deepEqual(cancelled, []);
+      assert.deepEqual(owned.owned(), [{ kind: "subagent", id: "worker-1" }]);
+      const later = await executor.executeAll(CALLS);
+      assert.equal(
+        (later[0] as { message?: string }).message,
+        message,
+        "a later wave is still dispatched"
+      );
+    } finally {
+      process.exitCode = saved;
+    }
   });
 });
 
@@ -731,7 +772,7 @@ describe("buildViolationWiring", () => {
     guardExitCode();
     try {
       const lines: string[] = [];
-      const inner = makeExecutor([denied("[hard_wall] dangerous command")]);
+      const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
       const { executor, counter } = buildViolationWiring(inner, {
         sink: (line) => lines.push(line),
       });
@@ -752,7 +793,7 @@ describe("buildViolationWiring", () => {
   it("default sink writes to stderr without throwing", async () => {
     guardExitCode();
     try {
-      const inner = makeExecutor([denied("[hard_wall] dangerous command")]);
+      const inner = makeExecutor([denied("[network_denied] evil.com: not in allowlist")]);
       const { executor } = buildViolationWiring(inner);
       for (let i = 0; i < 3; i += 1) {
         await executor.executeAll(CALLS);

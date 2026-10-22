@@ -124,15 +124,23 @@ async function serialized<T>(
   });
 }
 
+/** Publish one saved state. Resolves `true` when the state was actually
+ *  appended, `false` when the host SKIPPED it (the session is not publishable
+ *  yet, or it has no committed head to anchor at). A skip is a normal
+ *  outcome, not a failure: the same context is published at the next
+ *  boundary, which by then has a real anchor. The flag is what lets a caller
+ *  tell "the write landed" from "there was nothing to write yet" — ADR-0150's
+ *  delivery latch acknowledges only on a write that carried the digest, so a
+ *  skipped publication must not read as one. */
 async function publishSavedState(
   context: PersistenceContext,
   conversationId: string,
   request: RuntimeSavedStateRequest<NativeStateMessage>
-): Promise<void> {
-  if (!(await context.shouldPublish(conversationId))) return;
+): Promise<boolean> {
+  if (!(await context.shouldPublish(conversationId))) return false;
   const boundary = toNativeStateBoundary(request.boundary);
   const anchorEventId = await readHeadOrSkip(context, conversationId, request);
-  if (anchorEventId === null) return;
+  if (anchorEventId === null) return false;
   try {
     await context.store.appendNativeState({
       id: conversationId,
@@ -143,6 +151,7 @@ async function publishSavedState(
   } catch (err) {
     throw asPortError(err, conversationId, "publishSavedState");
   }
+  return true;
 }
 
 /**

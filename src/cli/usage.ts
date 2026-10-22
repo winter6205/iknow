@@ -1,6 +1,12 @@
 /**
  * CLI usage / version strings (stdout).
- * Bilingual (Chinese + English) product help for humans and scripts.
+ * English product help for humans and scripts.
+ *
+ * The text is data, not prose: one row per published fact inside the four
+ * sections, aligned by a single computed column so a row never hand-pads itself.
+ * Every flag the parser's scan chain recognizes must appear here —
+ * `tests/cli/parse-args-eval-state.test.ts` derives that coverage from the source
+ * rather than from this file's wording, so a flag can be added but not hidden.
  */
 import { readPackageVersion } from "../shared/package-version.js";
 
@@ -13,78 +19,156 @@ export function getVersion(): string {
   return readPackageVersion();
 }
 
+/** A published fact: the label column, then what it means. */
+type UsageRow = readonly [label: string, text: string];
+
+/**
+ * One shared column width per table: the widest label sets it, so renaming or
+ * adding an entry moves its own row and no other row's padding.
+ */
+function alignRows(rows: ReadonlyArray<UsageRow>): string {
+  const width = rows.reduce(
+    (max, [label]) => Math.max(max, label.length),
+    "  ".length
+  );
+  return rows
+    .map(([label, text]) => `  ${label.padEnd(width)}  ${text}`)
+    .join("\n");
+}
+
+const USAGE_ROWS: ReadonlyArray<UsageRow> = [
+  [
+    "iknow [options]",
+    "TTY: start the TUI in default mode; without a TTY: print this usage",
+  ],
+  [
+    'iknow "<query>" [options]',
+    "one-shot answer from the query (compat form of iknow ask)",
+  ],
+  [
+    "iknow <command> [options]",
+    "run one entry directly: chat / serve / trace / tui / ask / help",
+  ],
+  ["iknow -h | --help", "show this help"],
+  ["iknow -V | --version", "print the version"],
+];
+
+const COMMAND_ROWS: ReadonlyArray<UsageRow> = [
+  [
+    "iknow chat [options]",
+    "interactive chat REPL on a TTY, serial piped turns otherwise; --json starts with JSON answers",
+  ],
+  [
+    "iknow chat --resume <id>",
+    "continue an existing conversation in the chat REPL",
+  ],
+  [
+    'iknow ask "<query>" [options]',
+    "one-shot JSON answer (scripts / CI); names runState when run in eval state",
+  ],
+  [
+    "iknow serve [options]",
+    "HTTP session API + web UI, with the trace panel at /trace",
+  ],
+  [
+    "iknow trace [options]",
+    "open the trace panel (probes a running iknow serve first)",
+  ],
+  [
+    "iknow tui [session-id] [--auto-mode] [--yolo] [--no-sandbox]",
+    "multi-session terminal UI (needs Bun on PATH); a positional session-id resumes that session directly",
+  ],
+  ["iknow help", "show this help"],
+];
+
+const OPTION_ROWS: ReadonlyArray<UsageRow> = [
+  [
+    "--json",
+    "chat: start with JSON answers; on a bare TTY invocation it selects the chat route; on `iknow tui` it is a typed refusal (use iknow chat --json)",
+  ],
+  [
+    "--port <n>",
+    "serve listen port (default 8787); trace probes 8787, --separate uses 24881",
+  ],
+  ["--host <addr>", "serve / trace bind address (default 127.0.0.1)"],
+  ["--data-dir <dir>", "session pool root (default ~/.iknow)"],
+  [
+    "--workspace-root <dir>",
+    "per-root state root (settings writeback / worktrees); default process.cwd()",
+  ],
+  ["--max-bytes <n>", "trace read cap in bytes (default 8 MiB)"],
+  [
+    "--max-turns <n>",
+    "per-run loop turn cap for chat / ask / oneshot / tui (default unlimited); an explicit value wins over settings, and one run's cap is not the session's budget",
+  ],
+  [
+    "--resume <id>",
+    "chat: resume conversation <id> (iknow chat --resume <id>, or a bare --resume <id> on a TTY); the TUI resumes through the positional form `iknow tui <session-id>`, so `iknow tui --resume <id>` is a typed refusal; never combined with --eval-state",
+  ],
+  [
+    "--trace-out <path>",
+    "trace output directory for ask / serve / tui (default ./trace/)",
+  ],
+  ["--no-open", "trace: do not auto-open the browser (CI / headless)"],
+  ["--separate", "trace: keep the standalone reader process (port 24881)"],
+  [
+    "--auto-mode",
+    "tui only: start in full_auto (skip tool asks). A TUI posture: a bare launch that `--json` / `--resume <id>` routes to the chat REPL is a typed conflict, not a drop; on any other non-TUI head it is parsed and unused",
+  ],
+  [
+    "--yolo",
+    "tui only: the yolo preset — the bwrap fence retires entirely (network and filesystem unrestricted), the filesystem tier goes global AND the permission mode goes full_auto. Never persisted into settings or a session file; the in-session /yolo toggle asks for confirmation. chat / serve / ask / oneshot / trace carrying it get a typed non-zero exit and start nothing",
+  ],
+  [
+    "--no-sandbox",
+    "tui only: retires the bwrap fence for this session and sets the filesystem tier to global, WITHOUT touching the permission mode — no fence, questions still on; this is the one difference from --yolo, which also sets full_auto. Never persisted. chat / serve / ask / oneshot / trace carrying it get a typed non-zero exit and start nothing",
+  ],
+  [
+    "--eval-state",
+    "ask / oneshot only: ADR-0130 eval state — applies the yolo preset declaratively for one invocation (fence retired, permission full_auto, fs tier global) with no exit path, since an eval run's posture ends with the process. Not persisted. chat / serve / trace / tui carrying it, or combining it with --resume, get a typed non-zero exit",
+  ],
+];
+
+const NOTE_ROWS: ReadonlyArray<string> = [
+  'Routing: a bare `iknow` on a TTY starts the TUI; the same invocation without a TTY prints this usage and starts nothing; `iknow "<query>"` is a one-shot run.',
+  "A bare `--yolo`, `--no-sandbox` or `--auto-mode` on a TTY starts that same TUI holding the posture. `--no-sandbox` is the fence axis only: it never answers permission asks for you; `--yolo` answers them.",
+  "Neither preset is guardrail-free: the hard-wall still intercepts, writes still resolve against the live taskRoot, and neither is persisted. Refused outright when the process is running as root.",
+  "A bare `--json` or `--resume <id>` on a TTY keeps the chat route, so `iknow chat --resume <id>` and the bare form resume the same conversation.",
+  "A bare launch routed to chat by `--json` / `--resume <id>` and also carrying a TUI-only posture (`--auto-mode`) is refused as a typed conflict, because honoring one request would silently discard the other.",
+  "The same rule runs the other way: `iknow tui --json` and `iknow tui --resume <id>` are refused with a non-zero exit before any session starts, and each refusal names the supported form (`iknow chat --json` / `iknow tui <session-id>`).",
+  "A bare `--eval-state` prints this usage on either TTY state: a display path starts no session, so showing the flag is not an eval-state execution.",
+  'ask / oneshot is the headless eval entry, and `--eval-state` never routes an evaluation request to a TUI; its ask JSON names its own state (runState="eval_state").',
+  "Neither `--yolo` nor `--eval-state` is guardrail-free: the hard-wall still intercepts before full_auto, writes still resolve against the live taskRoot, and neither posture is persisted.",
+  "The workspace root defaults to the current directory (ADR-0019); `--workspace-root <dir>` overrides it.",
+  "The TUI needs Bun on PATH (OpenTUI native FFI). Any project can run it: a Node launch re-execs this same CLI under Bun with the cwd preserved, so the workspace default survives the handoff. `npm run dev:tui` is valid only at the iknow repo root.",
+  "A bare TTY launch carrying no TUI-only posture falls back to the chat REPL when Bun is missing, with one notice on stderr. A launch carrying `--yolo` or `--auto-mode`, and an explicit `iknow tui`, fail loudly with a non-zero exit instead of quietly starting a session without the posture.",
+  "trace is a session command: --yolo is incompatible with it (tui only) and is refused with a typed non-zero exit.",
+  "trace probes a running `iknow serve` (--host / --port) and then opens /trace in the browser; --no-open disables that. With no serve detected it exits 1 — start serve first, or use --separate to keep the standalone reader on ./trace/ (/api/v1/traces + /fields + /health). If an old ./trace.jsonl exists, run npx tsx scripts/trace-migrate.ts first.",
+  "serve exposes the session API and the trace panel at /trace; the contract lives in src/session-api/contract.ts.",
+  "An empty `ask` / query prints this usage and exits 1 (no default demo query).",
+  "ask prints JSON; chat prints the human view. Piped chat: IKNOW_CHAT_QUIET=1 drops the turn markers.",
+  "tui and serve share the ~/.iknow session pool; the TUI's /help lists its slash commands.",
+  "In-chat commands: /help /status /quit /json on|off /reset",
+];
+
 /** Full usage text (no trailing newline required by caller). */
 export function usageText(): string {
   const v = getVersion();
-  return `iknow ${v} — 工具调用 Agent 运行时 / tool-calling agent runtime
-
-用法 / Usage:
-  iknow                         交互对话（仅 TTY）/ interactive chat (TTY only)
-  iknow chat [options]          会话：TTY REPL 或按行管道 / chat (TTY REPL or piped lines)
-  iknow serve [options]         HTTP 会话 API + Web UI + trace 面板(/trace) / session API + web UI + trace panel
-  iknow trace [options]         打开 trace 面板（探测 serve）/ open trace panel (probes serve)
-  iknow tui [session-id] [--auto-mode] [--yolo] 终端多会话交互界面（需 Bun）/ multi-session TUI (needs Bun on PATH)
-  iknow ask "<query>" [options] 单次 JSON 回答（脚本/CI）/ one-shot JSON (scripts/CI)
-  iknow "<query>" [options]     同上（兼容写法）/ same as ask (compat)
-  iknow -h | --help             显示本帮助 / show this help
-  iknow -V | --version          打印版本 / print version
-
-选项 / Options:
-  --json                        聊天开始即用 JSON 输出 / chat starts with JSON answers
-  --port <n>                    serve 监听端口（默认 8787）；trace 默认探测 8787、--separate 用 24881
-                                / serve port (default 8787); trace probes 8787, --separate uses 24881
-  --host <addr>                 serve/trace 绑定地址，默认 127.0.0.1
-                                / serve/trace host (default 127.0.0.1)
-  --data-dir <dir>              会话池根目录，默认 ~/.iknow / session pool root (default ~/.iknow)
-  --workspace-root <dir>        per-root 状态根目录（settings 写回 / worktrees），默认 process.cwd()
-                                / per-root state root (settings writeback / worktrees), default process.cwd()
-  --max-bytes <n>               trace 单次读取字节上限，默认 8 MiB / trace read cap (default 8 MiB)
-  --no-open                     trace 不自动打开浏览器（CI/headless）/ trace: do not auto-open browser (CI/headless)
-  --separate                    trace 保留独立检测进程（#183 旧行为，端口 24881）
-                                / trace: keep standalone inspection process (#183 behavior, port 24881)
-  --auto-mode                   tui 启动即 full_auto（跳过工具 ask）/ tui starts in full_auto (skip tool asks)
-                                \`iknow tui --auto-mode\`（iknow 仓库根也可 npm run dev:tui -- --auto-mode）
-                                / \`iknow tui --auto-mode\` (or npm run dev:tui -- --auto-mode at the iknow repo root)
-  --yolo                        仅 tui：无沙箱模式（bwrap 围栏整体退场，网络与文件系统不限）
-                                / tui only: no-sandbox mode (the bwrap fence is retired entirely)
-                                不落盘（不进 settings / session 文件）；会话内切换（/yolo）需确认
-                                / not persisted; the in-session /yolo toggle asks for confirmation
-                                chat / serve / ask / oneshot / trace 携带 → 报错并非零退出、不启动
-                                / rejected with a typed error (non-zero exit) for those five commands
-  --eval-state                  仅 ask / oneshot：ADR-0130 评测态（围栏整体退场、不落盘、无需 TUI）
-                                / ask / oneshot only: ADR-0130 eval state — the bwrap fence retires
-                                entirely, and the posture is never persisted (per-invocation only)
-                                权限 full_auto + fs 档 global；hard-wall 与 taskRoot 写目标不随之退场
-                                / permission full_auto, fs tier global; the hard-wall and the live
-                                taskRoot write target do not retire with the fence
-                                chat / serve / trace / tui 携带，或与 --resume 同给 → 报错并非零退出、不启动
-                                / rejected with a typed error (non-zero exit) on those entries, or when
-                                combined with --resume; ask 的 JSON 以 runState="eval_state" 标明本态
-                                / the ask JSON artifact names its own state (runState="eval_state")
-
-会话内命令 / In-chat commands:
-  /help  /status  /quit  /json on|off  /reset
-
-说明 / Notes:
-  • TTY 无参数 → chat；管道/非 TTY 无参数 → 用法 / no args: TTY→chat, piped→usage
-  • 空 ask/query → 用法 + exit 1（无默认 demo 问句）/ empty ask → usage + exit 1
-  • ask 输出 JSON；chat 默认人类可读 / ask→JSON, chat→human view
-  • serve 打开 http://host:port/ ；API 见 src/session-api/contract.ts；trace 面板在 /trace
-• trace 默认探测 iknow serve（--host/--port 指定目标）后打开 /trace 面板并自动开浏览器
-    （--no-open 关闭）；检测不到 serve → exit 1 提示先起 serve 或 --separate
-    / trace probes iknow serve then opens /trace (auto browser; --no-open disables);
-    no serve → exit 1, start serve first or use --separate
-  • trace 属会话命令，--yolo 与其不兼容（仅 tui 可达）→ 报错并非零退出、不启动
-    / trace is a session command: --yolo is incompatible (tui only) and is rejected
-• trace --separate 保留独立进程读 ./trace/ 目录（/api/v1/traces + /fields + /health）；
-    写侧由 serve/chat/ask 的 --trace-out 负责；检测到旧 ./trace.jsonl 需先跑迁移脚本
-    / trace --separate keeps the standalone reader on ./trace/;
-    if an old ./trace.jsonl exists, run npx tsx scripts/trace-migrate.ts first
-  • tui 需要 PATH 上有 Bun（OpenTUI 原生 FFI 仅 Bun 支持）。任意项目直接 \`iknow tui\`：Node 启动会自动改用 Bun 重跑同一 CLI，cwd 不变（workspace 默认 cwd，ADR-0019）。
-    / tui needs Bun on PATH: run \`iknow tui\` from any project — a Node launch re-execs the same CLI under Bun with the cwd preserved (workspace = cwd, ADR-0019).
-    \`npm run dev:tui\` 只在 iknow 仓库根有效 / only valid at the iknow repo root.
-  • tui 与 serve 共享 ~/.iknow 会话池；tui 内 /help 看 slash 词表 / tui shares the pool
-  • 管道可设 IKNOW_CHAT_QUIET=1 关闭 turn 标记 / pipe: IKNOW_CHAT_QUIET=1 quiet markers`;
+  return [
+    `iknow ${v} — tool-calling agent runtime`,
+    "",
+    "Usage:",
+    alignRows(USAGE_ROWS),
+    "",
+    "Options:",
+    alignRows(OPTION_ROWS),
+    "",
+    "Commands:",
+    alignRows(COMMAND_ROWS),
+    "",
+    "Notes:",
+    NOTE_ROWS.map((note) => `  • ${note}`).join("\n"),
+  ].join("\n");
 }
 
 /** Print usage to stdout. */
@@ -92,16 +176,25 @@ export function printUsage(): void {
   process.stdout.write(`${usageText()}\n`);
 }
 
-/** Fallback intercept message for when Node runs `tui` but PATH has no Bun. cliFile = absolute path of this process's CLI entry. */
+/**
+ * Fallback intercept message for when Node runs `tui` but PATH has no Bun.
+ * cliFile = absolute path of this process's CLI entry.
+ *
+ * Reached only by a launch that asked for the TUI on its own (an explicit `tui`
+ * head, or a bare TTY launch carrying a TUI-only posture): an ordinary bare
+ * launch falls back to chat instead, so this copy must not read as a general
+ * "the terminal UI is unavailable" notice.
+ */
 export function tuiNodeInterceptMessage(cliFile: string): string {
   return (
-    `未找到 Bun，TUI 未启动（OpenTUI 原生 FFI 仅 Bun 支持；当前进程是 Node）。\n` +
-    `安装 Bun（https://bun.sh）后，任意项目直接 \`iknow tui\` 即可（Node 会自动用 Bun 重跑）。\n` +
-    `chat / ask / serve 仍可用 Node。\n` +
+    `Bun not found, so the TUI did not start (OpenTUI's native FFI needs Bun; this process is Node).\n` +
+    `Install Bun (https://bun.sh) and \`iknow tui\` works from any project: a Node launch re-execs this same CLI file under Bun with the cwd preserved.\n` +
+    `chat / ask / serve keep running on Node, and a plain \`iknow\` on a TTY falls back to the chat REPL by itself.\n` +
     `\n` +
-    `或现在手动执行（在目标项目目录，workspace 默认 cwd）：\n` +
+    `This launch asked for the TUI explicitly (iknow tui, or a bare --yolo / --auto-mode), so it stops here rather than starting a session without that posture.\n` +
+    `Or run it by hand now, in the target project directory (workspace defaults to cwd):\n` +
     `  bun ${JSON.stringify(cliFile)} tui\n` +
     `\n` +
-    `仅 iknow 仓库根才有 npm run dev:tui。\n`
+    `npm run dev:tui exists only at the iknow repo root.\n`
   );
 }

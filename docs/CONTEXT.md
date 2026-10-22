@@ -89,11 +89,14 @@ _Avoid_: 把 provider id 自动拼进请求；把路由 ID 整段当网关模型
 **LoopTrace**: `run()` 的第二返回面 `{ result, trace }`（TurnTrace / Totals 两型）—— A 层结构元数据 trace（每回合 supplierStop / toolCall kind / durationMs / cancelKind + 一次性 reduce 的 totals），严格不含 payload；与 append-only messages 唯一权威解耦，immutable 累积。`cancelKind` 是取消来源四值枚举 `"none" | "callerAbort" | "timerTimeout" | "hostCancel"`.
 _Avoid_: 在 trace 里塞 input/output/token/cost（B 层字段）——该禁令仅对 LoopTrace 本体，不外延到 TraceService（`LlmCallRecord` 承载 token usage 是 ADR-0008 裁决的合规落点）
 
-**usage (token accounting)**: LLM API 每次成功调用回传的 token 计费（`inputTokens`/`outputTokens` 必填 + `cacheCreationInputTokens`/`cacheReadInputTokens` nullable，对齐 SDK `Usage`）；权威落点 = TraceService `LlmCallRecord`（观测真值，错误分支整条缺席），运行时暴露面仅 `RunResult.lastUsage`（TUI 显示读者，017:67 的有记录例外）。chars/N 估算永不进核算 / 显示；闸侧只在无实测 occupancy 时作后备（ADR-0008 / ADR-0118）。
-_Avoid_: 用估算值顶替 trace 真值；为无读者的账本建运行时承载面；把 usage 塞进 LoopTrace
+**usage (token accounting)**: LLM API 每次成功调用回传的 token 计费（`inputTokens`/`outputTokens` 必填 + `cacheCreationInputTokens`/`cacheReadInputTokens` nullable，对齐 SDK `Usage`）；权威落点 = TraceService `LlmCallRecord`（观测真值，错误分支整条缺席），运行时暴露面仅 `RunResult.lastUsage`（TUI 显示读者，017:67 的有记录例外）。核算恒为实测：chars/N 或投影估算永不进 trace / `lastUsage` / 账单；TUI 条只显示 confirmed 输入侧占用，投影只作 image-bearing 闸的分子（ADR-0008 2026-10-22 修订）。闸侧在无实测 occupancy 时以锚定投影为后备（ADR-0118 修订）。
+_Avoid_: 用估算值顶替 trace 真值 / 进核算或账单；为无读者的账本建运行时承载面；把 usage 塞进 LoopTrace
 
-**context usage (display)**: 上下文用量显示 = TUI `ContextBar`（`src/tui/context-bar.tsx`）+ Web `UsageChip`（`web/src/components/UsageChip.tsx`，挂在 Composer）共同消费 `RunResult.lastUsage`（ADR-0008 D5）；wire 字段 = `TurnAnswerDto.lastUsage?` + `HealthResponse.contextWindow`（`src/session-api/` 投影，web 镜像于 `web/src/api/types.ts`）。百分比分子 = **context occupancy**；分母 = **策略预算窗口**（来源 `env.compress.contextWindow`，env var `IKNOW_MODEL_CONTEXT_WINDOW`，默认 256000）；Running 时按 **call-beat** 显示：读数 = 最近一次模型调用发出前的实测输入占用（`context_usage` 流事件 pre_call），或该次调用成功结束后的 API usage 校正（post_call）——随每次调用更新，不等整轮 `run()` 结束；同一次调用期间条可保持调用前值（检测在调用前，不在生成中途刷输出 token）。会话曾有成功 usage 时，`attachSession` / Web load 从会话文件回放的 lastUsage 或最后一条 agent answer 的 `lastUsage` 带回读数，重开不显示 0%。
-_Avoid_: ContextUsageStrip；用 chars/N 估算顶替 lastUsage 真值（无成功 usage 字段缺席或 null，条画 0%）；为显示引入第二份 token 账本；让 contextWindow 走 `deps.compress`（避免触发 auto-compaction 行为变化）；用供应商 1M 卡当分母；在生成中途按已输出 token 刷条；把 countTokens 总量再加 cache
+**context usage (display)**: 上下文用量显示 = TUI `ContextBar`（`src/tui/context-bar.tsx`）+ Web `UsageChip`（`web/src/components/UsageChip.tsx`，挂在 Composer）消费 `RunResult.lastUsage`（ADR-0008 D5）；wire 字段 = `TurnAnswerDto.lastUsage?` + `HealthResponse.contextWindow`（`src/session-api/` 投影，web 镜像于 `web/src/api/types.ts`）。百分比分子 = **context occupancy**；分母 = **策略预算窗口**（来源 `env.compress.contextWindow`，env var `IKNOW_MODEL_CONTEXT_WINDOW`，默认 256000）；Running 时按 **call-beat** 显示：读数 = 最近一次模型调用发出前的实测输入占用（`context_usage` 流事件 pre_call），或该次调用成功结束后的 API usage 校正（post_call）——随每次调用更新，不等整轮 `run()` 结束；同一次调用期间条可保持调用前值（检测在调用前，不在生成中途刷输出 token）。请求含 image block 时（网关把图片当文本计费），pre_call 改发 **`phase:"projected"` 变体**：不带 `usage` 字段，只带 occupancy / `projectedNext`。TUI 只消费 measured 拍（pre_call / post_call）并量 `NN%`；`phase:"projected"` 拍与事件里的 `projectedNext` 只作 image-bearing 闸的分子，**不刷条**（ADR-0008 2026-10-22 修订）。Web 无实时通道，仍显示 confirmed `lastUsage`（live 投影是记录在案的后续项）。投影永不写 `lastUsage`，TUI 的占用只进 UI-only 的 display occupancy。会话曾有成功 usage 时，`attachSession` / Web load 从会话文件回放的 lastUsage 或最后一条 agent answer 的 `lastUsage` 带回读数（首个事件到达前也用它），重开不显示 0%。
+_Avoid_: ContextUsageStrip；用 chars/N 估算顶替 lastUsage 真值（无成功 usage 字段缺席或 null，条画 0%）；为显示引入第二份 token 账本；把 projected 事件写进 `lastUsage` 或当 confirmed usage；让 contextWindow 走 `deps.compress`（避免触发 auto-compaction 行为变化）；用供应商 1M 卡当分母；在生成中途按已输出 token 刷条；把 countTokens 总量再加 cache
+
+**token speed**: 上下文条的生成速度读数 = **生成输出 token / 生成秒**（TUI-owned 显示层，`src/tui/token-speed.ts`）。live 值从首个输出 delta（`text_delta` / `thinking_delta` / `tool_input_delta`）起算，按约 1 秒环形窗口估算 delta 文本 / tool-input JSON，标 `~`；final 值在 post_call 用 `usage.outputTokens / generationMs`（首个输出片段到 `finalMessage()` 的墙钟）。首个 token 等待与工具执行都不计入，下一次模型调用重置窗口；live 与 final 是同一个量（估算 vs 供应商精确计数），post_call 时数字可以跳一下，不是 bug。缺 `outputTokens` / `generationMs` 时 final 保留 `~`、不产生可聚合的精确值。只上屏，不进 usage / 持久化。显示侧：速率与占用读数之间用一个 `·` 分隔；live 重绘最多每 800 ms 一次（不是每个 stream fragment 一次）；采样窗口空掉、或下一次调用还在等首个 token 时，条保持上一次显示的速率，不在轮次中途回落到 0；轮次结束显示加权轮次平均（turn-end weighted average）。
+_Avoid_: 把首 token 等待或工具执行算进 tok/s；把 live 估算当最终 usage；为显示建第二份 token 账本；把 post_call 的估算→精确跳变当 bug
 
 **viewport mount**: ChatView 只把 scrollbox 当前视口加 overscan 内的 transcript 条目挂进 OpenTUI 树；滚动文档仍覆盖全量 `session.messages` 与方案 B banner，高度来自布局实测。
 _Avoid_: 固定条数尾窗；行账 / 行窗口；把 LLM `/compact` 当 UI 树裁剪
@@ -254,16 +257,46 @@ _Avoid_: apt 装 socat 当产品前置；名单内直连公网当过滤器；per
 _Avoid_: 删掉 settings 网络段当幽灵清理；与 network-guard 混成一条栈；开网无闸当允许集
 
 **预放行档（builtin preset）**: 允许集的代码承载 defaults（GitHub 族、npm/yarn、PyPI、crates、Go module 代理、Playwright 下载）。模型供应商 API 与 Docker/GitLab 不入档。ADR-0104 / ADR-0107。
-_Avoid_: 文档推荐配置当 preset；用「不进 preset」当唯一防 LLM key 手段却让 bash 无闸
+_Avoid_: 文档推荐配置当 preset；用「不进 preset」当唯一防 LLM key 手段却让 bash 无闸；**与「预设（姿态预设）」混名**——本条是允许集的代码底档，那个是围栏轴 × 权限轴的声明组合
 
 **凭据 sentinel（credential sentinel）**: 围栏内假值、真值只在出口代理对放行域假换真（需 TLS 终止）。0107 **不自动启用**；可见面仍走 secret-roundtrip mask。ADR-0105。
 _Avoid_: 与 mask 混名；当成 0107 必做面
 
-**yolo 模式 (yolo mode)**（`--yolo`）: the operator-confirmed no-sandbox posture — the bwrap fence **retires wholesale** (not "sandbox still on with permissions relaxed"), and all four routes run bare in agreement (foreground bash / background spawn / verify / subagent worker); with no bwrap there is no egress seam and no domain gate. On entry `fsMode: workspace` is force-switched back to `global` (holders only, user-layer settings untouched) and the fence retires; the **permission axis is not touched** — ADR-0139 withdrew the original "entry goes to `full_auto`" clause, so a yolo session keeps whatever permission posture it had, and the red marker reports the fence only. Exit restores the pre-entry `fsMode` snapshot. Two entries only: `--yolo` before the TUI starts (flag), and in-session `/yolo` + confirmation modal; the flag on `chat` / `serve` / `ask` / `oneshot` / `trace` = typed error, non-zero exit. Persistent red marker on the mode row; nothing persisted; orthogonal to the worktree gate; **it is the explicit exemption face of `沙箱纪律` #653 G3 and ADR-0097 invariant #1 (`--unshare-net` always present)**, an exemption **评测态** reuses through its own named entry rather than a widened `--yolo`. #1035 / ADR-0119 / ADR-0130.
-_Avoid_: treating yolo as a fourth **PermissionMode** (`full_auto` keeps its name, the domain still has three values); treating yolo as "sandbox plus relaxed permissions"; treating yolo as turning off the domain gate; treating `full_auto` as unrestricted networking; half-bare operation (foreground only); silent in-session switching; persisting / settings / config-panel rows; skipping the worktree gate; using `defaultMode: "yolo"` as an entry; describing the exemption as ADR-0097 being revoked (non-yolo paths stay byte-identical); entering **评测态** through this flag; **反过来把权限轴当成随围栏退场（yolo 进入时改权限档位）**——权限轴与围栏轴互不写入（ADR-0139）
+**出口代理体（egress agent）**: 出口代理缝里**会话级常驻**的那一半——持有中继解析、代理口令、持久 CA 与信任包、凭据假值层（sentinel registry + masked store + masked binds）。首次需要时懒启动，profile 只装一次；引擎退出时销毁（连带关掉仍活着的调用端点）。**它不是代理进程**，也**不持有任何一次调用的策略**。ADR-0146。
+_Avoid_: 叫它 egress session（那是旧的「每次调用一套」语义）；把它当代理进程；把调用级策略塞进代理体；以为它按会话重建（serve 下按 root）
 
-**评测态 (eval state)**: benchmark 评测的运行姿态——与 **yolo 模式** 同一套**围栏**组合（`fsMode` → **全局档**、bwrap 围栏与 **出口代理缝** 整体退场、四路裸跑），但由无头入口上一个显式、具名、非默认的开关进入，不是把 `--yolo` 放宽到公共命令。权限姿态是 `full_auto`，但那是**评测态自己写的**，不是共载体的证据——基准跑起来没人能回答询问，所以它必须留在不问人的档上（ADR-0139 §3 重新裁定，撤下了 ADR-0130 原句的"structural parity"读法）。**hard-wall** 与 which-tree 轴不随围栏退场；此态下的分数不构成关于围栏的证据。ADR-0130。
-_Avoid_: 当成 yolo 的非 TUI 版本（两个入口没合并，`--yolo` 在五个公共命令上仍是 typed error）；当成「完全无护栏」；拿它的数字证明围栏有效；靠默认值 / settings / 静默 env 进入
+**调用端点（call endpoint）**: 出口代理缝里**每次调用独享**的那一半——一枚路径带一次性调用 id、权限 0600 的 unix socket（bind 进本次调用的 netns）、本次调用自己的放行策略与违规记录、以及本次调用的围栏缝参数。一次调用结束即关闭 socket、断连接、删文件。**归属精确**：违规只落产生它的那次调用。ADR-0146。
+_Avoid_: 从请求头读调用标识来定位调用；把调用端点当代理体；调用结束留着 socket 文件
+
+**围栏输入（fence input）**: 一次调用装配围栏所需的那份冻结快照——homeRoot / workspaceRoot / fsMode / waveRoot / tmpDir，以及受保护目标清单与围栏退役判断。**同一次调用里挂载与 EROFS 提示必须同源**。围栏退役判断按调用在 handler 入口冻结，**不进任何缓存**；bwrap 可用性每次调用重查。受保护目标清单的**走查快照**（走查到的匹配 + 走查记下的目录 fs 身份 dev/ino/mtimeNs/ctimeNs）按会话缓存——显式传给围栏装配，从不模块级缓存：缓存的是**走查**不是**判定**。复用前只做**stat 身份核对**（不重读目录、不进任何拒绝路径）：每个走查过的目录身份都没变 ⇒ 那棵树可证就是走查时那棵树 ⇒ 匹配集仍成立，直接复用；任一目录变了 ⇒ 快照**作废**，本次装配走常规的 awaited 预走重查——于是新出现的凭据由那次重查找到并由**那一次调用**遮蔽（与无缓存时完全一致），不会拿旧匹配集当答案、也不会因此拒绝。身份核对在绑载合成前同步完成，中间不插 await；重查那条路上预走仍是装围栏前的最后一次 await。ADR-0141 / ADR-0146。
+_Avoid_: 把「检查 bwrap 在不在」的结果缓存起来；让围栏挂载与提示各读一份快照；把退役判断读成第二处 yolo 判断；把走查快照当可信结论直接用（跳过身份核对）；快照作废时当成拒绝（应当重走）；把退役判断或 bwrap 探测塞进走查快照的缓存键
+
+**凭据读遮蔽（credential read mask）**: 围栏内把凭据路径读成 `/dev/null` 的那层——凭据子树（`~/.ssh`、`~/.aws` 等）里的每个文件都以空设备呈现，围栏外仍见真值。**凭据路径来自静态种子清单 + 每次装配物化的名字规则匹配**；新增凭据在下一次调用即被遮蔽。ADR-0097 / ADR-0146。
+_Avoid_: 与 secret-roundtrip mask（文本里的密钥占位）混名；把凭据**值**的登记表当凭据**路径**的来源
+
+**遮蔽计划（mask plan）**: 凭据读遮蔽的编译结果——哪些路径被 `/dev/null` 盖住、哪些只读绑定、以及占位目录怎么摆。**按会话缓存**（显式传给围栏工厂，从不模块级缓存），失效键 = 计划真实输入的内容摘要 + 计划所依赖路径的 fs 身份（dev/ino/mtimeNs/ctimeNs/size，子树按目录粒度记）。受保护目标清单与物化匹配**不进这个缓存**（清单的走查快照另有一个会话级 holder，见「围栏输入」）。ADR-0146。
+_Avoid_: 把清单当遮蔽计划缓存（清单带一次性 awaited 预走，缓存它会退回阻塞同步走）；把「登记了新的密钥值」当遮蔽计划的失效键（值登记不决定遮蔽哪些路径）；把走查快照当判定缓存（跳过身份核对就等于拿旧匹配集当答案）；快照作废时闭门拒绝（应当重走）
+
+**yolo 模式 (yolo mode)**（`--yolo`）: the **yolo 预设** — one declared act that applies a triple to the **会话覆盖层**: the bwrap fence **retired** wholesale (not "sandbox still on with permissions relaxed"), `fsMode` → **全局档**, and the permission axis → `full_auto`; all four routes run bare in agreement (foreground bash / background spawn / verify / subagent worker); with no bwrap there is no egress seam and no domain gate. Two entries only: `--yolo` before the TUI starts — a launch flag with **no modal**, because the flag the operator typed is itself the explicit act — and in-session `/yolo` **plus** the confirmation modal; the flag on `chat` / `serve` / `ask` / `oneshot` / `trace` = typed error, non-zero exit. Exit is one act that clears the **whole overlay**; there is no pre-entry `fsMode` snapshot to restore, and a user change of any of the three axes this preset **declares** is that same clear. **hard-wall** and security review intercept as before (both are pre-filters, above every mode branch). Persistent red marker on the mode row; nothing persisted; orthogonal to the worktree gate; **it is the explicit exemption face of `沙箱纪律` #653 G3 and ADR-0097 invariant #1 (`--unshare-net` always present)**, an exemption **评测态** reuses by declaring this preset headlessly rather than by a widened `--yolo`. #1035 / ADR-0119 / ADR-0130 / ADR-0141.
+_Avoid_: treating yolo as a **value** of either axis (it names a **预设** — the fence reads `fenceRetired`, and the permission domain still has exactly three values); treating yolo as "sandbox plus relaxed permissions"; treating yolo as turning off the domain gate; treating `full_auto` as unrestricted networking; **说 yolo「不碰权限轴」**（ADR-0139 的读法，ADR-0141 已撤回：yolo 预设现在自己声明 `full_auto`）; **把 yolo 的退出当成恢复某个 `fsMode` 快照**（覆盖层是 memory-only，退出是清掉整个覆盖层）; **launch 时弹确认模态**（模态只属于 in-session 入口）; **拿 `--no-sandbox` 当 yolo 的别名**（那个预设只声明两轴，不碰权限）; half-bare operation (foreground only); silent in-session switching; persisting / settings write-back / config-panel rows; skipping the worktree gate; using `defaultMode: "yolo"` as an entry; describing the exemption as ADR-0097 being revoked (non-yolo paths stay byte-identical); entering **评测态** through this flag
+
+**评测态 (eval state)**: benchmark 评测的运行姿态——**声明式地应用 yolo 预设**（`fsMode` → **全局档**、bwrap 围栏与 **出口代理缝** 整体退场、四路裸跑、权限 → **自动模式**），由无头入口上一个显式、具名、非默认的开关进入，不经 in-session 控制器、不是把 `--yolo` 放宽到公共命令。ADR-0141 把 `full_auto` 收进预设之后，评测态不再有「自己另写一次权限」这回事——那条写就是预设的写；三者仍是同一个组合，所以 ADR-0130 §2 的测量主张不动、分数与既有 run 可比。为什么必须留在不问人的档：基准跑起来没人能回答询问。此态**没有退出语义**（一次调用的姿态随进程结束）。**hard-wall** 与 which-tree 轴不随围栏退场；此态下的分数不构成关于围栏的证据。ADR-0130 / ADR-0141。
+_Avoid_: 当成 yolo 的非 TUI 版本（两个入口没合并，`--yolo` 在五个公共命令上仍是 typed error）；当成「完全无护栏」；拿它的数字证明围栏有效；靠默认值 / settings / 静默 env 进入；**把「评测态自己写权限、所以不是共载体」当成现行说法**（ADR-0139 §3 的读法，ADR-0141 已由「声明式应用预设」取代）；给它安一个退出语义
+
+**预设（preset / 姿态预设）**: 一个**声明动作**同时给定 **围栏轴** 与 **权限轴** 的组合，坐在两条轴**之上**——它不是任何一条轴的第四个值，也不是护栏的旁路（**hard-wall** 与 security review 在每个预设内和预设外都照拦）。现行两个：**yolo 预设**（围栏退役 + 全局档 + `full_auto`）与 **no-sandbox 预设**（围栏退役 + 全局档 + 权限**不动**）。三个特征合起来才叫预设：一次声明、**有出口**、UI 说得出自己在哪个预设里；两个 flag 凑出同一个三元组（`--no-sandbox` + `--auto-mode`）是**组合（composition）**，不是 **yolo 预设**——组合里没有任何预设声明权限轴，所以没有**联合退出**（`--no-sandbox` 预设仍生效、仍可单独清掉），也不亮 YOLO 徽标。ADR-0141。
+_Avoid_: 把预设当成轴的取值；把预设当成护栏旁路；把两个 flag 的配对叫预设；把 `--auto-mode` 叫预设（它只动权限轴）；给预设加持久化
+
+**no-sandbox 档（`--no-sandbox`）**: 第二个预设——只声明 **围栏轴**（`fenceRetired` + `fsMode` → 全局档），**故意不碰权限轴**，所以它单独到不了 `plan` + 无围栏这类姿态，也永远不该亮 YOLO 徽标。入口与 yolo 同为 launch flag（无模态）；本期无 in-session 命令（ADR-0141 P6 已决定，不加 `/no-sandbox`）。它是 ADR-0139 的产物名——`--yolo` 曾经做的正是这件事，后来按内容命名而不是继承标签。与 `--auto-mode` **并列允许**：两者从两个档位合成 yolo 的三元组，显示为 **无沙箱标识 + `Auto`，无徽标**。这个组合里 `--no-sandbox` 预设**仍然生效**、仍可被单独清掉；只是**没有任何预设声明权限轴**，所以中途改权限不清任何东西（会话停在围栏退役 + `plan`/`default`，不变量只约束 `fsMode` × 围栏）。ADR-0139 §2 / ADR-0141。
+_Avoid_: 当 yolo 的别名；以为它顺带把权限设成 `full_auto`；给它挂 YOLO 徽标；为这个组合编造一个**联合退出**动作；以为 `--no-sandbox` 后中途改权限会清掉围栏
+
+**围栏退役（fenceRetired）**: **围栏层唯一的第二个输入**——一个由**生效配置**算出的布尔，决定 bwrap 构造整体退场（四路同一工厂分支），`yolo` 这个名字**不进**围栏层。它**从不作为条目标签存储**：`fsMode` 与 `fenceRetired` 是围栏轴的两项，预设名只是它们的一种来路。ADR-0141。
+_Avoid_: 把 `yolo` 当围栏层的输入名；把 `fenceRetired` 持久化成一个档位；从预设标签反推围栏状态而绕过生效配置
+
+**会话覆盖层（session overlay）**: 预设写下的那一层——**只在内存**，不落盘、不进 settings、没有快照可回滚。生效值 = 持久 settings < 启动 flag < **会话覆盖层**。清除是**一个动作清整层**（连带丢掉其间任何用户改动），触发条件是「用户把一个值加到了**这个预设声明的某条轴**上」：两个预设都在 `fsMode` 上触发，只有 yolo 预设还在权限轴上触发；Shift+Tab 的 `full_auto → full_auto+graph` 那一跳只动 **graph 轴**，无预设声明它，因此不清档。yolo 退出之所以看着像「改权限 ⇒ 改围栏」，那是**预设撤掉自己的声明**，不是原语层一条轴写入另一条轴。ADR-0141。
+_Avoid_: 给覆盖层加 snapshot/restore；把「任何一次用户改动」当清档触发器；把 settings 写入当清档面（权限轴今日**没有** settings 写回，改档只翻 holder）；让持久层或启动 flag 反过来覆盖覆盖层
+
+**无沙箱标识**: 模式行上的常驻标记，判据是**生效配置**（围栏退役）**∪** 在围栏退役期间 spawn 且仍存活的后代（subagent、后台任务）——绝不从「哪个入口抬起来的」推导。因此 `--no-sandbox` 与组合姿态都亮它；**YOLO 徽标**只表示 **yolo 预设未被改动**，ruling 3 清档即消失。收掉逐轴标签的依据是「行上某个可见指示已经说了那条轴」，**不是**「有预设生效」：yolo 预设未改动时显示 **YOLO + 无沙箱** 且不再拼接（一个词说了它声明的三条轴）；`--no-sandbox` 没有徽标，所以 **无沙箱 + 权限标签** 并存。ADR-0141 ruling 5 / 6。
+_Avoid_: 从预设名或 holder 反推标记；把徽标和标记混成一个；后代进程消失后靠它继续宣称无沙箱；把「有预设生效」当成可以藏起权限标签的理由
 
 **声明工具面 vs 实际工具面**: `SubAgentDefinition.disallowedTools` 写进 `WorkerEnvelope` 的是声明面；worker 进程装配后真正可被模型调用的工具集是实际面，二者必须相等——裁剪发生在 `createAciRegistry(tools)` **之前**的 def-list 期（`createDefaultAciRegistry` 工厂内），由构造期快照保证，不事后修补（`AciRegistry.inner` 是冻结快照）。
 _Avoid_: 给 `AciRegistry` 加 `.tools` 字段在产物上事后裁剪；声明 deny-list 但 worker 不消费（#468 修复对象）
@@ -319,8 +352,8 @@ _Avoid_: 文件名含 cursor / Cursor；旧名兼容层
 **memory archive**: 热目录外的软禁归档（`memoryDir/archive/<slug>.md`）。召回 / 预取 / 抽取近邻 / 梦境输入 / cap **不扫** archive；不是硬删。
 _Avoid_: 把归档当硬删；热扫描仍遍历 archive
 
-**chat REPL** / **product CLI**: TTY interactive `iknow chat`（或裸 TTY invoke）的人类视图；管道模式为串行非终端 turn。
-_Avoid_: 把 one-shot JSON `ask` 当作交互产品；管道上 `terminal: true`；空 `ask` 时塞默认 demo query
+**chat REPL** / **product CLI**: TTY interactive `iknow chat` 的人类视图；管道模式为串行非终端 turn。裸 TTY invoke 不属此词条 —— 它进 TUI（ADR-0119 Amendment 2026-10-10）；裸 `--json` / `--resume <id>` 仍落回此 REPL。
+_Avoid_: 把 one-shot JSON `ask` 当作交互产品；把裸 TTY invoke 当作 chat；管道上 `terminal: true`；空 `ask` 时塞默认 demo query
 
 **oneshot / ask**: 脚本/CI 路径：单次问题 -> JSON on stdout；空 query -> usage + exit 1。
 _Avoid_: 空参数时塞中文 demo query
@@ -367,7 +400,7 @@ _Avoid_: 零依赖静态壳当产品；展示层省略 trace 字段
 **正常模式**: 默认 HITL 产品：每轮说完把回合还给用户；完成向 LLM 关闭；硬失败打回干活模型。
 _Avoid_: 每个 completed 请 LLM 评「做完没」；先问有没有 goal 再决定怎么判；把正常模式当成「没开 goal」的别名
 
-**自动模式**: 权限轴 `PermissionMode` 的 `full_auto`：不逐次征求批准、对 mutating 工具直接放行的会话级权限模式；**范围是围栏当前档位（fsMode）允许到达的地方——越出该范围时问一次「这次要不要放行」，答案只管这一次，不改 fsMode、不落盘**；本轮不问人，跑完仍把键盘还给用户。hard-wall 与 security review 仍先拦。Shift+Tab / 徽标上的 Auto 就是它；标签靠这条边界语义成立，不含分类器预筛。项目 settings 不得写入该值（`defaultMode: "full_auto"` 加载 fail-loud，仓库不得自授自动模式）。ADR-0032 / ADR-0090 / ADR-0140。
+**自动模式**: 权限轴 `PermissionMode` 的 `full_auto`：不逐次征求批准、对 mutating 工具直接放行的会话级权限模式；**范围是围栏当前档位（fsMode）允许到达的地方——越出该范围时问一次「这次要不要放行」，答案只管这一次，不改 fsMode、不落盘**；本轮不问人，跑完仍把键盘还给用户。hard-wall 与 security review 仍先拦。Shift+Tab / 徽标上的 Auto 就是它；标签靠这条边界语义成立，不含分类器预筛。它可以由三条来路落到 holder：**启动 flag** `--auto-mode`（只动权限轴，不碰围栏）、**会话覆盖层**（**yolo 预设**声明它，`--eval-state` 走同一声明；**no-sandbox 预设不碰它**）、in-session 的 `/permissions full_auto` 或 Shift+Tab；三条都不写盘。项目 settings 不得写入该值（`defaultMode: "full_auto"` 加载 fail-loud，仓库不得自授自动模式）。ADR-0032 / ADR-0090 / ADR-0140 / ADR-0141。
 _Avoid_: 把 `/goal` 续跑叫自动模式；全自动模式；第三种 PermissionMode；项目 settings 自授 `full_auto`；**把自动模式当成无边界放行**；把越界询问当成一次性的模式变更（它只管这一次调用）
 
 **goal 功能**: 斜杠钉上会话使命后的续跑：`/goal <text>` 写入后 hub 用 `goal.text` 接着跑，直到条件成立、判官 Impossible、不可恢复错误、可选轮次上限或 `/goal clear`；空转停循环但 goal 可留着。不是模式，不进 Shift+Tab。ADR-0032。
@@ -394,14 +427,20 @@ _Avoid_: 把清单并进 `run_graph`；进 plan 相位写计划再执行；同�
 **环境现势**: 给人看的工作区快照（至少 cwd / git 摘要 / diff 要点），投放在 TUI（或等价）人读面；**不**写入 ADR-0028 状态栏 user 消息，也**不**充当 verify 输入。#655（G1）验收画像锁定。
 _Avoid_: 状态栏；agent-status；把 cwd/git/diff 每跳追加进 `messages`；与 context usage (display) 混名
 
-**沙箱纪律**: 同一 `bash` 调用输入下，前台执行与 `background:true` spawn 共用同一套 bwrap 围栏参数（FS / `--unshare-net` / env / rlimit / cwdReadonly；出网为 **出口代理缝**）；产品路径不得提供无围栏的后台裸跑。#653 G3 / ADR-0107。Named exceptions are **yolo mode** (explicit, operator-locked, TUI-entry only; ADR-0119) and **评测态** (same posture, headless named opt-in; ADR-0130).
-_Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn_subagent 前景/后景混名；把出网理解成 0106 直连无闸；treating yolo as voiding the discipline (the discipline itself stands; exceptions are named and never silent)
+**沙箱纪律**: 同一 `bash` 调用输入下，前台执行与 `background:true` spawn 共用同一套 bwrap 围栏参数（FS / `--unshare-net` / `--unshare-pid` / env / rlimit / cwdReadonly；出网为 **出口代理缝**）；产品路径不得提供无围栏的后台裸跑。#653 G3 / ADR-0107 / ADR-0142。Named exceptions are a **closed roster** — one face (the retired fence) reached by three named entries: the **yolo 预设** (TUI entry: launch flag or `/yolo` + confirmation; ADR-0119 / ADR-0141), the **no-sandbox 档** (launch flag; ADR-0139 §2 / ADR-0141), and **评测态** (the same preset, declared headlessly by its own named switch; ADR-0130). No fourth way in; nothing silent.
+_Avoid_: 把后台当成逃出 bwrap；与 #440 bash 产品面混名；与 spawn_subagent 前景/后景混名；把出网理解成 0106 直连无闸；treating a preset as voiding the discipline (the discipline itself stands; exceptions are named and never silent); **把这份名单当成开放枚举或再往里面加未具名的旁路**
+
+**pid 命名空间（围栏的生命周期边界）**: 围栏与 `--unshare-net` 并列的第二个恒定命名空间 flag（ADR-0142）。bwrap 是该命名空间的 PID 1，内核在 init 退出时杀掉命名空间内**所有**残留进程——所以 `setsid` 脱离进程组的后代也活不过围栏（组信号打不到它，`--die-with-parent` 只管 bwrap 的直接子进程）。代价有二，都是刻意接受的：围栏内的 `$$` 是**命名空间 pid**（宿主探测它会得到"错误理由"的 ESRCH，测试须改用宿主可见的 argv marker 定位），且围栏内 `ps` / `/proc` 只能看见围栏自己的进程。**命名空间 init 不响应默认 disposition 的 SIGTERM**（内核对 PID-1 的规则），因此清理判定归 SIGKILL 升级链所有——`confirmed_stopped` 的语义未放宽：组内只要还有活的非僵尸成员就仍判为存活。yolo 走 `baseArgs` 之前的裸 argv 早返回，不受此约束（ADR-0119 是整体退役围栏，不是放宽围栏）。
+_Avoid_: 把 pid 命名空间当成"顺手的隔离"（它的理由是生命周期，不是保密）；拿围栏内 pid 在宿主侧探测并据此断言；用"组内只剩 ns-init 就当已停"来换绿灯；把 `--unshare-pid` 做成可配置项（它与 `--unshare-net` 同为恒定，无输入可剥离）
 
 **config 面板**: TUI 无参 `/config` 打开的设置浮层，交互同 `/model`（选行改值、Esc 落盘）。首版行：文件系统隔离档、worktree isolation mode、子代理并发上限预设。有参 `/config` 仍走 chat/serve。后续设置只加行。ADR-0096。
 _Avoid_: 每个开关一个 slash；把面板当 loop-engine 热替换；把上限写进 system 前缀
 
-**文件系统隔离档（fs isolation mode）**: bash 物理围栏上「能看见 / 能写哪些路径」的档位，与 **PermissionMode** 和 **worktree isolation mode** 正交。默认 **全局档**。ADR-0092 / ADR-0096。
-_Avoid_: 把权限模式当围栏；把 worktree 门禁当 FS 档；第三种产品「沙箱模式」把两层揉成一档
+**文件系统隔离档（fs isolation mode）**: bash 物理围栏上「能看见 / 能写哪些路径」的档位，与 **PermissionMode** 和 **worktree isolation mode** 正交；它与 **围栏退役（fenceRetired）** 同属**围栏轴**的两个输入。默认 **全局档**。一个**预设**可以同时给定两条轴，但两条轴彼此不写（ADR-0139 的机制裁定在 ADR-0141 之后照旧成立）。ADR-0092 / ADR-0096 / ADR-0141。
+_Avoid_: 把权限模式当围栏；把 worktree 门禁当 FS 档；造一个把两层揉成一档的**未声明旋钮**（把两层一起给定的是具名、有出口、显示得出的**预设**，不是第三条轴）
+
+**围栏轴（fence axis）**: 回答「进程被什么物理约束住」——**文件系统隔离档** × **围栏退役** 两项，取值由**生效配置**算出。产品侧的可见名字是 **无沙箱标识**；`yolo` 不是这条轴的值，是预设名。ADR-0141。
+_Avoid_: 把围栏轴当成只有 fsMode 一项；把预设名当轴取值；拿 `yolo` 这个词进围栏层的判据
 
 **全局档**: The default filesystem mode exposes real host paths for reading and writing; the permission chain and **hard-wall** still apply, while only physically protected targets have an interpreter-independent **effect boundary**. Home remains visible. ADR-0092 / ADR-0129.
 _Avoid_: 默认闭世界；把全局档当成跳过权限链 / 卸 bwrap
@@ -424,7 +463,7 @@ _Avoid_: 与 **protected target** 合并；与已退役的 fs-policy protected-s
 **host reach**: the set of paths a read-capable tool may open in a given fs mode. ADR-0092 + ADR-0128: workspace mode does NOT narrow it (only writes tighten); reach widens to ordinary host paths in both modes, minus **protected path**.
 _Avoid_: "workspace read" 当工作区档收窄了它；用「可达 = 全 `/` 无防护」实现
 
-**hard-wall**: A pre-execution shell-intent filter over enumerated syntax; a matched deny cannot be overridden by a session grant, while a clean scan does not certify an interpreter's runtime effects. It is not a second sandbox: protected filesystem and credential effects require a filesystem, process, or controlled-capability **effect boundary**. ADR-0068 / ADR-0125 / ADR-0129.
+**hard-wall**: A pre-execution shell-intent filter over enumerated syntax; a matched deny cannot be overridden by a session grant, while a clean scan does not certify an interpreter's runtime effects. It is not a second sandbox: protected filesystem and credential effects require a filesystem, process, or controlled-capability **effect boundary**. A matched deny fails that one tool call and is not a confirmed security violation for the current-turn streak (ADR-0135 amendment 2026-10-10). ADR-0068 / ADR-0125 / ADR-0129.
 _Avoid_: 把硬墙当沙箱；用换行/`format` 子串当危险；把"替换字符出现即拒"当现行合同（已退役）；引导把交付物写到 bash `/tmp` tmpfs；把 **替岗拒绝** / 工具选型当硬墙
 
 **effect boundary**: the interpreter-independent enforcement surface at which a protected filesystem or credential **effect** is refused regardless of command spelling — the bwrap mount layer + process/capability control, distinct from the **hard-wall** (a spelling-sensitive pre-execution guardrail). ADR-0129.
@@ -439,8 +478,8 @@ _Avoid_: 读片室；AST 层；把它当第二道墙或让它在解析层做政�
 **解析判定**: 解析地基本身的输出契约——六态闭集（ok / 未知语法 / 畸形 / 中止 / 超容量 / 解析器不可用）加解析前字符级一票否决清单，是所有墙唯一的解析输入。仅"解析器不可用"降级旧扫描（终态、红字警示、不许静默），其余各态各有固定归宿。ADR-0124。
 _Avoid_: 把"未知语法"当硬拒；让运行时解析异常降级回旧扫描；把降级和硬拒混成一个态；无警示地静默降级
 
-**解析分歧字符（前置否决清单）**: 使"解析器所见 token ≠ bash 所见 token"的字符形态——控制字符（豁免 `\t\n\r`）、Unicode 空白/零宽、反斜杠+空白——在信任解析结果**之前**一票否决，硬拒且 reason 写明字符类别；清单住在 `shell-parse.ts`，每发现一个新形状登记一条，合法惯用法（`echo\ test`）的误拒由 reason 的改写提示承担。ADR-0124。**不是** 第七态判定，也**不是** 某条墙的危险模式。
-_Avoid_: 把它叫"危险字符"或塞进 `DANGEROUS_COMMAND_PATTERNS`；为它新增第七个判定态；用 ask 代替硬拒（零宽字符人眼不可见）
+**解析分歧字符（前置否决清单）**: 使"解析器所见 token ≠ bash 所见 token"的字符形态——控制字符（豁免 `\t\n\r`）、Unicode 空白/零宽、反斜杠+空白——在信任解析结果**之前**一票否决，硬拒且 reason 写明字符类别；清单住在 `shell-parse.ts`，每发现一个新形状登记一条。反斜杠+空白**自 #1188 起按形态收窄**：词内转义空格（`a\ b`，静态值完整且为最大词）与作词分隔符的无引号 `\` LF（两侧皆 U+0020、不落在任何引号 span 或词 span 内）走正常权限流；TAB/CR/CRLF、词中 LF、双引号 LF、非 `ok` 解析、静态值不完整、转义反斜杠**偶数**串一律仍硬拒，且 reason 不再给出改写后的命令。ADR-0124（含 2026-10-04 Amendment）。**不是** 第七态判定，也**不是** 某条墙的危险模式。
+_Avoid_: 把它叫"危险字符"或塞进 `DANGEROUS_COMMAND_PATTERNS`；为它新增第七个判定态；用 ask 代替硬拒（零宽字符人眼不可见）；把"反斜杠+空白"读成一律硬拒（#1188 前才是那样）；拿 `echo\ test` 当现行硬拒样例（它已属受支持拼写）
 
 **递归检查**: 替换类语法的判定模型——`$(...)`、反引号、`<(...)` 的内层命令提取出来，走与顶层完全相同的权限判定，ask 逐层上传导，嵌套上限 2 层（第 3 层 → ask）。静态判定不赌运行时条件：`${X:-$(cmd)}` 按会执行分析。ADR-0125。
 _Avoid_: 内层只读 allowlist（第二份清单）；出现即拒；只看外层不看内层
@@ -484,10 +523,13 @@ _Avoid_: 把手动 `/compact` 的 noop 写成「未达自动阈值」；UI 字�
 **策略预算窗口**: `env.compress.contextWindow`——用量显示分母与 auto-compact 闸的同一数字；默认 256000。不是供应商模型上下文上限。ADR-0100。
 _Avoid_: 显示一套窗口、压缩一套；把 `providers[].contextWindow` 或 1M 卡当默认分母
 
-**context occupancy**: 用量条分子与 proactive auto-compact 闸的同一占用。pre_call（cache 字段缺席）= `inputTokens`（`countTokens` 总量）；post_call = `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`（Anthropic 三类不相交，null 当 0）。闸优先本拍有限且 >0 的 `countTokens`，否则上一拍 occupancy，否则 `estimateMessagesTokens`。ADR-0118。
-_Avoid_: 显示一套分子、压缩一套 chars/4；把 countTokens 总量再加 cache；把缺测直接收成低于阈值
+**context occupancy**: 用量条分子与 proactive auto-compact 闸的同一占用。两者的 `countTokens` 探针量**同一个请求三元组** `tools + system + messages`（共享 `countRequestTokens`，形状与有效性契约完全一致），所以一个占用数字同时驱动显示与闸；闸与显示仍是两个独立 seam（各自的 once-warn 槽），分歧只允许出现在"有没有测量"，不允许出现在"量了什么"。**image-bearing carve-out**：请求含顶层或 `tool_result.content` 内的 image block 时，两个 probe 走**同一个共享跳过决定**、都不探测 `countTokens`（网关把图片 payload 当文本计费），改用**锚定投影**；这是同一个"有没有测量"决定，不是量了不同的东西。图片成本按**像素**估：读受限的 header 前缀，长边缩到 1568 px 后 `round(w×h / 750)`，夹在 `[1, 3072]`，坏 / 未知 / 截断读上限；base64 长度不驱动估算。pre_call（cache 字段缺席）= `inputTokens`（`countTokens` 总量）；post_call = `inputTokens + cacheReadInputTokens + cacheCreationInputTokens`（Anthropic 三类不相交，null 当 0）。闸的优先级：请求带 image → 锚定投影；否则本拍有限且 >0 的 `countTokens`；测量缺席 → 锚定投影 → 上一拍 occupancy → 未锚定的 `estimateMessagesTokens`；缺测永不收成 `below_token_threshold`。**display carve-out（2026-10-22）**：显示侧只读 measured 拍（`occupancyFromUsage(usage)`），image-bearing 拍的锚定投影只作闸分子；同一拍允许显示与闸取不同读数，显示不把投影当 confirmed。ADR-0118（2026-10-21 修订）/ ADR-0008（2026-10-22 修订）。
+_Avoid_: 显示一套分子、压缩一套 chars/4；把 countTokens 总量再加 cache；把缺测直接收成低于阈值；让闸只量 messages 而漏掉 system+tools（2026-10-15 前的老口径，会让 95% 的闸实际在 ~102% 才开火）；把 image 按 base64/4 计费；把 image-bearing 的共同跳过读成两套分子
 
-**auto-compact token gate**: loop-engine 在每次 `stepWithTrace` 前是否 **proactive** 压缩的阈值，含每个 `run()` 的第一次（prior 续传、`turnCount === 0` 不是豁免）；未设覆盖时为 `floor(0.95 × 策略预算窗口)`（`src/harness/compress/threshold.ts`），`IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS` 可覆盖且必须 `< contextWindow`。不约束手动 `/compact`。比较的是 **context occupancy**，不是 chars 估算（无实测时才回退估算）。估算不进 trace / `RunResult.lastUsage`（ADR-0008 D6 显示半边 / ADR-0118）。
+**projected occupancy**: 由最近一次已确认 API usage 锚点 + 估算的追加消息构成的**下一请求**占用预测（`occupancyFromUsage` + `outputTokens` 作 base，追加消息估算作 delta）；无锚点时是整段历史 + system + tools 的估算。只作 image-bearing 请求的闸分子；TUI 条只显示 confirmed 输入侧占用（`occupancyFromUsage(usage)`），投影不再刷条（ADR-0008 2026-10-22 修订：post_call 的 `projectedNext` 加上 `outputTokens`，而下一实测输入未必包含它们，条上就会出现每跳数千 token 的抖动）。投影永不进 trace / `lastUsage` / 账单。锚点只在其对应的 frozen assistant 消息仍在 `messages` 里（引用同一对象）时有效；compaction 或任何历史替换清空锚点，下一次成功调用重新锚定。ADR-0008 2026-10-21 / 2026-10-22 修订 / ADR-0118 2026-10-21 修订。
+_Avoid_: 把投影当 confirmed usage；投影进核算 / 账单 / 持久化；把投影推给 TUI 条；把结构相等但非同一对象的 assistant 消息当锚点（会重复计入整段历史）
+
+**auto-compact token gate**: loop-engine 在每次 `stepWithTrace` 前是否 **proactive** 压缩的阈值，含每个 `run()` 的第一次（prior 续传、`turnCount === 0` 不是豁免）；优先级 `IKNOW_AUTO_COMPACT_THRESHOLD_TOKENS`（env）> `llm.compress.thresholdTokens`（settings）> `floor(0.9 × 策略预算窗口)`（`src/harness/compress/threshold.ts` 的缺省推导），两个配置项都必须 `< contextWindow`。不约束手动 `/compact`。比较的是 **context occupancy**，不是 chars 估算；闸可由**锚定投影**驱动（image-bearing 请求不探测 `countTokens`；测量缺席时先落锚定投影，再退未锚定估算）。投影 / 估算不进 trace / `RunResult.lastUsage` / 账单（ADR-0008 2026-10-21 修订 / ADR-0118 2026-10-21 修订）。
 _Avoid_: 把该门当 `/compact` 许可；把字符估算当真实 token；gate 决策绕开 `evaluateCompactTrigger` 直接调 `shouldAutoCompact`；用 `window − 33k` 当策略预算缺省闸；用 `turnCount === 0` 跳过 proactive
 
 **manual compact**: TUI `/compact` 与 web 压缩按钮触发的一次压缩；执行体与 proactive auto-compact **已开火之后**相同（窗口或 full_summary）。空会话幂等 no-op。
@@ -499,9 +541,9 @@ _Avoid_: `goal ?? taskFocus ?? query`；`goal.text ?? query`；把 evidenceConte
 **streaming arm**: LLM 客户端默认流式臂（`IKNOW_LLM_STREAM` 值域 `on | off`，默认 `on`，`env.ts` SSOT），`off` 回退非流式臂；原生 SSE 事件不出 adapter 边界，收敛为 `HarnessStreamEvent` 最小集（`text_delta` / `tool_call_start`，`src/harness/stream.ts`），终态经 SDK `finalMessage()` -> `interpretMessage`（SSOT）落为同形 `AssistantTurnResult`。
 _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 事件逸出 adapter 边界
 
-**project stack defaults (SSOT boundary) — settings 单承载收敛 (ADR-0015)**: LLM 配置收敛到 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project）双文件（ADR-0015）。项目层**不再**任意覆盖 user：只采纳允许名单（ADR-0084）。
+**project stack defaults (SSOT boundary) — settings 单承载收敛 (ADR-0015)**: LLM 配置收敛到 `~/.iknow/settings.json`（user）+ `<cwd>/.iknow/settings.json`（project）双文件（ADR-0015）。项目层**不再**任意覆盖 user：只采纳允许名单（ADR-0084）。`loadIknowSettings` 按两个源文件的元数据（存在性 + `(dev, ino, size, mtimeNs, ctimeNs)`）memoize，2 秒内写过的文件绕过缓存重读（打码热路径的新鲜度不变式），返回深 frozen 的同一实例（ADR-0143）。
 
-- `settings.llm.model`（字面值，唯一来源，trim 后非空串）: **主会话**模型路由 ID 的全局可寻址位；缺失 → `loadIknowEnv` fail-fast 抛「no LLM model configured in settings.llm.model」，不再有 hardcoded 兜底。
+- `settings.llm.model`（字面值，唯一来源，trim 后非空串）: **主会话**模型路由 ID 的全局可寻址位；缺失 → `loadIknowEnv` fail-fast 抛「no LLM model configured in settings.llm.model」，不再有 hardcoded 兜底。ADR-0145 起它只是**默认模型**：只在新建会话时被快照，已存在的会话不再读它。
 - `settings.llm.liteModel?`（可选，同形 `provider/model`）: **lite model** 槽，见上条术语；缺失不 fail-fast。ADR-0113。
 - `settings.subagent.model?`（可选，同形 `provider/model`）: **sub-agent model route**。用户层；项目文件不采纳。ADR-0122。
 - `settings.llm.apiKey`（字面或 `${VAR}` / `$VAR` 占位符）: 唯一 key 承载。字面 → 原样；占位符 → 经 `expandPlaceholders` 从 `process.env[VAR]` 优先 / `.env.local` / `.env` 兜底解析。解析不到 → undefined（消费点守卫抛「no API key configured」）。
@@ -509,10 +551,16 @@ _Avoid_: 把 `stream: false` + 裸 JSON 解析当默认 LLM 臂；让原生 SSE 
 - `settings.llm.providers?: LlmProvider[]`: **LLM provider** 注册表——用户层键（项目文件不采纳，沿 ADR-0084）；每条含 `id` / `baseUrl` / `apiKeyEnv` / `headers?` / `models[]`（`id` / `name?` / `contextWindow?` / `maxTokens?`）；**仅 anthropic 格式**，baseUrl + apiKeyEnv 必填；`loadIknowEnv` 按 `settings.llm.model = "<provider>/<model>"` 拆头查表，命中 → `baseUrl = provider.baseUrl` + `apiKey = process.env[provider.apiKeyEnv]`（env 缺席 → 抛「no API key for provider <id>」）；**wire model** = 尾段 `models[].id`，不是整段路由。未命中 → fallback `IKNOW_LLM_BASE_URL` + `settings.llm.apiKey`（今日路径逐字节一致，back-compat）。非法字段（id 空串 / baseUrl 非字符串 / apiKeyEnv 非字符串 / models 非数组）整条 drop，不静默。ADR-0093 / ADR-0094 / `specs/tui-model-command.md`。
   **退役机制**: `IKNOW_LLM_MODEL`（env 覆盖 model）已不再读取；`IKNOW_LLM_API_KEY_ENV`（env 覆盖 key 变量名）已不再读取；`LlmEnv.apiKeyEnv` 字段已删。`IKNOW_LLM_BASE_URL` 仍读（provider/baseUrl 是 9router 项目级决策，保留为代码默认 fallback）。`.env.local` 退化为「占位符真值源」（`.env.local` 持有 `${VAR}` 指向的变量值本身），不再是 model / key 变量名的配置口。
   **保留机制**: provider = 9router、`baseUrl` 代码默认 `http://localhost:20128/v1` 焊进 `env.ts`（`IKNOW_LLM_BASE_URL` 仍读）；非 LLM 字段（context window / maxTurns / web 端点 / mcp 超时等）的 `process.env > .env.local > .env` 优先级链不变。
-  _Avoid_: 在 `.env.local` 重复声明已与代码默认一致的非密项；把 model 切换当「每机配置」而非「项目栈决策」
+  _Avoid_: 在 `.env.local` 重复声明已与代码默认一致的非密项；把 model 切换当「每机配置」而非「项目栈决策」；在调用点缓存 `loadIknowSettings` 的结果（memoize 只在 loader 内部做，ADR-0143）
 
-**`/model`(TUI)**: TUI 斜杠命令——打开 provider 注册表 picker（每项一行 `provider/model` + 当前项游标）；`↑/↓` 移焦点（clamp 首尾）、`Enter` 选定 + 持久化（写回 `~/.iknow/settings.json` 的 `llm.model` 路由 ID）+ env 重载、`Esc` 关闭且不持久化；provider 注册表为空 → typed notice。下一轮 adapter 用 **wire model**（`models[].id`），不是把路由整段送上网关。`/info` 仍显示路由 `Model: <provider>/<model>`。ADR-0093 / ADR-0094 / `specs/tui-model-command.md`。
+**`/model`(TUI)**: TUI 斜杠命令——打开 provider 注册表 picker（每项一行 `provider/model` + 当前项游标）；`↑/↓` 移焦点（clamp 首尾）、`Enter` 选定 = 一个动作：改**当前会话**的 **会话模型路由**（内存 + 会话文件），同时写回 `~/.iknow/settings.json` 的 `llm.model` 作为新会话的 **默认模型**；其他已存在会话不变（ADR-0145）、`Esc` 关闭且不持久化；provider 注册表为空 → typed notice。下一轮 adapter 用 **wire model**（`models[].id`），不是把路由整段送上网关。`/info` 仍显示路由 `Model: <provider>/<model>`。ADR-0093 / ADR-0094 / `specs/tui-model-command.md`。
 _Avoid_: 把 `/model` 当 mid-turn 生效；空注册表时打开空面板；Esc 当"放弃选择"；把 picker 路由原样当 SDK `model`
+
+**默认模型（default model）**: `settings.llm.model`——只决定**新建会话**从哪个路由起步；新建时被快照进该会话，此后与该会话无关。改它（`/model` 或手改文件、任一进程）不影响任何已存在会话。ADR-0145。
+_Avoid_: 把它当「当前会话正在用的模型」；在一轮里为模型选择读它；路由解析失败时回退到它
+
+**会话模型路由（session model route）**: 某个会话自己持有的 `provider/model` 路由 ID。持久副本 `SessionFileV1.model`（可选字段，schema 仍为 5；缺失的旧会话首次接入时快照一次默认模型）；运行时副本是 hub 内 `Map<conversationId, route>`，有条目就不再重快照、不重读文件。只由该会话自己的 `/model` 改；回合、续跑、压缩、thinking 覆盖、子代理兜底都读它。reset 删内存条目、文件保留；serve 无关闭事件，条目留到 reset 或进程退出；不做容量淘汰。ADR-0145。
+_Avoid_: 删条目来「跟随默认」；TUI 切走再切回时重快照；为它做 LRU 淘汰；路由失效时静默回退默认模型；把它放进 ADR-0141 的会话覆盖层
 
 **runtime LLM env**: 进程内 LLM 装配的唯一运行时源——一份 EnvLoader（`get` / `reload` / watch）。TUI 与 serve 同挂；`createAdapterFromEnv(loader.get())` 是唯一 adapter 工厂；thinking 覆盖只改入参，不另造 client。ADR-0094。
 _Avoid_: hub 构造期 `overrideEnv` 快照；第二套 thinking client；serve 不挂 loader
@@ -520,10 +568,16 @@ _Avoid_: hub 构造期 `overrideEnv` 快照；第二套 thinking client；serve 
 **声明式权限规则**: 项目 `<仓>/.iknow/settings.json` 的 `permissions` 段用 `Tool` / `Tool(specifier)` 字符串（`allow` / `ask` / `deny` 三档 + 可选 `defaultMode`，值域 `default` | `plan`）；同项目层评估序 deny → ask → allow；编译为既有 `NormalRuleSpec` 进项目权限层，不新开决策轴。旧形态（`schema_version` + `rule[]` 谓词 DSL）加载 typed fail-loud、错误含新形态示例。模式名到 ACI 工具的映射、glob / param:value / Bash 复合命令分段 / 路径 specifier 形态见 `specs/declarative-project-permissions.md` Does。ADR-0090 / #1004。
 _Avoid_: 沿用 `schema_version` + `rule[]` 谓词 DSL；写 toml 当并存 SSOT；项目层写 `full_auto`（加载 fail-loud）；让用户层接 `permissions`；用 param:value 匹配 Bash `command` / Read/Edit 路径 / WebFetch `url`；给规则手写 `id` / `reason`
 
-**项目 settings 允许名单**: 共享项目 `<仓>/.iknow/settings.json` 只采纳 `verify` / `secrets` / `permissions`；`hooks` 仅用户层（command 钩子 = 任意 shell）。其余顶层段丢弃、不覆盖用户层。权限 SSOT = 项目 `settings.permissions`，规则形态 = **声明式权限规则**（ADR-0090 取代旧 toml 谓词 DSL），用户层不接；toml 与 json 并存 fail-loud。ADR-0084 / ADR-0090。
-_Avoid_: 第三层 local settings；项目文件盖 isolation / llm / memory / subagent；用户 settings 写 permissions；继续读 `permissions.toml` 当并存 SSOT
+**项目 settings 允许名单**: 共享项目 `<仓>/.iknow/settings.json` 只采纳 `verify` / `secrets` / `permissions` / `approval`（`approval` 段目前只有 `approval.timeoutMs`：批准请求的等待上限，缺省或 `0` = 不限，项目层优先于用户层）；`hooks` 仅用户层（command 钩子 = 任意 shell）。其余顶层段丢弃、不覆盖用户层。权限 SSOT = 项目 `settings.permissions`，规则形态 = **声明式权限规则**（ADR-0090 取代旧 toml 谓词 DSL），用户层不接；toml 与 json 并存 fail-loud。ADR-0084 / ADR-0090。
+_Avoid_: 第三层 local settings；项目文件盖 isolation / llm / memory / subagent；用户 settings 写 permissions；继续读 `permissions.toml` 当并存 SSOT；把 `approval` 当权限决策段（它只配超时，不表达 allow / ask / deny）；把 `approval.timeoutMs` 缺省读成有默认超时（缺省 = 不限，项目层 `0` 也合法且压过用户层的正值）
 
-**前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒/drain 通道回传。worker 恒为独立进程，与前景/后景正交。
+**两段式权限门（two-stage permission gate）**: 一波 tool calls 的过门分两段——**判 allow 的立刻开跑**（不等同一波里别的调用），**判 ask 的按 tool_use 顺序一个一个问**（同一时刻只有一条批准请求在飞）。**一波扫一次**：这一波的**形状**与它成员的**判定**在**该波开跑前**一并取定，判定取自**闸门自己的输入**（权限层 / hard walls / 模式 / host roots / fs 边界）——整批先取一遍的判定会**过期**（两波之间权限模式可被翻转），过期判定是 fail-open。**一波之内也有窗口**：该波的 allow 调用在提问应答前就开跑，权限状态若在**该波提问挂起期间**变更，**该波已开跑的 allow 调用不回头改判**（取判定的时间比基线早，下一波取新判定；ask 路的调用在**出提示前再判一次**，所以它看得见变更）。观察事件（`onDecision`）在每个调用的 prepare **之前**发出、带本波判定：**allow / deny 路上观察者与执行闸读同一份判定**；**ask 路上被强制执行的是出提示前那次再判定**，两者可以不同（「总是允许」时观察者报 `ask`、闸却直接放行）。**出提示前再判一次**，所以先前那次「总是允许」（记成工具级 session grant）会让同波下一个同工具调用不再被问。**断波的调用判两次**（上一波扫它时作探针，它自己那波再判一次），ask 路的调用再多判一次。**波的形状规则不变**：被判 deny 的调用无副作用，照样搭邻居的波次（#653）。回填顺序仍按 tool_use（engine 缓冲乱序、按前缀提交）。**内层执行 reject 不再让整波抛出**：该调用记成 `execution_failed` 结果，**波次仍每个调用交一个结果**（别的调用的结果不丢）。hard-wall 与 security review 仍先于一切，security review 仍只走 review 通道、绝不走普通批准口。判定次数下降是**性能性质，不是策略变更**。**被挂起的调用对 agent 可见**（2026-10-20 修订，接受两段式的前提）：批准请求与挂起条目带 `toolUseId` / `conversationId`，出提示前后各发 `approval_pending` / `approval_resolved` 事件；超时、提示失败、明确拒绝各有自己的 `[user_denied]` 文案；被挂起调用的结果追加一行，列出它挂起期间按波首判定已开跑的同波调用。**批准请求默认不超时**：没人回答就一直挂着，直到回答或本轮取消（取消记 `cancelled`）；只有配置了 `approval.timeoutMs` 才会超时。ADR-0147。
+_Avoid_: 把「每个调用判一次」读成「整批先判一次」——整批前取的判定会过期；把「观察者的判定就是闸的判定」读成在 ask 路上也成立（那里执行的是出提示前的再判定）；让批准请求并发弹出；把「总是允许」当权限模式切换（它只写 session grant，不动 holder，不清 **会话覆盖层**）；把两段读成「先全部问完再全部开跑」；把观察者与执行闸当成可以各判一次的；让 agent 只从最终结果猜测哪个调用被挂起过（挂起条目与结果必须指名到 `toolUseId`）；把审批超时当默认行为（默认无限等待，超时须显式配置）；把「内层执行 reject 记成该调用的 `execution_failed` 结果」读成「整波 reject 抛出、别的调用的结果被丢」
+
+**并发波次与按调用判定**: 一波 tool calls 的**形状规则不变**——判并发安全的调用、或判 deny 的调用（无副作用，照样搭邻居的波次，#653）搭当前波次，其余断波另起一波。**新的是「并发安全」可以按调用判定**：工具可声明**按调用谓词**（`isConcurrencySafeForInput`），声明了它就对该工具的每次调用**说了算**（只有 `predicate(input) === true` 才算安全），工具级的静态 `isConcurrencySafe` 只在没声明谓词时兜底；**谓词抛异常、或返回值不等于 `true`，一律判不安全**——**单向的只有「不确定」**：未知工具、谓词抛异常、返回值不等于 `true`，都判不安全 ⇒ 串行，不确定只能更保守、不能更宽松；**谓词对本工具的调用是权威的**：静态 `isConcurrencySafe` 判不安全时谓词可判安全（只读 bash 判安全），静态判安全时谓词也可判不安全——两个方向都由谓词说了算。**两处切分点（engine 的整批切分、ACI executor 的逐波扫描）走同一个判定**，只改一处则整条链空转。bash 因此可以同波并发：**只读命令（`git status` / `ls` / `cat` 等）同波并发跑**，写命令与任何不确定的命令仍单独成波（bash 的工具级 `isConcurrencySafe` 仍是 `false`，没有改成 `true`）。**围栏兜不住误判**：bwrap 以**可写**方式 bind 宿主 `/`，`cwdReadonly` 只多加一条 `--ro-bind <cwd>`，cwd 之外在围栏内仍可写——「这条是只读」判错就是一次真写，所以判定必须偏保守。并发安全的调用额外注入 `GIT_OPTIONAL_LOCKS=0`（与 readonly 模式已有的同一个变量，只是触发更宽），因为 `git status` 会刷新并重写索引、两个同仓 `git status` 会抢 `.git/index.lock`；这个变量只让 git 跳过那次可选的索引刷新写回，**不是**「git 变只读」。**只读模式的准入不变**（`bashMode === "readonly"` 仍只调 `validateReadonlyCommand`）：本次判定回答的是**更窄**的另一个问题（这条能不能同波），不放宽任何 deny/ask，也不改写 `validateReadonlyCommand` 的门禁身份。ADR-0148。
+_Avoid_: 「按调用并发安全」/「per-call concurrency safety」；「只读 bash 并发」；「并发批次」/「并发组」；把「bash 是 `isConcurrencySafe: false`」读成「bash 永远不并发」；把只读命令的判定读成「只读模式准入」；在判定里放宽任何 deny/ask；让判定在两处切分点不一致；把 `GIT_OPTIONAL_LOCKS=0` 读成「git 不会刷新索引之外的事」；把「谓词抛异常」读成「可以放行」
+
+**前景 spawn / 后景 spawn**: `spawn_subagent` 的两种结果契约（#361 裁决，ADR-0014）——前景（`wait:true`，默认）= handler 同步等 worker 到终态、envelope 直接作 tool_result 返回，当回合闭环；后景（`wait:false`，显式选项）= 立即返回 task_id，结果经 host 唤醒通道回传（wake 本身就是一次 claim，见 **delivery ledger**）。worker 恒为独立进程，与前景/后景正交。
 _Avoid_: 把前景/后景与进程隔离混同；泛化的"同步/异步"；把 V1"立即返回 task_id"当默认契约（已被反转）
 
 **同轮多 spawn**: 并行工人 = 同一 assistant 消息里 N 次 `spawn_subagent`（`isConcurrencySafe`，同 wave 启动）。跨回合的 `wait:true` 会串行，这是前景契约。ADR-0101。
@@ -541,8 +595,14 @@ _Avoid_: 往正在跑的 loop 里塞；用 TUI 有没有 `✓ Done` 当闸；新
 **子代理 task_id**: 这一次派出的 manager 句柄（`randomUUID()`）。父可见信封、`subagent_result`、mailbox、tmp、人停、`subagent_stop`、`subagent_continue` 都用它。worker `conversationId` 仍按 ADR-0040 管子侧。ADR-0101 / ADR-0102。
 _Avoid_: 把 `task_id` 当父会话 id；用 worker `conversationId` 当父工具入参；续跑另发明一套父可见 id
 
-**host drain**: host 把 completed 子代理的父可见信封浓缩成一条带固定前缀的消息、拼进下一次 `run()` 的 priorMessages；只读 buffer、不改状态。后景臂下：已有终态则立刻浓缩；仅 running 则立刻空返。叫醒主模型靠 mailbox，不靠用户再打一行，也不靠在 `run()` 边界空转等待。
-_Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；`wait:true` 已 tool_result 交差后再 silent wake 同一信封；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"或阻塞轮询当作可靠唤醒源
+**host drain**: host 把 completed 子代理的父可见信封浓缩成一条带固定前缀的消息、拼进下一次 `run()` 的 priorMessages。**read（gate / diagnostics）**：`peekPendingSubagents` / `drainCompleted` 只读 buffer、跳过已投递键，不改投递状态。**claim（delivery）**：`claimPendingSubagents` / `claimCompleted` 原子领取未投递的终态并快照 claim 时刻的信封，ack 后从后续 read 消失——终态 buffer 不再被反复投递。后景臂下：已有终态则立刻浓缩；仅 running 则立刻空返。叫醒主模型靠 mailbox，不靠用户再打一行，也不靠在 `run()` 边界空转等待。ADR-0150。
+_Avoid_: 把 drain 与"结果获取"混同（前景 spawn 不经 drain）；`wait:true` 已 tool_result 交差后再 silent wake 同一信封；让 agent 侧直接消费 manager buffer；把 drain 被动挂"下一轮用户输入"或阻塞轮询当作可靠唤醒源；「drain 即消费」（read ≠ delivery，ack 后不再投递）
+
+**terminal generation**: 一个 worker 的一次终态身份 = manager 全局单调递增的 `terminalSeq`，在 `emitStop`（唯一的终态信号，`stoppedEmitted` 守护）里分配一次。`resumeTask` 替换 `Task` 并拿到新的 `terminalSeq`，所以续跑的新结果可投递、旧结果不会被重放。投递键 = `(conversationId, taskId, terminalSeq)`。ADR-0150。
+_Avoid_: 用 `taskId` 当终态身份（续跑后新旧结果不可区分）；把 resume 当旧结果重放；按 host 每一轮重新投递同一终态
+
+**delivery ledger**: manager 自有的内存投递账本，按 terminal generation 记 `undelivered → claimed → delivered`。`drainCompleted` 是只读（gate / diagnostics，可带 `includeDelivered`），跳过已投递键；`claimCompleted` 是原子领取，每个 claim 快照 claim 时刻的信封；ack 只在承载 digest 的那次写入成功后发生，release 把 claim 退回 undelivered（不重新投 mailbox 通知，等下一次 run / wake）。账本寿命 = manager，`shutdown` 清空、永不持久化；重启不重放（源 buffer 本身只在内存）。registry 跨 manager 聚合，没有 claim seam 的视图退回只读路径。ADR-0150。
+_Avoid_: 「re-drain until restart」（ack 后不再投递，未投递只在 shutdown 丢）；把 ack 放在任意一次写入或 resolve 上；把投递标记持久化进 store / trace；把 claim 写成每次 host 轮次都能重复领取
 
 **mailbox**: 后景 spawn 的子→父终态回传通道。只投终态浓缩结果，不承载运行中消息，也不是子↔子协议。
 _Avoid_: 进度流；swarm / 子代理互投；把 mailbox 当 D-δ 低层 messaging；接到 run_graph 或图节点（ADR-0076）
@@ -697,8 +757,8 @@ _Avoid_: 会话中重算；chars/4 估阈；退场内建剥成仅名字；从目
 **会话级快照段 (session-snapshot segment)**: (ADR-0042) 装配时取一次快照、会话内冻结的 system 段（当前住户：`memory_layer` catalog、git 块；promote 段已撤出，ADR-0044）——语义是「快照」而非「缓存」：不再比对源变更，下个会话才重取。新落盘内容对当前会话不可见是已接受代价。
 _Avoid_: 与 mtime 门控缓存混同；会话中因源文件落盘而刷新；把快照段写进 messages
 
-**git 块 (git status block)**: (D1/ADR-0037 §4) 模型侧 git 感知的 system 段——当前分支 / 主分支（注明 PR 基线）/ status（截断上限 + 截断标记）/ 最近 5 条 commit，附「开局快照，会话期间不更新」免责句；读稳定 `projectIdentityRoot`（rebind 不抖）；退化态（非 git 仓库 / git 不可用）= 段整体缺席。属会话级快照段。
-_Avoid_: 块内放 diff；每回合刷新 status；rebind 时重建该段；缺席时渲染空占位
+**git 块 (git status block)**: (D1/ADR-0037 §4) 模型侧 git 感知的 system 段——当前分支 / 主分支（注明 PR 基线）/ status（截断上限 + 截断标记）/ 最近 5 条 commit，附「开局快照，会话期间不更新」免责句；读稳定 `projectIdentityRoot`（rebind 不抖）；采集异步——装配时起一次后台读、首次用到该段才等它落定，不阻塞子代理启动；退化态（非 git 仓库 / git 不可用）= 段整体缺席。属会话级快照段。
+_Avoid_: 块内放 diff；每回合刷新 status；rebind 时重建该段；同步采集 git 阻塞子代理启动；缺席时渲染空占位
 
 **git 作业**: 主代理用 `bash` 完成的版本库侧效应链（工作区变更 → add → commit），不单独注册 ACI 工具。纪律段仅在 worktree isolation ON 时挂 chat/tui/serve，不进 ask / worker；远端不进 identity。
 _Avoid_: git ACI 工具；`git_commit` / `git_push`；把环境现势当作业面；让只读子代理提交；把 push / network 写进 system
@@ -778,7 +838,7 @@ _Avoid_: 把 interrupt 当 closeout 的 tool_result；从盘上删除再续跑�
 **skill bare alias**: 插件技能规范名 `<plugin>:<name>` 之外，catalog 在无冲突时登记的裸名别名；`SkillCatalog.get` 先 canonical 再 bare。斜杠技能解析必须问 catalog，不在宿主再拆 `:`。展示与 help 优先 canonical。agents 不进斜杠。
 _Avoid_: 在 `slash.ts` 自写第二套命名空间匹配；把 agent id 当 slash 技能；冲突时仍保留双份 bare
 
-**skill model index**: The set eligible for `<available_skills>` (the opening frozen table or an in-session delta) and for body injection through `skill()` consists of skills with a description and without `disable-model-invocation`. Description is the first selection signal. Optional `when_to_use` is a second signal: it gets its own line and independent 1536-character truncation, is removed with description during index demotion, and does not change eligibility. The opening projection stays frozen in the system message; newly added names use the skill index delta. ADR-0098 / ADR-0123.
+**skill model index**: The set eligible for `<available_skills>` (the opening frozen table or an in-session delta) and for body injection through `skill()` consists of skills with a description and without `disable-model-invocation`. Description is the first selection signal. Optional `when_to_use` is a second signal: it gets its own line and independent 1536-character truncation, is removed with description during index demotion, and does not change eligibility. The opening projection stays frozen in the system message; newly added names use the skill index delta. ADR-0098 / ADR-0144.
 _Avoid_: Using `available()` as the slash-command candidate set; listing description-free skills in the model index; folding `when_to_use` into the description line; substituting `when_to_use` for description to change eligibility.
 
 **可加载技能面**: 人 slash 能信封加载的全集——磁盘上有可加载 SKILL.md 的 catalog 条目，含无 description、含 disable。TUI / Web / CLI **同一个入口**。ADR-0098 / `specs/skill-index-increment.md`。
@@ -790,14 +850,14 @@ _Avoid_: 只从当前 transcript 回放；把 skill-load 当进场；压缩后�
 **技能索引增量**: 调用模型前接到 messages 最末的隐藏 user 消息，正文为 `<available_skills>` 且只含索引进场史尚未收录的模型索引行。ADR-0098。
 _Avoid_: 整表刷新；插进本轮用户消息前面；画成用户气泡；改 system 冻表
 
-**frontmatter coercion boundary**: At the shared parser's output, string/number/boolean/null values become strings, scalar arrays are joined with commas, and mappings are skipped with a warning. A nested key **must never silently overwrite a top-level key**. Consumers (skill index, subagent catalog, and memory reader) receive only scalar values. ADR-0123.
+**frontmatter coercion boundary**: At the shared parser's output, string/number/boolean/null values become strings, scalar arrays are joined with commas, and mappings are skipped with a warning. A nested key **must never silently overwrite a top-level key**. Consumers (skill index, subagent catalog, and memory reader) receive only scalar values. ADR-0144.
 _Avoid_: Passing arrays or objects directly into `SkillEntry`; silently discarding nested keys; implementing another coercion rule in each consumer.
 
-**frontmatter fence strip contract**: The shared module removes a leading `---` fence independently of its contents, never throws, and returns a byte-identical body slice. It also strips invalid YAML, because `skill()` body assembly, third-party skill-load envelope reverse parsing, and KV-cache prefix stability depend on those exact bytes. ADR-0123.
+**frontmatter fence strip contract**: The shared module removes a leading `---` fence independently of its contents, never throws, and returns a byte-identical body slice. It also strips invalid YAML, because `skill()` body assembly, third-party skill-load envelope reverse parsing, and KV-cache prefix stability depend on those exact bytes. ADR-0144.
 _Avoid_: Using a throwing YAML parser to strip the fence; changing the body bytes; retaining another fence expression in skill body or the user catalog.
 
-**user-turn keep on protocol failure**: `protocolError` / `emptyFinalResponse` 时仍落下本轮**用户句**，不落下失败的 assistant。与「整轮不落盘」旧读法相对；`timeout` 落盘行为不变。
-_Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；与 viewport API error「不进 transcript」混成「用户句也不留」
+**user-turn keep on protocol failure**: `protocolError` / `emptyFinalResponse` 时仍落下本轮**用户句**，不落下失败的 assistant。失败的 assistant 指**没走到 commit 的那次模型调用**：已经 commit 上链的消息（成对 `tool_use` / `tool_result` 包括在内）原样留在 head 链上——serve 收尾落盘**以载入的 head 链为磁盘基线**；「与链对齐、却比链少算事件」的 rewind 外形投影**被拒绝**而非换回链本身：收尾向 `store.save` 声明 `keepHead`，由 store 的对齐关系判定（只有它算得清一条 coalesced `tool_result` user 消息对应链上几条 per-call 事件），失败即抛类型化 `concurrent_write` 且不写任何字节。因此收尾不往后挪 `head`——挪 head 是 reset / rewind 才有的动作。`none` 收尾把载入文件的 messages 原样写回，本轮没增长时不动文件。与「整轮不落盘」旧读法相对；`timeout` 落盘行为不变。
+_Avoid_: 连用户句一起丢；把失败半截 assistant 当权威回复；把本轮已 commit 的 tool 轮次当成「失败的 assistant」一起丢掉；用 turn-start 快照当落盘基线；在 hub 侧逐条比较自行判定 rewind 外形（合并批次处必然看漏）；静默改写投影去保住 head；与 viewport API error「不进 transcript」混成「用户句也不留」
 
 **出站投影（model-facing projection）**: 发给模型的字节是由代码按消息来源投影出的**派生视图**——`buildMessageParams` 是 `LoopState` + `request.system` 的纯函数，同一历史 → 同一 wire 字节（KV 前缀稳定）；**append-only messages** 权威历史本身可以脏，假标签原样留在盘上只被出站转译。投影失败 fail-closed：本跳不发模型请求，不回落原样上脏。ADR-0112；对齐 ADR-0036 observability side-channel / 契约 X（磁盘真源 ≠ 模型可见字节）。
 _Avoid_: 把「解析 XML / 前缀名册」当防伪机制；把转译结果写回权威历史或贴进 TUI 展示原文；指望投影阻止自然语言注入（那是能力面 sink 的事）；靠每跳改 `system` 塞现势
@@ -825,6 +885,24 @@ _Avoid_: channel（该词已命名信任轴，ADR-0009）；chat REPL；进程�
 **平台事实页（platform facts page）**: `docs/platforms/<平台>-facts.md`，只登记已核实的平台约束和带测法的未证实项，不做设计决策。换一个桥接目标就新增一页，平台数值不跨目标混用。ADR-0120。
 _Avoid_: 把平台数值写进桥核；把事实页当 spec
 
+**远程席位（remote seat）**: TUI 进程内的远程接入面：`<dataDir>/run/remote.sock` 上的 Unix socket，加上其后的投影器与 **统一输入口**。每个 TUI 进程至多一个，每个数据目录至多一个持有者；默认关闭，由用户层 `remote.enabled` 打开。席位不持有会话、不开 session 文件，TUI 进程仍是唯一写者。ADR-0149 / ADR-0110。
+_Avoid_: 远程会话（并没有第二个会话）；把席位当成 `iknow serve` 的一部分；在席位里另存一份轮次 / 队列 / 审批状态
+
+**hub 事件总线（hub event bus）**: `SessionHub.subscribeEvents`：把每个轮次、续跑与压缩的流事件，连同 `user_message`（带来源 local / remote）、`turn_started`、`turn_ended`，扇出给任意多个订阅者。逐调用的 `onStream` 契约不变；订阅者故障不回流到轮次。ADR-0149。
+_Avoid_: 把总线当成 Session HTTP 的 SSE；让订阅者改变 `hostStreamPresent`
+
+**统一输入口（input port）**: 远程三种操作（发消息、答审批、中止）的唯一入口，由 TUI 绑定到键盘已用的同一组函数：`sendTurn`（轮次进行中则进 gap 队列）、`resolvePermissionAsk`（「总是允许」写同一条 `tui-always-<tool>` grant）、`interruptForegroundTurn`（Esc 语义）。ADR-0149。
+_Avoid_: 为远程另写一套发送 / 审批 / 中止逻辑；让远程改权限模式
+
+**席位协议（seat protocol）**: 远程席位 socket 上的 NDJSON 协议：`hello` / `welcome` 握手协商整数版本，请求按 `id` 应答，事件带实例内单调 `seq`；重连带 `instanceId` + `sinceSeq` 走环形缓冲补发，补不上则发快照。认证只靠文件系统（目录 0700、socket 0600、属主为本用户）。类型放在 `src/remote-api/`，不依赖 TUI，便于日后独立守护进程沿用。ADR-0149。
+_Avoid_: 在 socket 上加 token；把版本内的破坏性改动当增量字段
+
+**iknow 后端（Happy iknow backend）**: happy-cli 分叉里的 `happy iknow`：一端是席位客户端，一端是 Happy 会话客户端；把席位事件映射成 Happy 会话协议信封，把审批映射到 `agentState.requests` / `completedRequests`，把手机的消息、`permission`、`abort` RPC 映射到统一输入口。会话 tag 为 `iknow-<instanceId>`。ADR-0149。
+_Avoid_: 经 agent 协议适配层转接；让它启动或结束 TUI
+
+**完成通知（ntfy notify）**: iknow 在审批挂起与轮次结束时向自建 ntfy 发布的最小通知，只含事件种类与工具名，不含代码、路径、提示或输出；`remote.notify` 只在用户层配置，缺省即关。ADR-0149。
+_Avoid_: 在通知里放工具输入或模型输出；让项目层设置开启或改向通知
+
 **goal 功能激活谓词**: goal 层导出的唯一谓词，读已加载会话判定 **goal 功能** 是否在跑（非空且 user-pinned 的 `goal.text`）；verify 只读它，不自写第二份。与 **自动模式** 的 `full_auto` 和 verify 循环的 `completionMode` 各属不同的轴。ADR-0137。
 _Avoid_: 把 opt-in 功能的激活态当完成判官开关；把「功能没开」当证据事实（那是 HITL 路径，不是证据不足）；在调用点内联 goal 条件
 
@@ -839,10 +917,15 @@ _Avoid_: 给从未跑过的判官署名；报记录里没有的配置事实；�
 
 ## Relationships
 
+- **默认模型 vs 会话模型路由**: 默认模型只在新建会话时被读一次；会话模型路由是此后该会话所有模型调用的唯一来源。`/model` 一次选择同时写两者，但只写当前会话的路由；凭据与上限（apiKey / baseUrl / headers / thinking …）仍对所有会话热生效。ADR-0145。
+
 - **代码前像 vs 内容寻址正文池**: Raw per-write file payloads stay in `code-snapshots/`; `blobs/` can hold native recovery and trace-permitted represented bodies under ADR-0136. Required recovery/file-evidence writes block dependent execution on failure, while trace remains best-effort; shared bytes do not merge those contracts (ADR-0121 / ADR-0071 / ADR-0136).
 - **代码回退 vs rewind head**: 回退按单条转录本链写回活 **taskRoot**；head 只移动指针。跨转录本同路径、漂移或根身份不符仍移动 head；前像 blob 读不到则 head 不动。ADR-0121 / ADR-0027。
 - **IM 桥 vs SessionHub**: 桥只做 Session HTTP 的外部消费者；session 文件的写者仍只有 hub 所在进程。ADR-0120 / ADR-0110。
 - **IM 桥 vs chat REPL**: 桥走 `iknow serve`；chat REPL 自装配、不经 hub，不在这条路径上。
+- **远程席位 vs Session HTTP 面**: 席位服务 TUI 进程里那一个活会话，经本地 Unix socket；Session HTTP 面服务 `iknow serve` 自己的 hub。两者互不转接。ADR-0149 / ADR-0120。
+- **手机审批 vs TUI 权限 modal**: 同一个挂起问题的两个面，先答者胜，后答得 `not_pending`；结算广播 `approval_resolved` 后两边同时关闭；无默认超时。ADR-0149 / ADR-0147。
+- **远程席位 vs 单写者**: 席位与 iknow 后端都不打开 session 文件；所有写入仍经 TUI 进程的 hub。ADR-0149 / ADR-0110。
 - **run() messages -> adapter streaming arm -> interpretMessage**: harness LLM path（流事件以 `HarnessStreamEvent` 经 `onStream` 暴露）
 - **turn -> LoopEngine -> tool call -> result -> next turn**: harness 驱动；tool use 经 ACI permission middleware
 - **Session HTTP -> run() -> AssistantTurnResult -> SessionHub**: session-api host 路径；messages 每回合投影到 UI
@@ -907,15 +990,22 @@ _Avoid_: 给从未跑过的判官署名；报记录里没有的配置事实；�
 - **文件系统隔离档 vs PermissionMode**: 前者是进程能碰哪些路径；后者是问不问人。全局档仍走权限链
 - **出口代理缝 vs 文件系统隔离档**: 正交。FS 档管路径；代理缝 + 允许集管 bash 出网。两档 FS 网络行为相同（ADR-0107）
 - **出口代理缝 vs host-net amplify**: 前者是现行唯一 bash 出网通路；后者是已退役的 per-call `network: true`
+- **出口代理体 vs 调用端点**: 同一个代理缝的两级——代理体是会话级常驻的那一半（CA、凭据假值层、口令，profile 只装一次），调用端点是每次调用独享的那一半（socket、放行策略、违规记录、围栏缝参数）。**上级装、下级用**；下级随调用结束即拆，上级随引擎退出才拆。上游代理包一个实例只绑一条策略与一条违规通道，所以「一代理多调用」的归属只能靠这级拆分拿到（ADR-0146）
 - **围栏宿主网 vs 出口代理缝**: 0106 直连无闸已废；现行是有闸的代理缝
 - **network-guard vs 域名允许集**: `web_fetch` / `web_search` 的 SSRF；bash `curl`/`git`/`ssh` 走允许集
 - **预放行档 vs 域名允许集**: defaults 是代码底档；允许集 = defaults ∪ 用户增量，deny 优先
 - **secret-roundtrip mask vs 凭据 sentinel**: mask 管可见面；sentinel 需代理且 0107 不自动启用
-- **yolo 模式 vs 沙箱纪律**: the discipline requires **all four routes to share one fence parameter set**; under yolo what the four routes share is the same "no fence" shape — still a single SSOT branch. The discipline itself does not lapse; the exceptions are named — **yolo mode** (ADR-0119) and **评测态** (ADR-0130)
-- **yolo 模式 vs 出口代理缝**: under yolo the egress seam is skipped wholesale (no netns → no socket bind / no proxy env), the domain allowlist does not intervene; non-yolo paths keep ADR-0097 verbatim — yolo is its invariant #1's explicit exemption face (ADR-0119 Amendment)
+- **预设 vs 两条轴**: a 预设 sits **above** the axes and gives both in one declared act; the axes still never write each other (ADR-0139's mechanism ruling stands — ADR-0141 retracts only the claim about **what `--yolo` means**). **hard-wall** and security review are pre-filters ahead of every mode branch, in a preset and outside one, so a preset is never a guardrail bypass (ADR-0141)
+- **预设 vs 预放行档**: 都译作 "preset"，是两个东西——**预放行档** 是域名允许集的代码底档，**预设** 是围栏轴 × 权限轴的声明组合
+- **yolo 模式 vs no-sandbox 档**: one and the same fence face (`fenceRetired` + **全局档**) — the difference is the permission axis alone: the yolo 预设 declares `full_auto`, `--no-sandbox` deliberately touches nothing. That single difference is what decides the badge, the exit semantics, and whether "no fence + questions on" is reachable by one flag
+- **no-sandbox 档 + `--auto-mode` vs yolo 预设**: 合成同一个三元组，但来自两个档位、两次动作 —— **组合，不是 yolo 预设**。无 YOLO 徽标、亮 **无沙箱标识**、模式行保留权限标签（显示启动档 `Auto`）；`--no-sandbox` 预设本身仍生效、仍可单独清掉，但组合里**没有预设声明权限轴**，所以中途改权限不清任何东西，会话就停在围栏退役 + `plan`/`default`（不变量只约束 `fsMode` × 围栏）—— 一个预设是一次声明、一个退出；两次动作有两条各自回头的路
+- **会话覆盖层 vs settings / 启动 flag**: 生效值 = 持久 settings < 启动 flag < **会话覆盖层**；覆盖层只在内存，预设退出或用户改动一条**被声明的轴**时整层清掉，不写盘、不回滚快照
+- **yolo 模式 vs 沙箱纪律**: the discipline requires **all four routes to share one fence parameter set**; under a retired fence what the four routes share is the same "no fence" shape — still a single SSOT branch. The discipline itself does not lapse; the closed roster of named exceptions is **yolo 预设** (ADR-0119 / ADR-0141), **no-sandbox 档** (ADR-0139 / ADR-0141) and **评测态** (ADR-0130)
+- **yolo 模式 vs 出口代理缝**: under a retired fence the egress seam is skipped wholesale (no netns → no socket bind / no proxy env), the domain allowlist does not intervene; paths outside a preset keep ADR-0097 verbatim — the retired fence is its invariant #1's explicit exemption face (ADR-0119 Amendment / ADR-0141)
 - **yolo 模式 vs worktree isolation mode**: the former is whether a process can escape the fence; the latter is which tree receives writes. Two orthogonal axes, yolo does not skip the gate (ADR-0037 / ADR-0119)
-- **评测态 vs yolo 模式**: 同一运行姿态、两个入口。yolo 是 TUI 会话态（确认模态 + 模式行红标 + 不持久化）；评测态是无头上的显式具名开关，前提是「评测本身不需要围栏」。例外因此从「一个具名」变成「两个具名」，防线也随之从入口枚举缩到入口枚举 + 评测态必须显名入报告 (ADR-0119 §ruling 7 / ADR-0130 §1)
-- **yolo 模式 vs PermissionMode**: 两条轴彼此不写对方（ADR-0139）——yolo 进入只写围栏轴（`fsMode → global`、`yolo → true`），**不再把权限档位改写成 `full_auto`**；权限档位独立可见、可切、可回滚。yolo 仍**不是**第四个 PermissionMode（值域仍是三个）。Shift+Tab 在 yolo 下照常切档，安全性由进入/退出时的快照保证。「无围栏 + 逐次询问」这一新可达组合有名字有定义（ADR-0139 §2），不是无名态
+- **评测态 vs yolo 模式**: 评测态 **声明式地应用 yolo 预设**（无头、不经 in-session 控制器、没有退出语义），不是「yolo 的非 TUI 版本」，也不是自己再写一次权限。两个入口没合并：`--yolo` 在五个公共命令上仍是 typed error。例外因此是「两个具名预设入口 + 一个无头声明」，防线随入口枚举走，外加评测态必须显名入报告 (ADR-0119 §ruling 7 / ADR-0130 §1 / ADR-0141)
+- **yolo 模式 vs PermissionMode**: the yolo 预设 **declares** `full_auto` in the same act that retires the fence — ADR-0141 retracts ADR-0139's "the permission axis is not touched". yolo is still **not** a fourth PermissionMode（值域仍是三个），the fence layer still reads `fenceRetired` rather than a product label, and Shift+Tab keeps cycling under a preset. 「无围栏 + 逐次询问」(ADR-0139 §2) keeps its definition but is entered by `--no-sandbox` — or by leaving `full_auto` in-session under no-sandbox, which the 预设 **survives** because it declares no permission axis — never by `--yolo`
+- **yolo 模式 vs 退出**: exit is one act that clears the **whole 会话覆盖层**, not a restore of a pre-entry `fsMode` snapshot; the trigger is a user value landing on an axis the preset **declares** (`fsMode` under both presets, permission under the yolo 预设 only, by any channel — `/config`, `/permissions`, Shift+Tab). The `full_auto → full_auto+graph` wheel step touches the **graph** axis only, which no preset declares, so it clears nothing (ADR-0141 ruling 3)
 - **文件系统隔离档 vs worktree isolation mode**: 前者是 bash FS 围栏档；后者是写主仓门禁 / 建树改绑
 - **全局档 vs 工作区档**: 默认真路径读写；工作区档收紧为写 taskRoot + 会话 tmp，home 其余不能写
 - **config 面板 vs `/model`**: 同族浮层；`/config` 管隔离与并发等运行档，`/model` 管路由
@@ -1003,6 +1093,9 @@ _Avoid_: 给从未跑过的判官署名；报记录里没有的配置事实；�
 - **secret-roundtrip mask（#406）**: 用户文本中的密钥形态被识别层替换为 `<<<SECRET_N>>>` 占位符（N 从 1 单调递增，per-engine registry 共享，in-memory 不落盘）；bash 工具 spawn 前 `restore()` 回填真值；输出 mask 经 `currentSecretValues(registry.values())` 兜底遮蔽。**session 重启后历史占位符无法还原**（registry 非持久化，占位符原样透传不抛——acceptable limitation）。`settings.secrets.mode` 控制 `roundtrip`（默认）| `block`（#126 deny-only guard 兼容）
 - **next phase focus**: harness tool surface 扩展 + session 持久化 + I4 风格的 live smoke
 - **goal vs 任务摘录 vs 判官 task**: goal 只开 goal 功能；任务摘录只 HITL compact 现抽现贴；完成向 `task` 仅 `goal.text`（ADR-0024 / ADR-0026 / ADR-0032）
+- **"preset" 一词有三处用法**: **预放行档（builtin preset）** 是域名允许集的代码底档；**预设（preset）** 是围栏轴 × 权限轴的声明组合（ADR-0141）；config 面板的「子代理并发上限**预设**」是第三种无关用法。单独写 "preset" / 「预设」必须带限定词
+- **yolo vs `--no-sandbox`**: 同面不同物——前者是声明三轴的**预设**（有自己的出口、亮 YOLO 徽标），后者只声明两轴（**也有自己的出口**，但**不声明权限轴**，所以中途改权限不清任何东西；无徽标，只有 **无沙箱标识**，模式行的权限标签保留）。指围栏时写 `fenceRetired`，别写 "yolo"
+- **egress session vs 出口代理体 vs 调用端点**: "egress session" 是旧语义（每次调用一整套：CA + 假值层 + 代理 + socket，随调用销毁），ADR-0146 之后不再指现行形状。现行两级写 **出口代理体**（会话级常驻，装 profile）与 **调用端点**（每次调用独享，带策略与违规）；verify 一路仍走旧的按轮次 session，是本 ADR 明确保留的例外
 
 ---
 

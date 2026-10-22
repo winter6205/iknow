@@ -15,6 +15,13 @@
  *                           whole, never masked), and print the survivors as
  *                           single-key `{"command": "..."}` JSONL on stdout.
  *
+ * Independent expectations live in a SIBLING roster file, never in a corpus
+ * record (a corpus record is exactly one `command` key, and stays that way). A
+ * label is a hand-authored fact about real Bash: it is read as data and is
+ * never derived from a `src/` predicate, so a `supported-benign` row that the
+ * production parse still vetoes is reported UNEXPECTED. An unlabeled corpus
+ * classifies exactly as it did before the roster existed.
+ *
  * The dual run is parse-only: corpus commands are inert text and are never
  * executed. The independent syntax oracle for the `malformed`-over-allow cell
  * runs `bash -n -c "$command"` (exit 0 = bash accepts, exit 2 = bash reports a
@@ -23,7 +30,7 @@
 
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { legacyFindDangerousPattern } from "../src/harness/permission/hard-walls.js";
@@ -57,6 +64,17 @@ export interface DualPassResult {
   readonly rows: ReportRow[];
   readonly histogram: Record<string, number>;
 }
+
+/** The expectation roster's closed vocabulary, order-insensitive. */
+export const EXPECTATION_LABELS = [
+  "supported-benign",
+  "retained-fidelity",
+] as const;
+
+export type Expectation = (typeof EXPECTATION_LABELS)[number];
+
+/** The one file beside the corpus that is NOT a corpus file. */
+const EXPECTATIONS_FILENAME = "backslash-whitespace-expectations.jsonl";
 
 /** The deferral class's pinned report tag. */
 const CLASS_E_TAG = "not-yet-migrated";
@@ -167,7 +185,11 @@ function verdictTag(newVerdict: string): string {
 }
 
 /** A legacy-allow row: EXPECTED only via the ask-parity or hard-deny clauses. */
-function classifyLegacyAllow(command: string, verdict: string): Classification {
+function classifyLegacyAllow(
+  command: string,
+  verdict: string,
+  expectation: Expectation | undefined
+): Classification {
   switch (verdict) {
     case "ok":
       return { class: "EXPECTED" };
@@ -177,8 +199,14 @@ function classifyLegacyAllow(command: string, verdict: string): Classification {
       return bashReportsSyntaxError(command)
         ? { class: "EXPECTED", clause: "d" }
         : { class: "UNEXPECTED" };
-    case "over-cap":
+    // The label refines this arm only: a parse-fidelity veto on a row labeled
+    // `supported-benign` is a false positive, while `over-cap` below is a
+    // capacity hard deny the contract keeps whatever the label says.
     case "vetoed":
+      return expectation === "supported-benign"
+        ? { class: "UNEXPECTED" }
+        : { class: "EXPECTED", clause: "d" };
+    case "over-cap":
       return { class: "EXPECTED", clause: "d" };
     default:
       return { class: "UNEXPECTED" };
@@ -228,10 +256,17 @@ function classifyLegacyDeny(
 }
 
 /** The SC11 rule: total, binary, over the two verdict columns plus the command. */
-export function classifyRow(row: ClassifyInput): Classification {
+export function classifyRow(
+  row: ClassifyInput,
+  expectations?: ReadonlyMap<string, Expectation>
+): Classification {
   const verdict = verdictTag(row.newVerdict);
   if (row.oldVerdict === null) {
-    return classifyLegacyAllow(row.command, verdict);
+    return classifyLegacyAllow(
+      row.command,
+      verdict,
+      expectations?.get(row.command)
+    );
   }
   if (verdict !== "ok") {
     return { class: "UNEXPECTED" };
@@ -252,13 +287,16 @@ function encodeNewVerdict(parse: SecurityParseResult): string {
 }
 
 /** One dual run: legacy scan verdict + parse verdict + classification. */
-export function dualRunCommand(command: string): ReportRow {
+export function dualRunCommand(
+  command: string,
+  expectations?: ReadonlyMap<string, Expectation>
+): ReportRow {
   const base: ClassifyInput = {
     command,
     oldVerdict: legacyFindDangerousPattern(command)?.id ?? null,
     newVerdict: encodeNewVerdict(parseForSecurity(command)),
   };
-  return { ...base, ...classifyRow(base) };
+  return { ...base, ...classifyRow(base, expectations) };
 }
 
 /** Report encoding: no raw newline, CR or TAB survives into a field. */
@@ -314,7 +352,10 @@ function corpusFiles(pathOrDir: string): string[] {
     return [pathOrDir];
   }
   return readdirSync(pathOrDir)
-    .filter((name) => statSync(join(pathOrDir, name)).isFile())
+    .filter(
+      (name) =>
+        name !== EXPECTATIONS_FILENAME && statSync(join(pathOrDir, name)).isFile()
+    )
     .sort()
     .map((name) => join(pathOrDir, name));
 }
@@ -340,6 +381,82 @@ export function loadCorpus(pathOrDir: string): string[] {
     });
   }
   return commands;
+}
+
+/**
+ * The expectation roster format: `command` plus `expectation` from the closed
+ * vocabulary, with an optional reviewer-facing `rationale`. A violating line
+ * fails the load, exactly as a violating corpus line does. The rationale is
+ * documentation: the classifier never reads it.
+ */
+export function checkExpectationLine(raw: string): string | null {
+  let value: unknown;
+  try {
+    value = JSON.parse(raw);
+  } catch {
+    return "line is not valid JSON";
+  }
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    return "line is not a JSON object";
+  }
+  const record = value as Record<string, unknown>;
+  const extraKeys = Object.keys(record).filter(
+    (key) => !["command", "expectation", "rationale"].includes(key)
+  );
+  if (extraKeys.length > 0) {
+    return `unknown keys ${JSON.stringify(extraKeys)}`;
+  }
+  if (typeof record.command !== "string") {
+    return "`command` value is not a string";
+  }
+  if (!EXPECTATION_LABELS.includes(record.expectation as Expectation)) {
+    return `\`expectation\` must be one of ${JSON.stringify(EXPECTATION_LABELS)}`;
+  }
+  if (record.rationale !== undefined && typeof record.rationale !== "string") {
+    return "`rationale` value is not a string";
+  }
+  return null;
+}
+
+/**
+ * The labeled rows keyed by exact command text. A missing file yields the empty
+ * map, which leaves an unlabeled corpus on its pre-roster classification. No
+ * parser, no `bash -n` and no `src/` predicate runs here: a label is only ever
+ * the committed text, so the roster cannot ratify production behavior.
+ */
+export function loadExpectations(file: string): Map<string, Expectation> {
+  const labels = new Map<string, Expectation>();
+  if (!existsSync(file)) {
+    return labels;
+  }
+  const lines = readFileSync(file, "utf8").split("\n");
+  lines.forEach((line, index) => {
+    if (line.length === 0) {
+      return;
+    }
+    const violation = checkExpectationLine(line);
+    if (violation !== null) {
+      throw new Error(`${EXPECTATIONS_FILENAME}:${index + 1} ${violation}`);
+    }
+    const record = JSON.parse(line) as {
+      command: string;
+      expectation: Expectation;
+    };
+    if (labels.has(record.command)) {
+      throw new Error(
+        `${EXPECTATIONS_FILENAME}:${index + 1} duplicate label for one command`
+      );
+    }
+    labels.set(record.command, record.expectation);
+  });
+  return labels;
+}
+
+/** The roster file beside a corpus file, or inside a swept corpus directory. */
+function expectationsSibling(pathOrDir: string): string {
+  return statSync(pathOrDir).isFile()
+    ? join(dirname(pathOrDir), EXPECTATIONS_FILENAME)
+    : join(pathOrDir, EXPECTATIONS_FILENAME);
 }
 
 /**
@@ -475,7 +592,10 @@ export function extractCommands(sessionDir: string): string[] {
 }
 
 /** The dual pass over an ordered command list, plus the OQ3 node-type histogram. */
-export function runDualPass(commands: readonly string[]): DualPassResult {
+export function runDualPass(
+  commands: readonly string[],
+  expectations?: ReadonlyMap<string, Expectation>
+): DualPassResult {
   const histogram: Record<string, number> = {};
   const rows = commands.map((command) => {
     const parse = parseForSecurity(command);
@@ -484,13 +604,14 @@ export function runDualPass(commands: readonly string[]): DualPassResult {
         histogram[type] = (histogram[type] ?? 0) + count;
       }
     }
-    return dualRunCommand(command);
+    return dualRunCommand(command, expectations);
   });
   return { histogram, rows };
 }
 
 function runCorpus(pathOrDir: string): void {
-  const pass = runDualPass(loadCorpus(pathOrDir));
+  const expectations = loadExpectations(expectationsSibling(pathOrDir));
+  const pass = runDualPass(loadCorpus(pathOrDir), expectations);
   for (const row of pass.rows) {
     process.stdout.write(`${formatReportRow(row)}\n`);
   }

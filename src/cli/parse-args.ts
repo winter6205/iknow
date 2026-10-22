@@ -21,6 +21,13 @@ import {
 const YOLO_FLAG = "--yolo";
 
 /**
+ * ADR-0141: the `--no-sandbox` literal (valueless boolean flag). A second named
+ * preset entry, not a variant spelling of `--yolo` — it declares one fewer axis
+ * and therefore survives a permission change (spec §6).
+ */
+const NO_SANDBOX_FLAG = "--no-sandbox";
+
+/**
  * The head tokens the dispatch at the bottom of `parseArgs` recognizes. Mirrors
  * that chain: a token at positional 0 that is not here is already the first word
  * of a bare `oneshot` query.
@@ -245,6 +252,142 @@ export type EvalStateRejection =
   EvalStateUnsupportedEntryError | EvalStateFlagConflictError;
 
 /**
+ * Typed refusal for a TUI-only posture riding on a bare invocation that the
+ * operator's own flags resolved to `chat` — the same discriminated-union face as
+ * `YoloNonTuiEntryError` and `EvalStateFlagConflictError`.
+ *
+ * Nothing here was typed as a command: the bare route infers chat from `--json`
+ * or `--resume`, so the posture and the anchor are two requests that cannot both
+ * be honored. Discarding either one silently is the failure mode ADR-0119
+ * §ruling 7 refuses to adopt, so the parser reports it. The message names the
+ * rejected flag *and* the supported form of each request, because a refusal the
+ * operator cannot act on is not a refusal.
+ *
+ * One type covers the family (a posture with no face on the resolved route) and
+ * carries the flag as data, so a second TUI-only posture reuses it instead of
+ * adding a case to the union.
+ */
+export interface TuiPostureConflictError {
+  readonly kind: "tui_posture_conflict";
+  readonly command: string;
+  readonly flag: string;
+  readonly message: string;
+}
+
+/**
+ * Typed refusal for a chat anchor (`--json` / `--resume`) on the **explicit**
+ * `tui` head — the mirror of `TuiPostureConflictError`, which covers a TUI
+ * posture on an inferred chat route.
+ *
+ * A resumed or JSON-answering run is a chat-REPL request: the terminal UI has
+ * neither an output format to switch to nor a flag-form resume (its resume is
+ * the positional session id). Either flag therefore names two requests that
+ * cannot both be honored, and dropping one quietly is the failure mode ADR-0119
+ * §ruling 7 refuses to adopt. Like the posture conflict, the message names the
+ * supported form of what was asked, because a refusal the operator cannot act on
+ * is not a refusal.
+ */
+export interface TuiEntryRefusalError {
+  readonly kind: "tui_entry_refusal";
+  readonly command: string;
+  readonly flag: string;
+  readonly message: string;
+}
+
+/**
+ * The entry-selecting anchor reports first: `--json` is the flag that picks an
+ * entry at all, while `--resume` only says which conversation that entry
+ * continues, so one refusal still leaves the operator one step from a command
+ * that serves both requests.
+ */
+export function rejectTuiEntryRefusal(opts: {
+  readonly flag: string;
+  readonly resumeId?: string;
+}): TuiEntryRefusalError {
+  return {
+    kind: "tui_entry_refusal",
+    command: "tui",
+    flag: opts.flag,
+    message:
+      `tui_entry_refusal: '${opts.flag}' has no face on the terminal UI, so ` +
+      `honoring 'iknow tui' would silently discard it. ` +
+      tuiEntrySupportedForm(opts),
+  };
+}
+
+function tuiEntrySupportedForm(opts: {
+  readonly flag: string;
+  readonly resumeId?: string;
+}): string {
+  return opts.resumeId !== undefined
+    ? `Run 'iknow tui ${opts.resumeId}' (the positional form) to resume in the ` +
+        `terminal UI, or 'iknow chat --resume ${opts.resumeId}' for the chat REPL.`
+    : `Run 'iknow chat ${opts.flag}' for the chat REPL, or 'iknow tui' without ` +
+        `'${opts.flag}' for the terminal UI.`;
+}
+
+/**
+ * Either face of "this flag and the terminal UI cannot both be honored": a TUI
+ * posture on an inferred chat route, or a chat anchor on the explicit `tui`
+ * head. One field carries the family and the host reads it at one point, so a
+ * new anchor or posture adds a case here instead of a second field and a second
+ * read that can drift.
+ */
+export type TuiEntryRejection = TuiPostureConflictError | TuiEntryRefusalError;
+
+export function rejectTuiPostureConflict(opts: {
+  readonly command: string;
+  readonly flag: string;
+  readonly anchor: string;
+  readonly resumeId?: string;
+}): TuiPostureConflictError {
+  // ADR-0119's amendment: a refusal has to name the form the operator can run, so
+  // the resume anchor carries its id instead of pointing at a command that would
+  // start a new conversation.
+  const chatForm =
+    opts.resumeId !== undefined
+      ? `iknow chat ${opts.anchor} ${opts.resumeId}`
+      : `iknow chat ${opts.anchor}`;
+  return {
+    kind: "tui_posture_conflict",
+    command: opts.command,
+    flag: opts.flag,
+    message:
+      `tui_posture_conflict: '${opts.flag}' is a TUI posture and '${opts.anchor}' ` +
+      `resolves this invocation to '${opts.command}', so honoring one request would ` +
+      `silently discard the other. Run 'iknow tui ${opts.flag}' for the terminal UI, ` +
+      `or '${chatForm}' (without '${opts.flag}') for the chat REPL.`,
+  };
+}
+
+/**
+ * `--json` and `--resume` anchor a run to the chat REPL, and the terminal UI
+ * has no face for either: no output format to switch to, and a resume of its own
+ * (the positional session id). On the `tui` head that is two requests that
+ * cannot both be honored, so the parser refuses rather than starting a TUI that
+ * quietly ignores one of them — the same fail-loud rule as the yolo and
+ * eval-state gates, and the mirror of the posture conflict `bareInvocationRoute`
+ * reports for an inferred chat route.
+ */
+function tuiEntryGate(request: {
+  readonly json: boolean;
+  readonly resumeId?: string;
+}): { readonly tuiEntryRejection?: TuiEntryRefusalError } {
+  if (request.json) {
+    return { tuiEntryRejection: rejectTuiEntryRefusal({ flag: "--json" }) };
+  }
+  if (request.resumeId !== undefined) {
+    return {
+      tuiEntryRejection: rejectTuiEntryRefusal({
+        flag: "--resume",
+        resumeId: request.resumeId,
+      }),
+    };
+  }
+  return {};
+}
+
+/**
  * Read `--yolo` off argv — present → `true`, absent → `undefined` (= non-yolo).
  *
  * Deliberately **no** branch for it inside the scan loop: a valueless boolean
@@ -265,6 +408,32 @@ function yoloFlagFromArgv(argv: ReadonlyArray<string>): boolean | undefined {
 }
 
 /**
+ * Read `--no-sandbox` off argv — present → `true`, absent → `undefined`.
+ * Same raw-argv discipline as `--yolo`, including the deliberate bias towards
+ * reading a dangerous posture flag even when it sits in another flag's value
+ * slot.
+ */
+function noSandboxFlagFromArgv(
+  argv: ReadonlyArray<string>
+): boolean | undefined {
+  return argv.includes(NO_SANDBOX_FLAG) ? true : undefined;
+}
+
+/**
+ * ADR-0141: which preset flag this argv asked for, if any. `--yolo` wins when
+ * both are typed — it is the stronger declaration (three axes, not two), so
+ * naming the refusal after the weaker one would understate what was asked for.
+ */
+function presetAsked(
+  yolo: boolean | undefined,
+  noSandbox: boolean | undefined
+): { readonly preset: "yolo" | "no-sandbox" } | undefined {
+  if (yolo === true) return { preset: "yolo" };
+  if (noSandbox === true) return { preset: "no-sandbox" };
+  return undefined;
+}
+
+/**
  * The posture on a display path (`-h` / `-V`), which returns from inside the
  * scan loop before the positional stream is read.
  *
@@ -282,26 +451,74 @@ function evalStateOnDisplayPath(
   return splitEvalStateTokens(argv, true).evalState;
 }
 
+/** The route a bare invocation takes, and what that route adds to the option bag. */
+interface BareRoute {
+  readonly command: CliCommand;
+  readonly fields: {
+    readonly implicitTuiLaunch: boolean;
+    readonly tuiEntryRejection?: TuiEntryRejection;
+  };
+}
+
 /**
- * Whether a bare invocation on a TTY defaults to `chat`. A bare `--yolo` (no
- * subcommand) does **not** fall to chat — it belongs with `-h` / `-V` as a pure
- * display path (the explicitly declared allowance in spec EXIT / the plan's
- * closing acceptance line). Otherwise the same input would fork into two
- * treatments depending on TTY, and under a TTY it would silently start a non-TUI
- * session — the mirror image of the "dangerous flag silently swallowed" the plan
- * rejected.
+ * Decide the route of a bare invocation (no subcommand head, no query text).
  *
- * ADR-0130: `--eval-state` retires the fence just as `--yolo` does, so a bare
- * invocation carrying it gets the same display-path treatment (the ADR's
- * "non-default" clause — a bare `iknow` on a TTY must never open a chat session
- * with the fence gone).
+ * Three faces, in this order, each with a reason the next one cannot absorb it:
+ *
+ *   - **Display path** (`help`). Without a TTY the operator has no terminal to
+ *     drive, so the invocation prints usage. A bare `--eval-state` prints usage on
+ *     *either* TTY state: the flag was read from an option position, nothing else
+ *     was asked for, and a display path starts no session — so displaying the
+ *     posture is **not** an eval-state execution, and under a TTY it must not open
+ *     a session with the fence gone (ADR-0130's non-default clause). This is the
+ *     same treatment `-h` / `-V` get, and the reason the old copy called a bare
+ *     posture flag "a posture path" was wrong: it never enters anything.
+ *   - **Chat route** (`chat`). `--json` and `--resume <id>` are chat's own anchors,
+ *     so the legacy route and its observable behavior survive the new default. A
+ *     TUI-only posture riding along is a second, incompatible request: it is
+ *     refused, not dropped. `--yolo` keeps flowing through the chat gate, so
+ *     `iknow --json --yolo` reports the yolo exception exactly as `iknow chat
+ *     --yolo` does.
+ *   - **TUI route** (`tui`). Everything else on a TTY starts the terminal UI,
+ *     carrying whichever posture was asked for — no gate applies, because the TUI
+ *     is `--yolo`'s legal home and `--auto-mode`'s only home.
+ *
+ * `implicitTuiLaunch` marks the last case **only when no posture was asked
+ * for**: that is the one launch a machine without Bun can still serve through the
+ * chat REPL. A launch that named a TUI-only posture would have to lose it to fall
+ * back, so `runTui` fails loudly there instead.
  */
-function bareInvocationDefaultsToChat(
-  requested: boolean | undefined,
-  yolo: boolean | undefined,
-  evalState: boolean | undefined
-): boolean {
-  return (requested ?? false) && yolo !== true && evalState !== true;
+function bareInvocationRoute(request: {
+  readonly interactive: boolean;
+  readonly json: boolean;
+  readonly yolo: boolean | undefined;
+  readonly autoMode: boolean;
+  readonly evalState: boolean | undefined;
+  readonly resumeId: string | undefined;
+}): BareRoute {
+  if (!request.interactive || request.evalState === true) {
+    return { command: "help", fields: { implicitTuiLaunch: false } };
+  }
+  if (request.json || request.resumeId !== undefined) {
+    return {
+      command: "chat",
+      fields: request.autoMode
+        ? {
+            implicitTuiLaunch: false,
+            tuiEntryRejection: rejectTuiPostureConflict({
+              command: "chat",
+              flag: "--auto-mode",
+              anchor: request.json ? "--json" : "--resume",
+              resumeId: request.json ? undefined : request.resumeId,
+            }),
+          }
+        : { implicitTuiLaunch: false },
+    };
+  }
+  return {
+    command: "tui",
+    fields: { implicitTuiLaunch: request.yolo !== true && !request.autoMode },
+  };
 }
 
 export type CliCommand =
@@ -411,6 +628,13 @@ export type ParsedCli = {
    */
   yolo?: boolean;
   /**
+   * ADR-0141: the second named preset entry. Default undefined = no preset
+   * declared (argv byte-identical to the `--yolo`-only shape). Carried by the
+   * `tui` entry only; the five non-TUI session entries carry the typed refusal
+   * in `yoloRejection` instead and the host starts nothing.
+   */
+  noSandbox?: boolean;
+  /**
    * ADR-0119 ruling 7: the typed refusal for a non-TUI entry carrying --yolo
    * (discriminated union). Absent = not carried, or a legal entry was hit. The
    * host writes the message to stderr and exits 1, starting no service /
@@ -435,20 +659,40 @@ export type ParsedCli = {
    * `${kind}: ...` from `.message` — never `String(err)`.
    */
   evalStateRejection?: EvalStateRejection;
+  /**
+   * The typed refusal (same discriminated-union face as the two above) when a
+   * flag and the terminal UI cannot both be honored: a bare TTY invocation that
+   * asks for a TUI-only posture **and** for chat through its own flags
+   * (`--json` / `--resume`), or a chat anchor on the explicit `tui` head. The
+   * parser decides; the host renders. `baseParsed` keeps the three refusal fields
+   * mutually exclusive, so a result never carries two of them.
+   */
+  tuiEntryRejection?: TuiEntryRejection;
+  /**
+   * True only when the TUI route came from a bare TTY invocation carrying no
+   * TUI-only posture. It records the **launch origin**, which the host needs at
+   * exactly one point: with Bun missing, an ordinary bare launch can still be
+   * served by the chat REPL, while a launch that named the TUI explicitly must
+   * fail non-zero rather than start a session without that posture. Always
+   * present (never an absent key), because a host should not have to guess what a
+   * missing field meant.
+   */
+  implicitTuiLaunch: boolean;
 };
 
 export type ParseArgsOptions = {
   readonly argv: string[];
-  /** When true, bare invocation (no query) defaults to chat. */
+  /** When true, a bare invocation (no query) starts the TUI instead of printing usage. */
   readonly interactive?: boolean;
 };
 
 /**
  * Parse process.argv.slice(2)-style argv into a structured CLI request.
  *
- * Defaults:
- * - no positionals + interactive → chat
+ * Defaults (the bare-invocation route is `bareInvocationRoute`'s):
+ * - no positionals + interactive → tui (default mode, or the posture asked for)
  * - no positionals + !interactive → help
+ * - no positionals + interactive + `--json` / `--resume <id>` → chat
  * - ask / bare query with empty text → missingQuery (caller exits 1)
  *
  * Early flag: `--subagent-worker` is checked at the very top of the
@@ -461,6 +705,7 @@ export type ParseArgsOptions = {
 export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   const argv = opts.argv;
   const yolo = yoloFlagFromArgv(argv);
+  const noSandbox = noSandboxFlagFromArgv(argv);
   const interactive = opts.interactive ?? false;
   let json = false;
   let port = 8787;
@@ -523,6 +768,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           separate,
           autoMode,
           yolo,
+          noSandbox,
           evalState: evalStateOnDisplayPath(argv),
           resumeId,
           query: "",
@@ -629,6 +875,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
           separate,
           autoMode,
           yolo,
+          noSandbox,
           evalState: evalStateOnDisplayPath(argv),
           resumeId,
           query: "",
@@ -643,10 +890,11 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
 
   // ADR-0130: `--eval-state` is read from **option positions only** (see
   // `splitEvalStateTokens`): an option never reaches the operator as query text,
-  // and a word of theirs never reaches the fence-retiring posture. `--yolo` is
-  // stripped wherever it sits — its raw-argv reading above is unchanged.
+  // and a word of theirs never reaches the fence-retiring posture. `--yolo` and
+  // `--no-sandbox` are stripped wherever they sit — their raw-argv readings
+  // above are unchanged.
   const { evalState, positional } = splitEvalStateTokens(
-    rest.filter((a) => a !== YOLO_FLAG)
+    rest.filter((a) => a !== YOLO_FLAG && a !== NO_SANDBOX_FLAG)
   );
 
   const flags = {
@@ -662,6 +910,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
     separate,
     autoMode,
     yolo,
+    noSandbox,
     evalState,
     resumeId,
     versionOnly: false,
@@ -680,14 +929,24 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
    * lands on a **session** command carries the typed refusal (discriminated
    * union); the host reports it, exits non-zero and starts nothing. Display
    * paths (-h / -V / non-TTY bare invocation -> help) do not pass this gate —
-   * they start no session and are the explicitly declared allowance (spec EXIT /
-   * the closing acceptance line of plans/yolo-mode.md).
+   * they start no session and are the explicitly declared allowance (spec
+   * `specs/yolo-mode.md` EXIT, including its bare-launch amendment).
    */
+  // ADR-0141: the refusal covers BOTH preset flags. They share one typed error
+  // shape and one command list because they share one home (the tui entry) —
+  // the enumeration is the defense line, so extending it here is what keeps a
+  // new preset from reaching a session entry by omission.
+  const presetFlagAsked = presetAsked(yolo, noSandbox);
   const yoloGate = (
     command: string
   ): { readonly yoloRejection?: YoloNonTuiEntryError } =>
-    yolo === true && isYoloRejectedCommand(command)
-      ? { yoloRejection: rejectYoloForCommand(command) }
+    presetFlagAsked !== undefined && isYoloRejectedCommand(command)
+      ? {
+          yoloRejection: rejectYoloForCommand(
+            command,
+            presetFlagAsked.preset
+          ),
+        }
       : {};
 
   /**
@@ -779,6 +1038,7 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
         // the only place that posture is visible. A flag here would be a second,
         // less-observable door to one state.
         ...evalStateGate("tui"),
+        ...tuiEntryGate({ json, resumeId }),
         query: "",
         missingQuery: false,
         sessionId: sessionId !== undefined ? sessionId : undefined,
@@ -813,20 +1073,28 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
 
   const query = positional.join(" ").trim();
   if (query.length === 0) {
-    if (bareInvocationDefaultsToChat(interactive, yolo, evalState)) {
-      return baseParsed({
-        command: "chat",
-        fields: {
-          ...flags,
-          query: "",
-          missingQuery: false,
-        },
-      });
-    }
+    const route = bareInvocationRoute({
+      interactive,
+      json,
+      yolo,
+      autoMode,
+      evalState,
+      resumeId,
+    });
     return baseParsed({
-      command: "help",
+      command: route.command,
       fields: {
         ...flags,
+        // The gates are the ones the resolved route's own head would pass, so an
+        // inferred route cannot be more permissive than a typed one. The display
+        // path passes none: it starts nothing (same allowance as `-h` / `-V`).
+        ...(route.command === "help"
+          ? {}
+          : {
+              ...yoloGate(route.command),
+              ...evalStateGate(route.command),
+            }),
+        ...route.fields,
         query: "",
         missingQuery: false,
       },
@@ -845,9 +1113,32 @@ export function parseArgs(opts: ParseArgsOptions): ParsedCli {
   });
 }
 
+/**
+ * One assembly point for every parse result. `implicitTuiLaunch` is filled here
+ * rather than at each head: the field is required in the public shape, and only
+ * the bare route can answer it true, so a head that never launches the TUI
+ * implicitly cannot forget to say so.
+ *
+ * Refusal precedence is decided here as well, once — yolo, then the TUI entry
+ * family, then eval state — so a request carrying two refused flags yields
+ * exactly one filled field and the host's read order carries no meaning.
+ */
 function baseParsed(opts: {
   readonly command: CliCommand;
-  readonly fields: Omit<ParsedCli, "command">;
+  readonly fields: Omit<ParsedCli, "command" | "implicitTuiLaunch"> & {
+    readonly implicitTuiLaunch?: boolean;
+  };
 }): ParsedCli {
-  return { command: opts.command, ...opts.fields };
+  const parsed: ParsedCli = {
+    command: opts.command,
+    implicitTuiLaunch: false,
+    ...opts.fields,
+  };
+  if (parsed.yoloRejection !== undefined) {
+    delete parsed.tuiEntryRejection;
+    delete parsed.evalStateRejection;
+  } else if (parsed.tuiEntryRejection !== undefined) {
+    delete parsed.evalStateRejection;
+  }
+  return parsed;
 }

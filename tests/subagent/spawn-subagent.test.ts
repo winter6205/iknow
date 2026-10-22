@@ -1588,6 +1588,110 @@ describe("spawn_subagent — parent thinking snapshot", () => {
   });
 });
 
+describe("spawn_subagent — parent model route", () => {
+  it("carries ctx.parentModelRoute into the definition and the worker payload", async () => {
+    const subagentsDir = mkdtempSync(join(tmpdir(), "iknow-route-spawn-"));
+    const launches: Array<{
+      readonly def: SubAgentDefinition;
+      readonly taskId: string;
+      readonly payload: WorkerEnvelope;
+      readonly child: FakePayloadChild;
+    }> = [];
+    const manager = createSubAgentManager({
+      subagentsDir,
+      spawn: (def, taskId, payload) => {
+        const child = makePayloadChild();
+        launches.push({ def, taskId, payload, child });
+        return child as unknown as ChildProcess;
+      },
+    });
+
+    try {
+      const tool = createSpawnSubAgentTool({ manager });
+      await tool.handler(
+        { title: "routed worker", task: "routed task", wait: false },
+        { parentModelRoute: "conv/conv-model" } as never
+      );
+
+      expect(launches).toHaveLength(1);
+      expect(launches[0]!.def.parentModelRoute).toBe("conv/conv-model");
+      expect(launches[0]!.payload.parentModelRoute).toBe("conv/conv-model");
+    } finally {
+      const completed = Promise.all(
+        launches.map(({ taskId }) => manager.waitFor(taskId, 2_000))
+      );
+      for (const { child } of launches) {
+        const envelope: SubAgentEnvelope = {
+          status: "ok",
+          summary: "finished",
+          result: "finished",
+        };
+        child.stdout.write(JSON.stringify(envelope) + "\n");
+        child.emit("exit", 0, null);
+      }
+      await completed;
+      await manager.shutdown();
+      rmSync(subagentsDir, { recursive: true, force: true });
+    }
+  });
+
+  it("no ctx route → the key is not produced on the definition or the payload", async () => {
+    const subagentsDir = mkdtempSync(join(tmpdir(), "iknow-route-spawn-"));
+    const launches: Array<{
+      readonly def: SubAgentDefinition;
+      readonly taskId: string;
+      readonly payload: WorkerEnvelope;
+      readonly child: FakePayloadChild;
+    }> = [];
+    const manager = createSubAgentManager({
+      subagentsDir,
+      spawn: (def, taskId, payload) => {
+        const child = makePayloadChild();
+        launches.push({ def, taskId, payload, child });
+        return child as unknown as ChildProcess;
+      },
+    });
+
+    try {
+      const tool = createSpawnSubAgentTool({ manager });
+      await tool.handler(
+        { title: "unrouted worker", task: "unrouted task", wait: false },
+        {} as never
+      );
+
+      expect(launches).toHaveLength(1);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          launches[0]!.def,
+          "parentModelRoute"
+        )
+      ).toBe(false);
+      expect(
+        Object.prototype.hasOwnProperty.call(
+          launches[0]!.payload,
+          "parentModelRoute"
+        )
+      ).toBe(false);
+    } finally {
+      const completed = Promise.all(
+        launches.map(({ taskId }) => manager.waitFor(taskId, 2_000))
+      );
+      for (const { child } of launches) {
+        const envelope: SubAgentEnvelope = {
+          status: "ok",
+          summary: "finished",
+          result: "finished",
+        };
+        child.stdout.write(JSON.stringify(envelope) + "\n");
+        child.emit("exit", 0, null);
+      }
+      await completed;
+      await manager.shutdown();
+      rmSync(subagentsDir, { recursive: true, force: true });
+    }
+  });
+});
+
 interface FakePayloadChild {
   readonly stdout: PassThrough;
   readonly stderr: PassThrough;

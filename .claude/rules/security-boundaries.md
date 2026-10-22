@@ -1,84 +1,45 @@
-# Security Boundaries
+# 安全边界（iknow 特有细则）
 
-## 优先只读命令
+红线在 `AGENTS.md`「硬边界」，这里只写细则。
 
-分析阶段优先使用：
+## 读取与环境变量
+
+- 确认环境变量是否存在用 `[ -n "${VAR:-}" ] && echo set || echo unset`，不用 `echo "$VAR"`、`env`、`printenv`、`set -x`。
+- 不用 `python3 -c`、`node -e`、`grep -r`、`source .env` 等写法绕开 `.env` 读取限制；settings 的 deny 拦不住这些写法，靠本条约束。
+
+## 测试数据与凭据
+
+- 测试、fixture、快照、示例里的凭据用明显的占位值，或运行时从环境变量读取；不用真实用户数据。
+- 新增或修改的 fixture、快照里不放真实凭据。
+- `npm run test:real-llm` 用 iknow settings 里配置的模型 key（不是固定环境变量），会产生费用并把输入发给外部提供方：输入只用可公开或已脱敏的内容。
+
+## trace 打码（本仓事实）
+
+- trace writer（`src/harness/trace/jsonl.ts:19,148,177`）写入前按密钥登记表把已知密钥值替换为 `<<<SECRET_N>>>`；开关是 settings 的 `secrets.enabled`，默认开启（`src/config/settings.ts:20,333`）。
+- 不得提交关闭 `secrets.enabled` 的配置或测试改动；打码只覆盖已登记的值。
+
+## 公开镜像
+
+- iknow 有公开镜像，发布工作区在 `${RELEASES_DIR:?}` 下；`.claude/`、`CLAUDE.md`、`AGENTS.md` 都会进镜像。规则、代码、文档里不写内部名称、私有 owner 和本机路径；内部名称清单只在 `${RELEASES_DIR:?}/internal-patterns.txt`，不进仓库，汇报命中时只报文件和行号。
+- 自检（仓库根目录，只读，输出为空才通过）：
 
 ```bash
-ls
-find
-grep
-rg
-cat
-sed -n
-git status
-git diff
-git log
-git show
+test -r "${RELEASES_DIR:?}/internal-patterns.txt" && git grep -n -I -i -E -f "${RELEASES_DIR:?}/internal-patterns.txt" -- . ':!*.lock'
+rg -n -uu -P --glob '!.git/' 'projects/release[s]|/home/[A-Za-z0-9._-]+/|/Users/[A-Za-z0-9._-]+/|/mnt/[a-z]/|\b[A-Z]:\\' .
 ```
 
-## 修改前说明计划
+- **发布前密钥扫描（只此一处）**。发布工作区里对公开镜像全树跑下面两条，任一有输出即停止发布，只报文件名、不报匹配值，并把结果附在批准请求里：
 
-涉及多文件修改、架构调整、高风险模块、依赖升级时，必须先输出：
-
-```text
-Plan:
-1. ...
-2. ...
-3. ...
-
-Files expected to change:
-- ...
-
-Validation:
-- ...
+```bash
+git -C "${RELEASES_DIR:?}/iknow" ls-files -z | xargs -0 -r rg -l -I --pcre2 \
+  -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' -e 'AKIA[0-9A-Z]{16}' -e '\bsk-[A-Za-z0-9_-]{20,}' \
+  -e '\bgh[pousr]_[A-Za-z0-9]{36,}' -e '[a-z][a-z0-9+.-]*://[^/\s:@]+:[^/\s@]+@' \
+  -e '(?i)(api[_-]?key|secret|token|passw(or)?d)\s*[:=]\s*["'"'"']?[A-Za-z0-9_\-/+=]{16,}'
+git -C "${RELEASES_DIR:?}/iknow" ls-files | rg -e '(^|/)\.env(\.|$)' -e '\.(pem|key|p12|pfx|jks)$' \
+  -e '(^|/)(id_rsa|id_ed25519)$' -e '(^|/)(secrets|credentials)\.' \
+  | rg -v '\.env\.(example|sample)$'
 ```
 
-## 不允许的操作
-
-不得读取或输出敏感文件内容：
-
-```text
-.env
-.env.*
-*.pem
-*.key
-*.p12
-*.crt
-id_rsa
-id_ed25519
-secrets.*
-credentials.*
-```
-
-不得把密钥 / token / cookie / 生产凭据复制到聊天、提交信息、日志或测试快照中。
-
-## 高风险区域 — 修改前必先确认
-
-- 身份认证
-- 授权权限
-- 支付计费
-- 加密、签名、token、session
-- 数据库迁移
-- 数据删除脚本
-- CI/CD
-- 生产配置
-- 基础设施配置
-- 安全策略
-- 多租户隔离
-- 审计日志
-- 合规相关逻辑
-
-## 安全与隐私
-
-任何涉及用户数据 / 认证 / 权限 / 支付 / 日志 / 遥测的变更，都必须考虑：
-
-1. 最小权限
-2. 输入校验
-3. 错误信息不泄露敏感细节
-4. 日志脱敏
-5. 审计可追踪
-6. 回滚方案
-7. 测试覆盖
-
-不得在测试、示例、文档中使用真实密钥或真实用户数据。
+- 发布前在发布工作区再跑：上面「自检」第一条、`git rev-list --all | xargs -r -n 100 git grep -l -I -E -f "${RELEASES_DIR:?}/internal-patterns.txt"`（历史）、`ls -a | rg '^\.env' | rg -v '\.env\.(example|sample)$'`，任一有输出即停止发布，把结果附在批准请求里。
+- 镜像工作区目前仍有内部名称残留，发布前逐条复核。
+- 提交（普通进仓库）不做密钥扫描；扫描只在公开镜像发布前做。

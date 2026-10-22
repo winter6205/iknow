@@ -9,8 +9,21 @@
  * Only the model transport is stubbed (a loopback Anthropic-compatible server
  * on 127.0.0.1) — that is the external boundary, and everything under it stays
  * real. The scripted model issues a genuinely hard-wall-denied command three
- * times, so the interruption the spec asks about is reached by production code
- * paths rather than by an injected result.
+ * times, so the denial is reached by production code paths rather than by an
+ * injected result.
+ *
+ * WHAT A HARD-WALL DENIAL DOES (ADR-0135's 2026-10-10 amendment, commit
+ * 265f8866 / PR #1242, acceptance in specs/hard-wall-denial-alignment.md
+ * sections 8 and 11): a `[hard_wall]` denial is the command's non-overridable
+ * per-call protection. It fails that tool call and is NOT a confirmed security
+ * violation: it neither increments nor resets the streak, and it does not
+ * interrupt the turn. The confirmed mid-tier violations that still interrupt
+ * at three are `[network_denied]`, `[fs_denied]`, and a dangerous
+ * `[permission_denied]` that is not a hard-wall denial. The old classifier
+ * mapped "[hard_wall] dangerous ..." to the mid tier, so before that
+ * amendment three hard-wall denials DID stop the turn; the first suite below
+ * now asserts the policy the amendment defines, and the second suite covers
+ * the interruption evidence.
  *
  * The CLI is run through `node --import tsx` on `src/cli.ts` rather than
  * `dist/`, so the test observes the sources under review and needs no build
@@ -28,10 +41,18 @@ import {
   readdirSync,
   rmSync,
 } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, resolve, sep } from "node:path";
 import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { startLoopbackModel } from "./_ask-loopback-model.ts";
+import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
+import { createRegistry } from "../../src/harness/tools/registry.ts";
+import { createExecutor } from "../../src/harness/tools/executor.ts";
+import { ToolExecutionError } from "../../src/harness/errors.ts";
+import { buildViolationWiring } from "../../src/harness/sandbox/violation-executor.ts";
+import { createJsonlTraceService } from "../../src/harness/trace/jsonl.ts";
+import { violationRecordFromReason } from "../../src/harness/trace/violation-record.ts";
+import { safeTrace } from "../../src/harness/trace/safe-trace.ts";
 
 const run = promisify(execFile);
 
@@ -184,7 +205,7 @@ describe("ask entry: a real run emits parseable shared-schema evidence", () => {
       { tool: { name: "bash", input: { command: "rm -rf /" } } },
       { tool: { name: "bash", input: { command: "rm -rf /" } } },
       { tool: { name: "bash", input: { command: "rm -rf /" } } },
-      { text: "unreachable if the turn was interrupted" },
+      { text: "the turn ran to its end" },
     ]);
   }, 180_000);
 
@@ -237,35 +258,34 @@ describe("ask entry: a real run emits parseable shared-schema evidence", () => {
     expect(linked.length).toBe(3);
   });
 
-  it("records the security interruption that stopped the turn", () => {
-    // The gap this task exists to close: `ask` reached the escalation (it
-    // printed the operator notice and exited non-zero) but wrote no
-    // `violation` row, so the interrupted turn was unreconstructable from the
-    // evidence a trial retains.
-    expect(outcome.stderr).toContain("session killed");
-    expect(outcome.code).not.toBe(0);
-
+  it("a hard-wall denial fails its call without stopping the turn", () => {
+    // ADR-0135's 2026-10-10 amendment (commit 265f8866, PR #1242; acceptance
+    // in specs/hard-wall-denial-alignment.md sections 8 and 11) made a
+    // `[hard_wall]` denial the command's per-call protection: it fails that
+    // tool call and is NOT a confirmed security violation, so it neither
+    // increments nor resets the streak and it does not interrupt the turn.
+    // Before that amendment the classifier mapped "[hard_wall] dangerous ..."
+    // to the mid tier, so three of these denials DID stop the turn - which is
+    // what this case used to assert, and what made it red on master. The
+    // guarantee it protects now is the opposite one, and it is the same
+    // guarantee the two sibling suites assert for the same input
+    // (tests/cli/chat-violation.test.ts and
+    // tests/session-api/hub-trace-evidence.test.ts, both updated by that same
+    // commit).
+    expect(outcome.stderr).not.toContain("session killed");
+    // The run finished on its own terms: the exit code is the run's, not an
+    // interruption's.
+    expect(outcome.code).toBe(0);
+    // A denial the policy calls a per-call protection leaves no violation row.
     const violations = outcome.rows.filter(
       (r) => r["record_type"] === "violation"
     );
-    expect(violations.length).toBeGreaterThan(0);
-    // The escalation notification and the structured report are two rows;
-    // select the report by the evidence it carries, not by ordering.
-    const report = violations.find(
-      (v) => v["confirmed_violations"] !== undefined && "cleanup" in v
-    );
-    expect(report).toBeDefined();
-    expect(report!["tier"]).toBe("mid");
-    expect(report!["tool"]).toBe("bash");
-    expect(report!["message"]).toContain("hard_wall");
-    expect(report!["confirmed_violations"]).toBe(3);
-    // Bound to a turn that exists in the same file, not to file order.
-    const turnId = report!["turn_id"] as string;
-    expect(
-      outcome.rows.some(
-        (r) => r["record_type"] === "turn" && r["turn_id"] === turnId
-      )
-    ).toBe(true);
+    expect(violations).toEqual([]);
+    // The turn ran to its end: the scripted text turn after the three denials
+    // was reached, so nothing stopped the run.
+    const parsed = JSON.parse(outcome.stdout) as Record<string, unknown>;
+    expect(parsed["turnCount"]).toBe(4);
+    expect(String(parsed["finalText"])).toContain("the turn ran to its end");
   });
 
   it("leaves the raw run outcome untouched", () => {
@@ -274,5 +294,120 @@ describe("ask entry: a real run emits parseable shared-schema evidence", () => {
     const parsed = JSON.parse(outcome.stdout) as Record<string, unknown>;
     expect(parsed["stopReason"]).toBeDefined();
     expect(parsed["turnCount"]).toBeGreaterThan(0);
+  });
+});
+
+describe("ask entry: an interrupted turn leaves its cause on the trace", () => {
+  it("writes the violation record the ask entry writes when a confirmed mid-tier violation stops the turn", async () => {
+    // The composition the `ask` entry runs (src/cli.ts): the executor wrapped
+    // by the violation wiring, whose onInterrupt writes the interruption
+    // report through the same shared JSONL service the turn and tool rows use.
+    //
+    // Why this is not a second real child process: after ADR-0135's
+    // 2026-10-10 amendment the only CONFIRMED mid-tier violation a
+    // model-driven tool call can still produce is the egress seam's
+    // `[network_denied]` - the `[fs_denied]` boundary guidance deliberately
+    // rides the ok-envelope stderr channel and is NOT counted (see
+    // src/harness/aci/tools/bash.ts) - and that seam needs the bundled relay
+    // plus a live network, so it is not reachable in a hermetic run. The
+    // escalating denial below is therefore synthetic, exactly as the
+    // Serve-route sibling does it
+    // (tests/session-api/hub-trace-evidence.test.ts); the wiring, the
+    // classifier, the record builder and the JSONL service under test are all
+    // production.
+    const root = mkdtempSync(join(tmpdir(), "iknow-ask-interrupt-"));
+    // The trace lands under a fresh temp directory: nothing reaches the
+    // developer's own data/ or ~/.iknow.
+    expect(resolve(root).startsWith(resolve(tmpdir()) + sep)).toBe(true);
+    const conversationId = "conversation-ask-interrupt";
+    const turnId = "turn-ask-interrupt";
+    const originalExitCode = process.exitCode;
+    try {
+      const traceService = createJsonlTraceService({
+        filePath: root,
+        conversationId,
+      });
+      const denied = createStubTool({
+        name: "denied_tool",
+        next: () => {
+          throw new ToolExecutionError(
+            "[network_denied] evil.com: not in allowlist"
+          );
+        },
+      });
+      const { executor } = buildViolationWiring(
+        createExecutor(createRegistry([denied])),
+        {
+          onInterrupt: (reason: string) => {
+            const record = violationRecordFromReason(
+              reason,
+              new Date().toISOString()
+            );
+            if (record === undefined) return;
+            void safeTrace(() => traceService.recordViolation(record));
+          },
+        }
+      );
+
+      // The operator notice goes to the process's stderr through the
+      // production default sink; capture it instead of letting it pollute the
+      // test output.
+      const stderrChunks: string[] = [];
+      const originalWrite = process.stderr.write.bind(process.stderr);
+      process.stderr.write = ((chunk: string | Uint8Array) => {
+        stderrChunks.push(
+          typeof chunk === "string"
+            ? chunk
+            : Buffer.from(chunk).toString("utf8")
+        );
+        return true;
+      }) as typeof process.stderr.write;
+      try {
+        await executor.executeAll(
+          [
+            { id: "call_1", name: "denied_tool", input: {} },
+            { id: "call_2", name: "denied_tool", input: {} },
+            { id: "call_3", name: "denied_tool", input: {} },
+          ],
+          undefined,
+          undefined,
+          conversationId,
+          undefined,
+          turnId
+        );
+      } finally {
+        process.stderr.write = originalWrite;
+      }
+      const notice = stderrChunks.join("");
+      expect(notice).toContain("[violation] session killed:");
+      expect(notice).toContain("tier=mid");
+      expect(notice).toContain("tool=denied_tool");
+      // The interrupted run exits non-zero.
+      expect(process.exitCode).toBe(1);
+
+      const traceFile = join(root, `${conversationId}.jsonl`);
+      const rows = readFileSync(traceFile, "utf8")
+        .trim()
+        .split("\n")
+        .filter((l) => l.trim().length > 0)
+        .map((l) => JSON.parse(l) as Record<string, unknown>);
+      const violations = rows.filter((r) => r["record_type"] === "violation");
+      expect(violations.length).toBeGreaterThan(0);
+      // Select the report by the evidence it carries, not by ordering.
+      const report = violations.find(
+        (v) => v["confirmed_violations"] !== undefined && "cleanup" in v
+      );
+      expect(report).toBeDefined();
+      expect(report!["tier"]).toBe("mid");
+      expect(report!["tool"]).toBe("denied_tool");
+      expect(String(report!["message"])).toContain("network_denied");
+      expect(report!["confirmed_violations"]).toBe(3);
+      // Bound to the turn that was interrupted, not to file order.
+      expect(report!["turn_id"]).toBe(turnId);
+      expect(report!["cleanup"]).toBeDefined();
+    } finally {
+      process.exitCode = originalExitCode;
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });

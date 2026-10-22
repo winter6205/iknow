@@ -96,7 +96,7 @@ function makeBridge(yolo?: ReturnType<typeof createYoloContext>) {
     ]),
     inflight: createInflightRegistry(),
     verifyConfig,
-    ...(yolo ? { yolo } : {}),
+    ...(yolo ? { fenceRetired: yolo } : {}),
   });
 }
 

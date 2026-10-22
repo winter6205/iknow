@@ -26,6 +26,11 @@ import type {
   SecurityParseOk,
 } from "../../../src/harness/permission/shell-parse.js";
 
+/** Named so the escape spellings below read as shapes rather than byte soup. */
+const LF = String.fromCharCode(0x0a);
+const CR = String.fromCharCode(0x0d);
+const TAB = String.fromCharCode(0x09);
+
 function okPayload(command: string): SecurityParseOk {
   const result = parseForSecurity(command);
   if (result.kind !== "ok") {
@@ -314,6 +319,91 @@ describe("bare newline / carriage-return offsets answer the quoted-outside quest
     const ok = okPayload("echo a\nls && pwd");
     expect(ok.bareNewlineOffsets).toEqual([6]);
     expect(operatorsOf(ok).map((fact) => fact.kind)).toEqual(["and"]);
+  });
+});
+
+/**
+ * #1188's effect on this view. A backslash-escaped U+0020 or an unquoted LF
+ * continuation is now admitted, and an admitted escaped LF is CONTENT rather
+ * than a statement separator, so it must not appear in either offset list.
+ * The escape parity is what decides that, and the parity is checked here
+ * against the sibling case that differs by exactly one backslash — otherwise
+ * an empty list would be indistinguishable from a blanket newline exemption.
+ */
+describe("an admitted escaped line break is content, not a bare separator", () => {
+  it("omits the escaped LF, and keeps the same LF bare once the escape is removed", () => {
+    const escaped = okPayload(`a \\${LF} b`);
+    expect(escaped.bareNewlineOffsets).toEqual([]);
+    expect(escaped.bareCarriageReturnOffsets).toEqual([]);
+
+    const genuine = okPayload(`a ${LF} b`);
+    expect(genuine.bareNewlineOffsets).toEqual([2]);
+    expect(genuine.bareCarriageReturnOffsets).toEqual([]);
+  });
+
+  it("omits the escaped LF for every admitted continuation shape", () => {
+    for (const command of [
+      `a \\${LF} b`,
+      `gh issue view 1188 --json number,title \\${LF} -q '.title'`,
+      `printf x a \\${LF} b`,
+    ]) {
+      const ok = okPayload(command);
+      expect(ok.bareNewlineOffsets, command).toEqual([]);
+      expect(ok.bareCarriageReturnOffsets, command).toEqual([]);
+      // The two operands either side of the continuation are separate words,
+      // so the fact view is still free to report both.
+      expect(ok.commands, command).toHaveLength(1);
+    }
+  });
+
+  it("keeps a genuine CR and a genuine CRLF pair as bare facts", () => {
+    const cr = okPayload(`echo a${CR}b`);
+    expect(cr.bareCarriageReturnOffsets).toEqual([6]);
+    expect(cr.bareNewlineOffsets).toEqual([]);
+
+    const crlf = okPayload(`echo a${CR}${LF}b`);
+    expect(crlf.bareCarriageReturnOffsets).toEqual([6]);
+    expect(crlf.bareNewlineOffsets).toEqual([7]);
+  });
+
+  it("publishes no line-break offset for a line break a backslash run escaped, whatever the run length", () => {
+    // Only the two admitted shapes reach `ok`; every other escape-adjacent
+    // line break is refused pre-parse, so no payload can carry one. The
+    // refusal is pinned here so the absent fact is a measured state rather
+    // than a silently untested branch.
+    for (const command of [
+      `a\\${LF}b`,
+      `\\${LF} a b`,
+      `a \\${LF}b`,
+      `"a\\${LF}b"`,
+      `a \\\\${LF} b`,
+      `a\\${CR}b`,
+      `a\\${CR}${LF}b`,
+      `a \\\\${CR}b`,
+    ]) {
+      expect(parseForSecurity(command).kind, JSON.stringify(command)).toBe(
+        "vetoed"
+      );
+    }
+  });
+
+  it("leaves quoted and heredoc-protected spans on the same footing as before", () => {
+    for (const command of [
+      `echo "a${LF}b"`,
+      `echo 'a${LF}b'`,
+      `echo $'a${LF}b'`,
+    ]) {
+      const ok = okPayload(command);
+      expect(ok.quotedSpans.length, command).toBeGreaterThan(0);
+      expect(ok.bareNewlineOffsets, command).toEqual([]);
+      expect(ok.bareCarriageReturnOffsets, command).toEqual([]);
+    }
+    const heredoc = okPayload("cat <<'EOF'\nx\nEOF");
+    expect(heredoc.bareNewlineOffsets).toEqual([11]);
+  });
+
+  it("leaves backslash+TAB a pre-parse refusal, so it never reaches this view at all", () => {
+    expect(parseForSecurity(`a\\${TAB}b`).kind).toBe("vetoed");
   });
 });
 

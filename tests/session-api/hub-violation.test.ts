@@ -57,13 +57,18 @@ afterAll(async () => {
  * issues 4 tool calls then a final text, so the loop drives the counter past
  * the mid threshold (3) and the kill fires mid-turn.
  */
-function makeViolationDeps(): LoopEngineDeps {
+const NETWORK_DENIED = "[network_denied] evil.com: not in allowlist";
+const HARD_WALL_DENIED = "[hard_wall] dangerous command rejected";
+
+function makeViolationDeps(
+  denial: string = NETWORK_DENIED
+): LoopEngineDeps {
   // ToolExecutionError keeps its message through the executor's sanitize
   // (a plain Error would be masked as "tool execution failed").
   const tool = createStubTool({
     name: "dangerous",
     next: () => {
-      throw new ToolExecutionError("[hard_wall] dangerous command rejected");
+      throw new ToolExecutionError(denial);
     },
   });
   const registry = createRegistry([tool]);
@@ -198,7 +203,7 @@ describe("SessionHub violation kill (serve entry)", () => {
         .filter((l) => l.includes('"record_type":"violation"'));
       assert.ok(lines.length >= 1, `expected violation record, got: ${raw}`);
       assert.match(lines[0] ?? "", /"conversation_id":"[^"]+"/);
-      assert.match(lines[0] ?? "", /hard_wall/);
+      assert.match(lines[0] ?? "", /network_denied/);
       // Integration assertion: every session root record written at run end
       // carries the agent_version injected by serve. One per postMessage, so
       // this test's two turns produce two.
@@ -237,6 +242,41 @@ describe("SessionHub violation kill (serve entry)", () => {
       assert.deepEqual(cause?.["cleanup"], []);
     } finally {
       process.exitCode = savedExitCode;
+    }
+  });
+
+  it("three [hard_wall] denials finish the turn completed with no security interruption", async () => {
+    const hub = new SessionHub({
+      store,
+      workspaceRoot: process.cwd(),
+      deps: makeViolationDeps(HARD_WALL_DENIED),
+      traceOut: traceDir,
+    });
+    const { session } = await hub.createSession();
+    // The stub queue is three denials then a closing text. Reaching that text
+    // means each denial was returned to the model and the turn was not cancelled.
+    const res = await hub.postMessage({
+      conversationId: session.conversation_id,
+      text: "do something dangerous",
+    });
+    assert.equal(res.turn.answer.stopReason, "completed");
+    assert.equal(res.turn.answer.finalText, "second turn");
+    const outcome = res.turn.answer.outcome;
+    assert.equal(
+      outcome?.terminal === "known" ? outcome.securityInterruption : undefined,
+      undefined
+    );
+    const tracePath = resolveConversationTraceFilePath({
+      projectDir: store.getProjectDir(),
+      conversationId: session.conversation_id,
+    });
+    if (existsSync(tracePath)) {
+      const raw = await readFile(tracePath, "utf8");
+      assert.equal(
+        raw.includes('"record_type":"violation"'),
+        false,
+        "a hard_wall denial must not write a turn-kill violation record"
+      );
     }
   });
 

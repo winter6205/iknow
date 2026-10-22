@@ -52,24 +52,35 @@ import type { SubAgentManager } from "../src/harness/subagent/manager.ts";
 import type { SubAgentTerminalNotice } from "../src/harness/subagent/mailbox.ts";
 
 describe("parseArgs", () => {
-  it("defaults bare invocation to chat when interactive", () => {
+  it("defaults a bare invocation to the TUI when interactive", () => {
     const p = parseArgs({ argv: [], interactive: true });
-    assert.equal(p.command, "chat");
+    assert.equal(p.command, "tui");
     assert.equal(p.missingQuery, false);
+    assert.equal(p.query, "");
+    // The default mode: no posture arrives on the implicit launch, and it is the
+    // one launch allowed to fall back to chat when Bun is missing.
+    assert.equal(p.yolo, undefined);
+    assert.equal(p.autoMode, false);
+    assert.equal(p.sessionId, undefined);
+    assert.equal(p.implicitTuiLaunch, true);
   });
 
   it("defaults bare invocation to help when non-interactive", () => {
     const p = parseArgs({ argv: [], interactive: false });
     assert.equal(p.command, "help");
+    assert.equal(p.implicitTuiLaunch, false);
   });
 
   it("flags-only on TTY defaults to chat", () => {
+    // `--json` is chat's own anchor, so it keeps the legacy route instead of the
+    // default TUI launch.
     const p = parseArgs({
       argv: ["--json"],
       interactive: true,
     });
     assert.equal(p.command, "chat");
     assert.equal(p.json, true);
+    assert.equal(p.implicitTuiLaunch, false);
   });
 
   it("flags-only non-TTY defaults to help", () => {
@@ -135,7 +146,18 @@ describe("usage / version", () => {
     assert.match(getVersion(), /^\d+\.\d+\.\d+/);
   });
 
-  it("usageText mentions chat and ask (bilingual) and does NOT mention --mode / --role", () => {
+  it("usageText publishes the four sections and the bare-launch routing", () => {
+    const t = usageText();
+    for (const section of ["Usage:", "Options:", "Commands:", "Notes:"]) {
+      assert.ok(t.includes(section), `usage must keep its ${section} section`);
+    }
+    // The help must tell what the parser does, in the same words.
+    assert.match(t, /bare `iknow` on a TTY starts the TUI/);
+    assert.match(t, /without a TTY prints this usage and starts nothing/);
+    assert.match(t, /`iknow "<query>"` is a one-shot run/);
+  });
+
+  it("usageText mentions chat and ask and does NOT mention --mode / --role", () => {
     const t = usageText();
     assert.match(t, /chat/);
     assert.match(t, /ask/);

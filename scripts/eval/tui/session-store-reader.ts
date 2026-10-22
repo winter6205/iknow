@@ -33,14 +33,7 @@
  * raises `ObserverError` — a broken observer is an error report, never a quiet
  * terminal, because "quiet" is what the stop rule reads as settled.
  */
-import {
-  openSync,
-  readFileSync,
-  closeSync,
-  readSync,
-  readdirSync,
-  statSync,
-} from "node:fs";
+import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join, sep } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 
@@ -84,9 +77,17 @@ export class ObserverError extends Error {
 export interface Baseline {
   readonly path: string;
   readonly conversationId: string;
-  /** Byte offset of the end of the last COMPLETE line. */
+  /**
+   * Byte offset of the end of the last COMPLETE line.
+   *
+   * Retained because `run.ts` hands it to `deriveStoreCounters` as a one-shot
+   * report field. It is NOT the reader's cursor: the header line changes length
+   * mid-run, so this value does not survive a rewrite (see `lastLine`).
+   */
   readonly byteOffset: number;
   readonly lineCount: number;
+  /** Text of the last COMPLETE line — the reader's re-anchor identity. */
+  readonly lastLine: string;
   readonly eventIds: readonly string[];
   readonly headId: string | null;
 }
@@ -346,25 +347,53 @@ function headIdOf(records: readonly StoreRecord[]): string | null {
 }
 
 /**
- * Split the ingested bytes at the last newline: everything through it is a
+ * Read the whole store as RAW BYTES. Absence is the writer's "not yet"; every
+ * other failure is a broken observer.
+ *
+ * WHY THE WHOLE FILE. The writer is NOT append-only in byte offset. `save()`
+ * writes the whole log to a tmp file and renames it over the authority, and the
+ * `session` header on line 1 GROWS as a run progresses (`turnCount`, `title`,
+ * `lastUsage`), so every record after it shifts. A reader carrying a monotonic
+ * byte offset therefore resumes in the middle of a record and raises
+ * `ObserverError(malformed_line)` mid-turn. Re-reading and re-anchoring on the
+ * identity of the last consumed line is immune to that, and the store is small.
+ */
+function readWhole(path: string): StoreRead {
+  let buffer: Buffer;
+  try {
+    buffer = readFileSync(path);
+  } catch (err) {
+    if (isAbsentPath(err)) return { exists: false };
+    throw new ObserverError("read_failed", 0, `${path}: ${String(err)}`);
+  }
+  return { exists: true, bytes: buffer };
+}
+
+/**
+ * Split raw store bytes at the last newline: everything through it is a
  * complete line, everything after it is the tail the writer has not finished.
  *
- * The decoder is fed only the COMPLETE-line bytes, and those always begin at a
- * newline — an ASCII byte that can never sit inside a multi-byte character — so
- * the stream it sees starts on a character boundary. The tail is left as raw
- * bytes for the caller to carry into the next poll.
+ * The tail is returned as RAW BYTES and never decoded. The writer appends
+ * without knowing where a read lands, so that boundary can fall inside a
+ * multi-byte character; decoding the tail eagerly turned the split bytes into
+ * `U+FFFD` and the continuation bytes were then never re-read — a permanent,
+ * silent corruption of the very text acceptance matches on. The complete-line
+ * region is safe to decode because it both starts and ends on an ASCII byte.
+ *
+ * CONTRACT (#1219): an incomplete trailing line is a WAIT. This function cannot
+ * report it as a record and cannot report it as a fault, so the caller sees
+ * only `tail`, and `pendingTailBytes` carries its size into the verdict.
  */
 function splitCompleteLines(
   decoder: StringDecoder,
-  ingested: Buffer
+  bytes: Buffer
 ): { lines: string[]; tail: Buffer } {
-  const lastNewline = ingested.lastIndexOf(0x0a);
-  const lines =
-    lastNewline < 0
-      ? []
-      : decoder.write(ingested.subarray(0, lastNewline + 1)).split("\n");
+  const lastNewline = bytes.lastIndexOf(0x0a);
+  if (lastNewline < 0) return { lines: [], tail: bytes };
+  const complete = decoder.write(bytes.subarray(0, lastNewline + 1));
+  const lines = complete.split("\n");
   lines.pop();
-  return { lines, tail: ingested.subarray(lastNewline + 1) };
+  return { lines, tail: bytes.subarray(lastNewline + 1) };
 }
 
 /**
@@ -373,7 +402,7 @@ function splitCompleteLines(
  * non-fault a read can report. Everything else is an `ObserverError`.
  */
 type StoreRead =
-  | { readonly exists: true; readonly bytes: Buffer; readonly size: number }
+  | { readonly exists: true; readonly bytes: Buffer }
   | { readonly exists: false };
 
 /** True for `ENOENT` only: the path is not there, so there is nothing to read.
@@ -385,42 +414,6 @@ function isAbsentPath(err: unknown): boolean {
     err !== null &&
     (err as { code?: unknown }).code === "ENOENT"
   );
-}
-
-/** Read the store from `offset` up to its current EOF, as RAW BYTES. */
-function readFrom(path: string, offset: number): StoreRead {
-  let fd: number;
-  try {
-    fd = openSync(path, "r");
-  } catch (err) {
-    if (isAbsentPath(err)) return { exists: false };
-    throw new ObserverError("read_failed", 0, `${path}: ${String(err)}`);
-  }
-  try {
-    const size = statSync(path).size;
-    if (size <= offset) return { exists: true, bytes: Buffer.alloc(0), size };
-    const parts: Buffer[] = [];
-    let read = 0;
-    // A short read is normal on a regular file, so the remainder is re-read
-    // here rather than left behind: dropping it would silently truncate a line.
-    while (read < size - offset) {
-      const buffer = Buffer.allocUnsafe(size - offset - read);
-      const got = readSync(fd, buffer, 0, buffer.length, offset + read);
-      if (got === 0) break;
-      parts.push(buffer.subarray(0, got));
-      read += got;
-    }
-    const bytes = parts.length === 1 ? parts[0]! : Buffer.concat(parts, read);
-    return { exists: true, bytes, size };
-  } catch (err) {
-    // The store vanished between `openSync` and `statSync`. Nothing was read,
-    // so the next poll re-reads from the same offset against whatever the
-    // writer has by then put there.
-    if (isAbsentPath(err)) return { exists: false };
-    throw new ObserverError("read_failed", 0, `${path}: ${String(err)}`);
-  } finally {
-    closeSync(fd);
-  }
 }
 
 /**
@@ -438,6 +431,7 @@ export function takeBaseline(loc: SessionLocation): Baseline {
     conversationId: loc.conversationId,
     byteOffset: 0,
     lineCount: 0,
+    lastLine: "",
     eventIds: [],
     headId: null,
   };
@@ -453,7 +447,8 @@ export function takeBaseline(loc: SessionLocation): Baseline {
       path,
       conversationId: loc.conversationId,
       byteOffset: completeLineEnd(raw),
-      lineCount: raw.split("\n").filter((l) => l.trim() !== "").length,
+      lineCount: completeLines(raw).length,
+      lastLine: lastCompleteLine(raw),
       eventIds: log.events.map((e) => e.id),
       headId: log.head,
     };
@@ -470,31 +465,46 @@ function completeLineEnd(raw: string): number {
   return Buffer.byteLength(raw.slice(0, raw.lastIndexOf("\n") + 1), "utf8");
 }
 
+/** Every complete line, as text. The trailing empty element is dropped. */
+function completeLines(raw: string): string[] {
+  const lines = raw.split("\n");
+  lines.pop();
+  return lines.filter((l) => l !== "");
+}
+
+/** The last complete line's text, or `""` when there is none. */
+function lastCompleteLine(raw: string): string {
+  const lines = completeLines(raw);
+  return lines.length === 0 ? "" : lines[lines.length - 1]!;
+}
+
 /**
  * Incremental tail reader over one conversation file.
  *
  * Only records after the baseline are yielded, so "relative to a baseline event
- * ID / offset" is structural rather than a filter applied at the call site.
+ * ID" is structural rather than a filter applied at the call site.
+ *
+ * WHY THE CURSOR IS A LINE ORDINAL AND NOT A BYTE OFFSET. `SessionStore.save()`
+ * rewrites the whole log and the `session` header on line 1 grows with the run
+ * (`turnCount`, `title`, `lastUsage`), so every later record shifts. Measured on
+ * a real run: the file grew 362 → 1686 bytes while line 1 grew 335 → 452 with a
+ * different hash. A monotonic `consumed` offset therefore resumes in the middle
+ * of a record. The store is append-only in RECORD ORDER — `save()` never drops
+ * an existing event or head record, and a fork appends rather than rewinds — so
+ * a line ordinal is stable where a byte offset is not, and the text of the last
+ * consumed line is the identity that proves it: if that text is no longer at
+ * the recorded ordinal, the reader re-anchors on the line itself.
  */
 export class SessionTailReader {
   readonly path: string;
   readonly baseline: Baseline;
-  /**
-   * The bytes of an UNTERMINATED trailing line, held raw.
-   *
-   * WHY bytes and not a string: the writer appends without knowing where the
-   * next read lands, so that boundary can fall inside a multi-byte character.
-   * Decoding the tail eagerly turned the split bytes into `U+FFFD` and the
-   * continuation bytes were then never re-read — a permanent, silent
-   * corruption of the very text acceptance matches on. As bytes they are
-   * re-decoded in context, together with whatever arrives next.
-   */
-  private tail: Buffer = Buffer.alloc(0);
   private readonly decoder = new StringDecoder("utf8");
-  private lineNo = 0;
   private seenIds = new Set<string>();
   private fatal: ObserverError | null = null;
-  private consumed = 0;
+  /** Complete lines ingested so far. Stable across a header rewrite. */
+  private consumedLines: number;
+  /** Text of the last complete line ingested — the re-anchor identity. */
+  private lastLine: string;
 
   constructor(opts: {
     readonly location: SessionLocation;
@@ -502,7 +512,8 @@ export class SessionTailReader {
   }) {
     this.baseline = opts.baseline ?? takeBaseline(opts.location);
     this.path = this.baseline.path;
-    this.consumed = this.baseline.byteOffset;
+    this.consumedLines = this.baseline.lineCount;
+    this.lastLine = this.baseline.lastLine;
     this.seenIds = new Set(this.baseline.eventIds);
   }
 
@@ -522,62 +533,28 @@ export class SessionTailReader {
    */
   poll(): PollResult {
     if (this.fatal !== null) throw this.fatal;
-    let chunk: StoreRead;
+    let read: StoreRead;
     try {
-      chunk = readFrom(this.path, this.consumed);
+      read = readWhole(this.path);
     } catch (err) {
-      this.fatal =
-        err instanceof ObserverError
-          ? err
-          : new ObserverError("read_failed", 0, String(err));
-      return {
-        ...EMPTY,
-        pendingTailBytes: this.tail.length,
-        error: this.fatal,
-      };
+      return this.fail(err);
     }
-    if (!chunk.exists) {
-      return {
-        ...EMPTY,
-        pendingTailBytes: this.tail.length,
-        exists: false,
-      };
-    }
-    if (chunk.size <= this.consumed) {
-      return {
-        ...EMPTY,
-        pendingTailBytes: this.tail.length,
-        exists: true,
-      };
-    }
-    const split = splitCompleteLines(
-      this.decoder,
-      Buffer.concat([this.tail, chunk.bytes])
-    );
-    this.tail = split.tail;
+    if (!read.exists) return { ...EMPTY, exists: false, pendingTailBytes: 0 };
+    const split = splitCompleteLines(this.decoder, read.bytes);
     let records: StoreRecord[];
     try {
-      records = this.decode(split.lines);
+      // `start` is the re-anchored ordinal, so a header that grew under a
+      // full-file rewrite cannot shift an already-consumed record into view.
+      const start = this.reanchor(split.lines);
+      records = this.decode(split.lines.slice(start), start);
     } catch (err) {
-      this.fatal =
-        err instanceof ObserverError
-          ? err
-          : new ObserverError("malformed_line", 0, String(err));
-      return {
-        ...EMPTY,
-        pendingTailBytes: this.tail.length,
-        error: this.fatal,
-      };
+      return this.fail(err);
     }
-    // Every byte up to EOF is ingested: complete lines into records, the rest
-    // into `tail`. The offset advances by exactly the bytes taken, so the tail
-    // is never re-read as new input and an unread remainder is never dropped.
-    this.consumed += chunk.bytes.length;
     return this.summarize(
       records,
       split.lines.length,
-      chunk.size,
-      this.tail.length
+      read.bytes.length,
+      split.tail.length
     );
   }
 
@@ -586,16 +563,60 @@ export class SessionTailReader {
     return this.poll();
   }
 
-  private decode(complete: readonly string[]): StoreRecord[] {
+  /**
+   * The ordinal the fresh lines start at, re-anchored on record IDENTITY.
+   *
+   * The recorded ordinal is trusted while the line it points at is still the
+   * line that was consumed — which is the normal case, including after the
+   * header grew, because only the header's LENGTH changes. If it is not, the
+   * last consumed line is searched for by its text, and failing that the reader
+   * reports an `ObserverError` rather than quietly resuming somewhere else.
+   */
+  private reanchor(lines: readonly string[]): number {
+    if (this.lastLine === "" || lines[this.consumedLines - 1] === this.lastLine)
+      return Math.min(this.consumedLines, lines.length);
+    const found = lines.lastIndexOf(this.lastLine);
+    if (found < 0)
+      throw new ObserverError(
+        "schema_invalid",
+        0,
+        `the last consumed record is no longer in ${this.path}; the store was ` +
+          `rewritten below the reader's position`
+      );
+    this.consumedLines = found + 1;
+    return this.consumedLines;
+  }
+
+  private fail(err: unknown): PollResult {
+    this.fatal =
+      err instanceof ObserverError
+        ? err
+        : new ObserverError("malformed_line", 0, String(err));
+    return { ...EMPTY, error: this.fatal };
+  }
+
+  private decode(
+    complete: readonly string[],
+    startLineNo: number
+  ): StoreRecord[] {
     const records: StoreRecord[] = [];
+    // Report the REAL 1-based line number of each record in the file, so an
+    // ObserverError points an auditor at the line they can open.
+    let lineNo = startLineNo;
     for (const line of complete) {
-      this.lineNo += 1;
+      lineNo += 1;
       if (line.trim() === "") continue;
-      const record = parseCompleteLine(line, this.lineNo);
-      assertKnownType(record, this.lineNo);
-      assertEventShape(record, this.seenIds, this.lineNo);
-      assertHeadShape(record, this.seenIds, this.lineNo);
+      const record = parseCompleteLine(line, lineNo);
+      assertKnownType(record, lineNo);
+      assertEventShape(record, this.seenIds, lineNo);
+      assertHeadShape(record, this.seenIds, lineNo);
       records.push(record);
+    }
+    // Only now is the position durably advanced: a decode that threw leaves the
+    // cursor where it was, and the error is latched by the caller anyway.
+    if (complete.length > 0) {
+      this.consumedLines += complete.length;
+      this.lastLine = complete[complete.length - 1]!;
     }
     return records;
   }

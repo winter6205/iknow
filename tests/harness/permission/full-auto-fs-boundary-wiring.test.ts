@@ -103,6 +103,15 @@ type Run = {
   readonly message?: string;
 };
 
+/**
+ * The exact refusal a declined boundary question produces in this file's shape:
+ * ADR-0147 R2 keeps the unchanged declined text, and R3 appends the held-call
+ * note — every case here drives ONE call per wave, so the sibling list is `none`.
+ */
+const DECLINED_WRITE_ALONE =
+  "[user_denied] user declined tool call: write_file\n" +
+  "[approval] held for user approval (declined); calls that ran in this wave meanwhile under the wave-start verdict: none";
+
 /** Build the real main-session assembly under the WORKSPACE tier. */
 async function buildUnderWorkspaceTier(input: {
   readonly mode: PermissionMode;
@@ -197,7 +206,7 @@ describe("ADR-0140 §2 — the workspace tier's boundary reaches full_auto via b
     assert.equal(asked, 1, "exactly one question at the edge");
     assert.equal(
       result.message,
-      "[user_denied] user declined tool call: write_file",
+      DECLINED_WRITE_ALONE,
       "the refusal is the ask gate's, not write_file's own root guard"
     );
     assert.equal(
@@ -258,7 +267,8 @@ describe("ADR-0140 §2 — the workspace tier's boundary reaches full_auto via b
     );
     assert.equal(
       refused.message,
-      "[user_denied] user declined tool call: write_file"
+      DECLINED_WRITE_ALONE,
+      "the second crossing is declined on its own; no siblings ran in its wave"
     );
     assert.equal(existsSync(second), false);
   });
@@ -320,10 +330,7 @@ describe("ADR-0140 §2 — the workspace tier's boundary reaches full_auto via b
     const result = await writeWith(engine, target);
 
     assert.equal(asked, 1, "default already asks every mutating call");
-    assert.equal(
-      result.message,
-      "[user_denied] user declined tool call: write_file"
-    );
+    assert.equal(result.message, DECLINED_WRITE_ALONE);
     assert.equal(existsSync(target), false);
   });
 

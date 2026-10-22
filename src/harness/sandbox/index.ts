@@ -17,19 +17,34 @@ export type { FsIsolationMode, FsModeContext } from "./fs-mode.js";
 export {
   YOLO_DEFAULT,
   YOLO_TUI_ONLY_REJECTED_COMMANDS,
+  NO_SANDBOX_ENTER_TEXT,
   createYoloContext,
   createYoloController,
+  deriveFenceRetired,
   isYoloRejectedCommand,
   parseYoloFlag,
   rejectYoloForCommand,
 } from "./yolo.js";
 export type {
+  FenceRetirementDeclaration,
+  FenceRetirementInvariantError,
   YoloActionOptions,
   YoloActionResult,
   YoloContext,
   YoloController,
   YoloNonTuiEntryError,
 } from "./yolo.js";
+
+// ADR-0141: the session overlay the presets declare into, and the derived
+// 无沙箱 marker read by the TUI mode row (SSOT: no-sandbox-marker.ts).
+export { createPresetOverlay, isNoSandboxActive } from "./no-sandbox-marker.js";
+export type {
+  CreatePresetOverlayOptions,
+  FenceRegistration,
+  PresetAxis,
+  PresetId,
+  PresetOverlay,
+} from "./no-sandbox-marker.js";
 
 export {
   CPU_SEC,
@@ -46,6 +61,7 @@ export type {
 
 export {
   BASE_ENV_WHITELIST,
+  DEFAULT_OWNER,
   SECRET_ENV_NAMES,
   applyCwdReadonlyFenceEnv,
   clearActiveExtraSecrets,
@@ -59,23 +75,37 @@ export type { EnvIsolation, EnvIsolationOptions } from "./env-isolation.js";
 export { createOutputMask } from "./output-mask.js";
 export type { OutputMask } from "./output-mask.js";
 
+// The session-scoped holder for the credential read-mask PLAN. Re-exported
+// from the barrel so the assembly points can reach the holder without
+// importing the mask module by path (the plan's own logic stays in the
+// mask module; only the holder type crosses the boundary).
+export { createMaskPlanCache } from "./credential-read-mask.js";
+export type { MaskPlanCache } from "./credential-read-mask.js";
+
 export {
   buildProxyEnv,
+  createEgressAgent,
   createEgressSession,
   resolveEgressRelay,
   createEgressViolationSink,
   renderEgressViolations,
   renderEgressFailureMessage,
   sshHostKeyFailureGuidance,
+  EgressAgentDisposedError,
   EgressRelayUnavailableError,
   createEgressApprovalGate,
   wrapCommandWithInnerBridge,
   type AskApproval,
   type CreateEgressApprovalGateOptions,
+  type EgressAgent,
+  type EgressAgentOptions,
   type EgressAllowlistSource,
   type EgressApprovalGate,
+  type EgressCallEndpoint,
+  type EgressCallPolicy,
   type EgressFenceSpec,
   type EgressPolicyInput,
+  type EgressProfile,
   type EgressSession,
   type EgressSessionOptions,
   type EgressViolation,
@@ -97,9 +127,12 @@ export {
   protectedTargetRoBindArgs,
 } from "./protected-targets.js";
 // The single wiring point for the protected-fence option pair (inventory +
-// credential read mask) shared by every production route.
+// credential read mask) shared by every production route. The awaited walk is
+// not exported here on purpose: a route reaches it only through
+// `prepareProtectedFenceWiring`, which is where the arm choice lives.
 export {
   fenceScanScope,
+  prepareProtectedFenceWiring,
   protectedFenceWiring,
 } from "./protected-fence-wiring.js";
 export {

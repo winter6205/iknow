@@ -115,7 +115,22 @@ export interface SessionGrantsPolicySource {
 export type PermissionSource = "code" | "project" | "session";
 
 /**
- * askUser inlet: true = approve, false = deny (fail-closed).
+ * Typed approval ending. A bare boolean remains accepted (`true` = approved,
+ * `false` = declined) so the TTY / fail-closed / no-ask inlets need no change.
+ */
+export type AskUserOutcome =
+  | { readonly kind: "approved" }
+  | { readonly kind: "declined" }
+  | { readonly kind: "timeout"; readonly afterMs: number }
+  | { readonly kind: "cancelled" };
+
+/** The ending of a question that was actually shown to the user. */
+export type ApprovalOutcome =
+  "approved" | "declined" | "timeout" | "prompt_failed" | "cancelled";
+
+/**
+ * askUser inlet: true = approve, false = deny (fail-closed); a typed outcome
+ * distinguishes a decline, a configured timeout and a cancellation.
  * Mandatory at engine construction time; missing at startup throws with the
  * `ask_inlet_missing` substring so call sites can detect.
  */
@@ -126,7 +141,11 @@ export interface AskUser {
     readonly summaryHint: string;
     /** Caller cancellation must release the permission waiter. */
     readonly signal?: AbortSignal;
-  }): Promise<boolean>;
+    /** The `tool_use` id of the call this question is about (ADR-0147 R1). */
+    readonly toolUseId: string;
+    /** The wave's conversation; absent only for a caller that has none. */
+    readonly conversationId?: string;
+  }): Promise<boolean | AskUserOutcome>;
 }
 
 /**

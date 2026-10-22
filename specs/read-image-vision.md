@@ -6,7 +6,7 @@
 
 ## Objective
 
-Let the main session (and any entry sharing the default ACI registry) invoke a tool on an image at a **path inside the workspace fence**, placing the pixels as an Anthropic SDK 0.115 `ImageBlockParam` inside `tool_result.content`, so the next `step` reaches `messages.create` / `.stream` unchanged. Users still send text only (`encodeUserText` untouched). The `read_file` text contract (NUL rejects binary, line pagination) is unchanged.
+Let the main session (and any entry sharing the default ACI registry) invoke a tool on an image at a **path inside the workspace fence**, placing the pixels as an Anthropic SDK 0.115 `ImageBlockParam` inside `tool_result.content`, so the next `step` reaches `messages.create` / `.stream` unchanged. `encodeUserText` is untouched by this spec (it bounds the tool path only — it makes no claim about how users send images elsewhere in the product). The `read_file` text contract (NUL rejects binary, line pagination) is unchanged.
 
 Success: the model calls `read_image` on a ≤1MB jpeg/png/gif/webp file, an SDK-shaped image block appears in the authoritative history, and after resume a further `step` still carries the same block; non-image binaries and oversize files still fail as typed errors.
 

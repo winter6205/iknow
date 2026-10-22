@@ -60,7 +60,8 @@ import {
   type CreateWorkerDepsOptions,
 } from "../../src/harness/subagent/worker.ts";
 import {
-  YOLO_ENV_KEY,
+  FENCE_RETIRED_ENV_KEY,
+  LEGACY_YOLO_ENV_KEY,
   createYoloContext,
 } from "../../src/harness/sandbox/yolo.ts";
 import { createBashTool } from "../../src/harness/aci/tools/bash.ts";
@@ -87,12 +88,14 @@ function makeFakeChild(pid = 97001): ChildProcess {
 
 /** Parent side: drive createDefaultSubAgentSpawn's spawn closure and capture the child env. */
 function parentSpawnEnv(opts: {
-  readonly yolo?: CreateWorkerDepsOptions["yolo"];
+  readonly fenceRetired?: CreateWorkerDepsOptions["fenceRetired"];
 }): Record<string, string | undefined> {
   spawnMock.mockImplementation(() => makeFakeChild());
   const spawnFn = createDefaultSubAgentSpawn({
     traceDir: join(FIX_TMP, "trace"),
-    ...(opts.yolo !== undefined ? { yolo: opts.yolo } : {}),
+    ...(opts.fenceRetired !== undefined
+      ? { fenceRetired: opts.fenceRetired }
+      : {}),
   });
   spawnFn(
     { name: "test", prompt: "p" } as never,
@@ -138,52 +141,62 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("subagent worker route — both ends of the yolo env wire (ADR-0119)", () => {
+describe("subagent worker route — both ends of the fence env wire (ADR-0141)", () => {
   it("parent side: holder wired normalizes the key — true -> '1', false -> '0'; holder absent -> key not written", () => {
-    const on = parentSpawnEnv({ yolo: createYoloContext(true) });
-    expect(on[YOLO_ENV_KEY]).toBe("1");
-    const off = parentSpawnEnv({ yolo: createYoloContext(false) });
-    expect(off[YOLO_ENV_KEY]).toBe("0");
+    const on = parentSpawnEnv({ fenceRetired: createYoloContext(true) });
+    expect(on[FENCE_RETIRED_ENV_KEY]).toBe("1");
+    const off = parentSpawnEnv({ fenceRetired: createYoloContext(false) });
+    expect(off[FENCE_RETIRED_ENV_KEY]).toBe("0");
     const absent = parentSpawnEnv({});
-    expect(YOLO_ENV_KEY in absent).toBe(false);
+    expect(FENCE_RETIRED_ENV_KEY in absent).toBe(false);
   });
 
-  it("parent side: an inherited ambient IKNOW_YOLO is scrubbed — only this parent's holder decides the wire (ADR-0119 fail-closed)", () => {
-    const previous = process.env[YOLO_ENV_KEY];
-    process.env[YOLO_ENV_KEY] = "1";
+  it("parent side: BOTH ambient spellings are scrubbed — only this parent's holder decides the wire", () => {
+    const previousNew = process.env[FENCE_RETIRED_ENV_KEY];
+    const previousLegacy = process.env[LEGACY_YOLO_ENV_KEY];
+    process.env[FENCE_RETIRED_ENV_KEY] = "1";
+    process.env[LEGACY_YOLO_ENV_KEY] = "1";
     try {
-      // Non-yolo parents must not launder the ambient value into the child.
+      // A non-yolo parent must not launder either ambient value into the child.
       const absent = parentSpawnEnv({});
-      expect(YOLO_ENV_KEY in absent).toBe(false);
-      const off = parentSpawnEnv({ yolo: createYoloContext(false) });
-      expect(off[YOLO_ENV_KEY]).toBe("0");
+      expect(FENCE_RETIRED_ENV_KEY in absent).toBe(false);
+      expect(LEGACY_YOLO_ENV_KEY in absent).toBe(false);
+      const off = parentSpawnEnv({ fenceRetired: createYoloContext(false) });
+      expect(off[FENCE_RETIRED_ENV_KEY]).toBe("0");
       // A true holder still wins.
-      const on = parentSpawnEnv({ yolo: createYoloContext(true) });
-      expect(on[YOLO_ENV_KEY]).toBe("1");
+      const on = parentSpawnEnv({ fenceRetired: createYoloContext(true) });
+      expect(on[FENCE_RETIRED_ENV_KEY]).toBe("1");
     } finally {
-      if (previous === undefined) {
-        delete process.env[YOLO_ENV_KEY];
+      if (previousNew === undefined) {
+        delete process.env[FENCE_RETIRED_ENV_KEY];
       } else {
-        process.env[YOLO_ENV_KEY] = previous;
+        process.env[FENCE_RETIRED_ENV_KEY] = previousNew;
+      }
+      if (previousLegacy === undefined) {
+        delete process.env[LEGACY_YOLO_ENV_KEY];
+      } else {
+        process.env[LEGACY_YOLO_ENV_KEY] = previousLegacy;
       }
     }
   });
 
   it("child side: yoloOptionFromEnv reads '1' back -> holder true; absent / invalid value -> key absent (fail-closed)", () => {
-    expect(yoloOptionFromEnv({ [YOLO_ENV_KEY]: "1" }).yolo?.get()).toBe(true);
-    expect(yoloOptionFromEnv({ [YOLO_ENV_KEY]: "TRUE" }).yolo?.get()).toBe(
+    expect(yoloOptionFromEnv({ [FENCE_RETIRED_ENV_KEY]: "1" }).fenceRetired?.get()).toBe(true);
+    expect(yoloOptionFromEnv({ [FENCE_RETIRED_ENV_KEY]: "TRUE" }).fenceRetired?.get()).toBe(
       true
     );
-    expect("yolo" in yoloOptionFromEnv({})).toBe(false);
-    expect("yolo" in yoloOptionFromEnv({ [YOLO_ENV_KEY]: "garbage" })).toBe(
+    expect("fenceRetired" in yoloOptionFromEnv({})).toBe(false);
+    expect("fenceRetired" in yoloOptionFromEnv({ [FENCE_RETIRED_ENV_KEY]: "garbage" })).toBe(
       false
     );
-    expect("yolo" in yoloOptionFromEnv({ [YOLO_ENV_KEY]: "0" })).toBe(false);
+    expect("fenceRetired" in yoloOptionFromEnv({ [FENCE_RETIRED_ENV_KEY]: "0" })).toBe(
+    false
+  );
   });
 
   it("end to end: parent writes '1' -> child reads the holder back -> the bash factory fence is bare (argv[0] = bash)", async () => {
-    const env = parentSpawnEnv({ yolo: createYoloContext(true) });
-    expect(env[YOLO_ENV_KEY]).toBe("1");
+    const env = parentSpawnEnv({ fenceRetired: createYoloContext(true) });
+    expect(env[FENCE_RETIRED_ENV_KEY]).toBe("1");
     const argv = await childFenceArgv(env);
     expect(argv).toEqual(["bash", "-c", "echo hi"]);
   });
@@ -195,19 +208,27 @@ describe("subagent worker route — both ends of the yolo env wire (ADR-0119)", 
   });
 
   it("end-to-end scrub: ambient IKNOW_YOLO=1 + holder false -> child env carries '0' -> the fence is still the bwrap baseline", async () => {
-    const previous = process.env[YOLO_ENV_KEY];
-    process.env[YOLO_ENV_KEY] = "1";
+    const previousNew = process.env[FENCE_RETIRED_ENV_KEY];
+    const previousLegacy = process.env[LEGACY_YOLO_ENV_KEY];
+    process.env[FENCE_RETIRED_ENV_KEY] = "1";
+    process.env[LEGACY_YOLO_ENV_KEY] = "1";
     try {
-      const env = parentSpawnEnv({ yolo: createYoloContext(false) });
-      expect(env[YOLO_ENV_KEY]).toBe("0");
+      const env = parentSpawnEnv({ fenceRetired: createYoloContext(false) });
+      expect(env[FENCE_RETIRED_ENV_KEY]).toBe("0");
+      expect(LEGACY_YOLO_ENV_KEY in env).toBe(false);
       const argv = await childFenceArgv(env);
       expect(argv[0]).toBe("bwrap");
       expect(argv).toContain("--unshare-net");
     } finally {
-      if (previous === undefined) {
-        delete process.env[YOLO_ENV_KEY];
+      if (previousNew === undefined) {
+        delete process.env[FENCE_RETIRED_ENV_KEY];
       } else {
-        process.env[YOLO_ENV_KEY] = previous;
+        process.env[FENCE_RETIRED_ENV_KEY] = previousNew;
+      }
+      if (previousLegacy === undefined) {
+        delete process.env[LEGACY_YOLO_ENV_KEY];
+      } else {
+        process.env[LEGACY_YOLO_ENV_KEY] = previousLegacy;
       }
     }
   });

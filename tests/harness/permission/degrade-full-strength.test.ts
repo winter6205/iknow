@@ -36,12 +36,16 @@ import type {
 import type {
   ParseBindingLoader,
   ParseFoundationState,
+  SecurityParseResult,
 } from "../../../src/harness/permission/shell-parse.js";
 import type { AciToolDef } from "../../../src/harness/aci/types.js";
 
 const HARD_WALLS_MODULE = "../../../src/harness/permission/hard-walls.js";
 const SHELL_PARSE_MODULE = "../../../src/harness/permission/shell-parse.js";
 const ACI_PERMISSION_MODULE = "../../../src/harness/aci/permission.js";
+
+/** Named so the escape spellings below read as shapes rather than byte soup. */
+const LF = String.fromCharCode(0x0a);
 
 type HardWallsModule =
   typeof import("../../../src/harness/permission/hard-walls.js");
@@ -58,6 +62,8 @@ interface AnswerGraph {
   /** The seam arm `findDangerousPattern` itself takes for this command. */
   readonly scanArmFor: (command: string) => string;
   readonly parseFoundationState: () => ParseFoundationState;
+  /** The public parse entry, so a case can name the arm, not only the seam. */
+  readonly parseVerdict: (command: string) => SecurityParseResult;
   readonly bashOutcome: (command: string) => {
     readonly decision: string;
     readonly reason: string;
@@ -111,6 +117,7 @@ function graphOf(
       parseMod.scanWithLegacyDegrade(command, walls.legacyFindDangerousPattern)
         .kind,
     parseFoundationState: parseMod.parseFoundationState,
+    parseVerdict: parseMod.parseForSecurity,
     bashOutcome: (command) => {
       const policy = aci.createPermissionPolicy();
       const out = aci.checkPermission({
@@ -253,6 +260,108 @@ describe("SC-GATES-4 (b) — the degrade path denies the four named shapes", () 
       );
       expect(graph.bashOutcome(row.command).decision, row.command).toBe("deny");
     }
+  });
+});
+
+describe("SC5a — the #1188 exemption gate is closed when the parser never loaded", () => {
+  /**
+   * The same contrast this file already draws, applied to the newly admitted
+   * surface. The admission is settled against parse facts that a machine
+   * without a parser cannot produce, so a row that is `ok` on a real parse
+   * becomes `vetoed` once the binding failed. The rows are synthetic and
+   * harmless — the split destructive flag and the split sensitive path stand in
+   * for the two shapes the criterion names, and nothing here is executed; the
+   * verdict and the seam arm are the only things that run.
+   */
+  const ADMITTED_ROWS: readonly {
+    readonly command: string;
+    readonly note: string;
+  }[] = [
+    {
+      command: "ls -lt --time-style=+%m-%d\\ %H:%M docs/evidence",
+      note: "harmless incident spelling 1",
+    },
+    {
+      command: `gh issue view 1188 --json number,title \\${LF} -q '.title'`,
+      note: "harmless incident spelling 2",
+    },
+    { command: "echo a\\ b", note: "harmless escaped space" },
+    { command: `a \\${LF} b`, note: "harmless continuation" },
+    {
+      command: "rm -r\\ f /tmp/iknow-1188-probe",
+      note: "split destructive flag",
+    },
+    {
+      command: "echo /etc/pas\\ swd",
+      note: "split sensitive operand",
+    },
+  ];
+
+  /**
+   * The same split sensitive path in a REDIRECT TARGET is a different lexical
+   * site: the target is a redirect fact rather than an argv word, so no
+   * complete static value exists to settle the escape and the row is retained
+   * whether or not the parser loaded. Kept apart from `ADMITTED_ROWS` so the
+   * gate is never credited with a denial the parse already owns.
+   */
+  const RETAINED_ON_BOTH_PATHS: readonly {
+    readonly command: string;
+    readonly note: string;
+  }[] = [
+    { command: "echo > /etc/pas\\ swd", note: "split sensitive redirect target" },
+  ];
+
+  it("answers every admitted row `ok` when READY", async () => {
+    for (const row of ADMITTED_ROWS) {
+      const parsed = await freshGraph();
+      // The load is lazy, so the state is read AFTER the first parse — which
+      // is the parse being measured.
+      expect(parsed.parseVerdict(row.command).kind, row.note).toBe("ok");
+      expect(parsed.parseFoundationState(), row.note).toBe("READY");
+      // A READY parse is not a degrade, so the seam stays on the parsed arm.
+      expect(parsed.scanArmFor(row.command), row.note).toBe("parsed");
+    }
+  });
+
+  it("refuses them at the PARSE arm on the degrade path, not at the legacy scan", async () => {
+    const degraded = await unavailableGraph();
+    for (const row of ADMITTED_ROWS) {
+      const verdict = degraded.parseVerdict(row.command);
+      expect(verdict.kind, row.note).toBe("vetoed");
+      if (verdict.kind !== "vetoed") {
+        throw new Error(`expected vetoed, got ${verdict.kind}`);
+      }
+      expect(verdict.class, row.note).toBe("backslash-whitespace");
+      // The seam arm is the load-bearing half: `legacy-clean` here would mean
+      // the refusal came from the legacy text scan, which is exactly the
+      // unproven route the gate exists to avoid.
+      expect(degraded.scanArmFor(row.command), row.note).toBe("parsed");
+    }
+  });
+
+  it("denies the split sensitive redirect target on BOTH paths, so the gate is not what protects it", async () => {
+    for (const row of RETAINED_ON_BOTH_PATHS) {
+      const parsed = await freshGraph();
+      const ready = parsed.parseVerdict(row.command);
+      expect(ready.kind, `${row.note} READY`).toBe("vetoed");
+      if (ready.kind !== "vetoed") {
+        throw new Error(`expected vetoed, got ${ready.kind}`);
+      }
+      expect(ready.class, `${row.note} READY`).toBe("backslash-whitespace");
+
+      const degraded = await unavailableGraph();
+      const gated = degraded.parseVerdict(row.command);
+      expect(gated.kind, `${row.note} UNAVAILABLE`).toBe("vetoed");
+      expect(degraded.scanArmFor(row.command), row.note).toBe("parsed");
+    }
+  });
+
+  it("keeps the legacy route for an ordinary command outside the exemption surface", async () => {
+    const command = "echo iknow-1188-ordinary";
+    const degraded = await unavailableGraph();
+    expect(degraded.parseFoundationState()).toBe("UNAVAILABLE");
+    expect(degraded.parseVerdict(command).kind).toBe("parser-unavailable");
+    expect(degraded.scanArmFor(command)).toBe("legacy-clean");
   });
 });
 

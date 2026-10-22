@@ -1,5 +1,5 @@
 /**
- * `---` fence slicing for frontmatter (ADR-0123).
+ * `---` fence slicing for frontmatter (ADR-0144).
  *
  * Contract (the frontmatter fence strip contract in docs/CONTEXT.md): content-independent, never
  * throws, and returns the body as an exact byte slice of the input — an invalid

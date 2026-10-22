@@ -25,7 +25,7 @@ function makeViolationCtx(sink: (line: string) => void): ChatLineContext {
   const tool = createStubTool({
     name: "dangerous",
     next: () => {
-      throw new ToolExecutionError("[hard_wall] dangerous command rejected");
+      throw new ToolExecutionError("[network_denied] evil.com: not in allowlist");
     },
   });
   const registry = createRegistry([tool]);
@@ -194,7 +194,7 @@ describe("chat per-turn violation counting (ADR-0135)", () => {
       // user turns) would reach the threshold of 3. Per-turn scope means turn
       // 2 starts at zero and never sees turn 1's two.
       const ctx = makeCtx(["turn one done", "turn two done"], {
-        message: "[hard_wall] dangerous command rejected",
+        message: "[network_denied] evil.com: not in allowlist",
         turnToolCalls: 2,
       });
       const first = await processChatLine({ line: "first", ctx });
@@ -219,7 +219,7 @@ describe("chat per-turn violation counting (ADR-0135)", () => {
 
   it("a new turn installs a fresh scope: zeroed counter, empty ledger, un-fired abort", async () => {
     const ctx = makeCtx(["one", "two"], {
-      message: "[hard_wall] dangerous command rejected",
+      message: "[network_denied] evil.com: not in allowlist",
       turnToolCalls: 2,
     });
     await processChatLine({ line: "first", ctx });
@@ -244,7 +244,7 @@ describe("chat per-turn violation counting (ADR-0135)", () => {
       const bad = createStubTool({
         name: "dangerous",
         next: () => {
-          throw new ToolExecutionError("[hard_wall] dangerous command rejected");
+          throw new ToolExecutionError("[network_denied] evil.com: not in allowlist");
         },
       });
       const registry = createRegistry([good, bad]);
@@ -292,7 +292,7 @@ describe("chat per-turn violation counting (ADR-0135)", () => {
     process.exitCode = 0;
     try {
       const ctx = makeCtx(["turn one", "turn two still works"], {
-        message: "[hard_wall] dangerous command rejected",
+        message: "[network_denied] evil.com: not in allowlist",
         turnToolCalls: 3,
       });
       const first = await processChatLine({ line: "bad", ctx });
@@ -351,7 +351,7 @@ describe("chat per-turn violation counting (ADR-0135)", () => {
       const danger = createStubTool({
         name: "dangerous",
         next: () => {
-          throw new ToolExecutionError("[hard_wall] dangerous command rejected");
+          throw new ToolExecutionError("[network_denied] evil.com: not in allowlist");
         },
       });
       const registry = createRegistry([launch, danger]);
@@ -431,7 +431,7 @@ describe("chat per-turn violation counting (ADR-0135)", () => {
       const danger = createStubTool({
         name: "dangerous",
         next: () => {
-          throw new ToolExecutionError("[hard_wall] dangerous command rejected");
+          throw new ToolExecutionError("[network_denied] evil.com: not in allowlist");
         },
       });
       const registry = createRegistry([launch, danger]);
@@ -475,6 +475,91 @@ describe("chat per-turn violation counting (ADR-0135)", () => {
       assert.deepEqual(turn1?.ownedWork.owned(), [
         { kind: "background_task", id: "persistent-service" },
       ]);
+    } finally {
+      process.exitCode = savedExitCode;
+    }
+  });
+
+  it("three [hard_wall] denials do not increment the counter, emit an interruption, or cancel owned work", async () => {
+    const savedExitCode = process.exitCode;
+    process.exitCode = 0;
+    const lines: string[] = [];
+    const reports: string[] = [];
+    const stopCalls: string[] = [];
+    try {
+      const launch = createStubTool({
+        name: "bash",
+        next: () => JSON.stringify({ task_id: "bg-this-turn" }),
+      });
+      const danger = createStubTool({
+        name: "dangerous",
+        next: () => {
+          throw new ToolExecutionError(
+            "[hard_wall] dangerous command rejected"
+          );
+        },
+      });
+      const registry = createRegistry([launch, danger]);
+      const notify = wireKillSessionNotification({
+        sink: (line) => lines.push(line),
+      });
+      const wrapped = wrapWithViolationHook({
+        inner: createExecutor(registry),
+        onKill: notify,
+        onInterrupt: (reason) => reports.push(reason),
+        turnScopeFor: () => ctx.violationTurn,
+      });
+      const adapter = createStubModel({
+        responses: [
+          assistantResult({
+            texts: [],
+            toolCalls: [
+              {
+                id: "b1",
+                name: "bash",
+                input: { command: "npm run dev", background: true },
+              },
+            ],
+          }),
+          assistantResult({
+            texts: [],
+            toolCalls: [{ id: "d1", name: "dangerous", input: {} }],
+          }),
+          assistantResult({
+            texts: [],
+            toolCalls: [{ id: "d2", name: "dangerous", input: {} }],
+          }),
+          assistantResult({
+            texts: [],
+            toolCalls: [{ id: "d3", name: "dangerous", input: {} }],
+          }),
+          assistantResult({ texts: ["continued"] }),
+        ],
+      });
+      const ctx: ChatLineContext = {
+        deps: { adapter, executor: wrapped, registry, maxTurns: 8 },
+        state: makeState({ conversationId: "conv-hw" }),
+        backgroundManager: {
+          stop: async (taskId: string) => {
+            stopCalls.push(taskId);
+            return { state: "not_started" as const };
+          },
+        } as never,
+      };
+      const result = await processChatLine({
+        line: "start, then hit the wall",
+        ctx,
+      });
+      assert.equal(result.ranQuery, true);
+      assert.equal(ctx.violationTurn?.counter.snapshot(), 0);
+      assert.equal(ctx.violationTurn?.interrupt.signal.aborted, false);
+      assert.deepEqual(lines, []);
+      assert.deepEqual(reports, []);
+      assert.deepEqual(stopCalls, []);
+      assert.deepEqual(ctx.violationTurn?.ownedWork.owned(), [
+        { kind: "background_task", id: "bg-this-turn" },
+      ]);
+      assert.equal(process.exitCode, 0);
     } finally {
       process.exitCode = savedExitCode;
     }

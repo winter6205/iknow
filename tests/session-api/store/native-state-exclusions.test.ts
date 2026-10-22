@@ -282,6 +282,28 @@ describe("persisted-payload exclusions — the guard is not a no-op", () => {
     );
   });
 
+  // ADR-0141: renaming the yolo wire must not open a hole in this guard. The
+  // pattern refused `yolo`; a preset declaration that now spells itself
+  // `noSandbox` / `fenceRetired` would have sailed through under the old
+  // pattern and survived into persisted state.
+  it("ADR-0141: a preset declaration is refused under every spelling", () => {
+    for (const field of [
+      "yolo",
+      "noSandbox",
+      "no_sandbox",
+      "no-sandbox",
+      "fenceRetired",
+      "fence_retired",
+      "fence-retired",
+    ]) {
+      assert.equal(
+        forbiddenPersistedField({ session: { [field]: true } }),
+        `session.${field}`,
+        `${field} must not persist`
+      );
+    }
+  });
+
   it("(c) a tool argument's own keys are NOT scanned (that schema is the model's, not this layer's)", async () => {
     const id = "tool-arg-keys";
     const anchor = await seedChain(id);

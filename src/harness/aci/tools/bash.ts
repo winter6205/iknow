@@ -2,8 +2,11 @@ import { mkdtempSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  createProtectedTargetSnapshotCache,
   fenceScanScope,
+  prepareProtectedFenceWiring,
   protectedFenceWiring,
+  type ProtectedTargetSnapshotCache,
 } from "../../sandbox/protected-fence-wiring.js";
 import type { AciToolDef } from "../types.js";
 import type { ToolExecutionContext } from "../../tools/types.js";
@@ -14,6 +17,10 @@ import {
 } from "../../permission/hard-walls.js";
 import { validateReadonlyCommand } from "./bash-readonly.js";
 import {
+  commandInvokesGit,
+  isReadonlyBashConcurrencySafe,
+} from "./bash-concurrency.js";
+import {
   BASE_ENV_WHITELIST,
   applyCwdReadonlyFenceEnv,
   createBwrapFence,
@@ -21,28 +28,40 @@ import {
   createEgressSession,
   createEnvIsolation,
   createFsPolicy,
+  createMaskPlanCache,
   createOutputMask,
   currentSecretValues,
   protectedTargetFenceGuidance,
   renderEgressFailureMessage,
   sshHostKeyFailureGuidance,
   wrapCommandWithInnerBridge,
+  EgressAgentDisposedError,
   EgressRelayUnavailableError,
   type AskApproval,
   type BwrapFenceOptions,
+  type EgressAgent,
   type EgressApprovalGate,
+  type EgressCallEndpoint,
   type EgressPolicyInput,
-  type EgressSession,
   type EgressViolation,
+  type MaskPlanCache,
   type ProtectedTargetInventory,
 } from "../../sandbox/index.js";
+// Direct module import (not the `sandbox/index.js` barrel): the call-policy
+// projection (drop the session-level credential roster) is the assembly
+// layer's own contract with the egress domain, and the barrel's re-export
+// list is owned elsewhere.
+import {
+  adaptEgressSessionToEndpoint,
+  toEgressCallPolicy,
+} from "../../sandbox/egress/session.js";
 import {
   FS_ISOLATION_MODE_DEFAULT,
   type FsIsolationMode,
   type FsModeContext,
 } from "../../sandbox/fs-mode.js";
 import type { FsBoundaryMounts } from "../../sandbox/fs-boundary.js";
-import type { YoloContext } from "../../sandbox/yolo.js";
+import type { FenceRetirementReader } from "../../sandbox/yolo.js";
 // Direct module import (not the `sandbox/index.js` barrel): the EBUSY arm and the
 // fs-mode boundary arm of the boundary feedback are this seam's own consumers,
 // and the barrel's re-export list is owned elsewhere.
@@ -205,6 +224,51 @@ function resolveBashDeadline(value: unknown): number {
   return deadline.deadlineMs;
 }
 
+/**
+ * #D2: the fence-env addition for a call the per-call concurrency predicate
+ * (`isReadonlyBashConcurrencySafe`) judges safe AND whose command actually
+ * runs git.
+ *
+ * `GIT_OPTIONAL_LOCKS=0` (git >= 2.14) makes git skip the optional index
+ * lock, so two concurrent `git status` calls in the SAME repository do not
+ * race on `.git/index.lock` (`fatal: Unable to create '.git/index.lock'`).
+ * The default `bashMode: "any"` path does not set this variable today
+ * (`applyCwdReadonlyFenceEnv` sets it in readonly mode only).
+ *
+ * The trigger has TWO halves, and both are needed:
+ *   - the per-call verdict (the predicate): a call the predicate REJECTS is
+ *     not provably read-only, so it must not join a wave and needs no
+ *     protection;
+ *   - the COMMAND actually runs git (`commandInvokesGit`): the variable is
+ *     git-specific, so a read-only call that never runs git (`ls`, `pwd`,
+ *     `cat file`) must not carry it. Injecting it there would change the
+ *     env of every such call for a race they cannot have.
+ *
+ * A call the predicate REJECTS gets nothing added, so its env stays exactly
+ * today's — the spread of an empty object adds no key. In readonly mode the
+ * variable is already `0`, so the concurrency-safe arm re-states the same
+ * value.
+ *
+ * The LONE-CALL TRADE-OFF, stated plainly: a per-call seam cannot know
+ * whether the call will end up sharing a wave. A git call that ends up ALONE
+ * in its wave still gets `GIT_OPTIONAL_LOCKS=0` — the honest cost of a
+ * per-call trigger, and the price of the protection when a neighbour does
+ * share the wave. The only way to narrow it further would be an "am I
+ * concurrent?" flag threaded from the wave splitter (aci-executor →
+ * permission-executor → bash), which this seam deliberately does not do.
+ *
+ * The branch lives here rather than in the handler so the handler's
+ * complexity does not grow (the S5 ratchet audits the touched function).
+ */
+export function gitOptionalLocksFenceEnv(
+  command: string,
+  concurrencySafe: boolean
+): { readonly GIT_OPTIONAL_LOCKS?: string } {
+  if (!concurrencySafe) return {};
+  if (!commandInvokesGit(command)) return {};
+  return { GIT_OPTIONAL_LOCKS: "0" };
+}
+
 interface BashInput {
   readonly command?: unknown;
   /** background?: boolean — defaults to false (foreground, existing path). */
@@ -292,15 +356,15 @@ export interface CreateBashToolOptions {
    */
   readonly fsMode?: FsModeContext;
   /**
-   * ADR-0119: the `--yolo` no-sandbox mode holder (see `sandbox/yolo.ts`).
-   * The handler reads `get() === true` once per call (per-call snapshot, same
-   * discipline as `fsMode`); the foreground fence and the background spawn
-   * share that one frozen value. Under yolo the fence emits bare argv, the
-   * egress seam is skipped entirely (ADR-0119 ruling 3) and the factory
-   * skips `requireBwrap` (ruling 5 (requireBwrap timing)). Absent / false → today's
-   * shape byte-identical.
+   * ADR-0141: the derived fence posture (see `sandbox/yolo.ts`) — a get-only
+   * reader, so this tool cannot flip the axis. The handler reads `get() === true`
+   * once per call (per-call snapshot, same discipline as `fsMode`); the
+   * foreground fence and the background spawn share that one frozen value. When
+   * retired the fence emits bare argv, the egress seam is skipped entirely
+   * (ADR-0119 ruling 3) and the factory skips `requireBwrap` (ruling 5
+   * (requireBwrap timing)). Absent / false → today's shape byte-identical.
    */
-  readonly yolo?: YoloContext;
+  readonly fenceRetired?: FenceRetirementReader;
   /**
    * ADR-0092: workspace-mode home ro-bind source host absolute path.
    * Default `homedir()` — same injection shape as `tmpDir` (testable).
@@ -351,6 +415,18 @@ export interface CreateBashToolOptions {
    */
   readonly egressPolicyFactory?: () => EgressPolicyInput | undefined;
   /**
+   * The session-resident egress agent (one per engine assembly): the call
+   * asks it for ONE per-call endpoint (its own socket / proxy instance /
+   * violation sink / fence spec), while the agent owns the session-level
+   * half (relay resolution, durable CA + trust bundle, credential mint) and
+   * loads it once instead of once per call.
+   *
+   * Production assembly injects it (build-engine → registry → here). Absent →
+   * the tool falls back to the legacy per-call session factory (the
+   * compatibility path the test seam below also uses).
+   */
+  readonly egressAgent?: EgressAgent;
+  /**
    * Test seam: inject the `createEgressSession` factory so end-to-end tests
    * can simulate "violation recorded → drain → typed failure" without
    * actually starting a relay / proxy. Production assembly does **not**
@@ -362,6 +438,10 @@ export interface CreateBashToolOptions {
    * stub session the test records one violation and exercises the whole
    * drain → typed failure pipeline, verifying that the message flows from
    * handler to categorizeResult without false greens.
+   *
+   * TEST-ONLY injection point: the stub factory is presented through the
+   * agent's endpoint interface (see `resolveEgressOpener`), so the handler
+   * keeps ONE seam-opening call site. Production always passes the agent.
    */
   readonly createEgressSessionFactory?: typeof createEgressSession;
   /**
@@ -407,7 +487,7 @@ function snapshotFenceInputs(
   readonly mode: FsIsolationMode;
   readonly homeRoot: string;
   readonly workspaceRoot: string;
-  readonly yolo: boolean;
+  readonly fenceRetired: boolean;
 } {
   return {
     mode: opts?.fsMode?.get() ?? FS_ISOLATION_MODE_DEFAULT,
@@ -415,13 +495,13 @@ function snapshotFenceInputs(
     // Frozen here, beside homeRoot, so the foreground fence and the
     // background spawn carry ONE scan-scope vintage.
     workspaceRoot: opts?.workspaceRoot ?? fenceScanScope(fallbackRoot),
-    yolo: opts?.yolo?.get() === true,
+    fenceRetired: opts?.fenceRetired?.get() === true,
   };
 }
 
 /**
  * Batch-snapshotted fence inputs (frozen at handler entry): fs mode holder
- * / homeRoot / tmpDir / yolo share one vintage — foreground fence and
+ * / homeRoot / tmpDir / fence posture share one vintage — foreground fence and
  * background spawn use the same snapshot; later holder or cell flips
  * cannot leak into the current call.
  */
@@ -432,8 +512,8 @@ interface FenceSnapshot {
   readonly tmpDir: string;
   /** UNBOUND_FENCE main checkout frozen at entry (absent = no segment). */
   readonly unboundMainCheckout: string | undefined;
-  /** ADR-0119: D2-frozen yolo reading (shared by fence and spawn). */
-  readonly yolo: boolean;
+  /** ADR-0141: frozen derived fence posture (shared by fence and spawn). */
+  readonly fenceRetired: boolean;
 }
 
 /**
@@ -479,24 +559,17 @@ async function runForegroundBash(
     workspaceRoot,
     tmpDir,
     unboundMainCheckout,
-    yolo,
+    fenceRetired,
     fsPolicy,
     fenceEnv,
     fenceIsReadonly,
+    maskCache,
+    targetSnapshotCache,
     effectiveEgressPolicyFactory,
     toolOpts: opts,
     ctx,
     deadlineMs,
   } = args;
-  // The protected-fence pair (inventory + credential read mask) is resolved
-  // ONCE for this call through the single wiring point, against the
-  // entry-frozen homeRoot and workspaceRoot: the fence mount block and the
-  // EROFS boundary-refusal feedback consume the same snapshot, so the message
-  // can only ever describe a refusal the fence actually enforces.
-  const fenceWiring = protectedFenceWiring({
-    homeRoot,
-    workspaceRoot,
-  });
   // ONE workspace-mount object per call: the same value is spread into the
   // fence argv and fed to the fs-mode boundary arm's geometry, so "what the
   // tier mounts" has a single declaration on this path (ADR-0092's rejected
@@ -505,29 +578,41 @@ async function runForegroundBash(
   // start session → build fence → run sandbox → install mask → record
   // ledger → finalize: 6 steps, each an extracted sub-function; this
   // function only orchestrates them in order.
-  // ADR-0119 ruling 3: under yolo the egress seam is skipped wholesale — no
-  // fence means no netns, so a proxy seam would be meaningless (no session
-  // started, no socket bound, no proxy env injected). The non-yolo path is
-  // byte-identical (the egress assembly below stays intact).
+  // ADR-0119 ruling 3: with the fence retired the egress seam is skipped
+  // wholesale — no fence means no netns, so a proxy seam would be meaningless
+  // (no session started, no socket bound, no proxy env injected). The fenced
+  // path is byte-identical (the egress assembly below stays intact).
   const egress =
-    yolo === true
+    fenceRetired === true
       ? {}
-      : await startEgressSessionForCall(
-          effectiveEgressPolicyFactory,
-          opts?.createEgressSessionFactory
-        );
-  const fence = buildForegroundFence({
-    finalCommand,
-    fsPolicy,
-    fenceEnv,
-    waveRoot,
-    fenceIsReadonly,
-    tmpDir,
-    mounts,
-    unboundMainCheckout,
-    yolo,
-    egressSession: egress.session,
-    fenceWiring,
+      : await openEgressEndpointForCall({
+          opener: resolveEgressOpener(opts),
+          egressPolicyFactory: effectiveEgressPolicyFactory,
+        });
+  // A released agent is a lifecycle fault, not a domain denial: the call
+  // aborts HERE — before the fence exists — so it can never degrade into a
+  // bare command with no proxy (fail-closed).
+  if (egress.lifecycleError !== undefined) {
+    throw egress.lifecycleError;
+  }
+  const { fence, fenceWiring } = await prepareForegroundFence({
+    homeRoot,
+    workspaceRoot,
+    fenceRetired: fenceRetired === true,
+    targetSnapshotCache,
+    egressEndpoint: egress.endpoint,
+    fenceArgs: {
+      finalCommand,
+      fsPolicy,
+      fenceEnv,
+      waveRoot,
+      fenceIsReadonly,
+      tmpDir,
+      mounts,
+      unboundMainCheckout,
+      fenceRetired,
+      maskCache,
+    },
   });
   let egressReleaseFailure: string | undefined;
   const result = await runSandboxDisposingEgress(
@@ -543,7 +628,7 @@ async function runForegroundBash(
       // frontend wait that returns while the command keeps running.
       deadlineMs: deadlineMs,
     },
-    egress.session,
+    egress.endpoint,
     (detail) => {
       egressReleaseFailure = detail;
     }
@@ -556,21 +641,22 @@ async function runForegroundBash(
     tmpDir,
   });
   const finalPath = await finalizeEgressPath({
-    egressSession: egress.session,
+    egressEndpoint: egress.endpoint,
     egressStartError: egress.startError,
     egressInfraHint: egress.infraHint,
     egressPolicyInput: egress.policyInput,
     result,
     mask,
     unboundMainCheckout,
-    // ADR-0119: under yolo the fence is retired, so an EROFS here cannot be
+    // ADR-0141: with the fence retired an EROFS here cannot be
     // the protected-target block refusing — no fence-attributed guidance.
-    protectedTargets: yolo === true ? undefined : fenceWiring.protectedTargets,
+    protectedTargets:
+      fenceRetired === true ? undefined : fenceWiring.protectedTargets,
     // EBUSY arm correlation set: the `/dev/null` masks THIS fence emitted.
-    // Under yolo the fence returned bare argv before the boundary block was
+    // With the fence retired the factory returned bare argv before the boundary block was
     // assembled, so its list is empty by construction and no EBUSY line can
     // match — the same guard, riding the fence's own field rather than a
-    // second yolo re-check.
+    // second fence re-check.
     exactFileMaskPaths: fence.exactFileMaskPaths,
     fsModeBoundary: fsModeBoundaryForCall({ fsPolicy, mounts }),
     egressReleaseFailure,
@@ -578,6 +664,65 @@ async function runForegroundBash(
   if (finalPath.kind === "throw") throw finalPath.throwError;
   return finalPath.envelope;
 }
+
+/**
+ * Prepare the protected inventory and its fence while this call still owns
+ * the egress endpoint. A refusal or fence-build error must release that
+ * endpoint before propagating the original failure.
+ */
+async function prepareForegroundFence(args: {
+  readonly homeRoot: string;
+  readonly workspaceRoot: string;
+  readonly fenceRetired: boolean;
+  /** The session-scoped protected-target snapshot holder. */
+  readonly targetSnapshotCache: ProtectedTargetSnapshotCache;
+  readonly egressEndpoint: EgressCallEndpoint | undefined;
+  readonly fenceArgs: Omit<
+    Parameters<typeof buildForegroundFence>[0],
+    "egressEndpoint" | "fenceWiring"
+  >;
+}): Promise<{
+  readonly fence: ReturnType<typeof buildForegroundFence>;
+  readonly fenceWiring: ReturnType<typeof protectedFenceWiring>;
+}> {
+  try {
+    // The protected-fence pair (inventory + credential read mask) is resolved
+    // from the entry-frozen roots. Keep this as the last await before building
+    // the fence so the walk's snapshot is exactly the set its binds mount.
+    const fenceWiring = await prepareProtectedFenceWiring({
+      homeRoot: args.homeRoot,
+      workspaceRoot: args.workspaceRoot,
+      fenceRetired: args.fenceRetired,
+      snapshotCache: args.targetSnapshotCache,
+    });
+    const fence = buildForegroundFence({
+      ...args.fenceArgs,
+      egressEndpoint: args.egressEndpoint,
+      fenceWiring,
+    });
+    return { fence, fenceWiring };
+  } catch (err) {
+    // EXIT: the assembly that consumed the session's walked snapshot did not
+    // succeed, so the snapshot is dropped: the next assembly walks fresh
+    // instead of re-serving a snapshot this one refused. Any doubt → rebuild.
+    // The retired arm consumes no snapshot, so it never drops one.
+    if (!args.fenceRetired) {
+      args.targetSnapshotCache.invalidate();
+    }
+    const releaseFailure = await releaseEgressEndpoint(args.egressEndpoint);
+    const releaseGuidance = egressReleaseGuidance(releaseFailure);
+    if (releaseGuidance !== undefined && err instanceof Error) {
+      // Keep the original typed refusal and object identity while preserving
+      // cleanup failure evidence on the only channel available before spawn.
+      err.message = `${err.message}\n${releaseGuidance}`;
+    }
+    // EXIT: a thrown non-Error has no message channel to carry the evidence on,
+    // so the original value propagates unchanged rather than being wrapped into
+    // a different failure the caller's typed handling would not recognize.
+    throw err;
+  }
+}
+
 /**
  * Parameter type for `runForegroundBash` (split out to keep that function
  * under 60 lines — S5 soft gate).
@@ -592,11 +737,23 @@ interface RunForegroundBashArgs {
   tmpDir: string;
   /** UNBOUND_FENCE main checkout frozen at entry (undefined = no segment). */
   unboundMainCheckout: string | undefined;
-  /** ADR-0119: D2-frozen yolo reading (same value foreground and background). */
-  yolo: boolean;
+  /** ADR-0141: frozen derived fence posture (same value foreground/background). */
+  fenceRetired: boolean;
   fsPolicy: ReturnType<typeof createFsPolicy>;
   fenceEnv: Record<string, string>;
   fenceIsReadonly: boolean;
+  /**
+   * The session-scoped credential read-mask plan holder (created once in the
+   * factory closure). It reaches the fence factory as an explicit option, so
+   * no plan outlives the session that produced it.
+   */
+  maskCache: MaskPlanCache;
+  /**
+   * The session-scoped protected-target snapshot holder (created once in the
+   * factory closure). It reaches the fence wiring as an explicit option, so
+   * the walked snapshot never outlives the session that produced it.
+   */
+  targetSnapshotCache: ProtectedTargetSnapshotCache;
   /**
    * Factory-closure-wrapped `egressPolicyFactory` (auto-injects
    * `approvalGate` and falls back allowlistSource to "session").
@@ -651,8 +808,13 @@ function buildForegroundFence(args: {
    *  emits no workspace segment. */
   readonly mounts: FsBoundaryMounts;
   readonly unboundMainCheckout: string | undefined;
-  readonly yolo: boolean;
-  readonly egressSession: EgressSession | undefined;
+  readonly fenceRetired: boolean;
+  readonly egressEndpoint: EgressCallEndpoint | undefined;
+  /** The session-scoped credential read-mask plan holder (the bash factory
+   *  closure owns it). Passed to the fence factory as an explicit option, so
+   *  the plan is reused across this session's assemblies and never across
+   *  sessions. */
+  readonly maskCache: MaskPlanCache;
   /** PROTECTED_TARGETS pair (inventory + read mask) from the
    *  single wiring point, resolved once at the path entry against the same
    *  entry-frozen homeRoot for the fence mount block AND the EROFS
@@ -660,7 +822,7 @@ function buildForegroundFence(args: {
   readonly fenceWiring: ReturnType<typeof protectedFenceWiring>;
 }): ReturnType<typeof createBwrapFence> {
   const payload = wrapCommandWithInnerBridge(
-    args.egressSession?.spec,
+    args.egressEndpoint?.spec,
     args.finalCommand
   );
   return createBwrapFence({
@@ -676,8 +838,8 @@ function buildForegroundFence(args: {
     // `mounts` is empty, so bwrap emits nothing, byte-identical to the V1
     // baseline.
     ...args.mounts,
-    ...(args.egressSession !== undefined
-      ? { egress: args.egressSession.spec }
+    ...(args.egressEndpoint !== undefined
+      ? { egress: args.egressEndpoint.spec }
       : {}),
     // PROTECTED_TARGETS wiring (T7 write block + T8 credential read mask) —
     // one spread of `protectedFenceWiring`'s bundle, the single wiring point
@@ -686,13 +848,18 @@ function buildForegroundFence(args: {
     // against the entry-frozen homeRoot). The skip warning stays on the
     // fence factory's default warn channel.
     ...args.fenceWiring,
-    // ADR-0119: the fence-retirement switch — the spread-guard keeps the
-    // non-yolo opts byte-identical; true makes the fence factory emit bare
+    // The session's credential read-mask plan holder (perf): with it the
+    // credential subtrees are walked once per session instead of once per
+    // assembly; the holder invalidates itself on the fs identities the plan
+    // depends on, so a changed subtree still yields a fresh plan.
+    maskCache: args.maskCache,
+    // ADR-0141: the fence-retirement switch — the spread-guard keeps the
+    // fenced opts byte-identical; true makes the fence factory emit bare
     // argv (the egress field above is already short-circuited to absent).
-    ...(args.yolo ? { yolo: true } : {}),
+    ...(args.fenceRetired ? { fenceRetired: true } : {}),
     // UNBOUND_FENCE physical segment — use the entry-frozen value, never
     // re-read the holder; pad=tmpDir keeps scratch writes landing (the
-    // ADR's ruling point). Inert under yolo: the factory returns before
+    // ADR's ruling point). Inert with the fence retired: the factory returns before
     // reaching this segment (ADR-0119 Amendment).
     ...(args.unboundMainCheckout !== undefined
       ? {
@@ -756,7 +923,7 @@ async function recordForegroundRead(
 
 /**
  * Guard for the protected-target boundary-refusal guidance: only a non-zero
- * exit with an inventory present can produce a message (yolo passes
+ * exit with an inventory present can produce a message (a retired fence passes
  * `undefined` — no fence, no fence-attributed message). Covers BOTH refusal
  * arms — the EROFS write refusal and the EBUSY unlink-of-a-mask-point
  * refusal — hence the boundary-level name, not an errno-level one. Extracted
@@ -805,8 +972,9 @@ function fsModeBoundaryForCall(args: {
  * refusal in specs/effect-boundary-protection.md). Same shape as the
  * protected-target guard above on purpose: the two refusals are announced the
  * same way, and the message is what distinguishes them. It rides the SAME
- * `protectedTargets === undefined` yolo guard rather than re-reading the yolo
- * holder — under yolo there is no fence, so no EROFS can be fence-attributed,
+ * `protectedTargets === undefined` guard rather than re-reading the fence
+ * posture — with the fence retired there is no fence, so no EROFS can be
+ * fence-attributed,
  * and the mode boundary is a fence boundary.
  *
  * The conservatism lives in `modeBoundaryFenceGuidance`: an EROFS that resolves
@@ -838,7 +1006,7 @@ function modeBoundaryGuidanceForCall(
  * Standalone function (S5 complexity gate).
  */
 async function finalizeEgressPath(args: {
-  readonly egressSession: EgressSession | undefined;
+  readonly egressEndpoint: EgressCallEndpoint | undefined;
   readonly egressStartError: string | undefined;
   readonly egressInfraHint: string | undefined;
   readonly egressPolicyInput: EgressPolicyInput | undefined;
@@ -846,10 +1014,10 @@ async function finalizeEgressPath(args: {
   readonly mask: ReturnType<typeof createOutputMask> | undefined;
   readonly unboundMainCheckout: string | undefined;
   /** Protected-target inventory for the boundary-refusal feedback; the
-   *  yolo path passes `undefined` (no fence → no fence-attributed message). */
+   *  retired-fence path passes `undefined` (no fence → no fence-attributed message). */
   readonly protectedTargets: ProtectedTargetInventory | undefined;
   /** The `/dev/null` credential masks this fence emitted — the EBUSY arm's
-   *  correlation set. Empty under yolo (the fence never assembled one). */
+   *  correlation set. Empty with the fence retired (it never assembled one). */
   readonly exactFileMaskPaths: readonly string[];
   /** The tier's own reach for this call, from the frozen `fsMode` snapshot —
    *  the fs-mode boundary arm's correlation set. */
@@ -867,7 +1035,7 @@ async function finalizeEgressPath(args: {
     }
 > {
   const {
-    egressSession,
+    egressEndpoint,
     egressStartError,
     egressInfraHint,
     egressPolicyInput,
@@ -880,7 +1048,7 @@ async function finalizeEgressPath(args: {
     egressReleaseFailure,
   } = args;
   const violations =
-    egressSession !== undefined ? egressSession.violationSink.drain() : [];
+    egressEndpoint !== undefined ? egressEndpoint.violationSink.drain() : [];
   if (violations.length > 0 || egressStartError !== undefined) {
     const throwError = composeEgressFailure({
       violations,
@@ -898,7 +1066,7 @@ async function finalizeEgressPath(args: {
   // combo). This is a message-plane observation: it does not change exit
   // semantics and produces no egress violation; no match = byte-identical.
   const f4Guidance =
-    egressSession !== undefined && result.exitCode !== 0
+    egressEndpoint !== undefined && result.exitCode !== 0
       ? sshHostKeyFailureGuidance(result.stderr)
       : undefined;
   // Under UNBOUND_FENCE, EROFS in stderr → feed back actionable guidance
@@ -947,15 +1115,70 @@ async function finalizeEgressPath(args: {
 }
 
 /**
- * Per-call egress session assembly — start the session before fence
- * assembly; on failure (EgressRelayUnavailableError etc.) this call runs
- * with no egress seam (no proxy env inside the sandbox, `--unshare-net`
- * still in place, i.e. plain isolation) + the failure text goes to the
- * caller's typed failure so the model / TUI sees it (no stderr bypass).
+ * The seam-opening contract of the bash tool: one call → one endpoint.
+ *
+ * The endpoint carries THIS call's unix socket, proxy-server instance,
+ * violation sink and fence spec; the session-level half (relay resolution /
+ * CA / credential mint) belongs to the agent and is loaded once per session.
+ */
+type EgressEndpointOpener = (
+  policy: EgressPolicyInput
+) => Promise<EgressCallEndpoint>;
+
+/**
+ * Resolve the bash tool's ONE seam-opening source.
+ *
+ * Production: the session-resident agent hands out this call's endpoint.
+ * TEST-ONLY fallback: the legacy `createEgressSession` factory seam (and the
+ * no-agent default) is presented through the same endpoint shape, so the
+ * handler never learns which source opened the seam.
+ */
+function resolveEgressOpener(
+  opts: CreateBashToolOptions | undefined
+): EgressEndpointOpener {
+  const agent = opts?.egressAgent;
+  if (agent !== undefined) {
+    // The roster is session-level (the agent's profile owns the mint), so the
+    // per-call policy carries the decision input only.
+    return async (policy) =>
+      agent.createCallEndpoint(toEgressCallPolicy(policy));
+  }
+  const factory = opts?.createEgressSessionFactory ?? createEgressSession;
+  // The legacy factory keeps its own contract — it receives the FULL policy
+  // (roster included), because the legacy session mints per session. The
+  // projection into the endpoint shape lives in the egress domain
+  // (`adaptEgressSessionToEndpoint`), shared with the background task path.
+  return async (policy) =>
+    adaptEgressSessionToEndpoint(await factory({ policy }));
+}
+
+/**
+ * The rendering of a released agent: a lifecycle fault (the session outlived
+ * its egress agent), not a domain denial and not an infrastructure outage.
+ * The call never reaches the fence, so the command did not run — the honest
+ * answer is "the seam could not be opened", not "the network refused".
+ */
+function disposedAgentRendering(err: EgressAgentDisposedError): string {
+  return `${err.message} Lifecycle error, not a domain denial and not an infrastructure outage: the call was aborted before the fence existed, so the command did not run (fail-closed: no proxy means no direct connection either).`;
+}
+
+/**
+ * Per-call egress seam assembly — open the endpoint before fence assembly.
+ *
+ * Outcomes:
+ *   - the endpoint opens → the call owns it until the release channel runs;
+ *   - a start failure (EgressRelayUnavailableError etc.) → no seam (the fence
+ *     still runs with `--unshare-net`, i.e. plain isolation) + the failure
+ *     text goes to the caller's typed failure so the model / TUI sees it (no
+ *     stderr bypass);
+ *   - a released agent (EgressAgentDisposedError) → a LIFECYCLE error: the
+ *     session outlived its agent. It is neither a domain denial nor an
+ *     infrastructure outage, and the call aborts before the fence exists
+ *     (fail-closed: never a bare command without a proxy).
  *
  * policyInput is passed through: the caller reads
  * `policyInput.allowlistSource` when composing the typed failure to label
- * "current allowlist source". The session holds no extra policy reference
+ * "current allowlist source". The endpoint holds no extra policy reference
  * (captured in its filter closure), hence the caller-side cache.
  *
  * Typed-error catch contract (code-quality.md): discriminate the concrete
@@ -970,23 +1193,33 @@ async function finalizeEgressPath(args: {
  *
  * Standalone function (S5 complexity gate).
  */
-async function startEgressSessionForCall(
-  egressPolicyFactory: (() => EgressPolicyInput | undefined) | undefined,
-  createEgressSessionFn: typeof createEgressSession = createEgressSession
-): Promise<{
-  session?: EgressSession;
+async function openEgressEndpointForCall(args: {
+  readonly opener: EgressEndpointOpener;
+  readonly egressPolicyFactory:
+    (() => EgressPolicyInput | undefined) | undefined;
+}): Promise<{
+  endpoint?: EgressCallEndpoint;
   startError?: string;
   infraHint?: string;
+  lifecycleError?: EgressAgentDisposedError;
   policyInput?: EgressPolicyInput;
 }> {
-  const policyInput = egressPolicyFactory?.();
+  const policyInput = args.egressPolicyFactory?.();
   if (policyInput === undefined) return {};
   try {
-    // fail-closed semantics live inside the session; here we only catch
-    // startup failure → no seam + leave a trace.
-    const session = await createEgressSessionFn({ policy: policyInput });
-    return { session, policyInput };
+    // fail-closed semantics live inside the agent / session; here we only
+    // catch startup failure → no seam + leave a trace.
+    const endpoint = await args.opener(policyInput);
+    return { endpoint, policyInput };
   } catch (err) {
+    if (err instanceof EgressAgentDisposedError) {
+      // Typed branch: the agent was already released. Not an infra fault and
+      // not a domain denial — the call aborts before the fence is built. The
+      // typed error itself is kept (a caller can discriminate it); only the
+      // rendering is enriched, so the failure stays honest about what it is.
+      err.message = disposedAgentRendering(err);
+      return { lifecycleError: err, policyInput };
+    }
     if (err instanceof EgressRelayUnavailableError) {
       // Typed branch: EgressRelayUnavailableError carries detail +
       // remediationHint (product dependency guidance, ADR-0107); use
@@ -1068,24 +1301,24 @@ function composeEgressFailure(args: {
 }
 
 /**
- * The single release channel for one call's egress session. Returns the
- * failure detail when dispose threw, `undefined` on success or when no session
- * was started — never throws, so the caller's own status is never replaced by
- * a release fault.
+ * The single release channel for one call's egress endpoint. Returns the
+ * failure detail when dispose threw, `undefined` on success or when no
+ * endpoint was opened — never throws, so the caller's own status is never
+ * replaced by a release fault.
  *
  * Standalone function (S5 gate).
  */
-async function releaseEgressSession(
-  session: EgressSession | undefined
+async function releaseEgressEndpoint(
+  endpoint: EgressCallEndpoint | undefined
 ): Promise<string | undefined> {
-  if (session === undefined) return undefined;
+  if (endpoint === undefined) return undefined;
   try {
-    await session.dispose();
+    await endpoint.dispose();
     return undefined;
   } catch (err) {
     // EXIT: dispose itself failed. The fence has already finished, so the
     // call keeps its real exit status and the detail travels as evidence in the
-    // result's stderr channel. Drop this branch once every session
+    // result's stderr channel. Drop this branch once every endpoint
     // implementation proves a non-throwing dispose.
     return err instanceof Error ? err.message : String(err);
   }
@@ -1104,7 +1337,7 @@ function egressReleaseGuidance(detail: string | undefined): string | undefined {
 }
 
 /**
- * runInSandbox + per-call egress session release in `finally` — exception
+ * runInSandbox + per-call egress endpoint release in `finally` — exception
  * and normal paths share one release channel (the pinned ownership /
  * dispose contract). dispose is idempotent, repeat calls are safe.
  * A release failure is handed to `onReleaseFailure` instead of being dropped:
@@ -1114,13 +1347,13 @@ function egressReleaseGuidance(detail: string | undefined): string | undefined {
  */
 async function runSandboxDisposingEgress(
   runArgs: Parameters<typeof runInSandbox>[0],
-  egressSession: EgressSession | undefined,
+  egressEndpoint: EgressCallEndpoint | undefined,
   onReleaseFailure: (detail: string) => void
 ): Promise<Awaited<ReturnType<typeof runInSandbox>>> {
   try {
     return await runInSandbox(runArgs);
   } finally {
-    const detail = await releaseEgressSession(egressSession);
+    const detail = await releaseEgressEndpoint(egressEndpoint);
     if (detail !== undefined) onReleaseFailure(detail);
   }
 }
@@ -1177,15 +1410,30 @@ export function createBashTool(
   opts?: CreateBashToolOptions
 ): AciToolDef {
   // ADR-0119 §5 (requireBwrap timing ruling): the factory probe is gated on
-  // the yolo holder's *initial* value — the yolo assembly path skips it (a
-  // host without bwrap must not block assembly; the exit side is covered by
-  // the controller's symmetric probe), the non-yolo path is byte-identical
-  // (absent / false still fails loud).
-  if (opts?.yolo?.get() !== true) requireBwrap();
+  // the derived fence posture's *initial* value — the retired-fence assembly
+  // path skips it (a host without bwrap must not block assembly; the exit side
+  // is covered by the controller's symmetric probe), the fenced path is
+  // byte-identical (absent / false still fails loud).
+  if (opts?.fenceRetired?.get() !== true) requireBwrap();
   // ADR-0092: the factory captures only `tmpDir` (process-stable). fsPolicy
   // is rebuilt per call by the handler, never closed over the factory cwd.
   let fallbackFenceTmp: string | undefined;
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
+  // SESSION-scoped holder for the credential read-mask plan (perf): without
+  // it the plan is rebuilt — and the credential subtrees re-walked — on every
+  // fence assembly. One holder per tool instance (one session), never a
+  // module-level singleton: it caches the PLAN only, and invalidates itself
+  // on the fs identities the plan depends on, so a changed credential subtree
+  // still yields a fresh plan.
+  const maskCache = createMaskPlanCache();
+  // SESSION-scoped holder for the protected-target enumeration's walked
+  // snapshot (perf): without it the whole name-rule scan scope is re-walked on
+  // every fence assembly. One holder per tool instance (one session), never a
+  // module-level singleton: it caches the WALKED SNAPSHOT only, and a reused
+  // snapshot is checked for FRESHNESS (every walked directory's fs identity
+  // re-read) before it is trusted — a changed tree discards the snapshot and
+  // walks fresh, so a credential that appeared is masked by that very call.
+  const targetSnapshotCache = createProtectedTargetSnapshotCache();
   // First-seen domain approval: session-level gate built once in the
   // factory closure, shared across calls (allowed/denied sets + in-flight
   // merge table). askApproval absent → the gate internally fails closed:
@@ -1308,7 +1556,7 @@ export function createBashTool(
       mode: fsMode,
       homeRoot,
       workspaceRoot,
-      yolo,
+      fenceRetired,
     } = snapshotFenceInputs(opts, cwd);
     // Only after the validation chain passes do we choose foreground /
     // background — dangerous-command and sensitive-path gates run on both
@@ -1333,7 +1581,7 @@ export function createBashTool(
           workspaceRoot,
           tmpDir,
           unboundMainCheckout,
-          yolo,
+          fenceRetired,
         }
       );
     }
@@ -1345,11 +1593,25 @@ export function createBashTool(
     // unbroken.
     const fenceIsReadonly =
       opts?.cwdReadonly === true || opts?.bashMode === "readonly";
+    // #D2: the per-call concurrency judgment (the same predicate the wave
+    // splitter uses, computed ONCE here). A call the predicate judges
+    // concurrency-safe AND whose command runs git gets `GIT_OPTIONAL_LOCKS=0`
+    // so two concurrent `git status` calls in the SAME repository do not race
+    // on `.git/index.lock` — `git status` refreshes and rewrites the index
+    // unless git skips the optional lock (git >= 2.14). The default
+    // `bashMode: "any"` path does not set this variable today
+    // (`applyCwdReadonlyFenceEnv` sets it in readonly mode only), so a
+    // concurrency-safe git call needs it injected here. The background arm
+    // returned above and never reaches this fence env, a call the predicate
+    // rejects keeps today's env exactly, and a read-only call that never
+    // runs git carries no git-specific variable at all.
+    const concurrencySafe = isReadonlyBashConcurrencySafe(input);
     const fenceEnv = {
       ...applyCwdReadonlyFenceEnv(
         envIsolation.filter(process.env),
         fenceIsReadonly
       ),
+      ...gitOptionalLocksFenceEnv(command, concurrencySafe),
       // ADR-0092: the session tmp host path is the draft location; guest Linux
       // `/tmp` is never bound to it, so `$TMPDIR` names the real path.
       TMPDIR: tmpDir,
@@ -1378,10 +1640,12 @@ export function createBashTool(
       workspaceRoot,
       tmpDir,
       unboundMainCheckout,
-      yolo,
+      fenceRetired,
       fsPolicy,
       fenceEnv,
       fenceIsReadonly,
+      maskCache,
+      targetSnapshotCache,
       effectiveEgressPolicyFactory,
       toolOpts: opts,
       ctx,
@@ -1414,7 +1678,13 @@ export function createBashTool(
     handler,
     aci: {
       category: "execute" as const,
+      // The tool-level default stays `false`: most bash calls mutate the
+      // filesystem, so the tool as a whole is not concurrency-safe. The
+      // per-call predicate below answers the narrower question the wave
+      // splitter asks for a SPECIFIC call: a provably read-only call may
+      // join a wave with its neighbours, anything uncertain stays serial.
       isConcurrencySafe: false,
+      isConcurrencySafeForInput: isReadonlyBashConcurrencySafe,
       interruptBehavior: "cancel" as const,
       // ADR-0134: the handler owns this tool's clock now (the validated
       // `timeout_ms`, or the 10 s default), and it enforces it in the process
@@ -1470,8 +1740,8 @@ interface BackgroundSpawnInput {
  * extract, never relax). Semantics are byte-identical to the inline form:
  *
  *   - `conversationId` / `cwdReadonly` are #653 T1 + D2 standing fields;
- *   - `yolo` is ADR-0119's D2-frozen reading (spread-guard: absent =
- *     non-yolo, legacy request field set unchanged);
+ *   - `fenceRetired` is the frozen derived reading (spread-guard: absent =
+ *     fenced, legacy request field set unchanged);
  *   - `unboundMainCheckout` is the UNBOUND_FENCE entry-frozen value
  *     (foreground/background set-equal on this axis, G3 discipline);
  *   - `fsMode` / `homeRoot` are ADR-0092 Round 2's mode surface;
@@ -1491,7 +1761,7 @@ function buildBackgroundSpawnRequest(args: {
   readonly homeRoot: string;
   readonly workspaceRoot: string;
   readonly unboundMainCheckout: string | undefined;
-  readonly yolo: boolean;
+  readonly fenceRetired: boolean;
   readonly backgroundEgressPolicyFactory:
     (() => EgressPolicyInput | undefined) | undefined;
 }): BackgroundSpawnRequest {
@@ -1504,7 +1774,7 @@ function buildBackgroundSpawnRequest(args: {
     homeRoot,
     workspaceRoot,
     unboundMainCheckout,
-    yolo,
+    fenceRetired,
     backgroundEgressPolicyFactory,
   } = args;
   return {
@@ -1532,10 +1802,10 @@ function buildBackgroundSpawnRequest(args: {
     // The name-pattern scan scope, same frozen vintage as homeRoot above —
     // foreground and background materialize over one shared root.
     workspaceRoot,
-    // ADR-0119: the D2-frozen yolo reading (spread-guard: absent =
-    // non-yolo, legacy request field set unchanged). manager skips the
-    // egress session on it; the spawn factory emits bare argv from it.
-    ...(yolo ? { yolo: true } : {}),
+    // ADR-0141: the D2-frozen fence reading (spread-guard: absent = fenced,
+    // legacy request field set unchanged). manager skips the egress session on
+    // it; the spawn factory emits bare argv from it.
+    ...(fenceRetired ? { fenceRetiredAtSpawn: true } : {}),
     // ADR-0097: egress seam — the caller's policy, WITHOUT the interactive
     // approval gate. The background path has no ask surface: by the time the
     // handler returned `task_id` nobody is waiting on the proxy, so a gate in
@@ -1608,7 +1878,7 @@ async function handleBackground(
     workspaceRoot,
     tmpDir,
     unboundMainCheckout,
-    yolo,
+    fenceRetired,
   }: FenceSnapshot
 ): Promise<{
   task_id: string;
@@ -1634,7 +1904,7 @@ async function handleBackground(
       homeRoot,
       workspaceRoot,
       unboundMainCheckout,
-      yolo,
+      fenceRetired,
       // ADR-0097: the caller's raw policy factory, NOT the gate-carrying one —
       // the background inlet is non-interactive, so an unknown domain must
       // stay fail-closed (buildBackgroundSpawnRequest names why). Read here
@@ -1660,11 +1930,11 @@ async function handleBackground(
       detail,
     });
   }
-  // ADR-0119: under yolo the whole fence retires — the main checkout is never
+  // ADR-0141: with the fence retired the main checkout is never
   // ro-mounted, so the EROFS pre-disclosure would assert a physical state that
   // does not exist. The receipt keeps the bound / gate-OFF shape (no notice
   // key); the worktree-gate axis itself is unchanged.
-  return unboundMainCheckout !== undefined && !yolo
+  return unboundMainCheckout !== undefined && !fenceRetired
     ? {
         task_id: result.task_id,
         log_path: result.log_path,

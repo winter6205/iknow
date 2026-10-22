@@ -77,10 +77,10 @@ const REJECTING_ENTRIES: ReadonlyArray<{
  *     flag is in here, so a newly *documented* value flag cannot be skipped even
  *     before the source-derived guard sees it.
  *
- * `--trace-out`, `--max-turns` and `--resume` are value-taking but are NOT in the
- * published options block, so nothing derives them from usage. The source-derived
- * guard derives them regardless — that is why it, and not the usage one, is the
- * one that binds.
+ * `--trace-out`, `--max-turns` and `--resume` are value-taking and are published
+ * in the options block, so the usage-derived guard now sees them too. The
+ * source-derived guard still binds first: a value flag can be added without ever
+ * being documented, and only the scan-chain read catches that.
  */
 const VALUE_TAKING_FLAGS = [
   "--host",
@@ -656,10 +656,9 @@ describe("parseArgs: the value-slot tripwire is derived from the parser's own so
 
 describe("usageText: the published value-taking options are all covered by the slot table", () => {
   it("every `--flag <value>` line in the options block has a slot case (tripwire on the table)", () => {
-    // The documentation-coverage half of the tripwire: a value-taking flag the
-    // help text publishes has a slot case whether or not the source-derived guard
-    // in the previous block has been updated. It cannot see an *undocumented*
-    // flag, which is why it is not the binding guard.
+    // The documentation-coverage half of the tripwire: a value-taking flag the help
+    // text publishes has a slot case whether or not the source-derived guard
+    // in the previous block has been updated.
     const published = [
       ...usageText().matchAll(/^ {2}(--[a-z][a-z0-9-]*) <[a-z]+>/gm),
     ].map((m) => m[1]!);
@@ -678,18 +677,27 @@ describe("usageText: the published value-taking options are all covered by the s
           `add it to VALUE_TAKING_FLAGS (or to the resume case)`
       );
     }
-    // `--trace-out`, `--max-turns` and `--resume` take values but are not in the
-    // options block, so nothing derives them from usage. Naming them here is what
-    // keeps the gap a stated exception rather than a silent hole; the
-    // source-derived guard is what actually covers them.
-    const unpublished = ["--trace-out", "--max-turns", "--resume"].filter(
-      (flag) => !published.includes(flag)
+    // And the other direction, now that the options block publishes every
+    // value-taking flag the parser has: a flag whose slot rule was dropped from
+    // the table cannot hide behind an undocumented row.
+    assert.deepEqual(
+      [...new Set(published)].sort(),
+      [...VALUE_TAKING_FLAGS, REPORTING_VALUE_FLAG].sort()
     );
-    assert.deepEqual(unpublished.sort(), [
-      "--max-turns",
-      "--resume",
-      "--trace-out",
-    ]);
+  });
+
+  it("every flag the scan chain recognizes is published (a flag cannot be added and hidden)", () => {
+    // Reads the flag literals out of the parser's own scan chain, so the help must
+    // name each one. `--subagent-worker` is the single declared exception: it is
+    // the parent-process wire, never an operator form, and is deliberately kept out
+    // of the public paths.
+    const hidden = ["--subagent-worker"];
+    const t = usageText();
+    for (const flag of scanChainArms().keys()) {
+      if (hidden.includes(flag)) continue;
+      assert.ok(t.includes(flag), `${flag} is parsed but not published`);
+    }
+    assert.equal(t.includes("--subagent-worker"), false);
   });
 });
 

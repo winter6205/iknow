@@ -71,6 +71,15 @@ export interface ToolExecutionContext {
   readonly messages?: ReadonlyArray<AnthropicNativeMessage>;
   /** Effective parent thinking snapshot for subagent spawn and continuation. */
   readonly parentThinking?: ThinkingParams;
+  /**
+   * The parent conversation's model route (`provider/model`), inherited by a
+   * spawned sub-agent worker so the child runs on the route the conversation
+   * chose instead of the process-global default. Rides here for the same
+   * reason as `parentThinking`: the spawn / continue tools read it off the
+   * tool context. Absent → key omitted; the worker then keeps the process
+   * default.
+   */
+  readonly parentModelRoute?: string;
 }
 
 /**
@@ -223,6 +232,8 @@ export interface Executor {
     /** Read-only model-visible history snapshot for this turn; absent → handler fails closed. */
     messages?: ReadonlyArray<AnthropicNativeMessage>,
     /** Effective parent thinking snapshot; optional for legacy executeAll callers. */
-    parentThinking?: ThinkingParams
+    parentThinking?: ThinkingParams,
+    /** Parent conversation's model route; optional for legacy executeAll callers. */
+    parentModelRoute?: string
   ) => Promise<ReadonlyArray<ToolExecutionResult>>;
 }

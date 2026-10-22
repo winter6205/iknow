@@ -17,13 +17,15 @@
 - `worktree-unbound-ro-bind.md` — worktree gate: physical ro-bind for unbound bash + EROFS feedback, replacing predictive interception (ADR-0109, supersedes ADR-0037 bash prediction clauses)
 - `worktree-external-discovery-entry.md` — discover and enter existing git worktrees outside `.iknow/worktrees/`; boundness becomes stamp-based (task-shape OR a durable explicit-enter sidecar) so a never-entered operator checkout stays ro-bound (#1231; amends ADR-0037 §4 / `foreign_worktree`, touches ADR-0019)
 - `effect-boundary-protection.md` — interpreter-independent protection at the bwrap mount + capability boundary: frozen protected-target inventory materialized from workspace-scoped name patterns, credential read mask, EBUSY/EROFS `[fs_denied]` feedback, shell+Python effect-equivalence tests (ADR-0129, clarifies ADR-0068; ADR-0092 unchanged)
-- `yolo-mode.md` — `--yolo` no-sandbox mode: the fence retires entirely, four-route bare argv, TUI-only entry with confirm modal (ADR-0119)
+- `yolo-mode.md` — the two **presets** on one memory-only session overlay: `--yolo` (fence retired + `global` + `full_auto`) and `--no-sandbox` (fence retired + `global`, permission untouched); four-route bare argv, TUI-only entry — launch flags open no modal, the in-session `/yolo` does (ADR-0119; recut by ADR-0141)
 - `subagent-layers-worktree-deps.md` — subagent three layers + worktree project deps
 - `subagent-model.md` — worker route is user-layer `settings.subagent.model`, else `llm.model`; per-spawn `model` is removed (#1121)
+- `session-model-isolation.md` — each conversation owns its model route: snapshotted at creation, persisted in `SessionFileV1.model`, changed only by its own `/model` act; `settings.llm.model` is the default for new conversations (ADR-0145)
 
 ### Permission / shell parsing
 
-- `permission-axis-semantics.md` — what the fence axis and the permission axis each control, every reachable combination (including the no-fence-with-questions posture), where the boundary question is asked and why it is not in `policy.ts`, and the two refusals a `[fs_denied]` message can carry (ADR-0139 / ADR-0140)
+- `permission-axis-semantics.md` — what the fence axis (`fsMode` × `fenceRetired`) and the permission axis each control, every reachable combination (including the no-fence-with-questions posture, now entered by `--no-sandbox` rather than by yolo), where the boundary question is asked and why it is not in `policy.ts`, and the two refusals a `[fs_denied]` message can carry (ADR-0139 / ADR-0140; preset table and posture entries revised for ADR-0141)
+- `backslash-whitespace-veto-repair.md` — **landed** #1188 repair: admits the proven escaped-space/separator-continuation forms, retains the fidelity hard denials, removes the unsound rewrite, and makes the offline expectations falsifiable (ADR-0124 roster amendment ratified 2026-10-04; ADR-0127 destinations preserved; the `isAllowedCommand` carve-out is recorded in the spec's SC4)
 
 One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 stage table; serial, one PR per stage, revert-only rollback):
 
@@ -36,7 +38,7 @@ One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 sta
 
 - `session-checkpoint-architecture.md` — published native execution snapshots, durable per-file progress, session-entry recovery, and final-request trace with shared immutable represented bodies; plans A/B/C implemented and merged, host wiring landed (#1183), joined acceptance matrix 29/29 PROVEN — with the fresh-process / real-pty evidence classes kept out of CI (ADR-0136)
 - `code-restore.md` — rewind can restore workspace bytes from per-write preimages on the abandoned head chain (ADR-0121; ADR-0027 / ADR-0071 / ADR-0110)
-- `context-occupancy-autocompact.md` — the usage bar and the proactive compaction gate share one occupancy numerator (ADR-0118)
+- `context-occupancy-autocompact.md` — the usage bar and the proactive compaction gate share one image-aware occupancy numerator; projections feed the image-bearing gate only and never repaint the bar (ADR-0118; ADR-0008 2026-10-21 / 2026-10-22 amendments)
 - `session-list-title.md` — list title: standalone transcript event + lite-model generation (ADR-0113)
 - `agent-status-instruction-echo.md` — status-bar echo upgrade: verbatim `instruction:` replay segment + one-shot pivot reconcile marker (ADR-0103 amends ADR-0028; ACR PASS)
 - `instruction-authority-projection.md` — instruction-authority outbound projection: host-frame stamping + untrusted translation (#1066; ADR-0112)
@@ -44,6 +46,10 @@ One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 sta
 - `interrupt-frozen-prefix-keep.md` — interrupting a model in flight keeps the frozen prefix (ADR-0108)
 - `verify-status-contract.md` — three honest verify outcomes (`passed` / `not_run` + `notRunReason` / failed family) replacing the `passed`+hide hack, upstream content gate that overrides `verify.command` presence, pipeline-tail (`| tail`/`| head`) evidence voided, trajectory golden set (ADR-0073; hsr-3/hsr-6-stopgap)
 - `verify-trust-boundary-and-goal-decoupling.md` — declared = implemented for the verify subsystem: turn-scoped gate, line-anchored green summaries + output-fabrication void, block-ordinal staleness, envelopes naming the real actor and fact, goal activation collapsed to one predicate (ADR-0137; issue #1195)
+
+### Evaluation & quality gates
+
+- `agent-evaluation-improvement.md` — proposed two-issue contract: offline evaluation mechanism with 20 behavior-local case references, then a separately authorized frozen real-model baseline/comparison (ADR-0130 / ADR-0136 constraints)
 
 ### TUI
 
@@ -56,10 +62,14 @@ One migration, split per stage (wayfinder map `unified-shell-parsing`, usp-5 sta
 
 - `im-bridge-feishu.md` — Feishu / Lark as an external consumer of the session HTTP face (ADR-0120; platform numbers in `docs/platforms/feishu-facts.md`)
 
+### Remote control
+
+- `remote-sync.md` — the phone monitors and steers the live TUI session: TUI-hosted remote seat (hub event bus, input port, versioned Unix-socket protocol) + Happy `iknow` backend + ntfy notifications (ADR-0149)
+
 ### Tools and extension sources
 
 - `251-lsp-tool.md` — LSP tool (connection-hygiene increment)
 - `skill-index-increment.md` — incremental skill model index + human-side slash unification (ADR-0098)
-- `frontmatter-shared-parser.md` — one shared frontmatter module (yaml-backed) replacing four hand-rolled parsers; memory newline guard; `when_to_use` signal (ADR-0123)
-- `memory-frontmatter-write-signals.md` — memory write-side signals: serializer refuses non-scalar extras, structured store `skipped` diagnostics (#1137; resolves ADR-0123 accepted residuals)
+- `frontmatter-shared-parser.md` — one shared frontmatter module (yaml-backed) replacing four hand-rolled parsers; memory newline guard; `when_to_use` signal (ADR-0144)
+- `memory-frontmatter-write-signals.md` — memory write-side signals: serializer refuses non-scalar extras, structured store `skipped` diagnostics (#1137; resolves ADR-0144 accepted residuals)
 - `read-image-vision.md` — read images at paths inside the fence, delivered to Anthropic vision via `tool_result` (ACR PASS)

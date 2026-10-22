@@ -1,41 +1,32 @@
-# Testing Policy
+# 测试规则（常驻）
 
-When adding or changing business logic, prioritize adding or updating tests before implementation. Tests must cover the applicable behavior classes:
+测试是判断改动对不对的主要依据。迭代时用 L0–L2 拿快速信号；交付前跑到这类改动要求的最高一层。删测试、放宽断言、加 skip 等改动的限制见 `AGENTS.md`「硬边界」。
 
-1. Normal behavior.
-2. Failure behavior.
-3. Boundary conditions.
-4. Insufficient permissions.
-5. Empty or invalid input.
-6. Concurrent or repeated submission, when applicable.
+| 层  | 命令                                                                                                                          | 耗时（由快到慢） | 必须跑到这一层的改动                                               |
+| --- | ----------------------------------------------------------------------------------------------------------------------------- | ---------------- | ------------------------------------------------------------------ |
+| L0  | `npm run typecheck`；改测试时加跑 `typecheck:tests` / `typecheck:tui-tests` / `typecheck:web-tests`                           | 最快             | 所有代码改动                                                       |
+| L1  | `npx vitest run <文件> -t "<用例名>"`；`tests/tui/` 下用 `bun test <文件>`                                                    | 快               | 迭代                                                               |
+| L2  | `npm run test:changed`（不含 `tests/tui/`；pre-commit 和 pre-push 也跑这一层；用 `HUSKY=0` 提交时不会自动跑，要列进 Not run） | 中               | 迭代                                                               |
+| L3  | `npm test`（先 build，再跑 vitest 和 `bun test tests/tui/`；不应用 `vitest.ci-excludes.ts`）                                  | 慢               | 所有代码改动。只动 `docs/`、`specs/`、根目录 `*.md` 的提交可以不跑 |
+| L4  | `npm run test:ci:full`（需要 bwrap）                                                                                          | 更慢             | harness 装配、bwrap 沙箱、Agent QA runner、`vitest.ci-excludes.ts` |
+| L5  | `npm run test:real-llm`（仓库根 `real-llm/`），加上对应黄金集                                                                 | 最慢             | prompt、模型输入、工具描述或 schema、轨迹                          |
+| L6  | PTY 用 `mcp__terminalcp__terminalcp`；只有浏览器界面的改动才用浏览器                                                          | —                | TUI、CLI 的交互行为                                                |
 
-## Docs-only commits
+- 代价：L3 全量是 1.4 万级用例、约 9 分钟（本地实测，量级参考），L4、L5 更贵。跑 L3 及以上之前先做前置检查：依赖装齐、`bwrap` 可用、测试 key 已配、黄金集和 fixture 与本次要验的接口契约对得上。前置不齐先修前置，不要用一次全量去发现前置缺失；前置检查不替代该层必跑。
+- 跑全量前把每个用例的结果增量写进一个 JSONL 报告文件（一行一条：用例名、层、状态、耗时），跑完再汇总。整轮被中断时以这份文件为准：已完成的用例不丢，不为了补齐证据再跑一次全量；中断的这次按 `Not run: L3 <中断原因>` 报，别的层也不要顺带重跑。报告文件放临时目录或已被忽略的目录，不提交。
+- 长任务（预计超过 1 分钟的用例或脚本）要有分阶段时限和可见状态：每个阶段单独的上限，加阶段名输出。只有总超时、说不出卡在哪一步的，不算通过，按 `Failed: L? <卡住的阶段>` 报。
+- 并发或异步的用例自己控制完成顺序：不要靠真实时钟撞顺序，用可控的 latch / deferred / 手动 resolve 决定谁先完成。至少覆盖三类：切会话后旧会话的迟到回调、取消或关闭之后才到达的回调、取消之后才发生的写入。
 
-When the staged diff contains only markdown documents (`docs/`, `specs/`, root `*.md`) and no code, typecheck and test suites are not the contract for the change: `.husky/pre-commit` fast-paths such commits (skips `typecheck` + `test:changed`, keeps lint-staged formatting). If a docs-only commit still triggers a full suite run (e.g. `vitest --changed` degrading to whole-suite on a no-code diff), committing with the hook bypassed is authorized for that commit; state "docs-only" in the commit body.
+完成汇报里补上这几项：
 
-Do not delete tests or weaken assertions to make a build pass. A deleted or replaced test must be covered by an equivalent or stronger test and have a rationale, authorization, and explanation in the commit body. Do not mark a failing test as skipped unless explicitly authorized and the reason is documented.
-
-## Session and trace evidence
-
-- When changing `SessionStore` persistence, migration, replay, resume, or listing, exercise the real store and filesystem in an isolated temporary directory. Give each case a fresh `conversationId`; never use the repository's `data/` directory or a user's session directory. For durability claims, read through a newly constructed store or inspect the actual persisted JSONL and verify the loaded result.
-- Use representative session content for the behavior under test: for example, user and assistant messages, tool-use/result pairs, checkpoints, title events, or legacy records when those paths are affected. Assert observable data such as message content, event/head relationships, list or resume results, and persisted record shape. Do not rely only on mocks, call counts, or assertions about private helpers.
-- When changing trace writing or reading, use the production trace writer/reader against real temporary files. Build fixtures in the format that component consumes: session-store JSONL, harness `llm_call` / `tool_call` / `turn` records, or trace-server `session` records as applicable. Assert relevant record order, IDs and parent IDs, status, and the result visible to the consumer. Prefer the production serializer/writer for valid records; hand-written records are appropriate for malformed or historical compatibility cases.
-- Stub an external model, network service, or host process at its boundary when that external behavior is not the subject of the test. Keep the internal code path under test real; do not mock the `SessionStore`, filesystem, trace writer, or other internal component whose behavior is being verified. Isolate external side effects; destructive or outbound effects require explicit opt-in in the applicable spec and its safety gates. Harmless real integrations may run in a suitable isolated test environment.
-
-## Model-visible behavior and interactive surfaces
-
-- For changes to prompt text, model inputs, tool descriptions/schemas, or model trajectory, read `docs/guides/prompt-development.md` and run the applicable golden fixture/set. A trajectory set requires its real-model half via `npm run test:real-llm`; offline fixtures or stub models do not count as that half. If credentials are unavailable, report the real-model check as `Not run`, with the reason; do not report it as passed. Follow the guide's rule for building a set or registering a gap.
-- For changes to interactive conversation behavior in the CLI, TUI, or REPL, capture a real PTY interaction and its observable output using the project's available PTY tooling. Use browser-based verification only when the changed behavior is in a browser surface.
-
-## Validation report
-
-If a relevant check cannot run, record it in the completion report:
-
-```text
-Validation:
-- Not run: <reason>
-- Expected command: <command>
-- Blocking issue: <issue>
-```
-
-Do not describe a check that was not run as passing. State which validation remains outstanding and why.
+- 每条命令写层级和通过 / 失败 / 跳过数，列出跳过的用例和原因。
+- 重试后才通过的记为 flaky，不算通过；重跑只用来判断是否 flaky。
+- flaky 分诊三步：① 单独重跑失败的那几个文件，判断是不是负载型；② 在比较基线上跑同一条，判断是不是本次引入；③ 在汇报里写复现条件（机器负载、并行度、是否全量并行、超时阈值、复现命令）。三步没走完的不算 flaky，按失败算。
+- CI 的 `test-fast` / `test-full` 带 `--retry 1`：重试后通过的用例在 CI 算绿。引用 CI 结论时写「CI green（含 retry 1）」并列出重试后通过的用例；本地按上一条记 flaky。
+- 失败归属：`npm test` 有失败时，先在比较基线（默认 `origin/master`）上复现同一条失败，只跑失败的那几个文件，不跑全量；能在基线上同样复现的记为预存在失败，写明基线提交和复现命令，不能复现的算本次引入。「全绿」以基线为准：本次没有新增失败。
+- 本地和 CI 范围不同：CI 以 `test:ci:fast` / `test:ci:full` 为准。没跑到的层、没跑到的那一侧，或缺工具（bwrap、测试 key）没法跑的，写 `Not run: <层> <原因>`。
+- 外部条件和「没跑」分开标：被外部条件挡住的（CI 额度、支付失败、限流、网络不通、缺工具）仍写 `Not run: <层> <原因>`，并在同一行标注 `Blocked: <外部条件>`。`Blocked` 不是失败也不是通过：必跑层的结果没拿到时，汇报里不得写「门禁通过」或「可合并」；要合并先拿到该层结果，或写明缺的是什么、谁来拿。
+- 红线：真模型测试已默认授权，改动模型可见内容时必须跑 L5；只用专用测试 key，没有 key 或跑不了就在汇报开头显眼地报 `Not run: L5 <原因>`，不得默默跳过，不得改用日常 key。
+- 要改没有测试覆盖的旧代码时，先写特征测试，钉住现有的可观察行为；可疑的现状写进汇报，不顺手改。
+- 测不了的内容登记到 `docs/test-gaps.md`：写缺什么能力、影响哪一层；不写 key 名、本机路径、内部服务名。
+- 场景细则：改 SessionStore 或 trace 时读 `.claude/rules/test-session-trace.md`；改 prompt、工具描述或 schema、黄金集时读 `.claude/rules/test-model-visible.md`；改 TUI 时读 `.claude/rules/test-tui.md`。

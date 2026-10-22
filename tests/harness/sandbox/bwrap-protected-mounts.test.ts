@@ -136,6 +136,8 @@ describe("T7 protected-target mount block — argv shape pins", () => {
       "bwrap",
       "--unshare-user-try",
       "--unshare-net",
+      // ADR-0141: pidns is part of the constant namespace block.
+      "--unshare-pid",
       "--die-with-parent",
       "--bind",
       "/",

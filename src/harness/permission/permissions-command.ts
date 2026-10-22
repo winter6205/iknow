@@ -95,7 +95,18 @@ export interface PermissionsCommandResult {
  */
 export function applyPermissionsCommand(
   ctx: PermissionModeContext,
-  args: ReadonlyArray<string>
+  args: ReadonlyArray<string>,
+  /**
+   * ADR-0141: the caller's clear hook, so a `/permissions set` under the yolo
+   * preset resolves the contradiction between the declared permission and the
+   * user's choice by clearing the overlay. The no-sandbox preset does not
+   * declare permission, so it survives the same command.
+   *
+   * A callback rather than the overlay itself: SC15 keeps `permission/` free of
+   * any `../sandbox/` import, so the caller — which already owns the overlay —
+   * decides whether the overlay declared the permission axis.
+   */
+  opts?: { readonly onUserPermissionChange?: () => void }
 ): PermissionsCommandResult {
   const cmd = parsePermissionsCommand(args);
   switch (cmd.kind) {
@@ -107,6 +118,9 @@ export function applyPermissionsCommand(
         }),
       };
     case "set":
+      // Clear BEFORE the write, so the effective value the user asked for is
+      // what the next read returns (spec §1 ordering).
+      opts?.onUserPermissionChange?.();
       ctx.set(cmd.mode);
       return { ok: true, text: `权限模式已切换: ${cmd.mode}` };
     case "usage":

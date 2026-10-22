@@ -3,22 +3,35 @@
  *
  * Coverage (≥5 cases):
  *  1. With envProvider injected, ensureDeps builds from its return value
- *     (never falls back to loadIknowEnv).
- *  2. After reloadFromEnv, the next postMessage gets a new adapter (hot
- *     rebuild via the minimal createAdapterFromEnv surface); registry /
+ *     (never falls back to loadIknowEnv) — observed on the wire: a NEW
+ *     conversation's request carries the provider model.
+ *  2. After reloadFromEnv, a live conversation keeps its OWN route; only a
+ *     NEW conversation follows the new default (ADR-0145). registry /
  *     executor / maxTurns references stay stable (not rebuilt).
  *  3. onEnvChange fires once on env change (repeat reloads with the same
  *     value do not refire).
  *  4. Omitting envProvider keeps behavior identical (backward compat;
  *     existing fixture regression).
- *  5. reload throws (model missing) → cachedDeps untouched, no crash.
+ *  5. reload throws (model missing) → cachedDeps untouched, no crash; the
+ *     next turn still goes out with the model the conversation already had.
+ *
+ * ADR-0145 的两种 env 形态（本文件按用例选用）：
+ *  - 路由形态 `p/model-1`：会话创建时快照当前默认，之后只走自己的路由；
+ *    turn 走 `routeTurnDeps` 的路由 adapter，wire model = 路由尾段
+ *    （`model-1`，见 `wireModelFromRoute`），transport 来自 env 携带的
+ *    provider 注册表（`LlmEnv.providers`）。
+ *  - 裸 model（`model-a`，不带 `/`）：会话没有路由 → turn 走 base deps 的
+ *    adapter，即凭据 / 限额热生效那条路径（invariant 7）。凭据降级那两条
+ *    用例走的就是这条路径：路由解析要先拿到 tier，tier 坏掉时 turn 根本
+ *    发不出去，谈不上"wire 仍带旧模型"。
  *
  * Discipline:
  *  - isolated tmp store (mkdtemp + afterAll rm);
  *  - capture-server cases closed explicitly (no port leaks);
+ *  - 合成 provider key：api key 只从本文件自有的环境变量名读，值是占位串；
  *  - vitest (consistent with the rest of tests/session-api).
  */
-import { afterAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test } from "vitest";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -27,6 +40,7 @@ import { SessionHub } from "../../src/session-api/hub.js";
 import { SessionStore } from "../../src/session-api/store/index.js";
 import type { LoopEngineDeps, LoopAdapter } from "../../src/harness/index.js";
 import type { IknowEnv } from "../../src/config/env.js";
+import { LLM_MODEL_MISSING_MESSAGE } from "../../src/config/messages.js";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.js";
 import { makeDeps, assistantResult } from "../cli/_fixtures.ts";
 import {
@@ -44,8 +58,35 @@ import {
 let baseDir: string;
 let store: SessionStore;
 
+/** 合成 provider id：本文件的路由都是 `p/<model>` 形态。 */
+const PROVIDER_ID = "p";
+/** 合成 provider 的 api-key 环境变量名（值是占位串，不指向任何真实服务）。 */
+const PROVIDER_KEY_ENV = "IKNOW_TEST_HUB_HOT_RELOAD_KEY";
+/**
+ * provider 注册表里登记的 wire model 尾段。路由解析（`resolveLlmEnvForRoute`）
+ * 按路由尾段找 provider 的 models[] 条目：命中才有该路由自己的输出预算，
+ * 没命中就退回 32,000（非流式请求会被 SDK 拒），所以本文件用到的每个路由
+ * 尾段都要登记。
+ */
+const PROVIDER_MODEL_IDS: readonly string[] = [
+  "model-1",
+  "model-2",
+  "provider-model",
+  "baseurl-test",
+  "temp-test",
+  "headers-test",
+  "snapshot-model",
+  "switched-model",
+];
+
+beforeAll(() => {
+  // provider 的 api key 只从 process.env 读（`resolveProviderApiKey`）。
+  process.env[PROVIDER_KEY_ENV] = "test-key";
+});
+
 afterAll(async () => {
   rmSync(baseDir, { recursive: true, force: true });
+  delete process.env[PROVIDER_KEY_ENV];
 });
 
 function makeStore(): SessionStore {
@@ -56,7 +97,17 @@ function makeStore(): SessionStore {
   return store;
 }
 
-/** Build a full IknowEnv (all fields; the isolated tmp home cannot read real settings). */
+/**
+ * Build a full IknowEnv (all fields; the isolated tmp home cannot read real settings).
+ *
+ * `model` 默认是路由形态（`p/model-1`）：ADR-0145 之后会话创建时快照当前
+ * 默认，之后只走自己的路由，wire model = 路由尾段。
+ *
+ * `providers` 是路由的解析依据：provider 的 baseUrl 决定路由 transport 的
+ * 落点，apiKey 从 `PROVIDER_KEY_ENV` 读，models[] 给出该路由的输出预算。
+ * provider 的 headers 与 tier 的 headers 同源（生产里 headers 就是 provider
+ * 带出来的），路由解析出来的 env 用 provider 的那份。
+ */
 function makeFullEnv(overrides: {
   readonly model?: string;
   readonly apiKey?: string;
@@ -66,11 +117,14 @@ function makeFullEnv(overrides: {
   readonly routeMaxTokens?: number;
   readonly temperature?: number;
   readonly headers?: Readonly<Record<string, string>>;
+  /** provider 注册表的 baseUrl（路由 transport 的落点）；默认跟 baseUrl 走。 */
+  readonly providerBaseUrl?: string;
 }): IknowEnv {
+  const baseUrl = overrides.baseUrl ?? "http://invalid";
   return {
     llm: {
-      baseUrl: overrides.baseUrl ?? "http://invalid",
-      model: overrides.model ?? "test-model",
+      baseUrl,
+      model: overrides.model ?? "p/model-1",
       // headers absent ⇔ key not emitted (same shape as production env's "key present only when set").
       ...(overrides.headers !== undefined
         ? { headers: overrides.headers }
@@ -92,6 +146,18 @@ function makeFullEnv(overrides: {
       // an SSE stream the capture server cannot satisfy.
       stream: overrides.stream ?? "off",
       maxTurns: undefined,
+      // ADR-0145：路由形态的 model 由这份 provider 注册表解析。
+      providers: [
+        {
+          id: PROVIDER_ID,
+          baseUrl: overrides.providerBaseUrl ?? baseUrl,
+          apiKeyEnv: PROVIDER_KEY_ENV,
+          models: PROVIDER_MODEL_IDS.map((id) => ({ id, maxTokens: 128 })),
+          ...(overrides.headers !== undefined
+            ? { headers: overrides.headers }
+            : {}),
+        },
+      ],
     },
     chat: { showThinking: false },
     web: { searchUrl: undefined, proxy: undefined },
@@ -133,11 +199,15 @@ async function createSessionId(hub: SessionHub): Promise<string> {
 // -- tests -------------------------------------------------------------------
 
 describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
-  test("envProvider 注入后被 hub 使用（reloadFromEnv 用其返回值重建 adapter）", async () => {
+  test("envProvider 注入后被 hub 使用（新会话的 wire model 来自 provider 路由）", async () => {
+    const cap = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const store0 = makeStore();
     let providerEnv: IknowEnv | undefined;
     const envProvider = () => {
-      providerEnv = makeFullEnv({ model: "provider-model" });
+      providerEnv = makeFullEnv({
+        model: "p/provider-model",
+        baseUrl: cap.origin,
+      });
       return providerEnv;
     };
     // Inject stub deps (same discipline as other tests in this directory:
@@ -153,26 +223,34 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
     try {
       await hub.reloadFromEnv();
       expect(providerEnv).toBeDefined();
-      expect(providerEnv!.llm.model).toBe("provider-model");
-      // adapter replaced by the createAdapterFromEnv product (AnthropicAdapter shape).
+      expect(providerEnv!.llm.model).toBe("p/provider-model");
+      // base adapter 由 envProvider 的 env 重建（AnthropicAdapter 形态）。
       const deps = await (
         hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
       ).ensureDeps();
       expect(typeof deps.adapter.step).toBe("function");
-      expect(deps.adapter).not.toBe(baseDeps().adapter);
+      // ADR-0145：新会话快照当前默认 → 拥有 `p/provider-model` 路由；
+      // wire model = 路由尾段（provider 前缀不上线）。
+      const id = await createSessionId(hub);
+      await hub.postMessage({ conversationId: id, text: "hi" });
+      expect(cap.bodies.length).toBe(1);
+      expect((cap.bodies[0] as { model?: string }).model).toBe(
+        "provider-model"
+      );
     } finally {
-      // No real LLM call, no close needed.
+      await cap.close();
     }
   });
 
-  test("reloadFromEnv 替换 adapter；registry/executor/maxTurns 引用保持稳定", async () => {
+  test("reloadFromEnv 后已有会话保留自己的路由、新会话跟随新默认；registry/executor/maxTurns 引用保持稳定", async () => {
+    const cap = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const store0 = makeStore();
-    let currentModel = "model-a";
+    let currentModel = "p/model-1";
     const envProvider = () =>
       makeFullEnv({
         model: currentModel,
         apiKey: "test-key",
-        baseUrl: "http://invalid",
+        baseUrl: cap.origin,
       });
     const hub = new SessionHub({
       store: store0,
@@ -184,41 +262,52 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       const depsBefore = await (
         hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
       ).ensureDeps();
-      const adapterBefore = depsBefore.adapter;
       const executorBefore = depsBefore.executor;
       const registryBefore = depsBefore.registry;
       const maxTurnsBefore = depsBefore.maxTurns;
 
-      // Change model → reloadFromEnv → adapter replaced, other fields stable.
-      currentModel = "model-b";
+      // 会话 A 在默认还是 p/model-1 时创建 → 快照自己的路由。
+      const idA = await createSessionId(hub);
       await hub.reloadFromEnv();
+      await hub.postMessage({ conversationId: idA, text: "a1" });
+      expect((cap.bodies[0] as { model?: string }).model).toBe("model-1");
+
+      // 改默认 → reloadFromEnv：A 的路由不动，新会话用新默认。
+      currentModel = "p/model-2";
+      await hub.reloadFromEnv();
+      await hub.postMessage({ conversationId: idA, text: "a2" });
+      expect((cap.bodies[1] as { model?: string }).model).toBe("model-1");
+
+      const idB = await createSessionId(hub);
+      await hub.postMessage({ conversationId: idB, text: "b1" });
+      expect((cap.bodies[2] as { model?: string }).model).toBe("model-2");
+
+      // base deps 只换 adapter，registry / executor / maxTurns 引用不动。
       const depsAfter = await (
         hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
       ).ensureDeps();
-      expect(depsAfter.adapter).not.toBe(adapterBefore);
       expect(depsAfter.executor).toBe(executorBefore);
       expect(depsAfter.registry).toBe(registryBefore);
       expect(depsAfter.maxTurns).toBe(maxTurnsBefore);
       expect(depsAfter.timeoutMs).toBe(4321);
     } finally {
-      // no-op
+      await cap.close();
     }
   });
 
-  test("reloadFromEnv 后下一次 postMessage 拿到新 adapter（capture-server 验证 model）", async () => {
+  test("reloadFromEnv 后同一会话的下一条消息仍走自己的路由（wire model 不变）", async () => {
     const cap = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const store0 = makeStore();
-    let currentModel = "model-1";
+    let currentModel = "p/model-1";
     const envProvider = () =>
       makeFullEnv({
         model: currentModel,
         apiKey: "test-key",
         baseUrl: cap.origin,
       });
-    // Inject stub deps (isolate the real home). The first postMessage uses
-    // the injected stub (offline); only after reloadFromEnv does the
-    // envProvider rebuild the real adapter — exactly the minimal hot-rebuild
-    // path (bypassing the full buildHarnessEngine chain).
+    // Inject stub deps (isolate the real home). The postMessage uses the
+    // route overlay (the conversation owns its route), so the request goes to
+    // the capture server the env's provider registry points at.
     const hub = new SessionHub({
       store: store0,
       askUser: createNoAskUser(),
@@ -227,18 +316,50 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
     });
     try {
       const id = await createSessionId(hub);
-      // reloadFromEnv (model-1) → adapter points at the capture server.
+      // reloadFromEnv (p/model-1) → 路由 adapter 指向 capture server。
       await hub.reloadFromEnv();
       await hub.postMessage({ conversationId: id, text: "hi" });
       expect(cap.bodies.length).toBe(1);
-      // Change model → reloadFromEnv → the next postMessage's wire model changes.
-      currentModel = "model-2";
+      expect((cap.bodies[0] as { model?: string }).model).toBe("model-1");
+
+      // 改默认 → reloadFromEnv：会话的路由不动，下一条消息仍是 model-1。
+      currentModel = "p/model-2";
       await hub.reloadFromEnv();
       await hub.postMessage({ conversationId: id, text: "hi again" });
       expect(cap.bodies.length).toBe(2);
       const models = cap.bodies.map((b) => (b as { model?: string }).model);
       expect(models[0]).toBe("model-1");
-      expect(models[1]).toBe("model-2");
+      expect(models[1]).toBe("model-1");
+    } finally {
+      await cap.close();
+    }
+  });
+
+  test("reloadFromEnv 后新建会话的 wire model 跟随新默认", async () => {
+    const cap = await startLlmCapture(MINIMAL_SDK_MESSAGE);
+    const store0 = makeStore();
+    let currentModel = "p/model-1";
+    const envProvider = () =>
+      makeFullEnv({
+        model: currentModel,
+        apiKey: "test-key",
+        baseUrl: cap.origin,
+      });
+    const hub = new SessionHub({
+      store: store0,
+      askUser: createNoAskUser(),
+      envProvider,
+      deps: baseDeps(),
+    });
+    try {
+      await hub.reloadFromEnv();
+      // 默认改到 p/model-2 之后创建的会话 → 起点就是新默认。
+      currentModel = "p/model-2";
+      await hub.reloadFromEnv();
+      const id = await createSessionId(hub);
+      await hub.postMessage({ conversationId: id, text: "hi" });
+      expect(cap.bodies.length).toBe(1);
+      expect((cap.bodies[0] as { model?: string }).model).toBe("model-2");
     } finally {
       await cap.close();
     }
@@ -246,7 +367,7 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
 
   test("onEnvChange 在 env 变化时触发一次；连续 reload 同值不重复触发", async () => {
     const store0 = makeStore();
-    let currentModel = "model-a";
+    let currentModel = "p/model-a";
     const envProvider = () => makeFullEnv({ model: currentModel });
     const changes: string[] = [];
     const hub = new SessionHub({
@@ -264,10 +385,10 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       expect(changes.length).toBe(0);
 
       // env changes → reloadFromEnv → fires once.
-      currentModel = "model-b";
+      currentModel = "p/model-b";
       await hub.reloadFromEnv();
       expect(changes.length).toBe(1);
-      expect(changes[0]).toBe("model-b");
+      expect(changes[0]).toBe("p/model-b");
 
       // Same-value reload → no refire (touching the settings file without
       // changing content → no adapter rebuild, no onEnvChange).
@@ -275,13 +396,13 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       // comparing key field values — see sameHotReloadKeyFields in hub.ts.
       await hub.reloadFromEnv();
       expect(changes.length).toBe(1);
-      expect(changes[0]).toBe("model-b");
+      expect(changes[0]).toBe("p/model-b");
 
       // Value genuinely changed → fires once more.
-      currentModel = "model-c";
+      currentModel = "p/model-c";
       await hub.reloadFromEnv();
       expect(changes.length).toBe(2);
-      expect(changes[1]).toBe("model-c");
+      expect(changes[1]).toBe("p/model-c");
     } finally {
       // no-op
     }
@@ -289,6 +410,13 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
 
   test("不传 envProvider 行为零变化（既有 fixture 回归）", async () => {
     const store0 = makeStore();
+    // ADR-0145：ambient 默认的 model 是路由形态时，会话会拥有自己的路由 →
+    // 路由 overlay 接管 adapter，注入的 fixture 就不再被使用。本用例钉住
+    // ambient 默认（HOME 指向空目录 → 没有 model → 没有路由），回归点不变：
+    // 注入的 fixture 仍然生效。
+    const prevHome = process.env.HOME;
+    const emptyHome = mkdtempSync(join(tmpdir(), "iknow-hub-hot-reload-home-"));
+    process.env.HOME = emptyHome;
     const hub = new SessionHub({
       store: store0,
       deps: makeDeps([assistantResult({ texts: ["cached reply"] })]),
@@ -300,14 +428,23 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       // reloadFromEnv without envProvider → no-op (no throw).
       await hub.reloadFromEnv();
     } finally {
-      // no-op
+      rmSync(emptyHome, { recursive: true, force: true });
+      if (prevHome === undefined) delete process.env.HOME;
+      else process.env.HOME = prevHome;
     }
   });
 
-  test("reload 抛错（model 缺失）→ cachedDeps 不动，process 不崩", async () => {
+  test("reload 抛错（model 缺失）→ cachedDeps 不动，process 不崩；下一条消息仍带旧模型", async () => {
+    const cap = await startHttpCapture(MINIMAL_MESSAGE_RESPONSE);
     const store0 = makeStore();
+    // 裸 model → 会话没有路由 → turn 走 base deps 的 adapter（凭据路径）。
     let currentModel = "model-a";
-    const envProvider = () => makeFullEnv({ model: currentModel });
+    const envProvider = () =>
+      makeFullEnv({
+        model: currentModel,
+        apiKey: "test-key",
+        baseUrl: cap.origin,
+      });
     const hub = new SessionHub({
       store: store0,
       askUser: createNoAskUser(),
@@ -315,40 +452,43 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       deps: baseDeps(),
     });
     try {
-      const depsBefore = await (
-        hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
-      ).ensureDeps();
-      const adapterBefore = depsBefore.adapter;
+      // 先成功 reload 一次：base adapter 指向 capture server。
+      await hub.reloadFromEnv();
+      const id = await createSessionId(hub);
+      await hub.postMessage({ conversationId: id, text: "before" });
+      expect(cap.bodies.length).toBe(1);
+      expect((cap.bodies[0] as { model?: string }).model).toBe("model-a");
 
       // Simulate reload throwing: envProvider throws (bad JSON / missing model take the same path).
-      const originalProvider = envProvider;
       (hub as unknown as { envProvider: () => IknowEnv }).envProvider = () => {
-        // Reuse the env built by the original provider but blank the model →
-        // createAdapterFromEnv would still construct (Anthropic accepts an
-        // empty model); to simulate the "model missing" guard, throw directly.
-        throw new Error("no LLM model configured in settings.llm.model");
+        // The exact error `loadIknowEnv` throws when `settings.llm.model` is
+        // absent. The hub's default-route read absorbs THIS failure (a hub
+        // that cannot name a default tier) and rethrows every other one, so
+        // the turn below still runs on the base adapter.
+        throw new Error(LLM_MODEL_MISSING_MESSAGE);
       };
       await assert.rejects(
         () => hub.reloadFromEnv(),
         /no LLM model configured/
       );
 
-      // cachedDeps untouched (adapter is still the old reference).
-      const depsAfter = await (
-        hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
-      ).ensureDeps();
-      expect(depsAfter.adapter).toBe(adapterBefore);
-      void originalProvider;
+      // cachedDeps untouched → 下一条消息仍然带着旧模型上线。
+      await hub.postMessage({ conversationId: id, text: "after" });
+      expect(cap.bodies.length).toBe(2);
+      expect((cap.bodies[1] as { model?: string }).model).toBe("model-a");
     } finally {
-      // no-op
+      await cap.close();
     }
   });
 
-  test("apiKey 解析失败（undefined）→ reloadFromEnv 抛错 + cachedDeps 不动（降级保留旧 env）", async () => {
+  test("apiKey 解析失败（undefined）→ reloadFromEnv 抛错 + 旧 env 降级保留（wire 仍带旧 key）；修好后 wire 带修好的 key", async () => {
+    const cap = await startHttpCapture(MINIMAL_MESSAGE_RESPONSE);
     const store0 = makeStore();
+    // 裸 model → 会话没有路由 → turn 走 base deps 的 adapter（凭据路径）。
     let currentModel = "model-a";
-    let apiKey: string | undefined = "test-key";
-    const envProvider = () => makeFullEnv({ model: currentModel, apiKey });
+    let apiKey: string | undefined = "old-key";
+    const envProvider = () =>
+      makeFullEnv({ model: currentModel, apiKey, baseUrl: cap.origin });
     const hub = new SessionHub({
       store: store0,
       askUser: createNoAskUser(),
@@ -356,30 +496,34 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
       deps: baseDeps(),
     });
     try {
-      const depsBefore = await (
-        hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
-      ).ensureDeps();
-      const adapterBefore = depsBefore.adapter;
+      // 先成功 reload 一次：base adapter 带旧 key 指向 capture server。
+      await hub.reloadFromEnv();
+      const id = await createSessionId(hub);
+      await hub.postMessage({ conversationId: id, text: "before" });
+      expect(cap.bodies.length).toBe(1);
+      expect((cap.bodies[0] as { model?: string }).model).toBe("model-a");
+      expect(cap.headers[0]!["x-api-key"]).toBe("old-key");
 
       // settings `${VAR}` fails to resolve → loadIknowEnv returns apiKey=undefined (no throw);
       // reloadFromEnv must throw ValidationError here while cachedDeps keeps the old adapter.
       apiKey = undefined;
       await assert.rejects(() => hub.reloadFromEnv(), /LLM mode needs API key/);
 
-      const depsAfter = await (
-        hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
-      ).ensureDeps();
-      expect(depsAfter.adapter).toBe(adapterBefore);
+      // 降级保留：cachedDeps 仍是旧 adapter → 下一条消息仍带旧模型 / 旧 key。
+      await hub.postMessage({ conversationId: id, text: "degraded" });
+      expect(cap.bodies.length).toBe(2);
+      expect((cap.bodies[1] as { model?: string }).model).toBe("model-a");
+      expect(cap.headers[1]!["x-api-key"]).toBe("old-key");
 
-      // Fix apiKey → reloadFromEnv resumes rebuilding.
-      apiKey = "test-key";
+      // Fix apiKey → reloadFromEnv resumes rebuilding → wire 带修好的 key。
+      apiKey = "new-key";
       await hub.reloadFromEnv();
-      const depsFixed = await (
-        hub as unknown as { ensureDeps: () => Promise<LoopEngineDeps> }
-      ).ensureDeps();
-      expect(depsFixed.adapter).not.toBe(adapterBefore);
+      await hub.postMessage({ conversationId: id, text: "fixed" });
+      expect(cap.bodies.length).toBe(3);
+      expect((cap.bodies[2] as { model?: string }).model).toBe("model-a");
+      expect(cap.headers[2]!["x-api-key"]).toBe("new-key");
     } finally {
-      // no-op
+      await cap.close();
     }
   });
 
@@ -391,7 +535,7 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
     let currentBaseUrl = cap1.origin;
     const envProvider = () =>
       makeFullEnv({
-        model: "baseurl-test",
+        model: "p/baseurl-test",
         apiKey: "test-key",
         baseUrl: currentBaseUrl,
       });
@@ -428,7 +572,7 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
     let currentTemperature = 0;
     const envProvider = () =>
       makeFullEnv({
-        model: "temp-test",
+        model: "p/temp-test",
         apiKey: "test-key",
         baseUrl: cap.origin,
         temperature: currentTemperature,
@@ -474,18 +618,18 @@ describe("SessionHub envProvider + reloadFromEnv（T3）", () => {
 //     never changes its headers), so grab the client reference and compare.
 //     Both references are readable from hub's cachedDeps — no new seam needed.
 describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）", () => {
-  test("thinking override 路径用 envProvider 的最新 env（新 baseUrl + model），不用构造期快照", async () => {
+  test("thinking override 路径用 envProvider 的最新 env（新 baseUrl），model 走会话自己的路由", async () => {
     const capOld = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const capNew = await startLlmCapture(MINIMAL_SDK_MESSAGE);
     const store0 = makeStore();
     // Construction-time snapshot = capOld; envProvider (production TUI's EnvLoader.get) returns the new env.
     const initial = makeFullEnv({
-      model: "snapshot-model",
+      model: "p/snapshot-model",
       apiKey: "test-key",
       baseUrl: capOld.origin,
     });
     let latest = makeFullEnv({
-      model: "snapshot-model",
+      model: "p/snapshot-model",
       apiKey: "test-key",
       baseUrl: capOld.origin,
     });
@@ -500,7 +644,7 @@ describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）
       const id = await createSessionId(hub);
       // State after a /model switch: envProvider returns the new provider's baseUrl + model.
       latest = makeFullEnv({
-        model: "switched-model",
+        model: "p/switched-model",
         apiKey: "test-key",
         baseUrl: capNew.origin,
       });
@@ -513,8 +657,9 @@ describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）
       // (that bug would send this request to capOld).
       expect(capOld.bodies.length).toBe(0);
       expect(capNew.bodies.length).toBe(1);
+      // ADR-0145：会话拥有自己的路由 → wire model 是路由尾段，不是当前默认的 model。
       expect((capNew.bodies[0] as { model?: string }).model).toBe(
-        "switched-model"
+        "snapshot-model"
       );
     } finally {
       await capOld.close();
@@ -547,12 +692,12 @@ describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）
   test("仅 headers 变化 → reloadFromEnv 重建 adapter；headers 相同 → 不重建", async () => {
     const cap = await startHttpCapture(MINIMAL_MESSAGE_RESPONSE);
     const store0 = makeStore();
-    let currentHeaders: Readonly<Record<string, string>> = {
+    let currentHeaders: Readonly<Record<string, string>> | undefined = {
       "X-Foo": "bar",
     };
     const envProvider = () =>
       makeFullEnv({
-        model: "headers-test",
+        model: "p/headers-test",
         apiKey: "test-key",
         baseUrl: cap.origin,
         headers: currentHeaders,
@@ -597,7 +742,7 @@ describe("hub override 路径取最新 env（SC10）+ headers 热重载（SC9）
       // Headers disappearing entirely (provider switching to a headers-less
       // tier) also counts as a change → rebuild again, and the wire no
       // longer carries the header.
-      currentHeaders = undefined as unknown as Readonly<Record<string, string>>;
+      currentHeaders = undefined;
       await hub.reloadFromEnv();
       const adapterE = await readAdapter();
       expect(adapterE).not.toBe(adapterC);

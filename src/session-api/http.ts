@@ -603,6 +603,9 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
   }
   if (method === "POST" && rest === "/messages") {
     const body = await readJsonBody(req);
+    // `content` blocks are an in-process/TUI payload; this route reads `text`
+    // only, so a block-carrying request would drop them silently. Fail loud.
+    assertNoWireContentField(body);
     const text = extractTextField(body);
     // Parse + validate the optional per-turn thinking override; invalid
     // values throw ValidationError → 400 (fail loud, no silent fallback).
@@ -679,7 +682,10 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
   }
   // GET pending ask requests (process-global snapshot). The SPA polls this
   // every ~2s to surface a permission dialog when the harness emits a decision
-  // of `ask`.
+  // of `ask`. Each entry carries the call's `toolUseId` and the wave's
+  // `conversationId` (ADR-0147 R1), so the dialog can name the call it asks
+  // about. A pending entry has no default expiry — it stays until answered or
+  // the turn is cancelled (a configured approval timeout is the only timer).
   if (method === "GET" && rest === "/asks") {
     sendJson({ res, status: 200, body: { asks: hub.listPendingAsks() } });
     return true;
@@ -698,9 +704,10 @@ async function handleSessionRoute(ctx: RouteContext): Promise<boolean> {
   }
   // POST /asks/:askId/resolve — body {decision} ∈ {allow-once|always-allow|deny}.
   // Always 200 with `{resolved}`: true when the ask was still pending and got
-  // resolved; false when the id is unknown / already resolved / timed out
-  // (fail-closed). `resolved:false` lets the SPA treat the ask as expired
-  // without a 404 that would look like a routing error.
+  // resolved; false when the id is unknown / already resolved (or, when an
+  // approval timeout is configured, timed out). Fail-closed either way:
+  // `resolved:false` lets the SPA treat the ask as expired without a 404 that
+  // would look like a routing error.
   if (
     method === "POST" &&
     rest.startsWith("/asks/") &&
@@ -779,12 +786,26 @@ function extractRestoreCodeField(raw: unknown): boolean {
   return value;
 }
 
+/** Reject a `content` block payload on the HTTP path. The field is an
+ *  in-process/TUI payload: this route reads `text` only, so a request that
+ *  carried blocks would otherwise drop them with no signal to the caller.
+ *  Absent, null, or an empty array mean the text-only turn and pass through. */
+function assertNoWireContentField(raw: unknown): void {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return;
+  const value = (raw as Record<string, unknown>).content;
+  if (value === undefined || value === null) return;
+  if (Array.isArray(value) && value.length === 0) return;
+  throw new ValidationError(
+    "content blocks are not accepted over HTTP; send text only",
+    { field: "content" }
+  );
+}
+
 function extractTextField(raw: unknown): string {
   if (!raw || typeof raw !== "object") return "";
   const o = raw as Record<string, unknown>;
   return "text" in o ? String(o.text ?? "") : "";
 }
-
 /** Extract the optional `thinking` field raw value (validation happens
  * in parseThinkingOverride, which throws ValidationError on invalid values). */
 function extractThinkingField(raw: unknown): unknown {

@@ -127,6 +127,9 @@ function createRecordingSink(
       if (failure !== undefined) throw failure;
       rec.published.push(request);
       rec.log.push(`publish:${request.boundary}`);
+      // The recorder IS the write here: the publication is stored, so the
+      // sink reports the write as durable.
+      return true;
     },
     async appendOperationFact(fact) {
       const failure = await opts?.beforeFact?.(fact);

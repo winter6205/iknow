@@ -1,4 +1,5 @@
 import { errorMessage } from "../errors.js";
+import type { ClaimedDelivery, DeliveryClaimToken } from "./delivery-ledger.js";
 import type { SubAgentEnvelope } from "./envelope.js";
 import type { SubagentInfo } from "./manager.js";
 import type {
@@ -7,10 +8,35 @@ import type {
 } from "./mailbox.js";
 
 export interface SubagentManagerDrainView {
-  readonly drainCompleted: (conversationId?: string) => ReadonlyArray<{
+  /**
+   * Non-consuming read of terminal results. `includeDelivered` is
+   * diagnostics-only (e.g. "which ids could a failed wake have seen");
+   * delivery gates never pass it.
+   */
+  readonly drainCompleted: (
+    conversationId?: string,
+    opts?: { readonly includeDelivered?: boolean }
+  ) => ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
   }>;
+  /**
+   * Optional delivery seam, optional the same way `abortTask` is: poll-only
+   * fakes and wake-only views stay structural, and absence means "this view
+   * cannot deliver" (hosts fall back to the read-only path). The registry
+   * itself always exposes the full set.
+   */
+  readonly claimCompleted?: (
+    conversationId?: string
+  ) => ReadonlyArray<ClaimedDelivery<SubAgentEnvelope>>;
+  /** Mark written deliveries delivered (unknown tokens are a no-op). */
+  readonly acknowledgeDeliveries?: (
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ) => void;
+  /** Return un-written deliveries to the claimable state (unknown tokens are a no-op). */
+  readonly releaseDeliveries?: (
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ) => void;
 }
 
 export interface SubagentManagerWakeView extends SubagentManagerDrainView {
@@ -56,6 +82,17 @@ export interface CreateSubagentManagerRegistryOptions {
 }
 
 export interface SubagentManagerRegistry extends SubagentManagerReadView {
+  // The aggregate always exposes the full delivery seam even though each
+  // per-manager member stays optional (ADR-0150 §6).
+  readonly claimCompleted: (
+    conversationId?: string
+  ) => ReadonlyArray<ClaimedDelivery<SubAgentEnvelope>>;
+  readonly acknowledgeDeliveries: (
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ) => void;
+  readonly releaseDeliveries: (
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ) => void;
   /** Always present on the aggregate (per-manager seam stays optional). */
   readonly abortTask: (taskId: string) => boolean;
   readonly register: (manager: SubagentManagerReadView | undefined) => void;
@@ -80,6 +117,8 @@ export function createSubagentManagerRegistry(
   options: CreateSubagentManagerRegistryOptions = {}
 ): SubagentManagerRegistry {
   const managers = new Set<SubagentManagerReadView>();
+  /** Owning manager per claim token, so ack/release route back to its ledger. */
+  const claimOwners = new Map<DeliveryClaimToken, SubagentManagerReadView>();
   const subscribers = new Map<
     SubAgentTerminalSubscriber,
     SubscriberSubscriptions
@@ -123,7 +162,8 @@ export function createSubagentManagerRegistry(
   };
 
   const drainCompleted = (
-    conversationId?: string
+    conversationId?: string,
+    opts?: { readonly includeDelivered?: boolean }
   ): ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
@@ -135,7 +175,7 @@ export function createSubagentManagerRegistry(
     let managerIndex = 0;
     for (const manager of managers) {
       try {
-        drained.push(...manager.drainCompleted(conversationId));
+        drained.push(...manager.drainCompleted(conversationId, opts));
       } catch (cause) {
         const error = new SubagentManagerDrainError({
           managerIndex,
@@ -153,6 +193,67 @@ export function createSubagentManagerRegistry(
       managerIndex += 1;
     }
     return drained;
+  };
+
+  /**
+   * Aggregate delivery take: every registered manager claims its own
+   * undelivered terminal generations. The owning manager of every claim is
+   * remembered so acknowledgement / release routes back to the ledger that
+   * issued the token. A manager without the claim seam contributes nothing
+   * (its results stay readable through the read-only path).
+   */
+  const claimCompleted = (
+    conversationId?: string
+  ): ReadonlyArray<ClaimedDelivery<SubAgentEnvelope>> => {
+    const claimed: ClaimedDelivery<SubAgentEnvelope>[] = [];
+    let managerIndex = 0;
+    for (const manager of managers) {
+      try {
+        const claims = manager.claimCompleted?.(conversationId) ?? [];
+        for (const claim of claims) claimOwners.set(claim.token, manager);
+        claimed.push(...claims);
+      } catch (cause) {
+        const error = new SubagentManagerDrainError({
+          managerIndex,
+          cause,
+        });
+        try {
+          reportError(error);
+        } catch (reportingError) {
+          reportObserverDiagnostic(
+            "claim error reporter failed",
+            reportingError
+          );
+        }
+      }
+      managerIndex += 1;
+    }
+    return claimed;
+  };
+
+  const acknowledgeDeliveries = (
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ): void => {
+    for (const claim of claims) {
+      const owner = claimOwners.get(claim.token);
+      if (owner === undefined) continue;
+      // The owner entry is dropped once routed: the ledger settles a token
+      // exactly once, so keeping the routing map would grow with every
+      // delivery for the life of the process.
+      claimOwners.delete(claim.token);
+      owner.acknowledgeDeliveries?.([claim]);
+    }
+  };
+
+  const releaseDeliveries = (
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ): void => {
+    for (const claim of claims) {
+      const owner = claimOwners.get(claim.token);
+      if (owner === undefined) continue;
+      claimOwners.delete(claim.token);
+      owner.releaseDeliveries?.([claim]);
+    }
   };
 
   const listSubagents = (
@@ -214,6 +315,9 @@ export function createSubagentManagerRegistry(
   return Object.freeze({
     register,
     drainCompleted,
+    claimCompleted,
+    acknowledgeDeliveries,
+    releaseDeliveries,
     listSubagents,
     abortTask,
     subscribe,

@@ -13,9 +13,9 @@
  *     against the old char scan — the "wider boundaries measured before
  *     T26" numbers of SC-S4-3.
  *
- * Headline counts (pinned below): shipped vs old = {same: 447,
- * widened-boundaries: 0, dropped-boundaries: 0} over the 447 `ok` rows;
- * pure-facts vs old = {same: 408, widened-boundaries: 0,
+ * Headline counts (pinned below): shipped vs old = {same: 452,
+ * widened-boundaries: 0, dropped-boundaries: 0} over the 452 `ok` rows;
+ * pure-facts vs old = {same: 413, widened-boundaries: 0,
  * dropped-boundaries: 39}, where the 39 are 33 rows whose SEGMENT STRINGS
  * widen (every dropped boundary is a fabrication inside a quoted span, a
  * heredoc body, or a comment — the class the consumer contract licenses as
@@ -112,12 +112,20 @@ function population(): string[] {
   return [...new Set([...corpusCommands(), ...DECLARATIVE_COMMAND_LITERALS])];
 }
 
-/** The population shapes that carry no `ok` payload — the degrade census. */
+/**
+ * The population shapes that carry no `ok` payload — the degrade census.
+ * `echo\ test` used to stand in here as the backslash-whitespace
+ * representative; #1188 admits it, so the two genuinely retained shapes the
+ * corpus labels `retained-fidelity` take its place — the mid-word LF join and
+ * the unquoted backslash+TAB, the two whose measured Bash disagreement is a
+ * wrong word boundary rather than a wrong static value.
+ */
 const NON_OK_ROWS: ReadonlyMap<string, string> = new Map([
   ["[[ a == b ]]", "unknown-syntax"],
   ["echo hi &&", "malformed"],
   ["powershell -c Remove-Item -Recurse -Force C:\\", "malformed"],
-  ["echo\\ test", "vetoed"],
+  ["printf '<%s>\\n' a\\\nb", "vetoed"],
+  ["printf '<%s>\\n' a\\\tb", "vetoed"],
   ['git "status; rm', "malformed"],
 ]);
 
@@ -259,9 +267,9 @@ describe("replica fidelity: the offset-slice arm is the verbatim scan", () => {
 });
 
 describe("shipped derivation vs the old char scan (SC-S4-3 move)", () => {
-  it("is byte-identical: {same: 447, widened-boundaries: 0, dropped-boundaries: 0}", () => {
+  it("is byte-identical: {same: 452, widened-boundaries: 0, dropped-boundaries: 0}", () => {
     const rows = okRows();
-    expect(rows.length).toBe(447);
+    expect(rows.length).toBe(452);
     let same = 0;
     let widened = 0;
     let dropped = 0;
@@ -278,7 +286,7 @@ describe("shipped derivation vs the old char scan (SC-S4-3 move)", () => {
     }
     // Every facts boundary is also a literal scan cut, so the union can
     // neither widen nor drop a boundary: no shape can flip a rule MATCH in
-    // either direction. Non-ok rows (the 5 census entries) degrade to the
+    // either direction. Non-ok rows (the 6 census entries) degrade to the
     // scan verbatim inside production `splitCommandSegments`.
     expect({
       okRows: rows.length,
@@ -286,8 +294,8 @@ describe("shipped derivation vs the old char scan (SC-S4-3 move)", () => {
       widenedBoundaries: widened,
       droppedBoundaries: dropped,
     }).toEqual({
-      okRows: 447,
-      same: 447,
+      okRows: 452,
+      same: 452,
       widenedBoundaries: 0,
       droppedBoundaries: 0,
     });
@@ -401,7 +409,7 @@ describe("pure-facts arm vs the old scan — T26 measurement", () => {
     );
   });
 
-  it("the counts feed T26: {same: 408, widened: 0, dropped: 39}", () => {
+  it("the counts feed T26: {same: 413, widened: 0, dropped: 39}", () => {
     let same = 0;
     let widened = 0;
     let dropped = 0;
@@ -415,7 +423,7 @@ describe("pure-facts arm vs the old scan — T26 measurement", () => {
       else same += 1;
     }
     expect({ same, widened, dropped }).toEqual({
-      same: 408,
+      same: 413,
       widened: 0,
       dropped: 39,
     });

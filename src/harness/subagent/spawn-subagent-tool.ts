@@ -45,7 +45,7 @@
  */
 import type { AciToolDef } from "../aci/types.js";
 import type { ToolExecutionContext } from "../tools/types.js";
-import type { SubAgentDefinition } from "./role.js";
+import { parentFields, type SubAgentDefinition } from "./role.js";
 import type { QueryBufferResult, SubAgentManager } from "./manager.js";
 import {
   SubAgentAbortError,
@@ -149,9 +149,10 @@ export interface SpawnSubAgentToolDeps {
  * from "finished but failed". envelope.status is already "failed" — what the
  * rule constrains is the result kind.
  *
- * The message must never be exactly `"cancelled"` —
+ * The message's first line must never be exactly `"cancelled"` —
  * `computeToolStopFlags` (loop-engine.ts) still treats
- * `execution_failed && message === "cancelled"` as whole-turn cancellation,
+ * `execution_failed && <message first line> === "cancelled"` as whole-turn
+ * cancellation,
  * so colliding with that literal would escalate one sub-task's wall clock
  *
  // (ADR-0091)
@@ -194,9 +195,10 @@ export function throwWallClockTimeout(
  *     read as a caller cancel; reusing the wall-clock wording would collide
  *     with the timeout attribution.
  *
- * What both share: never exactly `"cancelled"` — colliding with that literal
- * would escalate one sub-task's outcome into whole-turn cancellation (the
- * result-label branch in `computeToolStopFlags`).
+ * What both share: the message's first line must never be exactly `"cancelled"`
+ * — colliding with that literal would escalate one sub-task's outcome into
+ * whole-turn cancellation (the first-line result-label branch in
+ * `computeToolStopFlags`).
  *
  * Lives outside the handler: the whole attribution decision (including the
  * `ctx?.signal` read) must not add to the handler's cyclomatic complexity
@@ -585,9 +587,7 @@ export function createSpawnSubAgentTool(
         // direct handler call) the field is omitted entirely; Postel, no
         // empty values.
         ...(ctx?.turnId !== undefined ? { parentTurnId: ctx.turnId } : {}),
-        ...(ctx?.parentThinking !== undefined
-          ? { parentThinking: ctx.parentThinking }
-          : {}),
+        ...parentFields(ctx),
         // ADR-0071: reverse lookup to the parent loop's originating tool call
         // — the executor has put call.id (Anthropic tool_use_id) into
         // ctx.toolUseId and the manager copies it into the .meta.json

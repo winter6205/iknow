@@ -253,6 +253,63 @@ export interface WorktreeOnMutatePersistPatch {
 }
 
 /**
+ * Reverse-persistence patch for the permission posture (ADR-0141). User-layer
+ * key: `permissions.defaultMode`.
+ *
+ * `"full_auto"` is refused here rather than written, because the project-settings
+ * layer rejects it as a self-grant (ADR-0090: automatic mode is a per-session
+ * operator choice, not something a settings file confers). Throwing matches
+ * `mergeFsModePatch`'s discipline — an illegal value never reaches the disk.
+ */
+export interface PermissionModePersistPatch {
+  /**
+   * The user-layer domain, deliberately the narrow `"default" | "plan"` rather
+   * than harness `PermissionMode` — importing the harness type here would make
+   * `src/config` depend on a module it does not otherwise need, and
+   * `full_auto` is excluded by construction at the type level. The runtime
+   * refusal below still guards the untyped edge.
+   */
+  defaultMode: "default" | "plan";
+}
+
+/**
+ * Merge the permission patch into raw JSON (pure function, no fs). Same shape
+ * as `mergeFsModePatch`: a missing / non-plain-object `permissions` section is
+ * created or replaced, every other top-level key is preserved verbatim, and an
+ * illegal value throws before anything is written.
+ */
+export function mergePermissionModePatch(
+  raw: Record<string, unknown>,
+  patch: PermissionModePersistPatch
+): Record<string, unknown> {
+  // The typed domain already excludes `full_auto`; the untyped-JSON path (a
+  // caller casting a model-chosen mode, a hand-edited settings file routed back
+  // through here) does not, so both refusals stay.
+  const value: unknown = patch.defaultMode;
+  if (value === "full_auto") {
+    throw new TypeError(
+      'illegal permission defaultMode patch value: "full_auto" (ADR-0090: ' +
+        "automatic mode is a per-session operator choice and cannot be " +
+        "self-granted through settings)"
+    );
+  }
+  if (value !== "default" && value !== "plan") {
+    throw new TypeError(
+      `illegal permission defaultMode patch value: ${JSON.stringify(
+        patch.defaultMode
+      )} (expected "default" | "plan")`
+    );
+  }
+  const next: Record<string, unknown> = { ...raw };
+  const nextPerms: Record<string, unknown> = isPlainObject(next.permissions)
+    ? { ...next.permissions }
+    : {};
+  nextPerms.defaultMode = patch.defaultMode;
+  next.permissions = nextPerms;
+  return next;
+}
+
+/**
  * Merge the fsMode patch into raw JSON (pure function, no fs).
  *  - missing `isolation` → create it;
  *  - non-plain-object `isolation` → overwrite with a fresh object (the
@@ -540,6 +597,19 @@ export async function persistFsModeChanges(
 ): Promise<{ path: string; bytes: string }> {
   const raw = await readSettingsRaw(filePath);
   return persistMergedSettings(filePath, mergeFsModePatch(raw, patch));
+}
+
+/**
+ * Persist the permission posture to settings.json (atomic write). Mirrors
+ * `persistFsModeChanges` exactly — same read → merge → tmp → rename chain and
+ * the same `{ path, bytes }` return for the self-write sentinel.
+ */
+export async function persistPermissionModeChanges(
+  filePath: string,
+  patch: PermissionModePersistPatch
+): Promise<{ path: string; bytes: string }> {
+  const raw = await readSettingsRaw(filePath);
+  return persistMergedSettings(filePath, mergePermissionModePatch(raw, patch));
 }
 
 /**

@@ -426,6 +426,51 @@ describe("subagent_continue — 死工人续跑（新进程、同句柄）", () 
     }
   });
 
+  it("uses the current parent's model route for the resumed worker", async () => {
+    const harness = makeManagerHarness();
+    const taskId = await spawnCompleted(harness, {
+      task: "original",
+      conversationId: "c1",
+      parentModelRoute: "conv/first-route",
+    } as SubAgentDefinition);
+    harness.writeTranscript(taskId);
+    const tool = createSubAgentContinueTool({ manager: harness.manager });
+    const ctx = {
+      conversationId: "c1",
+      parentModelRoute: "conv/second-route",
+    } as unknown as ToolExecutionContext;
+
+    try {
+      await tool.handler(
+        {
+          task_id: taskId,
+          message: "continue on the current route",
+          wait: false,
+        },
+        ctx
+      );
+
+      const resumed = harness.invocations[1]!;
+      assert.equal(resumed.taskId, taskId);
+      assert.equal(
+        (
+          resumed.payload as WorkerEnvelope & {
+            readonly parentModelRoute?: unknown;
+          }
+        ).parentModelRoute,
+        "conv/second-route"
+      );
+    } finally {
+      const resumed = harness.invocations[1];
+      if (resumed !== undefined) {
+        emitOkEnvelope(resumed.child, "resumed");
+        await waitForTerminal(harness.manager, taskId);
+      }
+      await harness.manager.shutdown();
+      rmSync(harness.subagentsDir, { recursive: true, force: true });
+    }
+  });
+
   it("completed + transcript + 下一句（wait:false）→ 同 task_id 新进程，payload 指向同一本账", async () => {
     const harness = makeManagerHarness();
     const tool = createSubAgentContinueTool({ manager: harness.manager });

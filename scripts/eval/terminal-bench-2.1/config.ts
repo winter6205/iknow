@@ -11,11 +11,16 @@
  * Every value here comes from an explicit parameter or from a manifest on disk. There
  * are no defaults for the things that vary per machine: a still-placeholder value makes
  * resolution FAIL rather than silently reading one operator's home directory.
+ *
+ * "Placeholder" therefore means an UNRESOLVED TEMPLATE or an absent/blank value — never
+ * "this happens to equal a path an older script hardcoded". `cli.ts` makes all five path
+ * parameters mandatory flags, so an operator naming a real artifact is an operator
+ * supplying a value, and refusing it would make the driver unusable (issue 1219).
  */
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { isPlaceholder, type RunIdentity } from "./identities.js";
+import { isUnresolvedPathTemplate, type RunIdentity } from "./identities.js";
 
 /** One frozen slot in the manifest: a task, and how it is attempted. */
 export interface ManifestSlot {
@@ -98,8 +103,22 @@ const PATH_PARAMS = [
 const LIMIT_PARAMS = ["agentWallSec", "graderGraceSec"] as const;
 const GLIBCXX_FLOOR = /^GLIBCXX_\d+\.\d+\.\d+$/;
 
+/**
+ * Every path parameter must be a real, explicitly supplied location.
+ *
+ * `isUnresolvedPathTemplate` (not `isPlaceholder`) because a path additionally refuses an
+ * angle-bracket placeholder like `<path>`: no filesystem path contains one, whereas an
+ * `outputLayout` legitimately is a template built from them — see `identities.ts`.
+ *
+ * Existence and type are deliberately NOT checked here (issue 1219). This module reads no
+ * file and must stay unit-testable without real artifacts; whether the bundle tarball, the
+ * node archive, the settings file and the dataset tree are actually there is a PREFLIGHT
+ * fact, measured by the mandatory gate's real provisioning path, which bind-mounts and
+ * `docker cp`s exactly these paths before any model is dispatched. Refusing a real path here
+ * on the strength of its spelling is what made the frozen #1221 run impossible to start.
+ */
 function pathProblems(params: ConfigParams): string[] {
-  return PATH_PARAMS.filter((key) => isPlaceholder(params[key])).map(
+  return PATH_PARAMS.filter((key) => isUnresolvedPathTemplate(params[key])).map(
     (key) => `${key} is still a placeholder: ${JSON.stringify(params[key])}`
   );
 }

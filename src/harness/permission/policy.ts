@@ -106,9 +106,8 @@ export interface PermissionPolicy {
    * command was measured against.
    *
    * A function rather than a value so `CheckPermissionInput` callers that only
-   * hold a policy (the permission runtime, the executor's prediction pass) get
-   * the current roots for free, and so an assembly that never wired one leaves
-   * every verdict byte-identical.
+   * hold a policy (the permission runtime) get the current roots for free, and
+   * so an assembly that never wired one leaves every verdict byte-identical.
    */
   readonly hostRoots?: () => CleanupRootSnapshot;
   /**
@@ -117,6 +116,19 @@ export interface PermissionPolicy {
    * the seam existed.
    */
   readonly fsBoundary?: FsBoundaryReader;
+  /**
+   * Test seam: the pure decision entry every consumer of this policy goes
+   * through (`decidePermission`). Absent → `checkPermission` itself, so
+   * production behaviour is byte-identical. Present → the wrapper is called
+   * instead, which lets a test COUNT the evaluations (the wave gate decides
+   * each call in the wave scan that runs right before its wave, and the
+   * count is the only honest witness of it).
+   *
+   * The count is of TOP-LEVEL decisions: the shell-parse inner resolution
+   * inside `checkPermission` is one question inside one evaluation, not a
+   * second decision for the call.
+   */
+  readonly check?: (input: CheckPermissionInput) => PermissionOutcome;
 }
 
 export interface CreatePermissionPolicyOpts {
@@ -145,17 +157,33 @@ export interface CreatePermissionPolicyOpts {
 /**
  * The `fsBoundary` reader as the optional `checkPermission` field, or nothing
  * at all when the assembly wired none. ONE helper for the field, read by the
- * policy factory, the permission executor's gate and the executor's prediction
- * pass: `{}` reaches `checkPermission` as a missing field, not as a reader that
- * could only answer "outside" — the difference between "no boundary is
- * configured" and "a boundary with an empty set", which ADR-0140 §2 would
- * otherwise have to tell apart three times over.
+ * policy factory and by `decidePermission` (the single assembly every verdict
+ * consumer goes through): `{}` reaches `checkPermission` as a missing field,
+ * not as a reader that could only answer "outside" — the difference between
+ * "no boundary is configured" and "a boundary with an empty set", which
+ * ADR-0140 §2 would otherwise have to tell apart three times over.
  */
 export function fsBoundaryOption(
   source: { readonly fsBoundary?: FsBoundaryReader | undefined } | undefined
 ): { readonly fsBoundary?: FsBoundaryReader } {
   if (source?.fsBoundary === undefined) return {};
   return { fsBoundary: source.fsBoundary };
+}
+
+/**
+ * ADR-0132/ADR-0133: the host's root context as the optional `checkPermission`
+ * field, or nothing at all when the policy has none.
+ *
+ * An empty spread is the absent case and reaches `checkPermission` as a
+ * missing field, not as a reader that could return an empty snapshot — the
+ * difference between "no cleanup scope exists" and "a scope with no roots in
+ * it", which the wall would otherwise have to tell apart.
+ */
+export function hostRootsOption(policy: PermissionPolicy): {
+  readonly hostRoots?: () => CleanupRootSnapshot;
+} {
+  if (policy.hostRoots === undefined) return {};
+  return { hostRoots: policy.hostRoots };
 }
 
 export function createPermissionPolicy(
@@ -434,6 +462,34 @@ export function checkPermission(opts: CheckPermissionInput): PermissionOutcome {
     decision: "ask",
     reason: `category default: ${category} → ask user`,
   };
+}
+
+/**
+ * The ONE assembly of the pure decision's inputs.
+ *
+ * Every consumer of a verdict — the enforcing gate and the decision observer
+ * that reports the very same verdict — reads the decision through here, so
+ * they can never answer from different inputs (a divergence that once let the
+ * observer report a verdict the gate would not apply).
+ *
+ * `policy.check` is the test seam; absent, the pure `checkPermission` runs.
+ */
+export function decidePermission(
+  policy: PermissionPolicy,
+  def: AciToolDef,
+  input: unknown
+): PermissionOutcome {
+  const check = policy.check ?? checkPermission;
+  return check({
+    def,
+    input,
+    sources: policy.sources,
+    hardWalls: policy.hardWalls,
+    defaultByCategory: policy.defaultByCategory,
+    mode: policy.mode,
+    ...hostRootsOption(policy),
+    ...fsBoundaryOption(policy),
+  });
 }
 
 /**

@@ -52,10 +52,17 @@ export function messageText(msg: AnthropicNativeMessage): string {
  * `isSkillIndexDeltaText`).
  */
 export function isTurnQuery(msg: AnthropicNativeMessage): boolean {
+  if (msg.role !== "user") return false;
+  if (msg.content.some((b) => b.type === "tool_result")) return false;
   const text = messageText(msg);
+  // A textless user message still opens a turn: today that is an image-only
+  // paste, whose payload lives in the image block and therefore never reaches
+  // `messageText`. Every injected envelope kind below is built from text, so a
+  // host injection can never be mistaken for this case by skipping the
+  // predicates — and a textless message must not be dropped from the
+  // projection, the title source, the compact excerpts or the rewind anchors.
+  if (text.length === 0) return true;
   return (
-    msg.role === "user" &&
-    !msg.content.some((b) => b.type === "tool_result") &&
     !isSubagentDrainText(text) &&
     !isAgentStatusText(text) &&
     !isGraphModeText(text) &&

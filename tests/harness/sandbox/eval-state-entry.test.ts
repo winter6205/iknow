@@ -118,7 +118,7 @@ describe("eval state — the entry state combination is yolo's, reused (ADR-0130
     // The carrier of "the fence retires wholesale" is the yolo holder: the fence
     // factory's single branch (ADR-0119 §ruling 2) is the one SSOT the four
     // routes read, so eval state reaching it is what makes the shape identical.
-    assert.equal(holders.yolo.get(), true);
+    assert.equal(holders.fenceRetired.get(), true);
     assert.equal(
       holders.permission,
       permission,
@@ -161,7 +161,7 @@ describe("eval state — the entry state combination is yolo's, reused (ADR-0130
     });
     assert.equal(holders.permission.get(), "full_auto");
     assert.equal(holders.fsMode.get(), "global");
-    assert.equal(holders.yolo.get(), true);
+    assert.equal(holders.fenceRetired.get(), true);
   });
 
   it("a global fs tier stays global (the flip is conditional, not a forced write)", () => {
@@ -178,8 +178,8 @@ describe("eval state — the entry state combination is yolo's, reused (ADR-0130
     const fsMode = createFsModeContext("workspace");
     const first = enterEvalState({ permission, fsMode });
     const second = enterEvalState({ permission, fsMode });
-    assert.equal(first.yolo.get(), true);
-    assert.equal(second.yolo.get(), true);
+    assert.equal(first.fenceRetired.get(), true);
+    assert.equal(second.fenceRetired.get(), true);
     assert.equal(second.fsMode.get(), "global");
     assert.equal(second.permission.get(), "full_auto");
   });

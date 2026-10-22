@@ -96,6 +96,7 @@ function recordingTextAdapter(responses: string[]) {
         projection: { nativeMessage: native, texts: [text], toolCalls: [] },
         supplierStop: "success",
         needsTools: false,
+        hasThinking: false,
         isEmptyFinalResponse: false,
       };
     },
@@ -290,6 +291,7 @@ describe("host commit stamping: every injected seam carries hostInjected", () =>
           projection: { nativeMessage: native, texts: [text], toolCalls: [] },
           supplierStop: "success",
           needsTools: false,
+          hasThinking: false,
           isEmptyFinalResponse: false,
         };
       },
@@ -363,6 +365,7 @@ describe("host commit stamping: every injected seam carries hostInjected", () =>
             projection: { nativeMessage: native, texts: [text], toolCalls: [] },
             supplierStop: "success",
             needsTools: false,
+            hasThinking: false,
             isEmptyFinalResponse: false,
           };
         },

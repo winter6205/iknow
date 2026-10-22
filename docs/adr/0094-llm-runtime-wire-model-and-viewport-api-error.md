@@ -1,5 +1,7 @@
 # 0094. Single runtime EnvLoader source; wire model = models[].id; API errors only in the viewport
 
+> **Amendment 2026-10-17** (ADR-0145): the EnvLoader hot reload no longer changes the model of a live conversation; `model` edits apply to new conversations. Credentials and limits (apiKey / baseUrl / headers / thinking …) still hot-apply on the next turn.
+
 Date: 2026-09-14
 Status: accepted
 

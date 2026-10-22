@@ -17,7 +17,7 @@
  */
 
 import type { ImageBlockParam } from "@anthropic-ai/sdk/resources/messages.js";
-import { IMAGE_MEDIA_TYPES } from "../aci/tools/read-image.js";
+import { IMAGE_MEDIA_TYPES } from "../aci/tools/image-format.js";
 import type { AnthropicContentBlock } from "../model-adapter/types.js";
 import type { RegistryImpl } from "./registry.js";
 import type {
@@ -47,17 +47,18 @@ const TRUNCATION_MARKER_TEMPLATE =
  */
 const IMAGE_PASSTHROUGH_TOOL_NAME = "read_image";
 
-/** Legal media_types for SDK base64 image sources; the list SSOT is read-image.ts. */
+/** Legal media_types for SDK base64 image sources; the list SSOT is image-format.ts. */
 const IMAGE_MEDIA_TYPE_SET: ReadonlySet<string> = new Set<string>(
   IMAGE_MEDIA_TYPES
 );
 
 /**
- * Executor-side output content-block union. Image blocks (SDK
- * `ImageBlockParam`) live only inside `tool_result.content` (protocol type
- * `unknown`) and never enter the top-level `AnthropicContentBlock` union —
- * the protocol stays unchanged. This union is an internal assembly type,
- * downcast when landing in `ToolExecutionResult.payload` (declared as
+ * Executor-side output content-block union. A tool's image (SDK
+ * `ImageBlockParam`) stays nested inside `tool_result.content` (protocol type
+ * `unknown`) — the top-level `AnthropicContentBlock` image arm belongs to the
+ * user-paste path only (`model-adapter/image-content.ts`), which never goes
+ * through an executor. This union is an internal assembly type, downcast when
+ * landing in `ToolExecutionResult.payload` (declared as
  * `AnthropicContentBlock[]`; the Adapter ships `unknown` content verbatim
  * without structural interpretation).
  */
@@ -375,7 +376,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
     turnId?: string,
     onStream?: ToolExecutionContext["onStream"],
     messages?: ToolExecutionContext["messages"],
-    parentThinking?: ToolExecutionContext["parentThinking"]
+    parentThinking?: ToolExecutionContext["parentThinking"],
+    parentModelRoute?: ToolExecutionContext["parentModelRoute"]
   ): Promise<ToolExecutionResult> {
     const validation = validateCall(registry, call);
     if (!validation.ok) return validation.failure;
@@ -397,6 +399,7 @@ export function createExecutor(registry: RegistryImpl): Executor {
       toolUseId: call.id,
       ...(messages !== undefined ? { messages } : {}),
       ...(parentThinking !== undefined ? { parentThinking } : {}),
+      ...(parentModelRoute !== undefined ? { parentModelRoute } : {}),
     };
     try {
       const out =
@@ -427,7 +430,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
     // skill() second pass-through: a read-only snapshot of the model-visible
     // history, forwarded verbatim into ctx.messages.
     messages?: ToolExecutionContext["messages"],
-    parentThinking?: ToolExecutionContext["parentThinking"]
+    parentThinking?: ToolExecutionContext["parentThinking"],
+    parentModelRoute?: ToolExecutionContext["parentModelRoute"]
   ): Promise<ReadonlyArray<ToolExecutionResult>> {
     const out: ToolExecutionResult[] = [];
     for (const [index, call] of calls.entries()) {
@@ -439,7 +443,8 @@ export function createExecutor(registry: RegistryImpl): Executor {
         turnId,
         onStream,
         messages,
-        parentThinking
+        parentThinking,
+        parentModelRoute
       );
       await onSettled?.(result, index);
       out.push(result);

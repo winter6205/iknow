@@ -28,6 +28,7 @@ import {
   protectedFenceWiring,
   protectedTargetBindPaths,
 } from "../../../src/harness/sandbox/index.js";
+import type { ProtectedTargetInventory } from "../../../src/harness/sandbox/index.js";
 
 vi.mock("node:child_process", async (importOriginal) => {
   const actual = await importOriginal<typeof import("node:child_process")>();
@@ -37,8 +38,32 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
+// Passthrough spy: every export stays the real one, so the fence still
+// materializes and the argv pins below still mean what they say. Only the
+// pre-walk gains a call counter — the single fact this file needs to see, which
+// is that the ROUTE walked, not the fence factory.
+vi.mock(
+  "../../../src/harness/sandbox/protected-targets.js",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../../../src/harness/sandbox/protected-targets.js")
+      >();
+    return {
+      ...actual,
+      prewalkProtectedTargets: vi.fn(actual.prewalkProtectedTargets),
+    };
+  }
+);
+
 const childProcessMock = await import("node:child_process");
 const spawnMock = childProcessMock.spawn as unknown as ReturnType<typeof vi.fn>;
+const protectedTargetsMock =
+  await import("../../../src/harness/sandbox/protected-targets.js");
+const prewalkSpy =
+  protectedTargetsMock.prewalkProtectedTargets as unknown as ReturnType<
+    typeof vi.fn
+  >;
 
 const { createBashTool } =
   await import("../../../src/harness/aci/tools/bash.ts");
@@ -74,6 +99,7 @@ afterAll(() => {
 beforeEach(() => {
   spawnMock.mockReset();
   spawnMock.mockImplementation(() => makeFakeChild());
+  prewalkSpy.mockClear();
 });
 afterEach(() => {
   spawnMock.mockReset();
@@ -82,6 +108,32 @@ afterEach(() => {
 function firstSpawnArgv(): readonly string[] {
   const call = spawnMock.mock.calls[0] as readonly unknown[] | undefined;
   return (call?.[1] as readonly string[]) ?? [];
+}
+
+/**
+ * The route walked the name arm ahead of the fence, exactly once, on the
+ * inventory it then handed the fence.
+ *
+ * Why this is pinned here rather than only at the argv level: a route that
+ * regressed to the synchronous `protectedFenceWiring` still produces every
+ * mount token above — protection intact, thread blocked for the whole
+ * workspace enumeration. The argv cannot see that difference; the pre-walk call
+ * is the only observable that separates "walked cooperatively before the fence"
+ * from "walked synchronously inside it".
+ */
+function assertRoutePrewalked(): void {
+  assert.equal(
+    prewalkSpy.mock.calls.length,
+    1,
+    "the route awaited one protected-target walk before assembling the fence"
+  );
+  const walked = prewalkSpy.mock.calls[0]?.[0] as
+    ProtectedTargetInventory | undefined;
+  assert.ok(
+    walked !== undefined &&
+      walked.entries.some((entry) => entry.rule.kind === "name"),
+    "the walk was of this route's own inventory, name arm included"
+  );
 }
 
 function hasTriple(
@@ -152,6 +204,7 @@ describe("protected-target wiring — fence call sites carry the protectedFenceW
       subtreeRo >= 0 && maskIdx > subtreeRo,
       "the mask lands above its read-only subtree bind (one coordinated plan)"
     );
+    assertRoutePrewalked();
   });
 
   it("background spawn: same protected-target segments as foreground (set-equal)", async () => {
@@ -174,6 +227,7 @@ describe("protected-target wiring — fence call sites carry the protectedFenceW
       hasTriple(argv, "--ro-bind", "/dev/null", FIX_KEY),
       "background argv carries the per-file credential mask token"
     );
+    assertRoutePrewalked();
   });
 
   it("all three routes assemble the identical pair from the wiring point", () => {

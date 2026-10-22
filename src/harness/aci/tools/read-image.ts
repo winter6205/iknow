@@ -13,8 +13,9 @@
  *   - size cap = same 1 MiB as read_file, checked after stat and before
  *     encoding;
  *   - success returns an `ImageBlockParam` (base64); the executor's success
- *     arm passes it straight into `tool_result.content` (images live only
- *     inside tool_result, never at message top level);
+ *     arm passes it straight into `tool_result.content` (this tool's output is
+ *     always nested — the only top-level image block is a user-pasted one,
+ *     which never goes through this tool);
  *   - every error throws ToolExecutionError (executor turns it into
  *     execution_failed; the failure arm stays text);
  *   - never recorded in the last-read ledger: this factory takes no ledger
@@ -32,68 +33,11 @@ import { ToolExecutionError } from "../../errors.js";
 import type { LiveTaskRoot } from "../../session-roots.js";
 import type { AciToolDef } from "../types.js";
 import type { ImageBlockParam } from "@anthropic-ai/sdk/resources/messages.js";
+import { MAX_IMAGE_BYTES, detectImageMediaType } from "./image-format.js";
 import { resolveWithinRoot } from "./helpers.js";
-
-/** Same 1 MiB tier as read_file's `MAX_FILE_BYTES`; checked before encoding. */
-const MAX_IMAGE_BYTES = 1_048_576;
-
-/** SSOT for the media_type list: the executor's shape gate and the magic-byte
- * classifier draw from this single source. */
-export const IMAGE_MEDIA_TYPES = [
-  "image/jpeg",
-  "image/png",
-  "image/gif",
-  "image/webp",
-] as const;
-
-type ImageMediaType = (typeof IMAGE_MEDIA_TYPES)[number];
 
 function readRoot(root: string | LiveTaskRoot): string {
   return typeof root === "string" ? root : root.read();
-}
-
-/** Looks only at the file-header magic bytes; returns undefined when the
- * bytes match none of the four image types (caller then refuses by type). */
-function detectMediaType(buffer: Buffer): ImageMediaType | undefined {
-  if (hasPngMagic(buffer)) return "image/png";
-  if (hasJpegMagic(buffer)) return "image/jpeg";
-  if (hasGifMagic(buffer)) return "image/gif";
-  if (hasWebpMagic(buffer)) return "image/webp";
-  return undefined;
-}
-
-function hasPngMagic(b: Buffer): boolean {
-  // Full 8-byte signature (89 50 4E 47 0D 0A 1A 0A): checking only the first
-  // 4 bytes would misclassify any byte stream starting with \x89PNG as PNG.
-  return (
-    b.length >= 8 &&
-    b[0] === 0x89 &&
-    b[1] === 0x50 &&
-    b[2] === 0x4e &&
-    b[3] === 0x47 &&
-    b[4] === 0x0d &&
-    b[5] === 0x0a &&
-    b[6] === 0x1a &&
-    b[7] === 0x0a
-  );
-}
-
-function hasJpegMagic(b: Buffer): boolean {
-  return b.length >= 3 && b[0] === 0xff && b[1] === 0xd8 && b[2] === 0xff;
-}
-
-function hasGifMagic(b: Buffer): boolean {
-  if (b.length < 6) return false;
-  const header = b.subarray(0, 6).toString("ascii");
-  return header === "GIF87a" || header === "GIF89a";
-}
-
-function hasWebpMagic(b: Buffer): boolean {
-  return (
-    b.length >= 12 &&
-    b.subarray(0, 4).toString("ascii") === "RIFF" &&
-    b.subarray(8, 12).toString("ascii") === "WEBP"
-  );
 }
 
 function parseInput(input: unknown): string {
@@ -136,7 +80,7 @@ async function encodeImageBlock(
     );
   }
   const buffer = await readFile(resolved);
-  const mediaType = detectMediaType(buffer);
+  const mediaType = detectImageMediaType(buffer);
   if (mediaType === undefined) {
     throw new ToolExecutionError(
       `[read_image] unsupported image format (magic bytes are not png/jpeg/gif/webp): ${resolved}`

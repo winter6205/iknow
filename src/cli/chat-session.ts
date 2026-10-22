@@ -65,9 +65,16 @@ import {
 import type { SubAgentManager } from "../harness/subagent/manager.js";
 import { stampHostInjected } from "../harness/model-adapter/outbound-projection.js";
 import {
-  drainPendingSubagents,
+  peekPendingSubagents,
+  claimPendingSubagents,
   drainPendingSubagentsBeforeShutdown,
+  type DeliveryClaims,
 } from "../harness/subagent/host-drain.js";
+import {
+  createDeliveryLatchSet,
+  createDigestAck,
+  notifyPersisted,
+} from "../harness/subagent/digest-ack.js";
 import {
   createSubagentWake,
   queryableSubagentTaskIds,
@@ -266,7 +273,7 @@ export type ChatSessionOpts = {
   conversationId?: string;
   /**
    * Host drain — before each runHarness the chat entry calls
-   * `drainPendingSubagents(subagentManager)` and folds the condensed
+   * `claimPendingSubagents(subagentManager)` and folds the condensed
    * completed envelopes into the next turn's priorMessages. The ask entry
    * has no manager → not passed.
    */
@@ -804,6 +811,13 @@ export async function refreshChatDepsForRebind(
 
 type ChatSubagentDrain = {
   readonly text: string;
+  /**
+   * The claimed part only — the substring the ack predicate searches for.
+   * The rebind closeout text is host text, not a claimed generation.
+   */
+  readonly digestText: string;
+  /** The claimed generations; settled by the write that carries the digest. */
+  readonly claims: DeliveryClaims | null;
   readonly pendingText?: string;
 };
 
@@ -811,12 +825,16 @@ async function collectChatSubagentDrain(
   ctx: ChatLineContext
 ): Promise<ChatSubagentDrain> {
   const pendingText = ctx.pendingSubagentDrain;
-  const currentText = await drainPendingSubagents(ctx.subagentManager);
-  const text = [pendingText, currentText]
+  // ADR-0150: the claim is the delivery take — the result is offered again
+  // in a later round unless a write carries the digest.
+  const drain = await claimPendingSubagents(ctx.subagentManager);
+  const text = [pendingText, drain.text]
     .filter((value): value is string => value !== undefined && value.length > 0)
     .join("\n\n");
   return {
     text,
+    digestText: drain.digestText,
+    claims: drain.claims,
     ...(pendingText !== undefined ? { pendingText } : {}),
   };
 }
@@ -828,6 +846,47 @@ function acknowledgeChatSubagentDrain(
   if (pendingText !== undefined && ctx.pendingSubagentDrain === pendingText) {
     ctx.pendingSubagentDrain = undefined;
   }
+}
+
+/**
+ * The one checkpoint target decision: a store AND a conversation to write
+ * into. Every persist guard and the ADR-0150 carrier predicate read this, so
+ * the carrier can never drift from what actually gets written.
+ */
+function chatCheckpointTarget(
+  ctx: ChatLineContext
+):
+  | { readonly store: SessionStore; readonly conversationId: string }
+  | undefined {
+  const store = ctx.checkpointStore;
+  const conversationId = ctx.state.conversationId;
+  if (store === undefined || conversationId === null) return undefined;
+  return { store, conversationId };
+}
+
+/**
+ * ADR-0150: a durable carrier needs a store AND a conversation to write into.
+ * Without a conversation id the checkpoint guard saves nothing, so claiming
+ * "durable carrier" would release the claim after every run and re-deliver
+ * the digest forever.
+ */
+function chatHasDurableCarrier(ctx: ChatLineContext): boolean {
+  return chatCheckpointTarget(ctx) !== undefined;
+}
+
+/**
+ * Can this wake run now? ADR-0150: read-only peek FIRST — a busy host must
+ * not take the result away. The claim comes later, so a wake that never runs
+ * leaves the result claimable for a later round.
+ */
+async function canRunChatWake(
+  ctx: ChatLineContext,
+  box: { value: boolean }
+): Promise<boolean> {
+  if (box.value) return false;
+  const pendingText = ctx.pendingSubagentDrain;
+  if (pendingText !== undefined && pendingText.length > 0) return true;
+  return (await peekPendingSubagents(ctx.subagentManager)).length > 0;
 }
 
 /**
@@ -1159,10 +1218,11 @@ async function runSkipAppendAndPresent(opts: {
         ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
       }
     );
-    if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+    const checkpointTarget = chatCheckpointTarget(ctx);
+    if (checkpointTarget !== undefined) {
       await persistChatSessionCheckpoint({
-        store: ctx.checkpointStore,
-        conversationId: ctx.state.conversationId,
+        store: checkpointTarget.store,
+        conversationId: checkpointTarget.conversationId,
         jsonMode: ctx.state.jsonMode,
         ...(ctx.workspaceRoot !== undefined
           ? { workspaceRoot: ctx.workspaceRoot }
@@ -1231,27 +1291,43 @@ export async function runChatSubagentWake(opts: {
   readonly onStream?: (event: HarnessStreamEvent) => void;
 }): Promise<ProcessChatLineResult> {
   const { ctx } = opts;
-  const pendingDrain = await collectChatSubagentDrain(ctx);
-  if (pendingDrain.text.length === 0) return { quit: false, output: "" };
   const box = busyBox(ctx);
-  if (box.value) return { quit: false, output: "" };
-  box.value = true;
-  ctx.graphAssembly?.beginRound();
-  // Write-root segment: wake is a primary-model run that may arrive before
-  // a user query post-rebind — consume the one-shot slot the same way query
-  // lines do; consuming clears it.
-  const wakeWriteRootNotice = ctx.pendingWriteRootNotice;
-  if (wakeWriteRootNotice !== undefined) {
-    ctx.pendingWriteRootNotice = undefined;
+  if (!(await canRunChatWake(ctx, box))) {
+    return { quit: false, output: "" };
   }
-  const wakeTailTexts = [pendingDrain.text, wakeWriteRootNotice].filter(
-    (value): value is string => value !== undefined && value.length > 0
-  );
-  const priorMessages = Object.freeze([
-    ...ctx.state.messages,
-    hostDrainMessage(wakeTailTexts),
-  ]);
+  box.value = true;
+  const pendingDrain = await collectChatSubagentDrain(ctx);
+  if (pendingDrain.text.length === 0) {
+    box.value = false;
+    return { quit: false, output: "" };
+  }
+  // ADR-0150: the latch for this wake's claim. The checkpoint save is the
+  // write that carries the digest; without a checkpoint store no write can
+  // ever carry it (the documented fallback).
+  const digestAck = createDigestAck({
+    claims: pendingDrain.claims,
+    digestText: pendingDrain.digestText,
+    hasDurableCarrier: chatHasDurableCarrier(ctx),
+  });
   try {
+    // ADR-0150: everything between the claim and the run stays inside the
+    // release-on-throw path. `beginRound` (graph assembly) can throw, and a
+    // claim leaked there would never be offered again.
+    ctx.graphAssembly?.beginRound();
+    // Write-root segment: wake is a primary-model run that may arrive before
+    // a user query post-rebind — consume the one-shot slot the same way query
+    // lines do; consuming clears it.
+    const wakeWriteRootNotice = ctx.pendingWriteRootNotice;
+    if (wakeWriteRootNotice !== undefined) {
+      ctx.pendingWriteRootNotice = undefined;
+    }
+    const wakeTailTexts = [pendingDrain.text, wakeWriteRootNotice].filter(
+      (value): value is string => value !== undefined && value.length > 0
+    );
+    const priorMessages = Object.freeze([
+      ...ctx.state.messages,
+      hostDrainMessage(wakeTailTexts),
+    ]);
     const { result, trace } = await runHarness(
       "",
       ctx.deps,
@@ -1263,15 +1339,24 @@ export async function runChatSubagentWake(opts: {
       }
     );
     acknowledgeChatSubagentDrain(ctx, pendingDrain.pendingText);
-    if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+    const wakeCheckpointTarget = chatCheckpointTarget(ctx);
+    if (wakeCheckpointTarget !== undefined) {
       await persistChatSessionCheckpoint({
-        store: ctx.checkpointStore,
-        conversationId: ctx.state.conversationId,
+        store: wakeCheckpointTarget.store,
+        conversationId: wakeCheckpointTarget.conversationId,
         jsonMode: ctx.state.jsonMode,
         result,
         priorMessages: ctx.state.messages,
+        // ADR-0150: the checkpoint save is the carrier when it holds the
+        // digest.
+        onPersisted: (written) => {
+          digestAck.observe(written);
+        },
       });
     }
+    // ADR-0150: the wake ended. A digest no write carried goes back to
+    // claimable; a digest a write carried stays delivered.
+    digestAck.settle(true);
     if (
       result.stopReason !== "protocolError" &&
       result.stopReason !== "emptyFinalResponse"
@@ -1285,6 +1370,9 @@ export async function runChatSubagentWake(opts: {
       priorMessages,
     });
   } catch (err) {
+    // ADR-0150: the wake never reached a carrier → the claim goes back, so
+    // a later wake can offer the result again.
+    digestAck.settle(false);
     const wakeError = toSubagentWakeError(err, {
       taskIds: queryableSubagentTaskIds(ctx.subagentManager),
       queryable: ctx.subagentManager !== undefined,
@@ -1764,6 +1852,10 @@ async function runChatQueryLine(
         };
   const outputs: string[] = [];
   let lastStatusLine: string | undefined;
+  // ADR-0150: the delivery latches of this turn's sub-agent digest claims.
+  // One latch per auto-loop iteration: the write that carries the digest
+  // acknowledges the claim, any other outcome releases it.
+  const digestLatches = createDeliveryLatchSet();
   // auto-memory: session-level prefetch dedup — exclude ids already
   // injected in this conversation (lazy resume recovery from ctx.state.messages
   // on first attach) and record what this turn actually injects (overlay-
@@ -1788,6 +1880,14 @@ async function runChatQueryLine(
         // priorMessages. Empty manager / nothing completed → priorMessages
         // unchanged (zero behavior change).
         const pendingDrain = await collectChatSubagentDrain(ctx);
+        // ADR-0150: the latch for this round's claim. The checkpoint save is
+        // the write that carries the digest; without a checkpoint store no
+        // write can ever carry it (the documented fallback).
+        digestLatches.begin({
+          claims: pendingDrain.claims,
+          digestText: pendingDrain.digestText,
+          hasDurableCarrier: chatHasDurableCarrier(ctx),
+        });
         // Write-root segment: injected once after rebind, concatenated after
         // the drain (if any), cleared on consumption.
         const writeRootNotice = ctx.pendingWriteRootNotice;
@@ -1952,10 +2052,11 @@ async function runChatQueryLine(
         // falls out naturally from the catch branch: an unresolved run has
         // no usable turnCount / messages, and appendCheckpoint can't
         // produce delta>0).
-        if (ctx.checkpointStore && ctx.state.conversationId !== null) {
+        const queryCheckpointTarget = chatCheckpointTarget(ctx);
+        if (queryCheckpointTarget !== undefined) {
           await appendChatTurnOutcome({
-            store: ctx.checkpointStore,
-            conversationId: ctx.state.conversationId,
+            store: queryCheckpointTarget.store,
+            conversationId: queryCheckpointTarget.conversationId,
             result: s.result,
             priorMessages: s.priorMessages,
             // `ctx.state.messages` is only reassigned AFTER this hook (see the
@@ -1963,14 +2064,19 @@ async function runChatQueryLine(
             finalMessages: s.result.messages,
           });
           await persistChatSessionCheckpoint({
-            store: ctx.checkpointStore,
-            conversationId: ctx.state.conversationId,
+            store: queryCheckpointTarget.store,
+            conversationId: queryCheckpointTarget.conversationId,
             jsonMode: ctx.state.jsonMode,
             ...(ctx.workspaceRoot !== undefined
               ? { workspaceRoot: ctx.workspaceRoot }
               : {}),
             result: s.result,
             priorMessages: s.priorMessages,
+            // ADR-0150: the checkpoint save is the carrier when it holds the
+            // digest.
+            onPersisted: (written) => {
+              digestLatches.observe(written);
+            },
           });
         }
         // Continue the conversation next turn on cancelled/timeout/nonSuccessStop
@@ -2006,6 +2112,9 @@ async function runChatQueryLine(
               }\n`
             ),
         });
+        // ADR-0150: the round ended. A digest no write carried goes back to
+        // claimable; a digest a write carried stays delivered.
+        digestLatches.settle(true);
       },
       decideContinue: async (s) =>
         applyChatAutoContinue({
@@ -2026,6 +2135,9 @@ async function runChatQueryLine(
       },
     });
   } catch (err) {
+    // ADR-0150: the round never reached a carrier → the claims go back, so
+    // a later round can offer the results again.
+    digestLatches.releaseAll();
     await applyChatAutoError(ctx, err);
     if (err instanceof MaxTurnsExceeded) {
       // ADR-0011: maxTurns overflow is a forced-awareness signal — catch
@@ -2760,10 +2872,13 @@ export async function seedResumeMessages(opts: {
  * --resume reads a contiguous snapshot series.
  *
  * **Error handling**: all failures reuse SessionStore's existing typed
- * kinds (write_failed / not_found / parse_failed / schema_invalid), never
- * invent new ones; failures go to stderr via `opts.warn?.(line)` and
- * continue — never crash the REPL, never block exit (the second Ctrl+C
- * only bounded-waits 1s).
+ * kinds (write_failed / not_found / parse_failed / schema_invalid /
+ * concurrent_write), never invent new ones; failures go to stderr via
+ * `opts.warn?.(line)` and continue — never crash the REPL, never block
+ * exit (the second Ctrl+C only bounded-waits 1s). One exception: a
+ * `concurrent_write` refusal (the failure mode this path's `keepHead`
+ * declaration created) also prints through the module's `writeErr`
+ * operator sink even when no `warn` was passed.
  */
 /**
  * ADR-0126: persist the settled turn's terminal outcome — the chat REPL's
@@ -2821,6 +2936,22 @@ async function readChatTurnHead(
   }
 }
 
+/** Human-readable reason for a close-save notice. A typed store error is a
+ *  plain object by contract (String(err) would render `[object Object]`), so
+ *  it goes through `storeErrorDetail` — the same detail the host's error
+ *  printer uses; the `concurrent_write` refusal adds what happened in words,
+ *  because the id alone would not say which write lost and why. Any other
+ *  throwable keeps its message. */
+function saveFailureReason(err: unknown): string {
+  if (isTypedStoreError(err)) {
+    if (err.kind === "concurrent_write") {
+      return `${storeErrorDetail(err)}：另一 writer 已先行推进链表，本次 close 落后被拒`;
+    }
+    return storeErrorDetail(err);
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 export async function persistChatSessionCheckpoint(opts: {
   readonly store: SessionStore;
   readonly conversationId: string;
@@ -2836,6 +2967,14 @@ export async function persistChatSessionCheckpoint(opts: {
   readonly newFormat?: boolean;
   /** stderr notice on write failure / corrupted file (silent by default — observer discipline). */
   readonly warn?: (line: string) => void;
+  /**
+   * ADR-0150: observe the messages a successful save actually wrote, so the
+   * delivery latch can acknowledge the claim that write carried. Absent → no
+   * observation; a skipped save (decision `none`) is never a carrier.
+   */
+  readonly onPersisted?: (
+    written: ReadonlyArray<AnthropicNativeMessage>
+  ) => void;
 }): Promise<void> {
   const {
     store,
@@ -2907,16 +3046,27 @@ export async function persistChatSessionCheckpoint(opts: {
       // hub.conditionalSave (reopen must not regress to 0%).
       ...persistedLastUsage(result.lastUsage),
     };
-    await store.save({ id: conversationId, file: updated });
+    // keepHead: either persisting decision writes a wholesale projection, which
+    // can be behind a commit another writer made on this id; the store refuses
+    // that rewind (concurrent_write) and writes nothing, and the catch below
+    // reports it.
+    await store.save({ id: conversationId, file: updated, keepHead: true });
+    // ADR-0150: the save landed — the written array is a carrier when it
+    // holds the digest.
+    notifyPersisted(opts.onPersisted, persistedMessages);
   } catch (err) {
     // Failures warn only — never rethrow / never crash the REPL. Typed
     // kinds pass through verbatim for diagnosis.
-    const kind = isSessionStoreErrorKind(err)
-      ? `[${(err as SessionStoreError).kind}]`
-      : "";
-    warn?.(
-      `会话检查点写入失败 ${kind}（${err instanceof Error ? err.message : String(err)}），本次进度未持久化`
-    );
+    const kind = isTypedStoreError(err) ? err.kind : undefined;
+    const notice = `会话检查点写入失败${
+      kind ? ` [${kind}]` : ""
+    }（${saveFailureReason(err)}），本次进度未持久化`;
+    // WHY only concurrent_write reaches the operator sink unconditionally:
+    // this turn's keepHead declaration is what created that refusal, so it is
+    // the only failure this change makes visible; every other kind keeps the
+    // previous optional-`opts.warn` behavior (silent at the chat entries).
+    if (kind === "concurrent_write") writeErr(notice);
+    warn?.(notice);
   }
 }
 
@@ -3322,8 +3472,10 @@ export function createStreamPreviewSink(opts: {
         return;
       }
       // All other events (tool_call_start / thinking_delta / stop_summary /
-      // …) are closing points: flush the previous item first, then handle
-      // this one.
+      // context_usage …) are closing points: flush the previous item first,
+      // then handle this one. The occupancy beat arrives after a model phase
+      // ends, so the pending call's input JSON is already complete when it
+      // flushes the line.
       flushPending();
       if (event.type === "tool_call_start") {
         if (!textStreamed) {

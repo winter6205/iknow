@@ -12,7 +12,7 @@ import type {
   TraceError,
   TraceService,
 } from "../trace/index.js";
-import type { YoloContext } from "../sandbox/yolo.js";
+import type { FenceRetirementReader } from "../sandbox/yolo.js";
 import type {
   EgressPolicyInput,
   EgressSession,
@@ -24,6 +24,7 @@ import {
   createEgressSession,
   createEnvIsolation,
   createFsPolicy,
+  prepareProtectedFenceWiring,
   protectedFenceWiring,
   runInSandbox,
   wrapCommandWithInnerBridge,
@@ -48,6 +49,24 @@ export type RunVerifyFn = ((
 ) => Promise<SandboxRunResult>) & {
   readonly disposeEgressSession?: () => Promise<void>;
 };
+
+/**
+ * This call's PROTECTED_TARGETS pair (the arm choice lives at that single
+ * wiring point). This route only supplies its own default: the inventory
+ * resolves against the verify homeRoot when present, else homedir() — the drift
+ * review found this route was the one carrying its own defaults.
+ */
+async function fenceWiringForCall(
+  fenceRetired: boolean,
+  homeRoot: string | undefined,
+  workspaceRoot: string
+): Promise<ReturnType<typeof protectedFenceWiring>> {
+  return prepareProtectedFenceWiring({
+    homeRoot: homeRoot ?? homedir(),
+    workspaceRoot,
+    fenceRetired,
+  });
+}
 
 /**
  * Production default runVerify: same sandbox assembly as the bash tool (verify
@@ -109,14 +128,14 @@ export function makeDefaultRunVerify(opts: {
    */
   readonly egressPolicy?: EgressPolicyInput;
   /**
-   * ADR-0119: --yolo no-sandbox holder (same holder shape as the bash factory).
+   * ADR-0141: the derived fence posture (same reader shape as the bash factory).
    * Read once at assembly via get() — this factory rebuilds the closure per
    * round from verify-loop, so the snapshot vintage matches the bash handler
-   * entry's D2. Under yolo the fence takes bare argv and starts no egress
+   * entry's D2. With the fence retired it takes bare argv and starts no egress
    * session (no fence means no netns, the proxy seam is meaningless, ADR-0119
    * ruling 3). Absent / false → today's shape byte-for-byte unchanged.
    */
-  readonly yolo?: YoloContext;
+  readonly fenceRetired?: FenceRetirementReader;
   /**
    * worktree-on-mutate holder (read-only view). This closure is rebuilt per
    * round by verify-loop, so the factory-time `get()` equals that round's
@@ -146,10 +165,10 @@ export function makeDefaultRunVerify(opts: {
     gateOn: opts.worktreeOnMutate?.get() === true,
     root: opts.cwd,
   });
-  // ADR-0119: read the yolo holder once at factory time — the caller rebuilds
+  // ADR-0119: read the fence posture once at factory time — the caller rebuilds
   // this closure per round, so the snapshot vintage matches the bash handler
   // entry's D2.
-  const yolo = opts.yolo?.get() === true;
+  const fenceRetired = opts.fenceRetired?.get() === true;
   const fsPolicy = createFsPolicy({ tmpDir, mode: fsMode });
   const envIsolation = createEnvIsolation({ allowEnv: BASE_ENV_WHITELIST });
   // Egress session — lazy-started on first call and released once the command
@@ -218,10 +237,11 @@ export function makeDefaultRunVerify(opts: {
     // (ADR-0097)
     // from host env).
     // Egress session lazy start — begins on first call, reused after. Under
-    // yolo it is skipped wholesale (no session, no socket bind, no proxy env):
-    // no fence means no netns (ADR-0119 ruling 3); non-yolo is byte-for-byte
+    // a retired fence it is skipped wholesale (no session, no socket bind, no
+    // proxy env): no fence means no netns (ADR-0119 ruling 3); the fenced path is
+    // byte-for-byte
     // unchanged.
-    const session = yolo ? undefined : await ensureEgressSession();
+    const session = fenceRetired ? undefined : await ensureEgressSession();
     // Inner-bridge command prefix, identical in shape to the bash tool's
     // foreground / background spawn; the single concat point is the egress
     // module's `wrapCommandWithInnerBridge` — with a session the payload is
@@ -233,6 +253,13 @@ export function makeDefaultRunVerify(opts: {
       TMPDIR: tmpDir,
       ...(session !== undefined ? session.spec.env : {}),
     };
+    // PROTECTED_TARGETS pair for this call — the LAST await before the fence, so
+    // the walk's snapshot is adjacent to the binds that mount it. The scan scope
+    // is `opts.cwd`, which is the SAME root the other routes scan only because
+    // both production entry points thread the session's bound workspace root
+    // here (hub `boundRoot`, chat `ctx.workspaceRoot`) — the fence cwd and the
+    // scan scope are one value by construction, in either fs mode.
+    const fenceWiring = await fenceWiringForCall(fenceRetired, homeRoot, opts.cwd);
     const fence = createBwrapFence({
       command: "bash",
       args: ["-c", commandPayload],
@@ -251,19 +278,8 @@ export function makeDefaultRunVerify(opts: {
       // Egress seam (per-call fence argv, session owned by this closure).
       // (ADR-0097)
       ...(session !== undefined ? { egress: session.spec } : {}),
-      // PROTECTED_TARGETS wiring (T7 write block + T8 credential read mask) —
-      // same `protectedFenceWiring` bundle as the bash tool foreground /
-      // background: the inventory resolves against the verify homeRoot when
-      // present, else homedir() (the drift review found this route was the
-      // one carrying its own defaults), and the name-pattern scan scope is
-      // `opts.cwd`. That is the SAME root the other routes scan only because
-      // both production entry points thread the session's bound workspace
-      // root here (hub `boundRoot`, chat `ctx.workspaceRoot`) — the fence cwd
-      // and the scan scope are one value by construction, in either fs mode.
-      ...protectedFenceWiring({
-        homeRoot: homeRoot ?? homedir(),
-        workspaceRoot: opts.cwd,
-      }),
+      // PROTECTED_TARGETS pair, hoisted above so its walk could be awaited.
+      ...fenceWiring,
       // UNBOUND_FENCE segment — same segment, same order as the bash tool surface.
       ...(unboundMainCheckout !== undefined
         ? {
@@ -274,10 +290,10 @@ export function makeDefaultRunVerify(opts: {
           }
         : {}),
       // ADR-0119: the whole-fence-retirement switch — spread-guard keeps the
-      // non-yolo fence opts byte-identical; when true the fence factory emits
+      // fenced fence opts byte-identical; when true the fence factory emits
       // bare argv (the fsMode tier and the egress field both have nothing to
-      // carry — yolo wins).
-      ...(yolo ? { yolo: true } : {}),
+      // carry — the retired fence wins).
+      ...(fenceRetired ? { fenceRetired: true } : {}),
     });
     return runInSandbox({
       fence,

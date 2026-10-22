@@ -38,6 +38,7 @@ import {
   currentSecretValues,
 } from "../../../src/harness/sandbox/index.ts";
 import {
+  DEFAULT_OWNER,
   setActiveExtraSecrets,
   clearActiveExtraSecrets,
 } from "../../../src/harness/sandbox/env-isolation.ts";
@@ -64,11 +65,11 @@ const SECRET = "sk-live-dispatch-evidence";
 const tmpDirs: string[] = [];
 
 beforeEach(() => {
-  setActiveExtraSecrets([SECRET]);
+  setActiveExtraSecrets(DEFAULT_OWNER, [SECRET]);
 });
 
 afterEach(() => {
-  clearActiveExtraSecrets();
+  clearActiveExtraSecrets(DEFAULT_OWNER);
   while (tmpDirs.length > 0) {
     const d = tmpDirs.pop();
     if (d) rmSync(d, { recursive: true, force: true });

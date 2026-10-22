@@ -44,12 +44,17 @@ describe("types — basic shape", () => {
     assert.notEqual(HARD_WALL_DENY_PREFIX, "[user_denied]");
   });
 
-  it("AskUser signature accepts the (ctx) shape", () => {
+  it("AskUser signature accepts the (ctx) shape", async () => {
     const ask: AskUser = async () => true;
-    // smoke: invoking returns a Promise<boolean>
-    const p = ask({ tool: "x", input: {}, summaryHint: "" });
+    // smoke: the ctx carries the call's tool_use id and awaits its ending
+    const p = ask({
+      tool: "x",
+      input: {},
+      summaryHint: "",
+      toolUseId: "toolu_shape_1",
+    });
     assert.ok(p instanceof Promise);
-    p.then((v) => assert.equal(v, true));
+    assert.equal(await p, true);
   });
 
   it("PreToolUseHook is deny-only: undefined (pass) or PreHookBlock (block)", () => {

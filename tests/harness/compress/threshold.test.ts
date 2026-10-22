@@ -11,8 +11,8 @@ import {
 } from "../../../src/harness/compress/constant.ts";
 
 describe("getAutoCompactThreshold", () => {
-  it("缺省推导 (ADR-0100):window 200000 → floor(0.95 × window) = 190000", () => {
-    assert.equal(getAutoCompactThreshold(200_000, undefined), 190_000);
+  it("缺省推导 (ADR-0100):window 200000 → floor(0.9 × window) = 180000", () => {
+    assert.equal(getAutoCompactThreshold(200_000, undefined), 180_000);
     assert.equal(
       getAutoCompactThreshold(200_000, undefined),
       Math.floor(200_000 * AUTO_COMPACT_STRATEGY_RATIO)
@@ -24,7 +24,7 @@ describe("getAutoCompactThreshold", () => {
     // denominator ≈ the provider's real cap; over a strategy budget it would
     // compact too early. Both constants remain in constant.ts (ported
     // constant set, value-pinned by constant.test.ts against drift); since
-    // ADR-0100 the default gate is floor(0.95 × window) and production has no
+    // ADR-0100 the default gate is floor(0.9 × window) and production has no
     // consumer of the old formula.
     assert.notEqual(
       getAutoCompactThreshold(200_000, undefined),
@@ -36,21 +36,21 @@ describe("getAutoCompactThreshold", () => {
     );
   });
 
-  it("仓库缺省策略预算窗口 256000 → 缺省闸 243200", () => {
-    assert.equal(getAutoCompactThreshold(256_000, undefined), 243_200);
+  it("仓库缺省策略预算窗口 256000 → 缺省闸 230400", () => {
+    assert.equal(getAutoCompactThreshold(256_000, undefined), 230_400);
   });
 
   it("缺省闸向下取整:不可整除的 window 不产分数阈值", () => {
-    assert.equal(getAutoCompactThreshold(1_001, undefined), 950);
+    assert.equal(getAutoCompactThreshold(1_001, undefined), 900);
     assert.equal(getAutoCompactThreshold(9, undefined), 8);
   });
 
   it("显式 threshold = 0 → 忽略,走推导 (不 throw)", () => {
-    assert.equal(getAutoCompactThreshold(200_000, 0), 190_000);
+    assert.equal(getAutoCompactThreshold(200_000, 0), 180_000);
   });
 
   it("显式负数 (如 -1) → 不满足 > 0,走推导 (不 throw)", () => {
-    assert.equal(getAutoCompactThreshold(200_000, -1), 190_000);
+    assert.equal(getAutoCompactThreshold(200_000, -1), 180_000);
   });
 
   it("显式 threshold 优先:150000 < window → 返回 150000", () => {

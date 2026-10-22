@@ -19,8 +19,9 @@
  *          `&` or `>` keeps today's denial;
  *     (1b) an owned redirect mark: a redirect fact owned by the unit (via
  *          `redirects[].ownerCommandIndex`) whose operator text contains `>`
- *          (which also catches `>&` / `&>`-style operators, but there the
- *          `&` claim fires first, mirroring today's check order);
+ *          (`&>` and `>&file` still raise the `&` claim first). An fd
+ *          duplication — `>&` whose target is only digits (`2>&1`, `>&1`,
+ *          `1>&2`) — is neither this claim nor the `&` claim;
  *     (1c) a background mark: a `background` (or `|&` `pipe-both`) list
  *          operator fact touching the unit — the `&` that terminates a
  *          command rather than the `&&` that joins two.
@@ -195,8 +196,9 @@ const GIT_FSCK_MUTATING_FLAGS: ReadonlySet<string> = Object.freeze(
  * policy and flag tables are consulted with.
  */
 interface ReadonlyUnit {
-  /** `&` claim: background operator (1c), or a word text / redirect
-   * operator carrying `&` (1a/1b). Checked first, as today. */
+  /** `&` claim: background operator (1c), `|&`, `&>` / `>&file`, or a
+   * word whose text carries `&`. An fd duplication `N>&M` is not this
+   * claim. Checked first, as today. */
   readonly ampersand: boolean;
   /** `>` claim: output-redirect operator (1b), or a word text carrying `>`
    * (1a). */
@@ -253,20 +255,30 @@ function validateReadonlyTextPath(command: string): void {
 }
 
 function validateSegment(segment: string, command: string): void {
+  // `&&` is already consumed by the text splitter. What remains is bare `&`,
+  // `|&`'s leftover `&`, `&>` / `>&file`, or an fd duplication `N>&M`.
+  // `N>&M` (`2>&1`, `>&1`, `1>&2`) copies a descriptor; it is not a background
+  // job and not an output-file redirect. Quoted `>` strings stay a rare
+  // false-positive cost; deny-by-default accepts it.
+  const residue = withoutFdDuplications(segment);
   admitUnit(
     {
-      // Strictening 1: bare & (background operator) — the raw-text reading,
-      // where `&&` is already consumed by the text splitter so any remaining
-      // `&` in a segment is bare `&`, `&>`, or `2>&1` (conservative reject).
-      ampersand: segment.includes("&"),
-      // Strictening 2: output redirection (>, >>, &>, 2>). Catching any `>`
-      // in the segment covers all output-redirect forms. Quoted `>` strings
-      // are a rare false-positive cost; deny-by-default accepts it.
-      greaterThan: segment.includes(">"),
+      ampersand: residue.includes("&"),
+      greaterThan: residue.includes(">"),
       tokens: tokenize(segment),
     },
     command
   );
+}
+
+/**
+ * Drop fd duplications (`2>&1`, `>&2`, `10>&1`, optional blank before the
+ * destination digits). The digit run must end the word, so `>&1bar` and
+ * `>&file` stay in the residue and keep today's `&` / `>` denials. `&>`,
+ * `|&`, and bare `&` do not match.
+ */
+function withoutFdDuplications(segment: string): string {
+  return segment.replace(/\d*>&[ \t]*\d+(?=$|[\s|&;<>()])/g, "");
 }
 
 /**
@@ -524,8 +536,9 @@ interface UnitDraft {
  *     (background, `|&`) attributes to a command;
  *   - every redirect has a resolvable owner command;
  *   - every `;` / `|` / `&` character in the text sits inside a top-level
- *     operator span (quoted or escaped occurrences abstain to the fold,
- *     which denied them via its quote-blind cut/`&`-scan);
+ *     operator span, except an `&` that is the dup marker of an fd
+ *     duplication (`>&` onto digits only). Quoted or escaped occurrences
+ *     abstain to the fold, which still denies them via its quote-blind scan;
  *   - the text between operators is fully covered by word and redirect
  *     spans up to whitespace — comments, variable-assignment prefixes
  *     (`FOO=bar ls`), or any other unmodelled spelling abstain to the fold.
@@ -569,7 +582,9 @@ function readonlyCutRanges(ok: SecurityParseOk): FactSpan[] | null {
 }
 
 /** Step 2. Quote-blind survivors: any `;` `|` `&` the fold would have cut or
- * marked on must be a real top-level operator here, or the fold answers. */
+ * marked on must be a real top-level operator here, or the fold answers.
+ * An fd-duplication `&` (`2>&1`) is not a survivor: the fold does not mark
+ * it, and the redirect scan below does not either. */
 function foldSurvivorsAttributed(ok: SecurityParseOk): boolean {
   return ampersandOperatorsAttributed(ok) && separatorCharactersCut(ok);
 }
@@ -597,11 +612,34 @@ function operatorAttributesToCommand(
 function separatorCharactersCut(ok: SecurityParseOk): boolean {
   for (let index = 0; index < ok.text.length; index += 1) {
     if (!FOLD_SEPARATOR_CHARACTERS.has(ok.text[index]!)) continue;
-    if (!ok.operators.some((o) => o.span.start <= index && index < o.span.end)) {
-      return false;
-    }
+    if (separatorCharacterAttributed(ok, index)) continue;
+    return false;
   }
   return true;
+}
+
+function separatorCharacterAttributed(
+  ok: SecurityParseOk,
+  index: number
+): boolean {
+  if (ok.operators.some((o) => o.span.start <= index && index < o.span.end)) {
+    return true;
+  }
+  return ok.text[index] === "&" && fdDupAmpersandAt(ok, index);
+}
+
+function fdDupAmpersandAt(ok: SecurityParseOk, index: number): boolean {
+  return ok.redirects.some(
+    (redirect) =>
+      isFdDuplication(redirect) &&
+      redirect.span.start <= index &&
+      index < redirect.span.end
+  );
+}
+
+/** `>&` onto a pure fd number (`2>&1`, `>&1`). Not `&>`, `>&file`, or `>&-`. */
+function isFdDuplication(redirect: RedirectFact): boolean {
+  return redirect.op === ">&" && /^\d+$/.test(redirect.target.text);
 }
 
 /** Step 3. Attribute commands, redirects, operators, and words to ranges by
@@ -667,6 +705,10 @@ function redirectOwnerSlot(
 
 function markRedirectDraft(draft: UnitDraft, redirect: RedirectFact): void {
   draft.redirects.push(redirect);
+  // Fd duplication (`2>&1`) is neither a background operator nor an
+  // output-file redirect. `&>` and `>&file` still set both claims; the `&`
+  // claim is checked first.
+  if (isFdDuplication(redirect)) return;
   if (redirect.op.includes("&") || redirect.target.text.includes("&")) {
     draft.ampersand = true;
   }

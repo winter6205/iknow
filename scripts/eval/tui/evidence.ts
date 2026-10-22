@@ -280,9 +280,133 @@ function parseLines(text: string): StoreRecord[] {
     .map((line) => JSON.parse(line) as StoreRecord);
 }
 
+interface BaselineAnchor {
+  /** Text of the last COMPLETE line at baseline time — the primary identity. */
+  readonly lastLine?: string;
+  /** Complete-line ordinal at baseline time; cross-check for `lastLine`. */
+  readonly lineCount?: number;
+  readonly eventIds?: readonly string[];
+}
+
+/**
+ * The records the run is allowed to count, located by IDENTITY.
+ *
+ * WHY NOT BYTES (#1219). The store is not append-only in byte offset:
+ * `SessionStore.save()` writes the whole log to a tmp file and renames it over
+ * the authority, and the `session` header on line 1 GROWS during a run
+ * (`turnCount`, `title`, `lastUsage`), so every record after it shifts. A byte
+ * offset measured at baseline therefore lands mid-line in the FINAL copy: both
+ * `parseLines` calls would start or end inside a record and throw `JSON.parse`,
+ * which `finalizeEvidence` turns into `counters: null` and the required check
+ * `evidence.counters_derived` into a failure — an otherwise clean run reported
+ * unusable. `session-store-reader.ts` documents the same fact about its own
+ * `byteOffset`; this mirrors its re-anchoring.
+ *
+ * `lastLine` is the anchor, not the event ids, because a `native_state` boundary
+ * record carries NO `id`, so an id-based boundary would stop at the last
+ * `message` line and pull the resumed round's terminal boundary into this run's
+ * window. A line's TEXT is unique and survives a length change in an earlier
+ * line. `eventIds` is the fallback for a baseline written before `lastLine` was
+ * persisted. If none of the anchors can be located the store was rewritten below
+ * the baseline and the run is unmeasurable — this throws rather than widening the
+ * window to "from the start" and reporting numbers it cannot account for.
+ */
+/**
+ * The retained `baseline.json` body.
+ *
+ * WHY this lives beside `locateBoundary`: the writer and the reader of this
+ * shape are one contract, and `run.ts` had grown a second, drifting copy of the
+ * field list. `byteOffset` is a report field only — it does not survive a
+ * `save()` rewrite, because the `session` header on line 1 grows, which is why
+ * `lineCount` and `lastLine` are here.
+ */
+export function baselineArtifact(baseline: {
+  readonly conversationId: string;
+  readonly byteOffset: number;
+  readonly lineCount: number;
+  readonly lastLine: string;
+  readonly eventIds: readonly string[];
+  readonly path: string;
+}): string {
+  return JSON.stringify(
+    {
+      conversationId: baseline.conversationId,
+      byteOffset: baseline.byteOffset,
+      lineCount: baseline.lineCount,
+      lastLine: baseline.lastLine,
+      eventIds: baseline.eventIds,
+      path: baseline.path,
+    },
+    null,
+    2
+  );
+}
+
+/**
+ * The baseline's own last line, located in the final copy. The ordinal is tried
+ * first because it is the common case and it is O(1); the text search is the
+ * fallback for a file whose line COUNT changed.
+ */
+function boundaryByLastLine(
+  occupied: readonly string[],
+  baseline: BaselineAnchor
+): number | null {
+  if (baseline.lastLine === undefined || baseline.lastLine === "") return null;
+  if (
+    baseline.lineCount !== undefined &&
+    occupied[baseline.lineCount - 1] === baseline.lastLine
+  ) {
+    return baseline.lineCount - 1;
+  }
+  const found = occupied.lastIndexOf(baseline.lastLine);
+  return found >= 0 ? found : null;
+}
+
+/** The last record whose id was already in the baseline, or -1. */
+function boundaryByEventIds(
+  occupied: readonly string[],
+  ids: ReadonlySet<string>
+): number {
+  let boundary = -1;
+  for (let i = 0; i < occupied.length; i++) {
+    let id: unknown;
+    try {
+      id = (JSON.parse(occupied[i]!) as { id?: unknown }).id;
+    } catch {
+      throw new Error(
+        `the retained store copy has a record that is not valid JSON at line ${i + 1}; ` +
+          `the window cannot be established by identity`
+      );
+    }
+    if (typeof id === "string" && ids.has(id)) boundary = i;
+  }
+  return boundary;
+}
+
+function locateBoundary(
+  lines: readonly string[],
+  baseline: BaselineAnchor
+): number {
+  const occupied = lines.filter((l) => l.trim() !== "");
+  const ids = new Set(baseline.eventIds ?? []);
+  const byText = boundaryByLastLine(occupied, baseline);
+  if (byText !== null) return byText;
+  const byId = ids.size > 0 ? boundaryByEventIds(occupied, ids) : -1;
+  if (byId >= 0) return byId;
+  // A FRESH conversation: the baseline is genuinely empty, so everything in the
+  // store is this run's work. This is not the same as an unlocatable anchor, and
+  // conflating the two would fail every first-run.
+  if (baseline.lastLine === undefined || baseline.lastLine === "") return -1;
+  throw new Error(
+    `the baseline boundary is no longer in the retained store copy; it was ` +
+      `rewritten below the measured window, so the accepted/settled counters ` +
+      `cannot be attributed to this run`
+  );
+}
+
 function deriveStoreCounters(
   storeJsonl: string,
-  baselineOffset: number
+  baseline: BaselineAnchor
 ): {
   accepted: number;
   settled: number;
@@ -297,13 +421,14 @@ function deriveStoreCounters(
       `the retained store copy does not satisfy the production parser: ${whole.error.message}`
     );
   }
-  const bytes = Buffer.from(raw, "utf8");
-  const windowed = parseLines(bytes.subarray(baselineOffset).toString("utf8"));
-  const baselineIds = new Set<string>(
-    parseLines(bytes.subarray(0, baselineOffset).toString("utf8"))
-      .filter((r) => r.type === "message")
-      .map((r) => (r as { id: string }).id)
+  const allLines = raw.split("\n");
+  const windowed = parseLines(
+    allLines
+      .filter((l) => l.trim() !== "")
+      .slice(locateBoundary(allLines, baseline) + 1)
+      .join("\n")
   );
+  const baselineIds = new Set<string>(baseline.eventIds ?? []);
   // The production parser hands back every record AFTER the header, so the
   // header is counted from the file's own first line rather than assumed.
   const census: Record<string, number> = {};
@@ -327,10 +452,10 @@ function deriveStoreCounters(
 export function deriveCounters(refs: ArtifactRefs): RunCounters {
   const baseline = JSON.parse(
     readFileSync(requireFileOrThrow(refs.baselineJson), "utf8")
-  ) as {
-    byteOffset?: number;
-  };
-  const store = deriveStoreCounters(refs.storeJsonl, baseline.byteOffset ?? 0);
+  ) as BaselineAnchor;
+  // Identity, not `byteOffset` — see `locateBoundary`. A baseline written
+  // before this repair still carries `eventIds`, so it remains usable.
+  const store = deriveStoreCounters(refs.storeJsonl, baseline);
   return {
     runKind: refs.runKind,
     runDir: refs.runDir,

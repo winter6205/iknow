@@ -211,16 +211,16 @@ export interface VerifyLoopOptions {
    */
   readonly fsMode?: import("../sandbox/fs-mode.js").FsIsolationMode;
   /**
-   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder. Passed through to
+   * ADR-0141: the derived fence posture. Passed through to
    * `makeDefaultRunVerify` (read once at assembly via `get()`, same vintage as
-   * the bash handler entry's per-call snapshot); under yolo the verify fence takes
-   * bare argv and starts no egress session (ADR-0119 ruling 3). Absent / false
-   * → today's shape byte-for-byte unchanged (V1 baseline). One deliberate
-   * difference from the fsMode value: this passes the **holder**, not the tier
+   * the bash handler entry's per-call snapshot); when retired the verify fence
+   * takes bare argv and starts no egress session (ADR-0119 ruling 3). Absent /
+   * false → today's shape byte-for-byte unchanged (V1 baseline). One deliberate
+   * difference from the fsMode value: this passes the **reader**, not the tier
    * value — the default runner rebuilds its closure per round, so the snapshot
    * belongs inside `makeDefaultRunVerify`.
    */
-  readonly yolo?: import("../sandbox/yolo.js").YoloContext;
+  readonly fenceRetired?: import("../sandbox/yolo.js").FenceRetirementReader;
   readonly homeRoot?: string;
   /**
    * worktree-on-mutate holder (read-only view) — passed through to
@@ -245,16 +245,17 @@ export interface VerifyLoopOptions {
   readonly tmpDir?: string;
   /**
    * Egress proxy seam policy — injected by the caller (hub / chat-session,
-   *
-   // (ADR-0097)
    * usually derived via `createEgressPolicyFactory`) and passed to
-   * `makeDefaultRunVerify` (module-level per-session singleton, lazy-started
-   * on the first verify command). Default = no session = no seam (baseline).
+   * `makeDefaultRunVerify`. The runner closure owns the session: it starts
+   * lazily on the first command, and the executor releases it after every
+   * command (a later command starts its own). Default = no policy = no seam
+   * (baseline).
    *
-   * **Production assembly TODO**: hub / chat-session wiring points still to
-   * be connected — this only defines the contract, not the assembly.
+   * No production caller passes this today (neither hub nor chat-session wires
+   * the policy), so the verify route runs every fence with plain network
+   * isolation. This defines the contract, not the assembly.
    *
-   // (ADR-0097)
+   * ADR-0097
    */
   readonly egressPolicy?: import("../sandbox/index.js").EgressPolicyInput;
 }
@@ -1487,16 +1488,18 @@ function runClassifierLoop(
  *
  * ADR-0092: fs tier + homeRoot + session tmp pass-through (all absent →
  * global tier / process tmpdir, baseline bytes unchanged).
- * Egress seam: module-level per-session singleton, lazy-started on the first
- *
- // (ADR-0097)
- * verify call. **Production assembly TODO**: hub / chat-session wiring still
- * to be connected — this only defines the contract.
+ * Egress seam (ADR-0097): the policy travels to the verify runner factory,
+ * which owns the session inside the closure it builds. The closure is rebuilt
+ * per verify round; the session starts lazily on the first command and the
+ * executor releases it after every command, so a later command starts its own
+ * session. It is neither a module-level singleton nor session-scoped state.
+ * No production caller passes a policy today, so the seam stays closed and
+ * every verify fence runs with plain network isolation.
  */
 function buildVerifyRunnerArgs(options: VerifyLoopOptions): {
   cwd: string;
   fsMode?: VerifyLoopOptions["fsMode"];
-  yolo?: VerifyLoopOptions["yolo"];
+  fenceRetired?: VerifyLoopOptions["fenceRetired"];
   homeRoot?: string;
   tmpDir?: string;
   egressPolicy?: VerifyLoopOptions["egressPolicy"];
@@ -1509,7 +1512,9 @@ function buildVerifyRunnerArgs(options: VerifyLoopOptions): {
     ...(options.worktreeOnMutate !== undefined
       ? { worktreeOnMutate: options.worktreeOnMutate }
       : {}),
-    ...(options.yolo !== undefined ? { yolo: options.yolo } : {}),
+    ...(options.fenceRetired !== undefined
+      ? { fenceRetired: options.fenceRetired }
+      : {}),
     ...(options.homeRoot !== undefined ? { homeRoot: options.homeRoot } : {}),
     ...(options.tmpDir !== undefined ? { tmpDir: options.tmpDir } : {}),
     ...(options.egressPolicy !== undefined

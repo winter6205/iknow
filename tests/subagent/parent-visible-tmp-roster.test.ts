@@ -13,7 +13,7 @@ import type { ChildProcess } from "node:child_process";
 import { afterEach, beforeEach, describe, it, vi } from "vitest";
 
 import { workerFenceTmpPath } from "../../src/harness/sandbox/fence-tmp.ts";
-import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
+import { peekPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
 import { FINAL_TEXT_PAD_NAME } from "../../src/harness/subagent/envelope.ts";
@@ -123,7 +123,7 @@ describe("T6 empty handoff pad roster (SC5)", () => {
     assert.equal(drained.length, 1);
     assertRosterNamesOnly(drained[0]!.envelope, ["notes.md", "sketch.txt"]);
 
-    const text = await drainPendingSubagents(manager);
+    const text = await peekPendingSubagents(manager);
     assert.match(text, /notes\.md/);
     assert.match(text, /sketch\.txt/);
     assert.doesNotMatch(text, new RegExp(SECRET_BODY));

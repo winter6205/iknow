@@ -122,14 +122,13 @@ export interface AssemblyContext {
    *  as deps.agentStatus — only surfaces that inject the bar get the read
    *  rule; ask / worker never do. */
   readonly agentStatusReadRule?: boolean;
-  /** Git block seam (optional). Returns a **session-frozen** snapshot (the
-   *  closure captures once; taken synchronously once during assembly).
-   *  Every turn calls the same closure → adjacent turns are byte-identical
-   *  (KV cache contract). Absent / undefined → segment absent (zero byte
-   *  change); degraded states (cwd_unavailable / not_a_git_repo /
-   *  git_unavailable) → segment absent without error (absence implies byte
-   *  change is an accepted trade). */
-  readonly git?: () => GitSnapshot | undefined;
+  /** Git block seam (optional). Returns the **session-frozen** snapshot from
+   *  the provider closure (`createGitSnapshotProvider` in `git-snapshot.ts` is
+   *  the contract SSOT); every turn awaits the same pending capture → adjacent
+   *  turns are byte-identical (KV cache contract). Absent / undefined → segment
+   *  absent (zero byte change); degraded states → segment absent without
+   *  error (absence implies byte change is an accepted trade). */
+  readonly git?: () => Promise<GitSnapshot | undefined>;
   /** Git-work discipline seam (optional boolean gate): true → assemble the
    *  "## Git work" segment; absent / false → segment absent (no empty
    *  string, no tutorials, KV cache byte-stability). Production only
@@ -361,9 +360,9 @@ export function createIknowSystemResolver(opts: {
   readonly coordinatorText?: string;
   /** Boolean gate; see AssemblyContext.agentStatusReadRule (driven by the same gate). */
   readonly agentStatusReadRule?: boolean;
-  /** Optional git-block seam. The closure takes one synchronous snapshot at
-   *  factory time and freezes it for the session. See AssemblyContext.git. */
-  readonly git?: () => GitSnapshot | undefined;
+  /** Optional git-block seam; forwarded to AssemblyContext.git unchanged (the
+   *  provider closure owns the capture — see `createGitSnapshotProvider`). */
+  readonly git?: () => Promise<GitSnapshot | undefined>;
   /** Git-work discipline segment; see AssemblyContext.gitWorkDiscipline.
    *  Never forwarded on the ask surface even when true. A function is
    *  re-read on every system() call so a live isolation switch can drop
@@ -499,15 +498,14 @@ export async function assembleIdentityContext(
   // `## Project path` — byte-stable content): appended after the MCP name
   // directory, before the agent-status read rule; does not touch the LOCKED
   // 6-segment order and does not share a gate with agentStatusReadRule. Data
-  // source is the closure created by `git-snapshot.ts`, taken once
-  // synchronously and frozen for the session; degraded states
-  // (cwd_unavailable / not_a_git_repo / git_unavailable) → segment absent
-  // (byte-identical). Both build-engine and the worker take it synchronously
-  // at assembly time.
+  // source is the provider closure (`createGitSnapshotProvider` in
+  // `git-snapshot.ts` owns the capture contract): degraded states → segment
+  // absent (byte-identical). Both build-engine and the worker await it at
+  // assembly time.
   if (ctx.git) {
     let snapshot: GitSnapshot | undefined;
     try {
-      snapshot = ctx.git();
+      snapshot = await ctx.git();
     } catch (err) {
       console.warn(
         `[identity/assemble] git snapshot resolver failed: ${String(err)}`

@@ -281,12 +281,12 @@ describe("loadIknowEnv — compress config (#119 T1)", () => {
     assert.equal(env.compress.thresholdTokens, undefined);
   });
 
-  it("缺省分母与 auto-compact 闸同源 (ADR-0100):未设 env/settings → 256000 与 floor(0.95×256000)", () => {
+  it("缺省分母与 auto-compact 闸同源 (ADR-0100):未设 env/settings → 256000 与 floor(0.9×256000)", () => {
     // CONTEXT **strategy budget window** / **auto-compact token gate**: the display
     // denominator and the gate consult the same number. If the three defaults (env
     // derived value / TUI ContextBar / health projection) each wrote their own
     // literal, drift in any one would reintroduce inconsistencies like
-    // "display shows 95% but compaction hasn't fired".
+    // "display shows 90% but compaction hasn't fired".
     const env = loadIknowEnv(process.cwd(), EMPTY_SETTINGS);
     assert.equal(env.compress.contextWindow, DEFAULT_STRATEGY_CONTEXT_WINDOW);
     assert.equal(TUI_DEFAULT_CONTEXT_WINDOW, DEFAULT_STRATEGY_CONTEXT_WINDOW);
@@ -296,7 +296,7 @@ describe("loadIknowEnv — compress config (#119 T1)", () => {
     );
     assert.equal(
       getAutoCompactThreshold(env.compress.contextWindow, undefined),
-      243_200
+      230_400
     );
   });
 

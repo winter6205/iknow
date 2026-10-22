@@ -71,6 +71,95 @@ function manifestJson(overrides: Record<string, unknown> = {}): string {
   return JSON.stringify({ ...manifest(), ...overrides });
 }
 
+/**
+ * The four paths the #1221 headless qualification froze, verbatim.
+ *
+ * Each one is a real, existing artifact on the evaluation host, and `cli.ts` makes all four
+ * MANDATORY explicit flags. `resolveConfig` reads no file, so asserting on these literals
+ * exercises value validation only — no artifact is opened and no settings content is read.
+ */
+function frozenLiteralPaths(): Partial<ConfigParams> {
+  return {
+    datasetRoot: "/home/winner/eval-1189/dataset",
+    bundlePath: "/home/winner/eval-1189/bundle/iknow-bundle-9fa88f57.tgz",
+    nodeArchivePath: "/home/winner/eval-1212/prov/node.tar.gz",
+    settingsPath: "/home/winner/.iknow/settings.json",
+    runRoot: "/home/winner/eval-20261007-harness-qualification-v1",
+  };
+}
+
+/** The frozen #1221 protocol manifest, reproduced field for field. */
+function frozenProtocolManifest(): EvalManifest {
+  return manifest({
+    runId: "iknow-1221-harness-qualification-v1",
+    runnerVersion: "tb2.1-docker/1",
+    outputLayout: "tb2.1-slot-v1/<task>:<arm>:<maxTurns>",
+    slots: [
+      {
+        task: "sqlite-with-gcov",
+        image: "alexgshaw/sqlite-with-gcov:20251031",
+        imageDigest:
+          "sha256:f986820b00c74ce75db7288719d364df313fde7c7917bea6eb6352a08431a89f",
+        maxTurns: 12,
+        arm: "qualification",
+      },
+    ],
+  });
+}
+
+/**
+ * Every path parameter, paired with a replacement that is genuinely unusable. Each entry
+ * is driven through the REAL validation the CLI calls, so a param the CLI requires cannot
+ * silently stop being checked.
+ */
+const PATH_PARAM_REJECTIONS: ReadonlyArray<
+  readonly [keyof ConfigParams, unknown, string]
+> = [
+  ["datasetRoot", undefined, "omitted"],
+  ["datasetRoot", "", "empty"],
+  ["datasetRoot", "   ", "whitespace-only"],
+  ["datasetRoot", 42, "non-string"],
+  ["datasetRoot", "/srv/eval/${DATASET_ROOT}", "unexpanded shell variable"],
+  ["datasetRoot", "/srv/eval/{{datasetRoot}}", "unexpanded mustache slot"],
+  ["datasetRoot", "<path-to-dataset>", "angle-bracket placeholder"],
+  ["datasetRoot", "/srv/eval/TODO/dataset", "TODO marker segment"],
+  ["bundlePath", "/srv/eval/$BUNDLE.tgz", "bare shell variable"],
+  ["bundlePath", "/srv/eval/FIXME/bundle.tgz", "FIXME marker segment"],
+  ["bundlePath", "", "empty"],
+  [
+    "nodeArchivePath",
+    "/srv/eval/{{nodeArchivePath}}",
+    "unexpanded mustache slot",
+  ],
+  [
+    "nodeArchivePath",
+    "/srv/eval/CHANGEME/node.tar.gz",
+    "CHANGEME marker segment",
+  ],
+  ["nodeArchivePath", null, "null"],
+  ["settingsPath", "/srv/eval/TBD/settings.json", "TBD marker segment"],
+  ["settingsPath", "", "empty"],
+  ["runRoot", "/srv/eval/XXX/runs", "XXX marker segment"],
+  ["runRoot", "<run-root>", "angle-bracket placeholder"],
+];
+
+describe("every path parameter still refuses an unusable value", () => {
+  for (const [param, value, label] of PATH_PARAM_REJECTIONS) {
+    it(`refuses a ${label} ${param}`, () => {
+      const problems = validateConfigParams(
+        params({ [param]: value } as unknown as Partial<ConfigParams>)
+      );
+
+      assert.ok(
+        problems.some((problem) => problem.includes(param)),
+        `expected ${param}=${JSON.stringify(value) ?? "undefined"} refused; got: ${JSON.stringify(
+          problems
+        )}`
+      );
+    });
+  }
+});
+
 describe("explicit config parameters", () => {
   it("accepts a fully specified configuration", () => {
     assert.deepEqual(
@@ -80,25 +169,30 @@ describe("explicit config parameters", () => {
     );
   });
 
-  it("refuses the inherited machine-specific dataset default", () => {
-    const problems = validateConfigParams(
-      params({ datasetRoot: "/home/winner/eval-1189/dataset" })
-    );
-
-    assert.ok(
-      problems.some((problem) => problem.includes("datasetRoot")),
-      `expected a datasetRoot refusal; got: ${JSON.stringify(problems)}`
+  // CONVERTED (issue 1219). The replaced test asserted `/home/winner/eval-1189/dataset`
+  // was refused. It is a REAL, EXISTING dataset on the host and `cli.ts` requires
+  // `--dataset-root` explicitly, so that assertion made the CLI impossible to satisfy: the
+  // frozen #1221 run exited 1 before the run root, Docker wiring or any dispatch, with four
+  // "still a placeholder" lines naming artifacts the operator had named by hand.
+  // Replaced by the opposite contract plus strictly stronger coverage: every one of the
+  // four literals is accepted through the REAL `resolveConfig`, and every unresolved
+  // template form is still refused.
+  it("accepts the frozen #1221 historical literals as explicit real paths", () => {
+    assert.deepEqual(
+      validateConfigParams(params({ ...frozenLiteralPaths() })),
+      [],
+      "an explicitly supplied, existing artifact must not be refused for matching a " +
+        "historical default literal (issue 1219)"
     );
   });
 
-  it("refuses the inherited machine-specific node tarball default", () => {
-    const problems = validateConfigParams(
-      params({ nodeArchivePath: "/home/winner/eval-1212/prov/node.tar.gz" })
-    );
-
-    assert.ok(
-      problems.some((problem) => problem.includes("nodeArchivePath")),
-      `expected a nodeArchivePath refusal; got: ${JSON.stringify(problems)}`
+  it("accepts an inherited machine-specific node tarball default as an explicit path", () => {
+    assert.deepEqual(
+      validateConfigParams(
+        params({ nodeArchivePath: "/home/winner/eval-1212/prov/node.tar.gz" })
+      ),
+      [],
+      "issue 1219: the frozen node tarball is a real supplied artifact"
     );
   });
 
@@ -266,6 +360,40 @@ describe("manifest validation (required test 8)", () => {
       () => parseManifest("{ not json"),
       (error: unknown) => error instanceof ConfigError,
       "malformed JSON must throw ConfigError"
+    );
+  });
+
+  // Requirement (f): empty input is its own case. `JSON.parse("")` and
+  // `JSON.parse("{}")` both fail loudly here, and an empty slot list is a refusal rather
+  // than an empty run — so no malformed or empty manifest can ever resolve silently.
+  it("refuses an empty, whitespace-only or bare-JSON manifest document", () => {
+    for (const text of ["", "   ", "\n", "{}", "[]", "null"]) {
+      assert.throws(
+        () => parseManifest(text),
+        (error: unknown) => error instanceof ConfigError,
+        `expected ${JSON.stringify(text)} refused rather than silently parsed`
+      );
+    }
+  });
+
+  it("refuses a manifest document whose every field is blank", () => {
+    assert.throws(
+      () =>
+        parseManifest(
+          JSON.stringify({
+            ...manifest(),
+            runId: "",
+            datasetCommit: "  ",
+            bundleSha256: "",
+            nodeArchiveSha256: "",
+            runnerVersion: "",
+            outputLayout: "",
+          })
+        ),
+      (error: unknown) =>
+        error instanceof ConfigError &&
+        (error as ConfigError).problems.length >= 6,
+      "every blank pinned identity field must be reported, not just the first"
     );
   });
 
@@ -496,6 +624,57 @@ describe("resolved config", () => {
       () => resolveConfig(params({ bundlePath: "" }), manifest()),
       (error: unknown) => error instanceof ConfigError,
       "a placeholder parameter must refuse resolution"
+    );
+  });
+
+  // Requirement (a): the acceptance assertion goes through the REAL entry the CLI calls
+  // (`cli.ts` `main` → `resolveConfig`), with the frozen #1221 manifest and all four frozen
+  // literals, not a hand-rolled validator call. This is the config-only shape the #1221
+  // headless audit reproduced at exit 1.
+  it("resolves the frozen #1221 manifest and all four frozen literal paths", () => {
+    const resolved = resolveConfig(
+      params({ ...frozenLiteralPaths(), agentWallSec: 900 }),
+      frozenProtocolManifest()
+    );
+
+    assert.equal(
+      resolved.manifest.runId,
+      "iknow-1221-harness-qualification-v1",
+      "the frozen protocol manifest must resolve, not be refused"
+    );
+    assert.equal(
+      resolved.params.datasetRoot,
+      "/home/winner/eval-1189/dataset",
+      "the resolved config must carry the explicitly supplied dataset root"
+    );
+    assert.equal(
+      resolved.params.settingsPath,
+      "/home/winner/.iknow/settings.json",
+      "the resolved config must carry the explicitly supplied settings path"
+    );
+    assert.equal(
+      resolved.manifest.slots.length,
+      1,
+      "the frozen slot list must survive resolution"
+    );
+    assert.equal(
+      resolved.identityFor(resolved.manifest.slots[0]!).outputLayout,
+      "tb2.1-slot-v1/<task>:<arm>:<maxTurns>",
+      "the frozen layout template must reach the identity intact"
+    );
+  });
+
+  it("still refuses to resolve when any frozen literal is replaced by a template", () => {
+    assert.throws(
+      () =>
+        resolveConfig(
+          params({ ...frozenLiteralPaths(), bundlePath: "${BUNDLE_PATH}" }),
+          frozenProtocolManifest()
+        ),
+      (error: unknown) =>
+        error instanceof ConfigError &&
+        /bundlePath is still a placeholder/.test(error.message),
+      "the acceptance above must not have relaxed the placeholder refusal"
     );
   });
 

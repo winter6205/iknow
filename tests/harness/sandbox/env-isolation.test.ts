@@ -26,6 +26,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   BASE_ENV_WHITELIST,
+  DEFAULT_OWNER,
   SECRET_ENV_NAMES,
   applyCwdReadonlyFenceEnv,
   clearActiveExtraSecrets,
@@ -319,11 +320,11 @@ describe("#406 T3 — currentSecretValues extraSecrets 合并 (A3)", () => {
 });
 
 describe("#406 T3 — activeExtraSecrets 模块槽位 (A4 trace/jsonl 路径)", () => {
-  beforeEach(() => clearActiveExtraSecrets());
-  afterEach(() => clearActiveExtraSecrets());
+  beforeEach(() => clearActiveExtraSecrets(DEFAULT_OWNER));
+  afterEach(() => clearActiveExtraSecrets(DEFAULT_OWNER));
 
   it("setActiveExtraSecrets 后 currentSecretValues() 无参调用含值", () => {
-    setActiveExtraSecrets(["sk-registry-secret"]);
+    setActiveExtraSecrets(DEFAULT_OWNER, ["sk-registry-secret"]);
     const result = currentSecretValues({});
     assert.ok(
       result.includes("sk-registry-secret"),
@@ -332,21 +333,21 @@ describe("#406 T3 — activeExtraSecrets 模块槽位 (A4 trace/jsonl 路径)", 
   });
 
   it("clearActiveExtraSecrets 后 currentSecretValues() 无参调用不含值", () => {
-    setActiveExtraSecrets(["sk-registry-secret"]);
-    clearActiveExtraSecrets();
+    setActiveExtraSecrets(DEFAULT_OWNER, ["sk-registry-secret"]);
+    clearActiveExtraSecrets(DEFAULT_OWNER);
     const result = currentSecretValues({});
     assert.ok(!result.includes("sk-registry-secret"));
   });
 
   it("setActiveExtraSecrets 入参去重（重复值只留一份）", () => {
-    setActiveExtraSecrets(["sk-dup", "sk-dup", "sk-other"]);
+    setActiveExtraSecrets(DEFAULT_OWNER, ["sk-dup", "sk-dup", "sk-other"]);
     const result = currentSecretValues({});
     const occurrences = result.filter((v) => v === "sk-dup").length;
     assert.equal(occurrences, 1);
   });
 
   it("显式 extraSecrets 优先于模块槽位（?? 语义）", () => {
-    setActiveExtraSecrets(["from-module"]);
+    setActiveExtraSecrets(DEFAULT_OWNER, ["from-module"]);
     const result = currentSecretValues({}, ["from-explicit"]);
     assert.ok(
       result.includes("from-explicit"),

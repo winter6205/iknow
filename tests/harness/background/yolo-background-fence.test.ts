@@ -3,17 +3,19 @@
  * (route 2 of four).
  *
  * Invariants pinned here (Contract §3 / §6):
- *   - `BackgroundSpawnRequest.yolo` (a static value forwarded from the per-call
- *     snapshot in bash.ts) → `defaultBackgroundSpawn` passes yolo to
- *     `createBwrapFence` → the fence argv is bare (`argv[0] = "bash"`); when
- *     absent / false → byte-identical to the baseline bwrap argv;
- *   - yolo ON ⇒ `manager.spawn` starts no egress session (no fence = no netns, so
- *     the proxy seam is meaningless — ADR-0119 ruling 3): `createEgressSession`
- *     is not called and the spawn request carries no `egressSpec`; the control
- *     case proves that the same non-yolo input does start a session and attach a
- *     spec;
- *   - the bash-handler hop itself: `{background:true}` + yolo holder → the
- *     `BackgroundSpawnRequest` handed to the manager carries `yolo: true`, and
+ *   - `BackgroundSpawnRequest.fenceRetiredAtSpawn` (a static value forwarded from
+ *     the per-call snapshot in bash.ts) → `defaultBackgroundSpawn` passes
+ *     `fenceRetired` to `createBwrapFence` → the fence argv is bare
+ *     (`argv[0] = "bash"`); when absent / false → byte-identical to the baseline
+ *     bwrap argv;
+ *   - a retired fence ⇒ `manager.spawn` starts no egress session (no fence = no
+ *     netns, so the proxy seam is meaningless — ADR-0119 ruling 3):
+ *     `createEgressSession` is not called and the spawn request carries no
+ *     `egressSpec`; the control case proves the same live-fence input does start a
+ *     session and attach a spec;
+ *   - the bash-handler hop itself: `{background:true}` + a retired fence → the
+ *     `BackgroundSpawnRequest` handed to the manager carries
+ *     `fenceRetiredAtSpawn: true`, and
  *     that captured request fed into the real `defaultBackgroundSpawn` emits
  *     bare argv (the per-call snapshot → request spread is not just assumed to
  *     forward).
@@ -40,7 +42,7 @@ vi.mock("node:child_process", async (importOriginal) => {
   };
 });
 
-// createEgressSession stand-in — counts "was it called while yolo is on". The
+// createEgressSession stand-in — counts "was it called under a retired fence". The
 // default impl throws so that any accidental real call goes explicitly red
 // instead of passing silently.
 const egressSessionCalls: unknown[] = [];
@@ -108,7 +110,7 @@ function makeFakeChild(pid = 99001): ChildProcess {
 
 /** Drive the real defaultBackgroundSpawn, capturing argv via the nodeSpawn intercept. */
 async function backgroundArgv(opts: {
-  readonly yolo?: boolean;
+  readonly fenceRetiredAtSpawn?: boolean;
 }): Promise<readonly string[]> {
   spawnMock.mockImplementation(() => makeFakeChild());
   await defaultBackgroundSpawn({
@@ -116,7 +118,9 @@ async function backgroundArgv(opts: {
     cwd: CWD,
     env: { PATH: "/bin" },
     tmpDir: TMP,
-    ...(opts.yolo !== undefined ? { yolo: opts.yolo } : {}),
+    ...(opts.fenceRetiredAtSpawn !== undefined
+      ? { fenceRetiredAtSpawn: opts.fenceRetiredAtSpawn }
+      : {}),
   });
   const call = spawnMock.mock.calls[0];
   expect(call).toBeDefined();
@@ -131,21 +135,21 @@ afterEach(() => {
   egressSessionCalls.length = 0;
 });
 
-describe("background spawn face — yolo wiring (ADR-0119)", () => {
-  it("yolo true → bare fence argv (argv[0] = bash)", async () => {
-    const argv = await backgroundArgv({ yolo: true });
+describe("background spawn face — retirement wiring (ADR-0141)", () => {
+  it("a retired fence → bare fence argv (argv[0] = bash)", async () => {
+    const argv = await backgroundArgv({ fenceRetiredAtSpawn: true });
     expect(argv).toEqual(["bash", "-c", "echo hi"]);
   });
 
-  it("yolo absent → baseline bwrap argv (argv[0] = bwrap); yolo:false is byte-identical", async () => {
+  it("absent → baseline bwrap argv (argv[0] = bwrap); false is byte-identical", async () => {
     const baseline = await backgroundArgv({});
     expect(baseline[0]).toBe("bwrap");
     expect(baseline).toContain("--unshare-net");
-    const withFalse = await backgroundArgv({ yolo: false });
+    const withFalse = await backgroundArgv({ fenceRetiredAtSpawn: false });
     expect(withFalse).toEqual(baseline);
   });
 
-  it("manager.spawn: yolo true with an egressPolicy present → no egress session, request has no egressSpec", async () => {
+  it("manager.spawn: retired fence with an egressPolicy present → no egress session, request has no egressSpec", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-yolo-bg-"));
     const capturedReqs: Record<string, unknown>[] = [];
     const manager = createBackgroundTaskManager({
@@ -159,7 +163,7 @@ describe("background spawn face — yolo wiring (ADR-0119)", () => {
       command: "true",
       cwd: CWD,
       tmpDir: TMP,
-      yolo: true,
+      fenceRetiredAtSpawn: true,
       egressPolicy: {
         allowedDomains: ["example.com"],
         deniedDomains: [],
@@ -170,11 +174,11 @@ describe("background spawn face — yolo wiring (ADR-0119)", () => {
     expect(egressSessionCalls).toHaveLength(0);
     expect(capturedReqs).toHaveLength(1);
     expect(capturedReqs[0]!.egressSpec).toBeUndefined();
-    expect(capturedReqs[0]!.yolo).toBe(true);
+    expect(capturedReqs[0]!.fenceRetiredAtSpawn).toBe(true);
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("control case: non-yolo with an egressPolicy present → createEgressSession called once, request carries egressSpec", async () => {
+  it("control case: a live fence with an egressPolicy present → createEgressSession called once, request carries egressSpec", async () => {
     const root = await fs.mkdtemp(join(tmpdir(), "iknow-yolo-bg-ctl-"));
     const capturedReqs: Record<string, unknown>[] = [];
     const manager = createBackgroundTaskManager({
@@ -191,7 +195,7 @@ describe("background spawn face — yolo wiring (ADR-0119)", () => {
       egressPolicy: {
         allowedDomains: ["example.com"],
         deniedDomains: [],
-        commandLabel: "bash:non-yolo-bg",
+        commandLabel: "bash:fenced-bg",
       },
     });
     expect(egressSessionCalls).toHaveLength(1);
@@ -199,7 +203,7 @@ describe("background spawn face — yolo wiring (ADR-0119)", () => {
     await fs.rm(root, { recursive: true, force: true });
   });
 
-  it("handler hop: bash {background:true} + yolo holder → request carries yolo:true → the real defaultBackgroundSpawn emits bare argv", async () => {
+  it("handler hop: bash {background:true} + retired fence → request carries fenceRetiredAtSpawn:true → the real defaultBackgroundSpawn emits bare argv", async () => {
     const captured: BackgroundSpawnRequest[] = [];
     const manager = {
       spawn: async (req: BackgroundSpawnRequest) => {
@@ -211,11 +215,11 @@ describe("background spawn face — yolo wiring (ADR-0119)", () => {
         };
       },
     } as unknown as BackgroundTaskManager;
-    // yolo ON at construction skips requireBwrap (bash.ts assembly gate), so
-    // this case is bwrap-free-host safe like the rest of this file.
+    // A retired fence at construction skips requireBwrap (bash.ts assembly
+    // gate), so this case is bwrap-free-host safe like the rest of this file.
     const tool = createBashTool(CWD, {
       tmpDir: TMP,
-      yolo: createYoloContext(true),
+      fenceRetired: createYoloContext(true),
       backgroundManager: manager,
     });
     const receipt = (await tool.handler(
@@ -224,7 +228,7 @@ describe("background spawn face — yolo wiring (ADR-0119)", () => {
     )) as { task_id: string };
     expect(receipt.task_id).toBe("bg-yolo-hop");
     expect(captured).toHaveLength(1);
-    expect(captured[0]!.yolo).toBe(true);
+    expect(captured[0]!.fenceRetiredAtSpawn).toBe(true);
 
     // Feed the handler-captured request into the real spawn face: the whole
     // hop (per-call snapshot → request spread → fence factory) yields bare

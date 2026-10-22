@@ -29,6 +29,7 @@ import { spawn as nodeSpawn, type ChildProcess } from "node:child_process";
 import { appendFile, readFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
+import { setTimeout as setRealTimeout } from "node:timers";
 
 import {
   BASE_ENV_WHITELIST,
@@ -37,15 +38,26 @@ import {
   createEgressSession,
   createEnvIsolation,
   createFsPolicy,
+  EgressAgentDisposedError,
   fenceScanScope,
+  prepareProtectedFenceWiring,
   protectedFenceWiring,
   wrapCommandWithInnerBridge,
 } from "../sandbox/index.js";
 import type {
+  EgressAgent,
+  EgressCallEndpoint,
   EgressFenceSpec,
   EgressPolicyInput,
-  EgressSession,
 } from "../sandbox/index.js";
+// Direct module import (not the `sandbox/index.js` barrel): the call-policy
+// projection (drop the session-level credential roster) is the assembly
+// layer's own contract with the egress domain, and the barrel's re-export
+// list is owned elsewhere.
+import {
+  adaptEgressSessionToEndpoint,
+  toEgressCallPolicy,
+} from "../sandbox/egress/session.js";
 import type {
   BackgroundTaskRecord,
   BackgroundTaskStatus,
@@ -57,7 +69,9 @@ import type { BackgroundTaskError } from "./registry.js";
 import { readProcStartTime } from "./proc.js";
 import {
   NOT_STARTED_CLEANUP,
+  GROUP_POLL_MS,
   confirmedStopped,
+  isProcessGroupGone,
   sendSignalToProcessGroup,
   unconfirmedCleanup,
   waitForProcessGroupGone,
@@ -77,7 +91,39 @@ export type BackgroundSpawnValidationError =
       /** Constructive action hint (ADR-0021 discipline: state the situation
        *  + available actions, zero negative wording). */
       message: string;
+    }
+  | {
+      /**
+       * The session-resident egress agent was already released — a LIFECYCLE
+       * fault (not a start failure): the task is NOT spawned, because a task
+       * that silently ran without its egress seam would hide the fault behind
+       * a run that looks healthy.
+       */
+      kind: "egress_agent_released";
+      context: string;
+      /** The released agent's id (observation surface). */
+      agent_id: string;
     };
+
+/**
+ * The outcome of the per-task egress seam assembly.
+ *
+ * `endpoint` is the task's own endpoint (absent = the task runs without an
+ * egress seam — the fail-closed offline fence). `refusal` is set ONLY for a
+ * lifecycle fault (the session-resident agent was already released): the
+ * spawn then fails with the typed refusal instead of degrading into an
+ * offline task.
+ */
+interface TaskEgressStart {
+  readonly endpoint: EgressCallEndpoint | undefined;
+  readonly refusal: BackgroundSpawnValidationError | undefined;
+}
+
+/** No egress seam for this task — the task runs fail-closed (offline fence). */
+const NO_EGRESS_SEAM: TaskEgressStart = {
+  endpoint: undefined,
+  refusal: undefined,
+};
 
 /** Default log-read window 12KB (governance-value SSOT lives in the
  *  manager constant, ADR-0021). */
@@ -104,6 +150,12 @@ const STOP_GROUP_OBSERVE_MS = 250;
 /** shutdown constants mirroring subagent/manager.ts (same names, same
  *  values, for reviewability): SIGTERM → 5s grace → SIGKILL. */
 const SHUTDOWN_SIGKILL_GRACE_MS = 5_000;
+/** Bound for the shutdown settle drain: the host may bound the exit path
+ *  further, but the manager's own drain must not hold it indefinitely. */
+const SHUTDOWN_SETTLE_DRAIN_MS = 5_000;
+
+/** Process identity retained beside the ChildProcess handle. */
+type BackgroundProcessGroupState = "leader_live" | "leader_exited" | "gone";
 
 /** In-memory state: live in-process handle, not persisted to the registry json (child + mutable status). */
 interface BackgroundTask {
@@ -114,8 +166,21 @@ interface BackgroundTask {
    *  semantics as the settle closure). */
   readonly createdAt: string;
   child?: ChildProcess;
+  /** The detached process-group identity is the leader pid from spawn. */
+  readonly processGroupId: number;
+  readonly processGroupLeaderStartTime: number | undefined;
+  /** A group observed gone is retired forever; never signal a recycled pgid. */
+  processGroupState: BackgroundProcessGroupState;
   /** Serialized log appendFile chain: each chunk continues off the previous chain tail, preserving order. */
   writeChain: Promise<void>;
+  /** Event-triggered terminal persistence; shutdown drains it before releasing ownership. */
+  settlementPromise: Promise<void>;
+  /** Failed terminal persistence is retained until shutdown can report it. */
+  settlementFailure?: string;
+  /** The settlement promise a drain already gave up on. In-memory only: the
+   *  verdict is recorded, so waiting for the same promise again can only
+   *  spend another shutdown budget. */
+  timedOutSettlement?: Promise<void>;
   /**
    * First failed append, per channel, kept as task evidence. A failed WRITE
    * leaves the reader on the ENOENT → "" path — the very state
@@ -164,15 +229,24 @@ interface BackgroundTask {
    */
   terminationCause: BackgroundTerminationCause | null;
   /**
-   * ADR-0097: egress session handle — the per-task session started by
-   * manager.spawn; settle (triggered by child exit) disposes inside the
-   * already-settled guard, and abnormal paths (registry.save failure / spawn
-   * factory throw) dispose through the same fallback (ownership contract:
-   * "abnormal and normal paths release through the same channel").
+   * ADR-0097: egress endpoint handle — the per-task endpoint opened by
+   * manager.spawn (from the shared agent in production, from the legacy
+   * per-task session without one); settle (triggered by child exit) disposes
+   * inside the already-settled guard, and abnormal paths (registry.save
+   * failure / spawn factory throw) dispose through the same fallback
+   * (ownership contract: "abnormal and normal paths release through the same
+   * channel").
    *
-   * Absent = the caller passed no egressPolicy = this task has no egress session.
+   * Absent = the caller passed no egressPolicy = this task has no egress seam.
    */
-  egressSession?: EgressSession;
+  egressEndpoint?: EgressCallEndpoint;
+  /**
+   * ADR-0141: the fence posture frozen at spawn. Read through the existing
+   * status filter, so a live task spawned while the fence was retired keeps the
+   * 无沙箱 marker lit after the preset that spawned it cleared. No delete hook —
+   * liveness is the existing `status === "running"` filter.
+   */
+  readonly fenceRetiredAtSpawn?: boolean;
 }
 
 /** Externally read-only view; mutable fields are changed exclusively by the manager. */
@@ -192,6 +266,20 @@ interface MutableClientState {
   command: string;
 }
 
+type UnconfirmedCleanupEvidence = Extract<
+  CleanupEvidence,
+  { readonly state: "unconfirmed" }
+>;
+
+interface BackgroundShutdownCleanupError {
+  readonly kind: "cleanup_unconfirmed";
+  readonly context: string;
+  readonly cleanup: readonly UnconfirmedCleanupEvidence[];
+  /** Generic consumers format this with `String(err)`; without it the context
+   *  (and its task ids) is lost to `[object Object]`. */
+  toString(): string;
+}
+
 export interface CreateBackgroundTaskManagerOptions {
   /** Persistence root: `<poolRoot>/projects/<slug>/tasks/` (ADR-0088 home
    *  project tree) — same level and same slug as the session-folder leaf,
@@ -203,6 +291,18 @@ export interface CreateBackgroundTaskManagerOptions {
   readonly spawn: BackgroundSpawn;
   /** Persistence / risk-event log (silent by default). */
   readonly log?: (msg: string) => void;
+  /**
+   * The session-resident egress agent (one per engine assembly) — the
+   * manager opens this task's per-call ENDPOINT from it (its own socket /
+   * proxy instance / violation sink / fence spec), while the agent owns the
+   * session-level half (relay resolution, durable CA + trust bundle,
+   * credential mint) and loads it once for every task of the assembly.
+   *
+   * Production: build-engine hands the same agent to the manager and to every
+   * registry of the assembly. Absent → the manager keeps the legacy
+   * per-task session path (its own unit tests run that way).
+   */
+  readonly egressAgent?: EgressAgent;
 }
 
 /** Spawn-factory signature: takes the resolved request, returns a ChildProcess. */
@@ -263,14 +363,14 @@ export interface BackgroundSpawnRequest {
    */
   readonly workspaceRoot?: string;
   /**
-   * ADR-0119: --yolo no-sandbox snapshot — a static value passed through from
-   * the bash.ts handler-entry per-call snapshot, same vintage as fsMode / homeRoot.
-   * true → the fence takes bare argv (defaultBackgroundSpawn hands it to
-   * createBwrapFence), and this task starts no egress session: no fence means
-   * no netns, so the proxy seam is meaningless (ADR-0119 ruling 3). Absent /
-   * false → today's shape byte-for-byte unchanged.
+   * ADR-0141: the fence posture frozen at spawn — a static value passed through
+   * from the bash.ts handler-entry per-call snapshot, same vintage as fsMode /
+   * homeRoot. true → the fence takes bare argv (defaultBackgroundSpawn hands it
+   * to createBwrapFence), this task starts no egress session, and the task
+   * records the posture so the 无沙箱 marker reads it while the task is live.
+   * Absent / false → today's shape byte-for-byte unchanged.
    */
-  readonly yolo?: boolean;
+  readonly fenceRetiredAtSpawn?: boolean;
   /**
    * ADR-0097: egress proxy seam policy — passed in by the caller (typically
    * derived via `createEgressPolicyFactory`). Background-task form: the egress
@@ -294,9 +394,9 @@ export interface BackgroundSpawnRequest {
   readonly egressPolicy?: EgressPolicyInput;
   /**
    * ADR-0097: egress session startup product — set by manager.spawn before
-   * calling defaultBackgroundSpawn (createEgressSession(policy).spec). The
-   * spawn factory reads this field to build fence argv; manager.spawn holds
-   * the session handle and disposes it in the child-exit listener.
+   * calling defaultBackgroundSpawn (the endpoint's spec). The spawn factory
+   * reads this field to build fence argv; manager.spawn holds the endpoint
+   * handle and disposes it in the child-exit listener.
    *
    * Absent = the caller passed no egressPolicy = no session = no seam.
    * **External callers do not set this field**; it is an internal convention
@@ -418,6 +518,15 @@ export interface BackgroundOutputResult {
   readonly task_id: string;
 }
 
+/**
+ * Identity of a still-running background task. No command text and no log
+ * path: a busy set needs to know *which* tasks are live, not what they run.
+ */
+export interface BackgroundLiveTask {
+  readonly task_id: string;
+  readonly conversation_id: string;
+}
+
 export interface BackgroundTaskManager {
   /**
    * Starts a detached process group via the injected spawn factory and
@@ -443,6 +552,13 @@ export interface BackgroundTaskManager {
     requesterConversationId?: string
   ) => Promise<BackgroundOutputResult>;
   /**
+   * The tasks still running, as identity only. Synchronous in-memory scan (no
+   * disk, unlike output / status reads of the log); every conversation the
+   * manager owns is listed, callers join by `conversation_id` themselves.
+   * Never throws.
+   */
+  readonly listLiveTasks: () => ReadonlyArray<BackgroundLiveTask>;
+  /**
    * Host-side kill(-pgid): SIGTERM → 2s grace → SIGKILL.
    * Returns the teardown *request's* evidence, never a claim that the task
    * exited: the confirmed/unconfirmed verdict for a requested teardown lands on
@@ -456,12 +572,11 @@ export interface BackgroundTaskManager {
     requesterConversationId?: string
   ) => Promise<CleanupEvidence>;
   /**
-   * Process-level shutdown (mirrors the subagent manager's exit reap, ADR-0021):
-   * clear killFallback timers → SIGTERM all running process groups → ≤5s
-   * grace → SIGKILL groups still alive → registry json convergence
-   * (killed/exited + exit_code best-effort) → clear the in-memory Map.
-   * Idempotent: a second call sees an empty set and returns fast. Never
-   * throws (per-group signal errors are swallowed and surfaced via log).
+   * Reaps every process group owned by this manager, including descendants
+   * left after a leader exits. Uses a shared ≤5s TERM grace, then KILLs and
+   * observes remaining groups. Concurrent callers share one promise. Rejects
+   * with `cleanup_unconfirmed` when a signal fails, a group remains alive, or a
+   * task's terminal settlement/persistence did not complete.
    */
   readonly shutdown: () => Promise<void>;
   /**
@@ -508,6 +623,36 @@ function backgroundScanScope(req: BackgroundSpawnRequest): string {
   return req.workspaceRoot ?? fenceScanScope(req.cwd);
 }
 
+/**
+ * This spawn's PROTECTED_TARGETS pair (the arm choice lives at that single
+ * wiring point). This route only supplies its own frozen defaults: the
+ * inventory resolves against the request's homeRoot when present, else
+ * homedir() — the same default as the bash handler snapshot.
+ */
+async function fenceWiringForRequest(
+  req: BackgroundSpawnRequest
+): Promise<ReturnType<typeof protectedFenceWiring>> {
+  return prepareProtectedFenceWiring({
+    homeRoot: req.homeRoot ?? homedir(),
+    workspaceRoot: backgroundScanScope(req),
+    fenceRetired: req.fenceRetiredAtSpawn === true,
+  });
+}
+
+/**
+ * ADR-0141: the task row's optional fence-posture field. Same spread-guard
+ * shape as the sibling optional fields on that object, factored out so the
+ * branch does not sit inside `spawn` (S5: that function is already over the
+ * complexity limit at master and must not get worse).
+ */
+function fenceRetiredAtSpawnFields(request: BackgroundSpawnRequest): {
+  fenceRetiredAtSpawn?: boolean;
+} {
+  return request.fenceRetiredAtSpawn !== undefined
+    ? { fenceRetiredAtSpawn: request.fenceRetiredAtSpawn }
+    : {};
+}
+
 export async function defaultBackgroundSpawn(
   req: BackgroundSpawnRequest
 ): Promise<ChildProcess> {
@@ -544,6 +689,9 @@ export async function defaultBackgroundSpawn(
   // same shape as the bash.ts foreground consumer).
   const egressSpec = req.egressSpec;
   const commandPayload = wrapCommandWithInnerBridge(egressSpec, req.command);
+  // PROTECTED_TARGETS pair for this spawn — the LAST await before the fence, so
+  // the walk's snapshot is adjacent to the binds that mount it.
+  const fenceWiring = await fenceWiringForRequest(req);
   const fence = createBwrapFence({
     command: "bash",
     args: ["-c", commandPayload],
@@ -575,27 +723,20 @@ export async function defaultBackgroundSpawn(
     // manager.spawn is consumed here (socket --bind + spec.env --setenv
     // emitted at the single point by bwrap); absent = fully-offline baseline.
     ...(egressSpec !== undefined ? { egress: egressSpec } : {}),
-    // PROTECTED_TARGETS wiring (T7 write block + T8 credential read mask) —
-    // the same `protectedFenceWiring` bundle the foreground builds from its
-    // frozen inputs: the inventory resolves against the request's homeRoot
-    // when present, else homedir() (same default as the bash handler
-    // snapshot). Background tasks that retire the fence wholesale (yolo
-    // below) never reach the block.
-    ...protectedFenceWiring({
-      homeRoot: homeRoot ?? homedir(),
-      workspaceRoot: backgroundScanScope(req),
-    }),
+    // PROTECTED_TARGETS pair, hoisted above so its walk could be awaited (the
+    // single wiring point's bundle, foreground / background set-equal).
+    ...fenceWiring,
     // UNBOUND_FENCE segment pass-through — same values, same order as the
     // foreground buildForegroundFence (foreground/background set-equal, G3);
     // absent = segment not emitted, background argv byte-identical.
     ...(req.unboundFence !== undefined
       ? { unboundFence: req.unboundFence }
       : {}),
-    // ADR-0119: the whole-fence-retirement switch — spread-guard keeps the
-    // non-yolo fence opts byte-identical; when true the fence factory emits
+    // ADR-0141: the whole-fence-retirement switch — spread-guard keeps the
+    // fenced fence opts byte-identical; when true the fence factory emits
     // bare argv (the egress seam is skipped on the manager.spawn side, so it
     // never reaches the request).
-    ...(req.yolo === true ? { yolo: true } : {}),
+    ...(req.fenceRetiredAtSpawn === true ? { fenceRetired: true } : {}),
   });
   // ADR-0045: in consumer form (manager.spawn callers) there is no direct
   // node:child_process call anymore — the server.spawn long-lived
@@ -669,6 +810,140 @@ function validateRequest(
 }
 
 /**
+ * Present a legacy per-task egress session through the endpoint shape the
+ * manager consumes — the no-agent compatibility path (the manager's own unit
+ * tests). The endpoint owns this task's socket / proxy instance / sink; the
+ * legacy session owns the credential layer, so the adapter only forwards the
+ * release. The projection itself lives in the egress domain
+ * (`adaptEgressSessionToEndpoint`), shared with the foreground bash path.
+ */
+
+/**
+ * The reason of an unknown thrown value, as a short string — the bounded
+ * evidence a typed error carries (`cause`) and the read side raises typed.
+ */
+function failureReason(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+function registryFailureDetail(err: unknown): string {
+  const failure = err as { context?: unknown; cause?: unknown };
+  const context =
+    typeof failure.context === "string" ? failure.context : failureReason(err);
+  return failure.cause === undefined
+    ? context
+    : `${context}: ${failureReason(failure.cause)}`;
+}
+
+/**
+ * The `allSettled` results for a task's writes/settlement, or `undefined` if
+ * `deadline` passes first. The timer is not unref'd: the drain is on the
+ * shutdown path and must keep the loop alive until it resolves.
+ *
+ * The timeout is a REAL timer on purpose. A budget bounds how long the
+ * shutdown waits, and a clock that jumps (a fake clock, a suspended host)
+ * would otherwise expire the budget before the work ever got its turn — the
+ * verdict would then report work nobody observed as unfinished. The delay
+ * still comes from the deadline, so production waits exactly the remaining
+ * budget.
+ */
+async function settleWithinDeadline(
+  promises: readonly Promise<unknown>[],
+  deadline: number
+): Promise<PromiseSettledResult<unknown>[] | undefined> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<undefined>((resolve) => {
+    timer = setRealTimeout(
+      () => resolve(undefined),
+      Math.max(0, deadline - Date.now())
+    );
+  });
+  try {
+    return await Promise.race([Promise.allSettled(promises), timeout]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+/**
+ * Wait for each task's queued output and terminal transition to reach stable
+ * tails, bounded by `deadline`: a surviving descendant that keeps writing
+ * replaces `writeChain` on every chunk, so an unbounded loop would never reach
+ * shutdown's unconfirmed-cleanup throw.
+ */
+async function drainTaskWork(
+  tasks: readonly BackgroundTask[],
+  deadline: number
+): Promise<void> {
+  for (;;) {
+    const pending = tasks.map((task) => ({
+      task,
+      writes: task.writeChain,
+      settlement: task.settlementPromise,
+    }));
+    await Promise.all(
+      pending.map(async ({ task, writes, settlement }) => {
+        // A settlement a previous drain already gave up on gets no second
+        // wait: its verdict cannot improve, and the budget it would spend is
+        // the shutdown's worst case. A settlement that is not the same
+        // promise (a late exit) is waited for as usual.
+        const awaited =
+          task.timedOutSettlement === settlement
+            ? [writes]
+            : [writes, settlement];
+        const results = await settleWithinDeadline(awaited, deadline);
+        if (results === undefined) {
+          task.settlementFailure ??=
+            "settlement did not finish within the shutdown drain budget";
+          task.timedOutSettlement = settlement;
+          return;
+        }
+        const settlementResult = results[1];
+        if (settlementResult?.status === "rejected") {
+          task.settlementFailure ??= failureReason(settlementResult.reason);
+        }
+      })
+    );
+    if (
+      Date.now() >= deadline ||
+      pending.every(
+        ({ task, writes, settlement }) =>
+          task.writeChain === writes && task.settlementPromise === settlement
+      )
+    ) {
+      return;
+    }
+  }
+}
+
+/**
+ * The terminal settlement/persistence failures reportable as shutdown
+ * evidence. Mid-run log-append failures are deliberately excluded: they are
+ * already raised as typed `io_failure` by `output`, and relabelling them
+ * "teardown_failed" would claim a group teardown failed when it was confirmed.
+ */
+function taskSettlementFailures(
+  tasks: readonly BackgroundTask[]
+): UnconfirmedCleanupEvidence[] {
+  const evidence = new Map<string, UnconfirmedCleanupEvidence>();
+  for (const task of tasks) {
+    if (task.settlementFailure === undefined) continue;
+    const entry = unconfirmedCleanup(
+      task.processGroupId,
+      "teardown_failed",
+      task.settlementFailure,
+      task.task_id
+    );
+    // Guard, not a cast: `unconfirmedCleanup` widens to the full union, and
+    // only the unconfirmed branch is reportable shutdown evidence.
+    if (entry.state === "unconfirmed") {
+      evidence.set(`${task.task_id}:${task.settlementFailure}`, entry);
+    }
+  }
+  return [...evidence.values()];
+}
+
+/**
  * ADR-0134: disarm every timer a task is holding. Two independent reasons
  * they must not survive their owner: the stop escalation would re-issue a
  * SIGKILL that shutdown's own 5s grace already replaced, and a pending
@@ -683,6 +958,132 @@ function clearTaskTimers(task: BackgroundTask): void {
     clearTimeout(task.deadlineTimer);
     task.deadlineTimer = undefined;
   }
+}
+
+/**
+ * Check the task's own process group before signalling it. A leader starttime
+ * mismatch proves that its numeric pid has been reused; an absent leader can
+ * still have owned descendants in the original group.
+ */
+function isOwnedProcessGroupAlive(task: BackgroundTask): boolean {
+  if (task.processGroupState === "gone") return false;
+  const leaderStartTime = task.processGroupLeaderStartTime;
+  const currentLeaderStartTime = readProcStartTime(task.processGroupId);
+  if (
+    leaderStartTime !== undefined &&
+    currentLeaderStartTime !== undefined &&
+    currentLeaderStartTime !== leaderStartTime
+  ) {
+    task.processGroupState = "gone";
+    return false;
+  }
+  if (isProcessGroupGone(task.processGroupId)) {
+    task.processGroupState = "gone";
+    return false;
+  }
+  return true;
+}
+
+/** The ChildProcess handle remains the strongest identity while its leader lives. */
+function canSignalOriginalLeader(task: BackgroundTask): boolean {
+  if (task.processGroupState !== "leader_live") return false;
+  const child = task.child;
+  if (child === undefined) return false;
+  const currentStartTime = readProcStartTime(task.processGroupId);
+  if (task.processGroupLeaderStartTime !== undefined) {
+    return currentStartTime === task.processGroupLeaderStartTime;
+  }
+  return child.exitCode === null && child.signalCode === null;
+}
+
+/** Bounded, task-identity-aware observation used around shutdown escalation. */
+async function waitForOwnedProcessGroupGone(
+  task: BackgroundTask,
+  capMs: number
+): Promise<boolean> {
+  const polls = Math.max(1, Math.ceil(capMs / GROUP_POLL_MS));
+  for (let i = 0; i < polls; i += 1) {
+    if (!isOwnedProcessGroupAlive(task)) return true;
+    await new Promise((resolve) => setTimeout(resolve, GROUP_POLL_MS));
+  }
+  return !isOwnedProcessGroupAlive(task);
+}
+
+/**
+ * Stop the groups this manager launched. The grace period is shared across
+ * groups; a child exit never stands in for observing its whole group gone.
+ */
+async function stopOwnedProcessGroups(
+  ownedTasks: readonly BackgroundTask[],
+  log: (msg: string) => void
+): Promise<UnconfirmedCleanupEvidence[]> {
+  const candidates = ownedTasks.filter(isOwnedProcessGroupAlive);
+  const failures = new Map<BackgroundTask, string>();
+  for (const task of candidates) {
+    if (canSignalOriginalLeader(task)) {
+      try {
+        task.child?.kill("SIGTERM");
+      } catch {
+        // EXIT: the group signal below remains authoritative for cleanup.
+      }
+    }
+    sendSignalToProcessGroup(task.processGroupId, "SIGTERM", (detail) => {
+      failures.set(task, detail);
+      log(`background shutdown SIGTERM failed: ${detail}`);
+    });
+  }
+
+  await Promise.all(
+    candidates.map((task) =>
+      waitForProcessGroupGone(task.processGroupId, SHUTDOWN_SIGKILL_GRACE_MS)
+    )
+  );
+
+  for (const task of candidates) {
+    // EXIT: an identity mismatch or an observed empty group retires this pgid;
+    // never send SIGKILL to a process group that appeared under a reused id.
+    if (!isOwnedProcessGroupAlive(task)) continue;
+    if (canSignalOriginalLeader(task)) {
+      try {
+        task.child?.kill("SIGKILL");
+      } catch {
+        // EXIT: the group signal below remains authoritative for cleanup.
+      }
+    }
+    sendSignalToProcessGroup(task.processGroupId, "SIGKILL", (detail) => {
+      failures.set(task, detail);
+      log(`background shutdown SIGKILL failed: ${detail}`);
+    });
+  }
+
+  const gone = await Promise.all(
+    candidates.map((task) =>
+      waitForOwnedProcessGroupGone(task, STOP_GROUP_OBSERVE_MS)
+    )
+  );
+  const unconfirmed: UnconfirmedCleanupEvidence[] = [];
+  candidates.forEach((task, index) => {
+    const failure = failures.get(task);
+    const evidence =
+      failure !== undefined
+        ? unconfirmedCleanup(
+            task.processGroupId,
+            "teardown_failed",
+            failure,
+            task.task_id
+          )
+        : gone[index]
+          ? confirmedStopped(task.processGroupId, task.task_id)
+          : unconfirmedCleanup(
+              task.processGroupId,
+              "observation_expired",
+              "process group still alive when shutdown observation ended",
+              task.task_id
+            );
+    if (task.cleanup.state === "not_started") task.cleanup = evidence;
+    if (evidence.state === "unconfirmed") unconfirmed.push(evidence);
+  });
+  return unconfirmed;
 }
 
 /**
@@ -721,7 +1122,7 @@ function createSettleClosure(args: {
   readonly logPath: string;
   readonly registry: BackgroundRegistry;
   readonly disposeEgress: (
-    session: EgressSession | undefined,
+    endpoint: EgressCallEndpoint | undefined,
     taskId: string
   ) => Promise<void>;
   readonly log: (msg: string) => void;
@@ -735,12 +1136,12 @@ function createSettleClosure(args: {
       clearTimeout(task.deadlineTimer);
       task.deadlineTimer = undefined;
     }
-    // ADR-0097: the egress session is released inside the settle guard — same
+    // ADR-0097: the egress endpoint is released inside the settle guard — same
     // lifetime as the task (the child-exit event is the release moment);
     // a failed release is reported rather than swallowed, and shutdown()'s
     // convergence step does not re-dispose (this guard is idempotent).
-    if (task.egressSession !== undefined) {
-      await args.disposeEgress(task.egressSession, task.task_id);
+    if (task.egressEndpoint !== undefined) {
+      await args.disposeEgress(task.egressEndpoint, task.task_id);
     }
     client.status = status;
     client.exit_code = exitCode;
@@ -762,11 +1163,9 @@ function createSettleClosure(args: {
     try {
       await registry.save(rec);
     } catch (err) {
-      log(
-        `background registry save failed on settle: ${
-          (err as BackgroundTaskError).context
-        }`
-      );
+      const detail = `registry save failed on settle: ${registryFailureDetail(err)}`;
+      task.settlementFailure ??= detail;
+      log(`background ${detail}`);
     }
   };
 }
@@ -895,23 +1294,23 @@ export function createBackgroundTaskManager(
   }
 
   /**
-   * ADR-0097: the single release channel for the egress session — shared by
+   * ADR-0097: the single release channel for the egress endpoint — shared by
    * the spawn abnormal path, settle, and the shutdown fallback. dispose is
    * idempotent and the manager never reclaims twice; a failure is reported
    * (never rethrown — it would replace the task's own outcome) so a proxy that
    * may still be live leaves a trace naming the task.
    */
   async function disposeEgressQuietly(
-    session: EgressSession | undefined,
+    endpoint: EgressCallEndpoint | undefined,
     taskId: string
   ): Promise<void> {
-    if (session === undefined) return;
+    if (endpoint === undefined) return;
     try {
-      await session.dispose();
+      await endpoint.dispose();
     } catch (err) {
       // EXIT: the release failed. The task's status/exit code are already
       // settled and must not be replaced by a teardown fault, so the cause is
-      // logged as evidence. Drop this branch once every session implementation
+      // logged as evidence. Drop this branch once every endpoint implementation
       // proves a non-throwing dispose.
       log(
         `background egress session release failed for ${taskId}: ${
@@ -930,9 +1329,26 @@ export function createBackgroundTaskManager(
   function countRunningTasks(): number {
     let count = 0;
     for (const t of tasks.values()) {
-      if (t.client.status === "running") count += 1;
+      if (isLiveTask(t)) count += 1;
     }
     return count;
+  }
+
+  /** The manager's own "still live", shared by the cap gate and `listLiveTasks`. */
+  function isLiveTask(task: BackgroundTask): boolean {
+    return task.client.status === "running";
+  }
+
+  function listLiveTasks(): ReadonlyArray<BackgroundLiveTask> {
+    const live: BackgroundLiveTask[] = [];
+    for (const t of tasks.values()) {
+      if (!isLiveTask(t)) continue;
+      live.push({
+        task_id: t.task_id,
+        conversation_id: t.client.conversation_id,
+      });
+    }
+    return live;
   }
 
   async function spawn(
@@ -963,18 +1379,29 @@ export function createBackgroundTaskManager(
     const taskId = generateTaskId();
     const logPath = join(opts.tasksDir, `${taskId}.log`);
 
-    // ADR-0097: egress session assembly (per-task form; see the helper
+    // ADR-0097: egress seam assembly (per-task form; see the helper
     // comment).
-    const egressSession = await startTaskEgressSession(request, taskId);
+    const egressStart = await startTaskEgressEndpoint(request, taskId);
+    if (egressStart.refusal !== undefined) {
+      // A lifecycle fault (the session-resident agent was already released):
+      // the task is NOT spawned. No task id is consumed by a refused spawn
+      // beyond the one already generated (the registry never sees it).
+      return {
+        status: "spawn_error",
+        task_id: taskId,
+        error: egressStart.refusal,
+      };
+    }
+    const egressEndpoint = egressStart.endpoint;
     // The spawn factory consumes only spec (spec.env /
-    // spec.unixSocketPath / spec.sandboxLocalPort); egressSession.handle is
+    // spec.unixSocketPath / spec.sandboxLocalPort); the endpoint handle is
     // held by the manager and disposed on the settle path. **egressSpec is
     // an internal-convention field**; external callers do not set it (see
     // the BackgroundSpawnRequest.egressSpec comment).
     const spawnRequest: BackgroundSpawnRequest = {
       ...request,
-      ...(egressSession !== undefined
-        ? { egressSpec: egressSession.spec }
+      ...(egressEndpoint !== undefined
+        ? { egressSpec: egressEndpoint.spec }
         : {}),
     };
 
@@ -985,19 +1412,19 @@ export function createBackgroundTaskManager(
       const error: BackgroundTaskError = {
         kind: "io_failure",
         context: `spawn ${taskId}`,
-        cause: err instanceof Error ? err.message : String(err),
+        cause: failureReason(err),
       };
       log(`background spawn factory threw: ${error.context}`);
       // Abnormal path: the manager already started the egress session before
       // the spawn factory threw, so dispose is mandatory here (ownership:
       // "abnormal and normal paths release through the same channel").
-      await disposeEgressQuietly(egressSession, taskId);
+      await disposeEgressQuietly(egressEndpoint, taskId);
       return { status: "spawn_error", task_id: taskId, error };
     }
     if (child.pid === undefined) {
       log(`background spawn returned no pid: ${taskId}`);
       // Abnormal path: dispose as above.
-      await disposeEgressQuietly(egressSession, taskId);
+      await disposeEgressQuietly(egressEndpoint, taskId);
       return {
         status: "spawn_error",
         task_id: taskId,
@@ -1037,7 +1464,7 @@ export function createBackgroundTaskManager(
     const saveFailure = await saveSpawnRecordOrReap(record, child, registry);
     if (saveFailure !== undefined) {
       // Abnormal path: registry.save failed; the egress session disposes too.
-      await disposeEgressQuietly(egressSession, taskId);
+      await disposeEgressQuietly(egressEndpoint, taskId);
       return { status: "spawn_error", task_id: taskId, error: saveFailure };
     }
 
@@ -1053,14 +1480,21 @@ export function createBackgroundTaskManager(
       client,
       createdAt: record.created_at,
       child,
+      processGroupId: child.pid,
+      processGroupLeaderStartTime: starttime,
+      processGroupState: "leader_live",
       writeChain: Promise.resolve(),
+      settlementPromise: Promise.resolve(),
       cleanup: NOT_STARTED_CLEANUP,
       deadlineAt,
       timeoutMs: request.timeoutMs ?? null,
       terminationCause: null,
       // ADR-0097: dispose on the settle path (the session handle is held by
       // the manager, kept out of the registry and the zod schema).
-      ...(egressSession !== undefined ? { egressSession } : {}),
+      ...(egressEndpoint !== undefined ? { egressEndpoint } : {}),
+      // ADR-0141: freeze the fence posture this task started under, so the
+      // marker survives the preset's own exit while the task is still live.
+      ...fenceRetiredAtSpawnFields(request),
     };
     tasks.set(taskId, task);
 
@@ -1090,9 +1524,6 @@ export function createBackgroundTaskManager(
     // can tell which side a line came from; the merged log keeps the exact
     // bytes existing consumers read.
     const stderrLogPath = `${logPath}.stderr`;
-    /** Bounded reason of a failed append, so the read side can raise it typed. */
-    const failureReason = (err: unknown): string =>
-      err instanceof Error ? err.message : String(err);
     const enqueue = (chunk: Buffer | string): void => {
       task.writeChain = task.writeChain.then(() =>
         appendFile(logPath, chunk, "utf8").catch((err: unknown) => {
@@ -1138,6 +1569,9 @@ export function createBackgroundTaskManager(
       // migrates status + persists json; log flush is drained on the output
       // side.
       claimExitCause(task, signal);
+      task.processGroupState = isOwnedProcessGroupAlive(task)
+        ? "leader_exited"
+        : "gone";
       // The leader's exit says nothing about the tree: a descendant that holds
       // no pipe keeps the group alive, so a teardown's verdict waits for the
       // bounded observation rather than for this event. A natural exit with no
@@ -1148,10 +1582,13 @@ export function createBackgroundTaskManager(
           task.cleanup.state === "unconfirmed" ? task.cleanup.detail : undefined
         );
       }
-      void settle(
+      task.settlementPromise = settle(
         signal !== null ? "killed" : "exited",
         code ?? (signal === null ? 0 : null)
-      );
+      ).catch((err: unknown) => {
+        task.settlementFailure ??= failureReason(err);
+        log(`background settle failed: ${task.task_id}`);
+      });
     });
 
     return { status: "ok", task_id: taskId, log_path: logPath };
@@ -1349,12 +1786,23 @@ export function createBackgroundTaskManager(
       /* Dead-process EPIPE / ESRCH ignored */
     }
     sendSignalToProcessGroup(pid, "SIGTERM", recordFailure);
-    // SIGKILL fallback: only sent if still running after 2s.
+    // SIGKILL fallback: only sent if the group still has members after 2s.
+    //
+    // ADR-0142: the guard asks whether THIS teardown is still in flight
+    // (`task.killFallback` is set), not whether the task is still "running".
+    // The old `client.status === "running"` guard skipped the escalation for
+    // exactly the case it exists to handle: the direct child exits on the
+    // first SIGTERM, the status migrates to `killed` within ~100 ms, and the
+    // group — under a pid namespace, where SIGTERM cannot reach the
+    // namespace's init — is still full. With that guard the escalation never
+    // fired, nothing ever published a verdict, and the stray outlived the
+    // task. `killFallback` is cleared by shutdown() before it escalates, so it
+    // still prevents a duplicate round.
     const killFallback = setTimeout(() => {
       const t = tasks.get(task.task_id);
-      if (t && t.client.status === "running" && t.child) {
+      if (t && t.killFallback !== undefined) {
         try {
-          t.child.kill("SIGKILL");
+          t.child?.kill("SIGKILL");
         } catch {
           /* ignored */
         }
@@ -1370,9 +1818,22 @@ export function createBackgroundTaskManager(
     // The group's fate is observed after the escalation has had its grace
     // window, not by this call: a teardown is a request and returns
     // immediately.
-    void waitForProcessGroupGone(pid, STOP_KILL_GRACE_MS).then((gone) =>
-      observeTaskGroupGone(task, teardownFailure, gone)
-    );
+    //
+    // ADR-0142: the observation must NOT settle the task on the SIGTERM
+    // window alone. Under `--unshare-pid` bwrap's child is PID 1 of the
+    // namespace, and the kernel does not deliver default-disposition signals
+    // to a namespace's init — so the SIGTERM round cannot empty the group at
+    // all, and only the SIGKILL escalation can (taking the rest of the
+    // namespace with it). Two timers of the same length used to race here: this
+    // poll (20 ms granularity) expired before the escalation fired and settled
+    // every such task as `unconfirmed`, even though the group drained moments
+    // later. Wait out the grace first, then let whoever gets there first
+    // publish the verdict — the escalation's own `observeTaskGroupGone` does
+    // exactly that once it has sent the SIGKILL.
+    void waitForProcessGroupGone(pid, STOP_KILL_GRACE_MS).then((gone) => {
+      if (!gone) return; // the escalation chain owns the verdict
+      observeTaskGroupGone(task, teardownFailure, true);
+    });
     return true;
   }
 
@@ -1427,6 +1888,7 @@ export function createBackgroundTaskManager(
     const gone =
       alreadyGone ??
       (await waitForProcessGroupGone(pid, STOP_GROUP_OBSERVE_MS));
+    if (gone) task.processGroupState = "gone";
     if (task.cleanup.state !== "not_started") return;
     task.cleanup = gone
       ? confirmedStopped(pid, task.task_id)
@@ -1442,162 +1904,141 @@ export function createBackgroundTaskManager(
   }
 
   /**
-   * ADR-0097: per-task egress session assembly — the session starts before
-   * the spawn factory is called; a failed start → fail-closed (this task
-   * runs without an egress session and the fence stays fully offline).
-   * Failure paths
+   * ADR-0097: per-task egress seam assembly — the endpoint opens before the
+   * spawn factory is called; a failed start → fail-closed (this task runs
+   * without an egress seam and the fence stays fully offline). Failure paths
    * converge fail-closed: egress is not released and nothing throws
    * (background has no ask surface).
+   *
+   * Production: the endpoint comes from the shared session-resident agent, so
+   * the session-level half (relay / CA / credential mint) is loaded once for
+   * the whole assembly. The per-task policy drops the credential roster (the
+   * roster is session-level) but keeps everything else — including the
+   * approval-gate shape, which the background inlet never fills (no ask
+   * surface).
+   *
+   * Without an agent (the manager's own unit tests) the legacy per-task
+   * session path stays in place.
+   *
+   * A RELEASED agent is not a start failure but a lifecycle fault: the spawn
+   * is refused with the typed `egress_agent_released` error instead of
+   * degrading into a task that silently runs without its egress seam.
    */
-  async function startTaskEgressSession(
+  async function startTaskEgressEndpoint(
     request: BackgroundSpawnRequest,
     taskId: string
-  ): Promise<EgressSession | undefined> {
-    // ADR-0119 ruling 3: a yolo task starts no egress session — no fence means
-    // no netns, so the proxy seam is meaningless; the fence takes bare argv via
-    // defaultBackgroundSpawn.
-    if (request.yolo === true) return undefined;
-    if (request.egressPolicy === undefined) return undefined;
+  ): Promise<TaskEgressStart> {
+    // ADR-0119 ruling 3: a retired-fence task starts no egress seam — no
+    // fence means no netns, so the proxy seam is meaningless; the fence takes
+    // bare argv via defaultBackgroundSpawn.
+    if (request.fenceRetiredAtSpawn === true) return NO_EGRESS_SEAM;
+    if (request.egressPolicy === undefined) return NO_EGRESS_SEAM;
+    const agent = opts.egressAgent;
     try {
-      return await createEgressSession({ policy: request.egressPolicy });
+      if (agent !== undefined) {
+        return {
+          endpoint: await agent.createCallEndpoint(
+            toEgressCallPolicy(request.egressPolicy)
+          ),
+          refusal: undefined,
+        };
+      }
+      return {
+        endpoint: adaptEgressSessionToEndpoint(
+          await createEgressSession({ policy: request.egressPolicy })
+        ),
+        refusal: undefined,
+      };
     } catch (err) {
+      if (err instanceof EgressAgentDisposedError) {
+        // The session-resident agent was already released: a LIFECYCLE fault.
+        // The task is not spawned — a task that ran without its egress seam
+        // would hide the fault behind a run that looks healthy.
+        log(
+          `background egress agent is released for ${taskId}: ${err.message}`
+        );
+        return {
+          endpoint: undefined,
+          refusal: {
+            kind: "egress_agent_released",
+            context: `spawn ${taskId}: ${err.message}`,
+            agent_id: err.agentId,
+          },
+        };
+      }
+      // EXIT: a genuine start failure (the relay / the CA / the credential mint
+      // could not be assembled) degrades to a fail-closed OFFLINE task: no
+      // egress seam, and the fence stays fully offline (never a direct
+      // connection). The reason is logged as the only evidence.
       log(
         `background egress session start failed for ${taskId}: ${
           err instanceof Error ? err.message : String(err)
         }`
       );
-      return undefined;
+      return NO_EGRESS_SEAM;
     }
   }
 
-  /**
-   * Process-level shutdown (ADR-0021):
-   *   1. clear all armed killFallback timers (the stop fallback layer) and
-   *      all armed deadline timers (ADR-0134 — a process-wide shutdown ends
-   *      every task, so a pending deadline must never fire afterwards)
-   *   2. SIGTERM all running process groups (child + group dual path)
-   *   3. wait ≤5s grace (child-exit event + escalation timer dual gate)
-   *   4. SIGKILL as fallback for groups that did not exit
-   *   5. registry json convergence (tasks without an exit event still
-   *      running → marked killed; already-settled ones are not overwritten;
-   *      best-effort save)
-   *   6. clear the in-memory Map
-   * Idempotent: the second call sees shuttingDown already set and returns
-   * fast on the empty set. Per-group signal errors are swallowed and
-   * surfaced via log (no throw, no pollution of other groups).
-   */
-  let shuttingDown = false;
-  async function shutdown(): Promise<void> {
-    if (shuttingDown) return;
-    shuttingDown = true;
+  /** One promise is shared by concurrent and later shutdown callers. */
+  let shutdownPromise: Promise<void> | undefined;
+  function shutdown(): Promise<void> {
+    shutdownPromise ??= performShutdown();
+    return shutdownPromise;
+  }
 
-    // 1. Collect all running tasks + clear the armed timers (neither the stop
-    //    escalation nor a pending deadline may strike after shutdown).
-    const running: BackgroundTask[] = [];
-    for (const task of tasks.values()) {
-      clearTaskTimers(task);
-      if (task.client.status === "running") {
-        running.push(task);
-      }
-    }
+  async function performShutdown(): Promise<void> {
+    const ownedTasks = [...tasks.values()];
+    const running = ownedTasks.filter(
+      (task) => task.client.status === "running"
+    );
+    for (const task of ownedTasks) clearTaskTimers(task);
 
-    if (running.length === 0) {
-      tasks.clear();
-      return;
-    }
+    // Shutdown budget invariant: every blocking await below measures its own
+    // finite budget from the moment that await starts, and never inherits a
+    // budget an earlier phase already spent. A slow phase (the group-teardown
+    // grace) therefore cannot make a later, fast phase look unfinished: a
+    // "did not finish" verdict always describes work nobody waited long
+    // enough for. The worst case is a small fixed number of these budgets
+    // spent back to back.
 
-    // 2. SIGTERM all running process groups (child + group dual path, errors swallowed).
-    for (const task of running) {
-      const child = task.child;
-      const pid = child?.pid;
-      if (!child || pid === undefined) continue;
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        /* EPIPE / ESRCH ignored */
-      }
-      try {
-        process.kill(-pid, "SIGTERM");
-      } catch (err) {
-        const code = (err as NodeJS.ErrnoException).code;
-        if (code !== "ESRCH") {
-          log(`background shutdown SIGTERM failed: ${String(err)}`);
-        }
-      }
-    }
+    const unconfirmed = await stopOwnedProcessGroups(ownedTasks, log);
 
-    // 3. Wait ≤5s grace (child-exit event + escalation timer dual gate).
-    const closed = new Set<BackgroundTask>();
-    let resolveExit: () => void = () => undefined;
-    const waitForExits = new Promise<void>((resolve) => {
-      resolveExit = resolve;
-      for (const task of running) {
-        const child = task.child;
-        if (!child) {
-          closed.add(task);
-          continue;
-        }
-        child.once("exit", () => {
-          closed.add(task);
-          if (closed.size === running.length) resolve();
-        });
-      }
-      // No child listener to attach, or all closed on the spot → resolve immediately
-      if (closed.size === running.length) resolve();
-    });
-    const timer = setTimeout(() => resolveExit(), SHUTDOWN_SIGKILL_GRACE_MS);
-    timer.unref?.();
-    await waitForExits;
-    clearTimeout(timer);
+    // Await in-flight settle before convergence: a task already exiting must
+    // reach its terminal registry write / egress dispose here, so the loop
+    // below does not relabel it "killed" and leave that deferred work pending.
+    await drainTaskWork(ownedTasks, Date.now() + SHUTDOWN_SETTLE_DRAIN_MS);
 
-    // 4. SIGKILL fallback for groups that did not exit.
-    for (const task of running) {
-      if (closed.has(task)) continue;
-      const child = task.child;
-      const pid = child?.pid;
-      if (!child || pid === undefined) continue;
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        /* ignored */
-      }
-      try {
-        process.kill(-pid, "SIGKILL");
-      } catch {
-        /* ignored */
-      }
-    }
-
-    // 5. Registry json convergence: overwrite only still-running tasks
-    //    (settled ones already persisted killed/exited via the exit event,
-    //    never rewritten). Best-effort save: failures are only logged.
-    //    Convergence keeps the original created_at from spawn time (same
-    //    semantics as the settle closure) — a persisted record is a
-    //    time-invariant entity; created_at marks the task's creation moment
-    //    and is not rewritten by shutdown. ADR-0097 shutdown fallback — a
-    //    child may still have emitted no exit event after grace + SIGKILL
-    //    (the process group is gone but the Node listener never caught it);
-    //    then task.egressSession is still held and the session handle must
-    //    be explicitly disposed to prevent a leak. Tasks already disposed
-    //    on the settle path never reach this branch (their client status was
-    //    rewritten by settle != "running").
+    // Registry json convergence: overwrite only tasks whose leader was still
+    // running at shutdown entry. The persisted schema stays unchanged; a
+    // rejection below carries the in-memory cleanup evidence to the owner.
+    //
+    // The convergence phase keeps its own budget, measured where the phase
+    // starts: it covers every task's dispose, so N tasks do not cost N
+    // budgets, and the group-teardown grace above cannot spend it.
+    const disposeDeadline = Date.now() + SHUTDOWN_SETTLE_DRAIN_MS;
     for (const task of running) {
       if (task.client.status !== "running") continue;
       task.client.status = "killed";
       task.client.exit_code = null;
-      // ADR-0134: a task still running when the host shuts down was ended by
-      // the shutdown, not by anything the model asked for. A cause already
-      // claimed by an earlier trigger (a stop, a deadline) is kept.
       task.terminationCause ??= "shutdown";
-      // ADR-0097: shutdown fallback dispose (session-start exception /
-      // settle path never fired).
-      await disposeEgressQuietly(task.egressSession, task.task_id);
+      // An endpoint whose dispose never settles must not strand the shutdown
+      // caller forever. An unsettled dispose is reported as unconfirmed
+      // cleanup evidence (the same channel the settlement failures use)
+      // instead of being awaited without a bound.
+      const disposed = await settleWithinDeadline(
+        [disposeEgressQuietly(task.egressEndpoint, task.task_id)],
+        disposeDeadline
+      );
+      if (disposed === undefined) {
+        task.settlementFailure ??=
+          "egress dispose did not finish within the shutdown drain budget";
+      }
       const rec: BackgroundTaskRecord = {
         task_id: task.task_id,
         command: task.client.command,
         owner_pid: process.pid,
         conversation_id: task.client.conversation_id,
-        pgid: task.child?.pid ?? 0,
+        pgid: task.processGroupId,
         status: "killed",
         exit_code: null,
         created_at: task.createdAt,
@@ -1606,8 +2047,28 @@ export function createBackgroundTaskManager(
         termination_cause: task.terminationCause,
       };
       try {
-        await registry.save(rec);
+        // The convergence write gets its own budget, measured here: an
+        // unbounded write would hold the shutdown forever, and a write that
+        // finished inside its budget must never be reported as unfinished.
+        const saved = await settleWithinDeadline(
+          [registry.save(rec)],
+          Date.now() + SHUTDOWN_SETTLE_DRAIN_MS
+        );
+        const outcome = saved?.[0];
+        if (saved === undefined) {
+          task.settlementFailure ??=
+            "registry save did not finish within the shutdown drain budget";
+        } else if (outcome !== undefined && outcome.status === "rejected") {
+          // Re-enter the catch path below with the same failure detail.
+          throw outcome.reason;
+        }
       } catch (err) {
+        // Record into the same evidence channel as the settle path: a failed
+        // convergence write must not let shutdown resolve clean while the
+        // on-disk record still says "running".
+        task.settlementFailure ??= `registry save failed on shutdown: ${registryFailureDetail(
+          err
+        )}`;
         log(
           `background registry save failed on shutdown: ${
             (err as BackgroundTaskError).context
@@ -1616,8 +2077,27 @@ export function createBackgroundTaskManager(
       }
     }
 
-    // 6. Clear the in-memory Map.
+    // A settle promise created during convergence needs its own drain; the
+    // second pass also reports a failed terminal persistence as evidence
+    // instead of swallowing it.
+    await drainTaskWork(ownedTasks, Date.now() + SHUTDOWN_SETTLE_DRAIN_MS);
+    unconfirmed.push(...taskSettlementFailures(ownedTasks));
+
     tasks.clear();
+    if (unconfirmed.length > 0) {
+      const context = unconfirmed
+        .map((item) => `${item.task_id ?? item.pgid}: ${item.state}`)
+        .join(", ");
+      const message = `background shutdown: ${context}`;
+      throw {
+        kind: "cleanup_unconfirmed",
+        context: message,
+        cleanup: unconfirmed,
+        toString(): string {
+          return message;
+        },
+      } satisfies BackgroundShutdownCleanupError;
+    }
   }
 
   /** Reap seam: register a conversation-deletion listener. No internal callers; registration itself triggers nothing. */
@@ -1645,6 +2125,7 @@ export function createBackgroundTaskManager(
   return Object.freeze({
     spawn,
     status,
+    listLiveTasks,
     output,
     stop,
     shutdown,

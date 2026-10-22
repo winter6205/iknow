@@ -107,8 +107,90 @@ describe("graph mode: applyShiftTabAgentModeFlip（键位守卫 + 双 holder）"
     );
   });
 
-  it("非 Shift+Tab 键 / Ctrl+Tab / Meta+Tab → no-op", () => {
+  /* ADR-0141 §3 — the wheel is read as its RESULT, not as a press. */
+
+  it("the graph-only step (full_auto → full_auto + graph) does NOT fire the clear hook", () => {
     const permission = createPermissionModeContext("default");
+    const graph = createGraphModeContext();
+    let clears = 0;
+    const press = (): boolean =>
+      applyShiftTabAgentModeFlip({
+        key: { name: "tab", shift: true },
+        permission,
+        graph,
+        onFlip: () => {},
+        onUserPermissionChange: () => {
+          clears += 1;
+        },
+      });
+
+    assert.equal(press(), true); // default -> full_auto: a permission step
+    assert.equal(permission.get(), "full_auto");
+    assert.equal(graph.get().enabled, false);
+    assert.equal(clears, 1);
+
+    assert.equal(press(), true); // full_auto -> full_auto + graph: GRAPH only
+    assert.equal(permission.get(), "full_auto");
+    assert.equal(graph.get().enabled, true);
+    assert.equal(
+      clears,
+      1,
+      "the graph axis is owned by no preset, so this step must clear nothing"
+    );
+
+    assert.equal(press(), true); // full_auto + graph -> default: a permission step
+    assert.equal(permission.get(), "default");
+    assert.equal(clears, 2);
+  });
+
+  it("the wheel steps from the EFFECTIVE permission, not the holder", () => {
+    // Under the yolo preset the row shows full_auto while the holder may still
+    // say default. Stepping from the holder would move nothing the operator
+    // can see while still tripping the clear — ADR-0141's F4 in a new axis.
+    const permission = createPermissionModeContext("default");
+    const graph = createGraphModeContext();
+    let clears = 0;
+    const seen: AgentModeSnapshot[] = [];
+    const pressed = applyShiftTabAgentModeFlip({
+      key: { name: "tab", shift: true },
+      permission,
+      graph,
+      effectivePermission: "full_auto",
+      onFlip: (next) => seen.push(next),
+      onUserPermissionChange: () => {
+        clears += 1;
+      },
+    });
+
+    assert.equal(pressed, true);
+    // Stepped from the EFFECTIVE full_auto + graph(false) => full_auto + graph,
+    // NOT from the holder's default (which would have gone to full_auto and
+    // moved nothing the operator can see). The step is graph-only, so the hook
+    // must not fire even though a preset is in force.
+    assert.deepEqual(seen, [{ permission: "full_auto", graph: true }]);
+    assert.equal(permission.get(), "full_auto");
+    assert.equal(graph.get().enabled, true);
+    assert.equal(
+      clears,
+      0,
+      "the effective read must not turn a graph-only step into a permission step"
+    );
+  });
+
+  it("omitting effectivePermission keeps the holder-only behavior (no preset in force)", () => {
+    const permission = createPermissionModeContext("default");
+    const graph = createGraphModeContext();
+    const seen: AgentModeSnapshot[] = [];
+    applyShiftTabAgentModeFlip({
+      key: { name: "tab", shift: true },
+      permission,
+      graph,
+      onFlip: (next) => seen.push(next),
+    });
+    assert.deepEqual(seen, [{ permission: "full_auto", graph: false }]);
+  });
+
+  it("非 Shift+Tab 键 / Ctrl+Tab / Meta+Tab → no-op", () => {    const permission = createPermissionModeContext("default");
     const graph = createGraphModeContext();
     for (const key of [
       { name: "tab", shift: false },

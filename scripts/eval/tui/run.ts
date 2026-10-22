@@ -35,6 +35,7 @@ import { AcceptanceLedger, type AcceptanceRecord } from "./acceptance.js";
 import { SUBMIT_KEYSTROKE, decideDelivery, planChunks } from "./delivery.js";
 import {
   appendRssRow,
+  baselineArtifact,
   buildIndex,
   deriveCounters,
   separateRuns,
@@ -47,9 +48,11 @@ import {
 import { parseProtocol, type Protocol, type RunKind } from "./protocol.js";
 import {
   isProcessAlive,
+  holdProcessAlive,
   openPty,
   probeReadiness,
   tail,
+  type ProcessLifetime,
   type PtySession,
   type ReadinessVerdict,
 } from "./pty.js";
@@ -546,16 +549,7 @@ function retainStore(state: RunState): void {
   }
   writeFileSync(
     state.artifacts.baselineJson,
-    JSON.stringify(
-      {
-        conversationId: state.baseline.conversationId,
-        byteOffset: state.baseline.byteOffset,
-        eventIds: state.baseline.eventIds,
-        path: state.baseline.path,
-      },
-      null,
-      2
-    ),
+    baselineArtifact(state.baseline),
     "utf8"
   );
 }
@@ -563,7 +557,8 @@ function retainStore(state: RunState): void {
 /** Phase 4: derive every number from the retained bytes, then index them. */
 function finalizeEvidence(
   state: RunState,
-  window: { startedIso: string; endedIso: string }
+  window: { startedIso: string; endedIso: string },
+  log: (line: string) => void
 ): RunCounters | null {
   retainStore(state);
   const refs: ArtifactRefs = {
@@ -576,10 +571,16 @@ function finalizeEvidence(
     window,
   };
   let counters: RunCounters | null = null;
+  let countersError: string | null = null;
   try {
     counters = deriveCounters(refs);
-  } catch {
-    counters = null;
+  } catch (err) {
+    // WHY the reason is retained instead of swallowed: a bare `catch {}` here made
+    // `evidence.counters_derived` fail with a bare "could not be derived" and no
+    // way to tell a missing artifact from a window that could not be located.
+    // This is the only place that knows why.
+    countersError = String(err);
+    log(`counters could not be derived: ${countersError}`);
   }
   writeFileSync(
     join(state.artifacts.runDir, "acceptance.json"),
@@ -591,6 +592,14 @@ function finalizeEvidence(
     renderEvents(state.events),
     "utf8"
   );
+  // Retained beside the counters so the failing check is diagnosable from the
+  // artifacts alone, with no re-run needed.
+  if (countersError !== null)
+    writeFileSync(
+      join(state.artifacts.runDir, "counters.error.txt"),
+      countersError,
+      "utf8"
+    );
   writeFileSync(
     join(state.artifacts.runDir, "counters.json"),
     JSON.stringify(counters, null, 2),
@@ -672,6 +681,14 @@ async function buildState(
  * included — so a failed run leaves no live process behind. The verdict is built
  * AFTER teardown, because `teardown.no_stray_process` is an observation about
  * what survived, not an assumption.
+ *
+ * LIFETIME (#1221): a ref'd guard is held from before the PTY is opened until
+ * after teardown, and released in the `finally`. Every deadline this driver
+ * awaits is unref'd, so without it a relay whose handles closed mid-wait let the
+ * loop drain and Node exited with the DEFAULT status 0 — nothing printed, no
+ * verdict written, no failure signalled. A teardown that cannot be PROVEN
+ * (`PtyCleanupError`) is folded into the verdict rather than thrown out of the
+ * `finally`, which would have skipped the verdict entirely.
  */
 export async function runTuiCalibration(
   protocol: Protocol,
@@ -680,26 +697,31 @@ export async function runTuiCalibration(
   const now = opts.now ?? ((): number => Date.now());
   const sleep = opts.sleep ?? defaultSleep;
   const log = opts.log ?? ((): void => {});
-  const artifacts = artifactsFor(protocol);
   const startedIso = new Date().toISOString();
-  const session = await openPty({
-    command: protocol.child.command,
-    args: protocol.child.args,
-    cwd: protocol.cwd,
-    rows: 40,
-    cols: 120,
-  });
-  const state = await buildState(session, protocol, artifacts);
+  const { session, state, lifetime } = await initSession(protocol, log);
 
   let phases: Phases | null = null;
   let failure: string | null = null;
+  let cleanupError: string | null = null;
   // The outer watchdog is the hard cap on the whole run. It is deliberately
   // LONGER than the inner wall plus the exit grace, so it can only fire when
   // something the inner bounds did not cover hung — never to race the graceful
-  // path it protects.
+  // path it protects. It stays unref'd: `lifetime` already keeps the loop alive
+  // for the whole window in which this can fire, and it is cleared below.
+  // WHY the kill is not `void`: `killGroup` rejects with `PtyCleanupError` when
+  // the teardown cannot be proven, and Node >= 20 makes an unhandled rejection
+  // FATAL — the process would die before `releaseSession` ran and leave NO
+  // retained verdict, contradicting the contract that every bounded failure
+  // keeps an unusable report. The fault is recorded and folded in below instead.
   const watchdog = setTimeout(() => {
     state.observerFailed = true;
-    void session.killGroup(`outer watchdog at ${protocol.outerWatchdogMs}ms`);
+    session
+      .killGroup(`outer watchdog at ${protocol.outerWatchdogMs}ms`)
+      .catch((err: unknown) => {
+        const detail = String(err);
+        log(`watchdog teardown unproven: ${detail}`);
+        cleanupError ??= detail;
+      });
   }, protocol.outerWatchdogMs);
   void watchdog.unref?.();
   try {
@@ -709,13 +731,94 @@ export async function runTuiCalibration(
     log(`run failed: ${failure}`);
   } finally {
     clearTimeout(watchdog);
-    await session.dispose();
+    // `??=` keeps a fault the watchdog already recorded from being overwritten by
+    // a clean `releaseSession`; the first fault seen is the one that explains it.
+    cleanupError ??= await releaseSession(session, lifetime);
   }
   const stray = [session.childPid, session.relayPid].filter(
     (pid) => pid > 0 && isProcessAlive(pid)
   );
   log(`teardown: stray pids ${JSON.stringify(stray)}`);
-  return assemble(state, phases, stray, failure);
+  return assemble(state, phases, { stray, cleanupError }, failure);
+}
+
+/**
+ * Release the PTY and then the loop guard, in that order.
+ *
+ * WHY the guard is released LAST: teardown itself awaits bounded, unref'd
+ * waits, so a guard dropped first would reopen exactly the drain this exists to
+ * close. A cleanup that cannot be proven is REPORTED and returns a string
+ * instead of throwing — a throw from the `finally` would propagate out of the
+ * run and leave NO verdict on disk, which is the failure mode being repaired.
+ */
+async function releaseSession(
+  session: PtySession,
+  lifetime: ProcessLifetime
+): Promise<string | null> {
+  try {
+    await session.dispose();
+    return null;
+  } catch (err) {
+    return `pty teardown could not be proven: ${String(err)}`;
+  } finally {
+    lifetime.release();
+  }
+}
+
+/**
+ * Open the PTY, hold the ref'd lifetime guard, and build the run state.
+ *
+ * The guard is held from BEFORE the PTY is opened. Every failure between that
+ * point and a usable state releases it again — through `releaseSession`, whose
+ * dispose-then-release order also tears down whatever the PTY already spawned.
+ * A path that released the guard without disposing (or disposed without
+ * releasing) would leave either a live relay/child behind or a process that
+ * can no longer exit on its own.
+ */
+async function initSession(
+  protocol: Protocol,
+  log: (line: string) => void
+): Promise<{
+  session: PtySession;
+  state: RunState;
+  lifetime: ProcessLifetime;
+}> {
+  const lifetime = holdProcessAlive(`tui-run:${protocol.label}`);
+  // `artifactsFor` is inside the guard-protected try: it mkdirs the artifacts
+  // directory and THROWS on an unwritable path. Outside the try its throw
+  // skipped `lifetime.release()`, leaving the ref'd hold on the loop — the CLI
+  // never exited (observed: `timeout` killed it) despite the error on stderr.
+  let artifacts: Artifacts;
+  let session: PtySession;
+  try {
+    artifacts = artifactsFor(protocol);
+    session = await openPty({
+      command: protocol.child.command,
+      args: protocol.child.args,
+      cwd: protocol.cwd,
+      // Absent means "inherit the runner's environment", unchanged. Present
+      // means the child sees EXACTLY this and nothing else.
+      ...(protocol.child.env === undefined
+        ? {}
+        : { env: { ...protocol.child.env } }),
+      rows: 40,
+      cols: 120,
+    });
+  } catch (err) {
+    lifetime.release();
+    throw err;
+  }
+  try {
+    const state = await buildState(session, protocol, artifacts);
+    return { session, state, lifetime };
+  } catch (err) {
+    log(`initialization failed: ${String(err)}`);
+    // There is no verdict to fold a cleanup fault into yet, so the release
+    // result is surfaced through the log instead of being dropped.
+    const cleanup = await releaseSession(session, lifetime);
+    if (cleanup !== null) log(cleanup);
+    throw err;
+  }
 }
 
 /** The four measured phases, in order. */
@@ -739,10 +842,11 @@ async function runPhases(args: {
   // Phase 3 — stop and classify, never upgrade.
   const stopped = await stopChild(state, sequenceEnd, sleep);
   // Phase 4 — derive from the retained bytes, then index them.
-  const counters = finalizeEvidence(state, {
-    startedIso,
-    endedIso: new Date().toISOString(),
-  });
+  const counters = finalizeEvidence(
+    state,
+    { startedIso, endedIso: new Date().toISOString() },
+    log
+  );
   return {
     readiness,
     stopped,
@@ -890,11 +994,21 @@ function resolvePhases(
   };
 }
 
+/**
+ * What teardown actually left behind: the pids that survived, plus why the
+ * cleanup could not be PROVEN (`PtyCleanupError`). One observation, because
+ * both answer the same question — did this run release what it started?
+ */
+interface TeardownObservation {
+  readonly stray: readonly number[];
+  readonly cleanupError: string | null;
+}
+
 /** Collect the observed facts. Every field is a reading, never a constant. */
 function observedFacts(
   state: RunState,
   resolved: ResolvedPhases,
-  stray: readonly number[],
+  teardown: TeardownObservation,
   failure: string | null
 ): CheckFact {
   const ran = resolved.ran;
@@ -918,7 +1032,12 @@ function observedFacts(
     // while the run had in fact stopped reading the store it is judged on.
     observerClean: all(ran, failure === null, !state.observerFailed),
     storeValid: validateWholeFile(state.artifacts.storeCopy).error === null,
-    teardownClean: stray.length === 0,
+    // An unproven teardown (`PtyCleanupError`) is not a clean one: the run
+    // cannot claim it released what it started when it raised to say so.
+    teardownClean: all(
+      teardown.stray.length === 0,
+      teardown.cleanupError === null
+    ),
     noSecrets: resolved.secrets.length === 0,
   };
 }
@@ -976,15 +1095,15 @@ function withHonestPoolingDetail(
 function assemble(
   state: RunState,
   phases: Phases | null,
-  stray: readonly number[],
+  teardown: TeardownObservation,
   failure: string | null
 ): RunResult {
   const resolved = resolvePhases(state, phases, failure);
   const report = withHonestPoolingDetail(
-    buildCheckReport(observedFacts(state, resolved, stray, failure)),
+    buildCheckReport(observedFacts(state, resolved, teardown, failure)),
     resolved
   );
-  writeVerdict(state, { report, resolved, stray, failure });
+  writeVerdict(state, { report, resolved, teardown, failure });
   return {
     label: state.protocol.label,
     // The role this run declared, not a constant: hard-coding "measured" made a
@@ -1000,7 +1119,7 @@ function assemble(
     counters: resolved.counters,
     otherRuns: resolved.otherRuns,
     index: resolved.index,
-    strayProcesses: stray,
+    strayProcesses: teardown.stray,
     events: state.events,
     failure,
   };
@@ -1021,7 +1140,7 @@ function writeVerdict(
   args: {
     readonly report: CheckReport;
     readonly resolved: ResolvedPhases;
-    readonly stray: readonly number[];
+    readonly teardown: TeardownObservation;
     readonly failure: string | null;
   }
 ): void {
@@ -1033,8 +1152,9 @@ function writeVerdict(
         stop: args.resolved.stop,
         readiness: args.resolved.readiness,
         exit: args.resolved.exit,
-        stray_processes: args.stray,
+        stray_processes: args.teardown.stray,
         failure: args.failure,
+        cleanup_error: args.teardown.cleanupError,
       },
       null,
       2
@@ -1067,7 +1187,39 @@ function failedReadiness(): ReadinessVerdict {
   };
 }
 
-/** CLI entry. Exit 0 only for an unconditional `usable` verdict. */
+/**
+ * Exit 0 requires a PERSISTED verdict, not a returned one.
+ *
+ * WHY the readback: `process.exitCode` used to be assigned only inside the
+ * direct-run promise callbacks, so a process that drained before the run
+ * resolved ended with Node's DEFAULT status 0 — no report, no `check-report.json`
+ * and no non-zero signal. Reading the verdict back from disk makes exit 0 a
+ * claim about a file an auditor can open, and makes every other outcome 1.
+ */
+export function verdictExitCode(
+  protocol: Protocol,
+  report: CheckReport
+): number {
+  if (!report.usable) return 1;
+  try {
+    const raw: unknown = JSON.parse(
+      readFileSync(
+        join(protocol.artifactsDir, protocol.label, VERDICT_FILE),
+        "utf8"
+      )
+    );
+    if (raw === null || typeof raw !== "object") return 1;
+    const persisted = (raw as { report?: { usable?: unknown } }).report;
+    return persisted?.usable === true ? 0 : 1;
+  } catch {
+    // EXIT: an unreadable or invalid persisted verdict means the on-disk report
+    // cannot back an exit-0 claim — the contract makes 0 a property of a file an
+    // auditor can open, so this fallback must stay non-zero rather than guess.
+    return 1;
+  }
+}
+
+/** CLI entry. Exit 0 only for an unconditional, persisted `usable` verdict. */
 export async function main(argv: readonly string[]): Promise<number> {
   const args = parseArgs(argv);
   if (args.protocolPath === null) {
@@ -1087,7 +1239,7 @@ export async function main(argv: readonly string[]): Promise<number> {
     log: (line) => console.error(line),
   });
   console.log(JSON.stringify(result.report, null, 2));
-  return result.report.usable ? 0 : 1;
+  return verdictExitCode(protocol, result.report);
 }
 
 interface CliArgs {
@@ -1111,11 +1263,18 @@ const isDirectRun =
     fileURLToPath(pathToFileURL(process.argv[1]));
 
 if (isDirectRun) {
+  // WHY fail-closed here too: the guard makes the loop outlive the run, and the
+  // release happens BEFORE the exit code is set so the process can still exit.
+  // `main` is the only thing that can ever return 0, and it only does so when
+  // `verdictExitCode` has read a usable verdict back off disk.
+  const lifetime = holdProcessAlive("tui-run-cli");
   main(process.argv.slice(2)).then(
     (code) => {
+      lifetime.release();
       process.exitCode = code;
     },
     (err: unknown) => {
+      lifetime.release();
       console.error(String(err));
       process.exitCode = 2;
     }

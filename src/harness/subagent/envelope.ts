@@ -80,6 +80,12 @@ export interface WorkerEnvelope {
   /** Effective thinking settings of the parent turn at this dispatch hop. */
   readonly parentThinking?: ThinkingParams;
   /**
+   * The parent conversation's model route (`provider/model`). The worker
+   * resolves it against the provider registry and runs on that route instead
+   * of the process-global default; absent → the process default.
+   */
+  readonly parentModelRoute?: string;
+  /**
    * Host truncated dialogue (judge). Independent of `task`.
    */
   readonly finalText?: string;
@@ -330,6 +336,7 @@ export const WORKER_SCHEMA: Record<string, unknown> = {
       required: ["mode"],
       additionalProperties: false,
     },
+    parentModelRoute: { type: "string" },
     finalText: { type: "string" },
     evidenceContext: { type: "object" },
     // Write-situation tri-state — same shape as role (wire additive,

@@ -27,13 +27,15 @@
  * TOOL CONTRACT this file codes against (the script is landing in parallel).
  * ---------------------------------------------------------------------------
  * `scripts/shell-parse-divergence.ts` must export:
- *   dualRunCommand(command: string): { command: string; oldVerdict: string | null;
+ *   dualRunCommand(command: string, expectations?): { command: string;
+ *       oldVerdict: string | null;
  *       newVerdict: string; class: "EXPECTED" | "UNEXPECTED"; clause?: string }
  *       — one dual run: `oldVerdict` is `findDangerousPattern`'s answer (a
  *       DangerousPatternId or null — SC11 def. (i), NOT a wall verdict),
  *       `newVerdict` is the parse verdict plus payload facts, encoded per SC10
  *       as `verdict=<tag>` + facts (SC11 def. (ii)).
- *   classifyRow(row: { command; oldVerdict; newVerdict }): { class; clause? }
+ *   classifyRow(row: { command; oldVerdict; newVerdict }, expectations?):
+ *       { class; clause? }
  *       — the pure SC11 rule, total and binary, over the two columns only.
  *       `clause` is the spec's own machine-readable name for the EXPECTED
  *       branch: "a" | "b" | "c" | "d" | "e"; absent/undefined on an UNEXPECTED
@@ -62,10 +64,39 @@
  *       `argumentsCaptured` on `<id>/trace.jsonl` by SKIPPING, never touching
  *       message bodies / other tools' argv / paths / env, dropping any
  *       candidate with a roster hit whole (never masked), in fixture order.
- *   runDualPass(commands: string[]): { rows; histogram: Record<string, number> }
- *       — the same pass over an ordered command list; `histogram` is the
- *       node-type inventory OQ3 closes on.
+ *   runDualPass(commands: string[], expectations?): { rows; histogram } — the
+ *       same pass over an ordered command list; `histogram` is the node-type
+ *       inventory OQ3 closes on. The optional `expectations` map is the one
+ *       label input `classifyRow`/`dualRunCommand`/`runDualPass` take.
  *
+ * ---------------------------------------------------------------------------
+ * #1188 SC7 — INDEPENDENT EXPECTATIONS (a sibling roster, never a corpus key)
+ * ---------------------------------------------------------------------------
+ * `specs/backslash-whitespace-veto-repair.md` SC7 demands that the report tell a
+ * supported benign form that is wrongly vetoed apart from an intentionally
+ * retained fidelity denial, on independent fixture labels. The corpus record
+ * format is frozen at exactly one `command` key (SC10's decidable format, and
+ * the format `--extract` emits), so the labels live in the SIBLING file
+ * `backslash-whitespace-expectations.jsonl`: `command` + `expectation`
+ * ("supported-benign" | "retained-fidelity") + a reviewer-facing `rationale`.
+ * The tool finds that file next to the corpus it was given (a swept directory
+ * or a single file's parent), skips it while sweeping a corpus directory, and
+ * treats a MISSING file as the empty map — so an unlabeled corpus classifies
+ * exactly as it did before the roster existed.
+ *
+ * `loadExpectations`/`checkExpectationLine` are the roster's own reader, and it
+ * reads TEXT: no `parseForSecurity`, no exemption predicate, no `bash -n`. A
+ * label is only ever the committed rationale-free text in the roster, so the
+ * gate cannot ratify whatever production currently does. The `rationale` string
+ * is documentation for reviewers and is never read by the classifier.
+ *
+ * The refinement is confined to the `vetoed` arm of a legacy-allow row: a
+ * `supported-benign` row that production still vetoes is UNEXPECTED, and every
+ * other combination (retained-fidelity + vetoed, any label + `ok`,
+ * `unknown-syntax`, `malformed`, `over-cap`, no label at all) keeps its
+ * pre-roster classification byte-for-byte.
+ *
+
  * CI placement (noted, not asserted — this file must say nothing about config):
  * `vitest.config.ts:18` collects every file under `tests/` whose name ends in
  * `.test.ts`, and this path matches that shape; it appears in neither
@@ -106,13 +137,17 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from "vitest";
 
 import {
   checkCorpusLine,
+  checkExpectationLine,
   classifyRow,
   dualRunCommand,
+  EXPECTATION_LABELS,
   extractCommands,
   formatReportRow,
   loadCorpus,
+  loadExpectations,
   redactionHits,
   runDualPass,
+  type Expectation,
 } from "../../../scripts/shell-parse-divergence.ts";
 
 type DivergenceRow = ReturnType<typeof dualRunCommand>;
@@ -127,6 +162,45 @@ const repoRoot = join(
 const scriptPath = join(repoRoot, "scripts", "shell-parse-divergence.ts");
 const corpusDir = join(repoRoot, "tests", "fixtures", "shell-corpus");
 const corpusFile = join(corpusDir, "benign.jsonl");
+
+/** The sibling roster's one filename: the corpus dir's only NON-corpus file. */
+const EXPECTATIONS_FILENAME = "backslash-whitespace-expectations.jsonl";
+const expectationsFile = join(corpusDir, EXPECTATIONS_FILENAME);
+
+/**
+ * The incident pair from #1188, pinned as text. Both spellings are ordinary
+ * Bash: an escaped space inside a long option's value, and a word-separator LF
+ * continuation between two options.
+ */
+const INCIDENT_ESCAPED_SPACE = "ls -lt --time-style=+%m-%d\\ %H:%M docs/evidence";
+const INCIDENT_SEPARATOR_CONTINUATION =
+  "gh issue view 1188 --json number,title \\\n -q '.title'";
+
+/** The two reduced counterparts: identical prefix, only the follower differs. */
+const SHAPED_ESCAPED_SPACE = "printf '<%s>\\n' a\\ b";
+const SHAPED_SEPARATOR_CONTINUATION = "printf '<%s>\\n' a \\\n b";
+
+/** The two retained fidelity denials: one mid-word LF join, one backslash+TAB. */
+const RETAINED_MIDWORD_JOIN = "printf '<%s>\\n' a\\\nb";
+const RETAINED_BACKSLASH_TAB = "printf '<%s>\\n' a\\\tb";
+
+const SUPPORTED_BENIGN_COMMANDS: readonly string[] = [
+  INCIDENT_ESCAPED_SPACE,
+  INCIDENT_SEPARATOR_CONTINUATION,
+  SHAPED_ESCAPED_SPACE,
+  SHAPED_SEPARATOR_CONTINUATION,
+];
+const RETAINED_FIDELITY_COMMANDS: readonly string[] = [
+  RETAINED_MIDWORD_JOIN,
+  RETAINED_BACKSLASH_TAB,
+];
+
+/**
+ * The pre-#1188 generic denial representative. It is an escaped-space form, so
+ * the repair makes it a supported spelling: it can no longer stand in for a
+ * retained hard denial anywhere in this file.
+ */
+const RETIRED_DENIAL_REPRESENTATIVE = "echo\\ test";
 
 /** The closed dangerous-pattern set — SC10's P1 column vocabulary. */
 const DANGEROUS_PATTERN_IDS = [
@@ -252,7 +326,8 @@ function runScript(args: string[]): Promise<ScriptRun> {
  */
 function admissionViolations(
   rows: readonly DivergenceRow[],
-  committedRecordCount: number
+  committedRecordCount: number,
+  expectations: ReadonlyMap<string, Expectation>
 ): string[] {
   const violations: string[] = [];
 
@@ -295,6 +370,24 @@ function admissionViolations(
     violations.push(
       "P3: no admitted record's decoded command contains an embedded newline"
     );
+  }
+
+  // (P4) SC7's labeled population reached the report, and both labels are
+  // exercised: a roster that only ever labels one side cannot tell a wrongly
+  // vetoed supported form apart from an intended denial.
+  const labeled = new Set(rows.map((r) => r.command));
+  for (const command of expectations.keys()) {
+    if (!labeled.has(command)) {
+      violations.push(
+        `P4: labeled row never reached the report: ${JSON.stringify(command)}`
+      );
+    }
+  }
+  for (const label of EXPECTATION_LABELS) {
+    const exercised = [...expectations.values()].filter((e) => e === label);
+    if (exercised.length === 0) {
+      violations.push(`P4: the roster carries no ${label} row`);
+    }
   }
 
   // The derived floor, on the page: 5 id rows + 4 legacy-allow rows.
@@ -343,6 +436,18 @@ afterEach(() => {
 /** The committed corpus, read once per test that needs it (red = dir missing). */
 function committedCommands(): string[] {
   return loadCorpus(corpusDir);
+}
+
+/**
+ * The corpus directory's own files. The expectation roster is a sibling with a
+ * different format and its own reader, so it is excluded here exactly as
+ * `loadCorpus`'s directory sweep excludes it.
+ */
+function corpusFileNames(): string[] {
+  return readdirSync(corpusDir)
+    .filter((name) => name !== EXPECTATIONS_FILENAME)
+    .filter((name) => statSync(join(corpusDir, name)).isFile())
+    .sort();
 }
 
 // ==========================================================================
@@ -462,10 +567,8 @@ describe("SC10: corpus JSONL format gate", () => {
     }
   });
 
-  it("every line of every committed corpus file passes the gate, and the directory is not empty", () => {
-    const files = readdirSync(corpusDir).filter((name) =>
-      statSync(join(corpusDir, name)).isFile()
-    );
+  it("every line of every committed CORPUS file passes the gate, and the directory is not empty", () => {
+    const files = corpusFileNames();
     expect(files.length, `no corpus file under ${corpusDir}`).toBeGreaterThan(
       0
     );
@@ -479,6 +582,82 @@ describe("SC10: corpus JSONL format gate", () => {
           `${name}:${i + 1} is not a single-key command record: ${violation}`
         ).toBeNull();
       });
+    }
+  });
+
+  it("the expectation roster is NOT a corpus file: each format rejects the other's records", () => {
+    // The corpus format is frozen at exactly one `command` key, and the roster
+    // is a separate reader. If either reader ever accepted the other's lines the
+    // two populations could be silently interchanged, so both directions are
+    // pinned here rather than inferred from the directory layout.
+    const rosterLines = readFileSync(expectationsFile, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0);
+    expect(rosterLines.length, "the roster carries no labeled row").toBeGreaterThan(0);
+    for (const line of rosterLines) {
+      expect(
+        checkCorpusLine(line),
+        `the corpus reader admitted a labeled record: ${line.slice(0, 60)}`
+      ).toBeTruthy();
+      expect(checkExpectationLine(line), line.slice(0, 60)).toBeNull();
+    }
+    expect(checkExpectationLine(JSON.stringify({ command: "echo hi" }))).toBe(
+      "`expectation` must be one of [\"supported-benign\",\"retained-fidelity\"]"
+    );
+    expect(corpusFileNames()).not.toContain(EXPECTATIONS_FILENAME);
+  });
+
+  it("every roster line carries a closed-vocabulary label and a rationale, one per physical line", () => {
+    const raw = readFileSync(expectationsFile, "utf8");
+    const lines = raw.split("\n");
+    expect(
+      lines[lines.length - 1],
+      "the roster's last line is not terminated"
+    ).toBe("");
+    const records = lines
+      .filter((line) => line.length > 0)
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    expect(records.length).toBeGreaterThanOrEqual(4);
+    for (const record of records) {
+      expect(EXPECTATION_LABELS).toContain(record.expectation);
+      expect(typeof record.command).toBe("string");
+      expect(
+        String(record.rationale).length,
+        "a label with no stated reason is not reviewable"
+      ).toBeGreaterThan(20);
+    }
+    const supported = records.filter(
+      (r) => r.expectation === "supported-benign"
+    );
+    const retained = records.filter(
+      (r) => r.expectation === "retained-fidelity"
+    );
+    expect(
+      supported.map((r) => r.command),
+      "the roster lost an incident-equivalent supported row"
+    ).toEqual(expect.arrayContaining([INCIDENT_ESCAPED_SPACE, INCIDENT_SEPARATOR_CONTINUATION]));
+    expect(
+      retained.map((r) => r.command),
+      "the roster lost a retained denial"
+    ).toEqual(expect.arrayContaining([RETAINED_MIDWORD_JOIN]));
+    expect(
+      retained.some(
+        (r) => typeof r.command === "string" && r.command.includes("\t")
+      ),
+      "no unquoted backslash+TAB row: the measured TAB disagreement is unlabelled"
+    ).toBe(true);
+  });
+
+  it("every labeled row is a committed corpus row, and no labeled row is a secret", () => {
+    const committed = committedCommands();
+    const expectations = loadExpectations(expectationsFile);
+    expect(expectations.size).toBeGreaterThan(0);
+    for (const command of expectations.keys()) {
+      expect(
+        committed,
+        `a label with no corpus row can never be reached: ${JSON.stringify(command)}`
+      ).toContain(command);
+      expect(redactionHits(command), command).toEqual([]);
     }
   });
 
@@ -885,7 +1064,14 @@ describe("SC11: EXPECTED clauses", () => {
     expect(overCap.class).toBe("EXPECTED");
     expect(overCap.clause).toBe("d");
 
-    const vetoed = dualRunCommand("echo\\ test");
+    // SC8: `echo\ test` is an escaped-space form, i.e. a shape the repair
+    // SUPPORTS, so it can no longer represent a hard denial. The vetoed cell
+    // now uses a committed mid-word continuation — a shape real Bash joins into
+    // one argument — and the roster's retained-fidelity label must not weaken
+    // it: the row stays an expected class-(d) denial.
+    const expectations = loadExpectations(expectationsFile);
+    expect(expectations.get(RETAINED_MIDWORD_JOIN)).toBe("retained-fidelity");
+    const vetoed = dualRunCommand(RETAINED_MIDWORD_JOIN, expectations);
     expect(vetoed.oldVerdict).toBeNull();
     expect(verdictTag(vetoed)).toBe("vetoed");
     expect(vetoed.class).toBe("EXPECTED");
@@ -1004,7 +1190,7 @@ describe("SC11: UNEXPECTED — the class cannot absorb the gate", () => {
       "> /tmp/x",
       "find /",
       "echo hi &&",
-      "echo\\ test",
+      RETAINED_MIDWORD_JOIN,
       generatedOverCapCommand(),
     ];
     for (const command of commands) {
@@ -1031,25 +1217,52 @@ describe("SC11: UNEXPECTED — the class cannot absorb the gate", () => {
 // ==========================================================================
 
 describe("SC11: the corpus run in CI", () => {
-  it("every committed record yields one classified row, with zero UNEXPECTED", () => {
+  it("every committed record yields one classified row, and the only UNEXPECTED rows are labeled supported forms still vetoed", () => {
     const committed = committedCommands();
-    const pass = runDualPass([...committed, generatedOverCapCommand()]);
+    const expectations = loadExpectations(expectationsFile);
+    const pass = runDualPass(
+      [...committed, generatedOverCapCommand()],
+      expectations
+    );
     expect(pass.rows.length).toBe(committed.length + 1);
 
+    // SC7: the planted false positives ARE the UNEXPECTED rows — no unlabeled
+    // row may be excused by the label, and no labeled supported form may be
+    // quietly dropped. A repaired parse shrinks this set to empty; the
+    // assertion is the relation, not a frozen count.
     const unexpected = pass.rows.filter((r) => r.class === "UNEXPECTED");
     expect(
-      unexpected.map(
-        (r) => `${r.command.slice(0, 60)} | ${r.oldVerdict} | ${r.newVerdict}`
-      ),
+      unexpected.map((r) => r.command),
       "UNEXPECTED divergences gate the next stage"
+    ).toEqual(
+      pass.rows
+        .filter(
+          (r) =>
+            verdictTag(r) === "vetoed" &&
+            expectations.get(r.command) === "supported-benign"
+        )
+        .map((r) => r.command)
+    );
+    const unexcused = pass.rows.filter(
+      (r) =>
+        r.class === "UNEXPECTED" && expectations.get(r.command) === undefined
+    );
+    expect(
+      unexcused.map((r) => r.command),
+      "an unlabeled row went UNEXPECTED: outside this repair's label surface"
     ).toEqual([]);
-    expect(pass.rows.every((r) => r.class === "EXPECTED")).toBe(true);
   });
 
   it("the report satisfies SC10's admission predicate — and fails the moment rows are curated out", () => {
     const committed = committedCommands();
-    const rows = runDualPass([...committed, generatedOverCapCommand()]).rows;
-    expect(admissionViolations(rows, committed.length)).toEqual([]);
+    const expectations = loadExpectations(expectationsFile);
+    const rows = runDualPass(
+      [...committed, generatedOverCapCommand()],
+      expectations
+    ).rows;
+    expect(admissionViolations(rows, committed.length, expectations)).toEqual(
+      []
+    );
 
     // Falsifier, the graded form of "the corpus was curated to make the gate
     // green": delete the whitespace (vetoed) and over-cap rows to quiet (d).
@@ -1057,7 +1270,11 @@ describe("SC11: the corpus run in CI", () => {
       (r) =>
         !(r.clause === "d" && ["vetoed", "over-cap"].includes(verdictTag(r)))
     );
-    const afterCurating = admissionViolations(curatedOut, committed.length);
+    const afterCurating = admissionViolations(
+      curatedOut,
+      committed.length,
+      expectations
+    );
     expect(afterCurating.length).toBeGreaterThan(0);
     expect(afterCurating.join("\n")).toContain("vetoed");
     expect(afterCurating.join("\n")).toContain("over-cap");
@@ -1065,8 +1282,25 @@ describe("SC11: the corpus run in CI", () => {
     // Falsifier in the other direction: drop the only bare-metachar row.
     const withoutBare = rows.filter((r) => r.oldVerdict !== "bare-metachar");
     expect(
-      admissionViolations(withoutBare, committed.length).join("\n")
+      admissionViolations(withoutBare, committed.length, expectations).join("\n")
     ).toContain("bare-metachar");
+  });
+
+  it("P4 is a floor too: curating the labeled rows out of the report fails admission", () => {
+    const committed = committedCommands();
+    const expectations = loadExpectations(expectationsFile);
+    const rows = runDualPass([...committed], expectations).rows;
+    expect(rows.length).toBe(committed.length);
+    const withoutLabeled = rows.filter(
+      (r) => expectations.get(r.command) === undefined
+    );
+    expect(withoutLabeled.length).toBe(committed.length - expectations.size);
+    const violations = admissionViolations(
+      withoutLabeled,
+      withoutLabeled.length,
+      expectations
+    ).join("\n");
+    expect(violations).toContain("P4");
   });
 
   it("class-(e) membership is a committed assertion, not a reading of the tool (SC11 round 9)", () => {
@@ -1154,20 +1388,24 @@ describe("SC11: the corpus run in CI", () => {
 // ==========================================================================
 
 describe("T6 Acceptance: the report is a command, not a ceremony", () => {
-  it("`npx tsx scripts/shell-parse-divergence.ts --corpus tests/fixtures/shell-corpus/benign.jsonl` exits 0", async () => {
+  it("`npx tsx scripts/shell-parse-divergence.ts --corpus tests/fixtures/shell-corpus/benign.jsonl` prints one classified row per record", async () => {
     const run = await runScript(["--corpus", corpusFile]);
-    expect(run.code, `exit ${run.code}; stderr: ${run.err}`).toBe(0);
     const records = readFileSync(corpusFile, "utf8")
       .split("\n")
       .filter((line) => line.length > 0);
     const lines = run.out.split("\n").filter((l) => l.length > 0);
+    expect(run.code, `exit ${run.code}; stderr: ${run.err}`).toBe(
+      // The committed corpus now carries SC7's planted rows, so the exit code
+      // is a computed consequence of the report, not a pinned literal: 1 while a
+      // labeled supported form is still vetoed, 0 once none is.
+      lines.some((l) => l.split("\t")[3] === "UNEXPECTED") ? 1 : 0
+    );
     expect(lines.length, "one row per record").toBe(records.length);
     for (const line of lines) {
       const fields = line.split("\t");
       expect(fields.length).toBe(4);
       expect(fields[3].length).toBeGreaterThan(0);
     }
-    expect(lines.some((l) => l.split("\t")[3] === "UNEXPECTED")).toBe(false);
   }, 120_000);
 
   it("SC10's stdout format test: one quoted inert record with a real LF, CR and TAB yields exactly one physical row", async () => {
@@ -1210,5 +1448,272 @@ describe("T6 Acceptance: the report is a command, not a ceremony", () => {
       "a malformed corpus must fail the run, not be skipped"
     ).not.toBe(0);
     expect(run.out, "a rejected corpus may not print rows anyway").toBe("");
+  }, 120_000);
+
+  it("an empty corpus is not an error: no rows, no crash, exit 0", async () => {
+    const dir = freshTempDir("empty-corpus");
+    const file = join(dir, "empty.jsonl");
+    writeFileSync(file, "");
+    const run = await runScript(["--corpus", file]);
+    expect(run.code, `exit ${run.code}; stderr: ${run.err}`).toBe(0);
+    expect(run.out).toBe("");
+  }, 120_000);
+});
+
+// ==========================================================================
+// 6. #1188 SC7 — the labeled roster falsifies a planted false positive
+// ==========================================================================
+
+/** One corpus file plus its sibling roster, in a fresh temp dir. */
+function writeCorpusWithRoster(
+  label: string,
+  commands: readonly string[],
+  roster: readonly Record<string, unknown>[]
+): string {
+  const dir = freshTempDir(label);
+  const file = join(dir, "planted.jsonl");
+  writeFileSync(
+    file,
+    commands.map((command) => JSON.stringify({ command })).join("\n") + "\n"
+  );
+  if (roster.length > 0) {
+    writeFileSync(
+      join(dir, EXPECTATIONS_FILENAME),
+      roster.map((record) => JSON.stringify(record)).join("\n") + "\n"
+    );
+  }
+  return file;
+}
+
+/** The four TSV fields of each printed row, class column last. */
+function reportFields(stdout: string): string[][] {
+  return stdout
+    .split("\n")
+    .filter((line) => line.length > 0)
+    .map((line) => line.split("\t"));
+}
+
+describe("#1188 SC7: a planted supported-form veto is reported UNEXPECTED", () => {
+  it("the real CLI exits non-zero on a labeled supported form that production still vetoes", async () => {
+    // Planted by hand, not committed: the mid-word continuation is a shape the
+    // repair RETAINS, and this roster claims it is supported-benign. That is the
+    // false positive the gate exists to name, and it stays a false positive
+    // whether or not the incident forms have been repaired yet.
+    const file = writeCorpusWithRoster(
+      "planted",
+      [RETAINED_MIDWORD_JOIN],
+      [
+        {
+          command: RETAINED_MIDWORD_JOIN,
+          expectation: "supported-benign",
+          rationale: "planted on purpose: this corpus must fail the run",
+        },
+      ]
+    );
+    const run = await runScript(["--corpus", file]);
+    expect(run.code, `exit ${run.code}; stdout: ${run.out}`).toBe(1);
+    const fields = reportFields(run.out);
+    expect(fields.length).toBe(1);
+    expect(fields[0][2]).toBe("verdict=vetoed");
+    expect(fields[0][3], "a labeled supported veto is not reported").toBe(
+      "UNEXPECTED"
+    );
+    expect(fields[0][1], "clause (d)'s premise is a legacy-allow row").toBe(
+      "null"
+    );
+  }, 120_000);
+
+  it("the same corpus WITHOUT the label is an expected class-(d) denial and exits 0", async () => {
+    const file = writeCorpusWithRoster("unplanted", [RETAINED_MIDWORD_JOIN], []);
+    const run = await runScript(["--corpus", file]);
+    expect(run.code, `exit ${run.code}; stdout: ${run.out}`).toBe(0);
+    const fields = reportFields(run.out);
+    expect(fields[0][2]).toBe("verdict=vetoed");
+    expect(fields[0][3]).toBe("expected-d");
+  }, 120_000);
+
+  it("a missing roster is the empty map: the unlabeled rows classify exactly as before", async () => {
+    expect(
+      loadExpectations(join(corpusDir, "no-such-roster.jsonl")).size,
+      "a missing roster file crashed or invented labels"
+    ).toBe(0);
+    // A corpus dir with no sibling roster still runs, and the unlabeled rows
+    // are byte-for-byte their pre-roster classification.
+    const file = writeCorpusWithRoster(
+      "no-roster",
+      [RETAINED_MIDWORD_JOIN],
+      []
+    );
+    const run = await runScript(["--corpus", file]);
+    expect(run.code, `exit ${run.code}; stderr: ${run.err}`).toBe(0);
+    expect(dualRunCommand(RETAINED_MIDWORD_JOIN)).toEqual(
+      dualRunCommand(RETAINED_MIDWORD_JOIN, new Map())
+    );
+    expect(dualRunCommand(RETAINED_MIDWORD_JOIN).class).toBe("EXPECTED");
+    expect(dualRunCommand(RETAINED_MIDWORD_JOIN).clause).toBe("d");
+  }, 120_000);
+
+  it("a malformed roster line fails the load before any row prints", async () => {
+    const dir = freshTempDir("bad-roster");
+    const file = join(dir, "planted.jsonl");
+    writeFileSync(
+      file,
+      JSON.stringify({ command: "echo hi" }) + "\n"
+    );
+    writeFileSync(
+      join(dir, EXPECTATIONS_FILENAME),
+      JSON.stringify({ command: "echo hi", expectation: "probably-fine" }) + "\n"
+    );
+    const run = await runScript(["--corpus", file]);
+    expect(typeof run.code, "the child process never ran").toBe("number");
+    expect(run.code, "an undecidable label must not be read as a label").toBe(1);
+    expect(run.out, "a rejected roster may not print rows anyway").toBe("");
+    expect(run.err).toContain("expectation");
+  }, 120_000);
+});
+
+describe("#1188 SC7: the labeled population separates the two denials", () => {
+  const expectations = loadExpectations(expectationsFile);
+
+  it("a supported-benign row is UNEXPECTED only while production vetoes it", () => {
+    const rows = runDualPass(
+      [...SUPPORTED_BENIGN_COMMANDS, ...RETAINED_FIDELITY_COMMANDS],
+      expectations
+    ).rows;
+    expect(rows.length).toBe(6);
+    for (const row of rows) {
+      const planted = verdictTag(row) === "vetoed";
+      const supported = expectations.get(row.command) === "supported-benign";
+      expect(
+        row.class,
+        `${JSON.stringify(row.command)} verdict=${verdictTag(row)} label=${expectations.get(row.command)}`
+      ).toBe(planted && supported ? "UNEXPECTED" : "EXPECTED");
+      if (row.class === "EXPECTED" && row.oldVerdict === null) {
+        // An agreement row carries no clause; a denied row names clause (d).
+        expect(
+          [null, "d"],
+          `${row.command} clause`
+        ).toContain(row.clause ?? null);
+      }
+    }
+  });
+
+  it("the retained fidelity denials are still denials, and still EXPECTED", () => {
+    for (const command of RETAINED_FIDELITY_COMMANDS) {
+      expect(expectations.get(command), command).toBe("retained-fidelity");
+      const row = dualRunCommand(command, expectations);
+      // SC3: a real or unresolved Bash disagreement stays a hard denial, and
+      // the label must not be able to talk the gate out of that.
+      expect(verdictTag(row), `${command} lost its denial`).toBe("vetoed");
+      expect(row.oldVerdict, command).toBeNull();
+      expect(row.class, command).toBe("EXPECTED");
+      expect(row.clause, command).toBe("d");
+    }
+  });
+
+  it("the mid-word join is the committed denial representative, and `echo\\ test` is gone", () => {
+    const committed = committedCommands();
+    expect(committed, "the retired representative is still a corpus row").not.toContain(
+      RETIRED_DENIAL_REPRESENTATIVE
+    );
+    for (const command of RETAINED_FIDELITY_COMMANDS) {
+      expect(committed, `${command} is not a committed corpus row`).toContain(
+        command
+      );
+    }
+    for (const command of SUPPORTED_BENIGN_COMMANDS) {
+      expect(committed, `${command} is not a committed corpus row`).toContain(
+        command
+      );
+    }
+  });
+
+  it("the roster is read as text: a label comes back whether or not the parse vetoes it", () => {
+    // Independence, behaviorally: the loader returns the committed label for a
+    // vetoed command and for an admitted one alike, so nothing in the label can
+    // be a function of production behavior.
+    const dir = freshTempDir("label-text");
+    const roster = join(dir, EXPECTATIONS_FILENAME);
+    writeFileSync(
+      roster,
+      [
+        JSON.stringify({ command: RETAINED_MIDWORD_JOIN, expectation: "supported-benign" }),
+        JSON.stringify({ command: "echo hi", expectation: "retained-fidelity" }),
+        "",
+      ].join("\n")
+    );
+    const loaded = loadExpectations(roster);
+    expect(loaded.get(RETAINED_MIDWORD_JOIN)).toBe("supported-benign");
+    expect(loaded.get("echo hi")).toBe("retained-fidelity");
+    expect(verdictTag(dualRunCommand(RETAINED_MIDWORD_JOIN))).toBe("vetoed");
+    expect(verdictTag(dualRunCommand("echo hi"))).toBe("ok");
+    // Only the vetoed one flips, which is the veto's doing, not the label's.
+    expect(dualRunCommand(RETAINED_MIDWORD_JOIN, loaded).class).toBe(
+      "UNEXPECTED"
+    );
+    expect(dualRunCommand("echo hi", loaded).class).toBe("EXPECTED");
+  });
+
+  it("the real CLI run over the committed corpus: the class column follows the label, and the exit code follows the class column", async () => {
+    const run = await runScript(["--corpus", corpusFile]);
+    const fields = reportFields(run.out);
+    const committed = readFileSync(corpusFile, "utf8")
+      .split("\n")
+      .filter((line) => line.length > 0).length;
+    expect(fields.length, "one row per record").toBe(committed);
+
+    let unexpected = 0;
+    for (const [, , newVerdict, classColumn] of fields) {
+      expect(classColumn.length, "the class column may not be empty").toBeGreaterThan(0);
+      if (classColumn === "UNEXPECTED") {
+        unexpected += 1;
+        expect(
+          newVerdict,
+          "only a still-vetoed supported form may be UNEXPECTED"
+        ).toBe("verdict=vetoed");
+      }
+    }
+    expect(run.code, `exit ${run.code}; stdout: ${run.out}`).toBe(
+      unexpected > 0 ? 1 : 0
+    );
+
+    // Every labeled row is present in the report, and stdout agrees with the
+    // in-process classification of that same row. The class column is the tool's
+    // own encoding of the class, so an admitted supported form reads
+    // `expected-agree` and a retained denial reads `expected-d`.
+    const pass = runDualPass(committedCommands(), expectations);
+    for (const command of expectations.keys()) {
+      const row = pass.rows.find((r) => r.command === command);
+      if (row === undefined) {
+        throw new Error(`${command} never reached the report`);
+      }
+      const printed = fields.find((f) => decodeReportField(f[0]) === command);
+      expect(printed, `${command} is missing from stdout`).toBeTruthy();
+      expect(printed, command).toEqual(formatReportRow(row).split("\t"));
+    }
+  }, 120_000);
+
+  it("the accepted corpus — the committed rows minus the labeled supported forms — exits 0", async () => {
+    const accepted = committedCommands().filter(
+      (command) => !SUPPORTED_BENIGN_COMMANDS.includes(command)
+    );
+    expect(
+      accepted.length,
+      "the accepted corpus is empty: the assertion would be vacuous"
+    ).toBeGreaterThan(40);
+    const dir = freshTempDir("accepted");
+    const file = join(dir, "accepted.jsonl");
+    writeFileSync(
+      file,
+      accepted.map((command) => JSON.stringify({ command })).join("\n") + "\n"
+    );
+    const run = await runScript(["--corpus", file]);
+    expect(run.code, `exit ${run.code}; stderr: ${run.err}`).toBe(0);
+    const fields = reportFields(run.out);
+    expect(fields.length).toBe(accepted.length);
+    expect(
+      fields.filter((f) => f[3] === "UNEXPECTED").map((f) => f[0]),
+      "the accepted corpus carries a divergence"
+    ).toEqual([]);
   }, 120_000);
 });

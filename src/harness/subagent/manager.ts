@@ -31,9 +31,11 @@ import type {
   WorkerEnvelope,
 } from "./envelope.js";
 import type { SecurityReviewRoute } from "../permission/security-review.js";
-import type { SubAgentDefinition } from "./role.js";
+import { parentFields, type SubAgentDefinition } from "./role.js";
 import { createSubAgentMailbox } from "./mailbox.js";
 import type { SubAgentTerminalSubscriber } from "./mailbox.js";
+import { createDeliveryLedger } from "./delivery-ledger.js";
+import type { ClaimedDelivery } from "./delivery-ledger.js";
 import { SubAgentSandboxRootError } from "../errors.js";
 import type {
   TraceService,
@@ -204,6 +206,13 @@ export interface SubagentInfo {
    * direct manager spawn, whose card falls back to the catalog role.
    */
   readonly title?: string;
+  /**
+   * ADR-0141: the fence posture frozen when this row was spawned. Rows keep
+   * terminal entries, so a reader filters on liveness and then reads this —
+   * that is what keeps the 无沙箱 marker lit for a bare subagent that outlives
+   * the preset that spawned it. Absent = spawned under the fenced default.
+   */
+  readonly fenceRetiredAtSpawn?: boolean;
 }
 
 export interface SubAgentManager {
@@ -240,11 +249,38 @@ export interface SubAgentManager {
   ) => Promise<SubAgentEnvelope>;
   /** abort in-flight + SIGTERM descendants + ≥5s backstop SIGKILL. */
   readonly shutdown: () => Promise<void>;
-  /** Minimal read-only enumeration needed by host-drain: terminal tasks currently in the buffer. */
-  readonly drainCompleted: (conversationId?: string) => ReadonlyArray<{
+  /**
+   * Non-consuming read of terminal tasks that are not yet claimed/delivered.
+   * `includeDelivered` is diagnostics-only (e.g. "which ids could a failed
+   * wake have seen"); delivery gates never pass it.
+   */
+  readonly drainCompleted: (
+    conversationId?: string,
+    opts?: { readonly includeDelivered?: boolean }
+  ) => ReadonlyArray<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
   }>;
+  /**
+   * Atomic delivery take: claims every undelivered terminal generation
+   * `(conversationId, taskId, terminalSeq)` and snapshots its envelope at
+   * claim time. A second concurrent claim of the same key returns nothing.
+   *
+   * Optional, the same way `abortTask` is: poll-only fakes and wake-only
+   * views stay structural, and absence means "this view cannot deliver"
+   * (the host falls back to the read-only path).
+   */
+  readonly claimCompleted?: (
+    conversationId?: string
+  ) => ReadonlyArray<ClaimedDelivery<SubAgentEnvelope>>;
+  /** Mark successfully written deliveries delivered (unknown tokens are a no-op). */
+  readonly acknowledgeDeliveries?: (
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ) => void;
+  /** Return un-written deliveries to the claimable state (unknown tokens are a no-op). */
+  readonly releaseDeliveries?: (
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ) => void;
   /**
    * Non-terminal task IDs (starting + running) for host-drain's blocking
    * polling. completed / failed never appear; host drain uses this to
@@ -634,6 +670,7 @@ function parentTurnFields(def: SubAgentDefinition): {
 function ownershipInfoFields(def: SubAgentDefinition): {
   readonly conversationId?: string;
   readonly foreground?: boolean;
+  readonly fenceRetiredAtSpawn?: boolean;
 } {
   return {
     ...(def.conversationId !== undefined
@@ -643,6 +680,10 @@ function ownershipInfoFields(def: SubAgentDefinition): {
     // population: wait:true spawn_subagent / judge / graph-node).
     // Downstream Ctrl+C fan-out selects this session's foreground subagents by it.
     ...(def.excludeFromHostDrain === true ? { foreground: true } : {}),
+    // ADR-0141: frozen at spawn so the marker survives the preset's exit.
+    ...(def.fenceRetiredAtSpawn !== undefined
+      ? { fenceRetiredAtSpawn: def.fenceRetiredAtSpawn }
+      : {}),
   };
 }
 
@@ -670,6 +711,13 @@ interface Task {
    * (exit handler and child.on("error")/timeout-fired and other paths can all trigger the terminal state);
    * once set, never overwritten, avoiding duplicate persistence. */
   stoppedEmitted: boolean;
+  /**
+   * Manager-global monotonic terminal generation, assigned once in emitStop.
+   * A resumed task replaces the Task record and therefore gets a fresh
+   * generation: its new result is deliverable, while the old one is not
+   * replayed (ADR-0150).
+   */
+  terminalSeq?: number;
   /**
    * Terminal-state ISO stamp (bookkeeping only, does not change state-machine
    * semantics). Latched once inside emitStop alongside stoppedEmitted;
@@ -950,6 +998,7 @@ function resumeDefinition(
     parentTurnId: _baseTurnId,
     toolUseId: _baseToolUseId,
     parentThinking: _baseParentThinking,
+    parentModelRoute: _baseParentModelRoute,
     excludeFromHostDrain: _baseDrain,
     ...identity
   } = base;
@@ -962,6 +1011,9 @@ function resumeDefinition(
     ...(next.toolUseId !== undefined ? { toolUseId: next.toolUseId } : {}),
     ...(next.parentThinking !== undefined
       ? { parentThinking: next.parentThinking }
+      : {}),
+    ...(next.parentModelRoute !== undefined
+      ? { parentModelRoute: next.parentModelRoute }
       : {}),
     ...(next.excludeFromHostDrain === true
       ? { excludeFromHostDrain: true }
@@ -1253,6 +1305,10 @@ export function createSubAgentManager(opts: {
   /** settleReject references of pending waitFor: actively rejected at shutdown, never hanging. */
   const waitRejecters = new Set<(reason: unknown) => void>();
   const terminalMailbox = createSubAgentMailbox();
+  /** Manager-global terminal generation counter (ADR-0150). */
+  let terminalSeq = 0;
+  /** Memory-lifetime delivery ledger; cleared by shutdown, never persisted. */
+  const deliveryLedger = createDeliveryLedger();
   /**
    * Per-task independently held per-agent trace instance + meta write closure.
    * When `opts.subagentsDir` is absent, degrades to NoopTraceService (same as
@@ -1982,6 +2038,9 @@ export function createSubAgentManager(opts: {
   ): void {
     if (task.stoppedEmitted) return;
     task.stoppedEmitted = true;
+    // One generation per terminal Task record, before the mailbox publish so
+    // an immediate host claim sees a stable key (ADR-0150).
+    task.terminalSeq = ++terminalSeq;
     if (task.envelope !== undefined && task.def.excludeFromHostDrain !== true) {
       // Locked sentence 2: published after locateEnvelope, so the envelopes
       // drain/wake receives also carry output_path (the write precedes publish).
@@ -2749,9 +2808,7 @@ export function createSubAgentManager(opts: {
       ...(def.maxTurns !== undefined && { maxTurns: def.maxTurns }),
       ...(def.timeoutMs !== undefined && { timeoutMs: def.timeoutMs }),
       ...(def.role !== undefined && { role: def.role }),
-      ...(def.parentThinking !== undefined && {
-        parentThinking: def.parentThinking,
-      }),
+      ...parentFields(def),
       ...(def.finalText !== undefined && { finalText: def.finalText }),
       ...(def.evidenceContext !== undefined && {
         evidenceContext: def.evidenceContext,
@@ -3410,25 +3467,102 @@ export function createSubAgentManager(opts: {
     // 4. Clear the tasks map.
     tasks.clear();
     terminalMailbox.clear();
+    // Undelivered results are lost with the manager (same as today); the
+    // ledger's lifetime is the manager's (ADR-0150).
+    deliveryLedger.clear();
   }
 
-  function drainCompleted(conversationId?: string): ReadonlyArray<{
+  /** Terminal, host-drainable entries before ledger filtering. */
+  function drainableEntries(conversationId?: string): Array<{
     readonly taskId: string;
     readonly envelope: SubAgentEnvelope;
+    readonly conversationId: string;
+    readonly terminalSeq: number;
   }> {
-    const out: { taskId: string; envelope: SubAgentEnvelope }[] = [];
+    const out: Array<{
+      taskId: string;
+      envelope: SubAgentEnvelope;
+      conversationId: string;
+      terminalSeq: number;
+    }> = [];
     for (const [id, task] of tasks) {
       if (
         (task.state === "completed" || task.state === "failed") &&
         task.envelope &&
+        task.terminalSeq !== undefined &&
         task.def.excludeFromHostDrain !== true &&
         (conversationId === undefined ||
           task.def.conversationId === conversationId)
       ) {
-        out.push({ taskId: id, envelope: task.envelope });
+        out.push({
+          taskId: id,
+          envelope: task.envelope,
+          conversationId: task.def.conversationId ?? "",
+          terminalSeq: task.terminalSeq,
+        });
       }
     }
     return out;
+  }
+
+  /**
+   * Non-consuming read of terminal tasks. Claimed and delivered generations
+   * are filtered out unless `includeDelivered` (diagnostics only).
+   */
+  function drainCompleted(
+    conversationId?: string,
+    opts: { readonly includeDelivered?: boolean } = {}
+  ): ReadonlyArray<{
+    readonly taskId: string;
+    readonly envelope: SubAgentEnvelope;
+  }> {
+    const entries = drainableEntries(conversationId);
+    if (opts.includeDelivered === true) {
+      return entries.map((entry) => ({
+        taskId: entry.taskId,
+        envelope: entry.envelope,
+      }));
+    }
+    return deliveryLedger
+      .undelivered(
+        entries.map((entry) => ({
+          conversationId: entry.conversationId,
+          taskId: entry.taskId,
+          terminalSeq: entry.terminalSeq,
+          envelope: entry.envelope,
+        }))
+      )
+      .map((entry) => ({ taskId: entry.taskId, envelope: entry.envelope }));
+  }
+
+  /**
+   * Atomic delivery take: claim every undelivered terminal generation. A
+   * second claim for the same key returns nothing; the caller acknowledges
+   * after the digest-carrying write or releases on failure.
+   */
+  function claimCompleted(
+    conversationId?: string
+  ): ReadonlyArray<ClaimedDelivery<SubAgentEnvelope>> {
+    return deliveryLedger.claim(
+      drainableEntries(conversationId).map((entry) => ({
+        conversationId: entry.conversationId,
+        taskId: entry.taskId,
+        terminalSeq: entry.terminalSeq,
+        envelope: entry.envelope,
+      }))
+    );
+  }
+
+  function acknowledgeDeliveries(
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ): void {
+    deliveryLedger.acknowledge(claims);
+  }
+
+  function releaseDeliveries(
+    claims: ReadonlyArray<ClaimedDelivery<unknown>>
+  ): void {
+    deliveryLedger.release(claims);
   }
 
   return Object.freeze({
@@ -3438,6 +3572,9 @@ export function createSubAgentManager(opts: {
     waitFor,
     shutdown,
     drainCompleted,
+    claimCompleted,
+    acknowledgeDeliveries,
+    releaseDeliveries,
     listActive,
     abortTask,
     // Entry point for resuming dead workers (gates decided inside resumeTask;

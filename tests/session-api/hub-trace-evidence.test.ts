@@ -46,11 +46,12 @@ afterAll(async () => {
   await rm(baseDir, { recursive: true, force: true });
 });
 
-const DENIAL = "[hard_wall] dangerous command rejected";
+const DENIAL = "[network_denied] evil.com: not in allowlist";
+const HARD_WALL_DENIED = "[hard_wall] dangerous command rejected";
 
 /**
  * Deps whose turn launches one worker and one finite background job and then
- * hard-denies three times.
+ * denies three times with a non-hardwall mid-tier message.
  *
  * Ownership is registered the way production registers it: the turn-work
  * ledger reads a `task_id` out of a *successful* tool result, so the launcher
@@ -59,11 +60,11 @@ const DENIAL = "[hard_wall] dangerous command rejected";
  * scope, and the ids below land in that real registry because the real
  * wrapper put them there.
  */
-function makeDeps(): LoopEngineDeps {
+function makeDeps(denial: string = DENIAL): LoopEngineDeps {
   const deny = createStubTool({
     name: "dangerous",
     next: () => {
-      throw new ToolExecutionError(DENIAL);
+      throw new ToolExecutionError(denial);
     },
   });
   const spawn = createStubTool({
@@ -143,7 +144,7 @@ describe("Serve route: interrupted-turn evidence is reconstructable from the JSO
     // ── Step 2: the cause, read without touching the displayed outcome.
     expect(report!["tier"]).toBe("mid");
     expect(report!["tool"]).toBe("dangerous");
-    expect(report!["message"]).toContain("hard_wall");
+    expect(report!["message"]).toContain("network_denied");
     expect(report!["confirmed_violations"]).toBe(3);
 
     // ── Step 3: bind the report to a concrete turn row.
@@ -168,7 +169,7 @@ describe("Serve route: interrupted-turn evidence is reconstructable from the JSO
     for (const row of toolRows) {
       expect(row["tool_kind"]).toBe("execution_failed");
       expect((row["error"] as { message: string }).message).toContain(
-        "hard_wall"
+        "network_denied"
       );
       expect("cause" in row).toBe(false);
     }
@@ -196,6 +197,46 @@ describe("Serve route: interrupted-turn evidence is reconstructable from the JSO
     expect(worker["cleanup"]).toEqual({ state: "not_started" });
     // And nothing anywhere on the item claims a confirmed stop.
     expect(JSON.stringify(worker)).not.toContain("confirmed_stopped");
+  });
+
+  it("three [hard_wall] denials write no interruption report and do not cancel owned work", async () => {
+    const hub = new SessionHub({
+      store,
+      workspaceRoot: process.cwd(),
+      deps: makeDeps(HARD_WALL_DENIED),
+      traceOut: traceDir,
+    });
+    const created = await hub.createSession();
+    const id = created.session.conversation_id;
+    const answer = await hub.postMessage({ conversationId: id, text: "go" });
+    expect(answer.turn.answer.stopReason).toBe("completed");
+    expect(answer.turn.answer.finalText).toBe("second turn");
+    const outcome = answer.turn.answer.outcome;
+    expect(
+      outcome?.terminal === "known" ? outcome.securityInterruption : undefined
+    ).toBeUndefined();
+
+    const tracePath = resolveConversationTraceFilePath({
+      projectDir: store.getProjectDir(),
+      conversationId: id,
+    });
+    expect(existsSync(tracePath)).toBe(true);
+    const rows = rowsOf(await readFile(tracePath, "utf8"));
+    const violations = rows.filter((r) => r["record_type"] === "violation");
+    expect(violations).toEqual([]);
+    const cleanupClaims = rows.filter(
+      (r) =>
+        JSON.stringify(r["cleanup"] ?? "").includes("worker-1") ||
+        JSON.stringify(r["cleanup"] ?? "").includes("bg-1")
+    );
+    expect(cleanupClaims).toEqual([]);
+    const denials = rows.filter(
+      (r) =>
+        r["record_type"] === "tool_call" &&
+        r["tool_kind"] === "execution_failed" &&
+        JSON.stringify(r["error"] ?? "").includes("hard_wall")
+    );
+    expect(denials.length).toBe(3);
   });
 });
 

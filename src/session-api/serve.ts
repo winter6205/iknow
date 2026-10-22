@@ -200,7 +200,7 @@ export async function startSessionServe(
   // ADR-0094: single-source runtime LLM env (serve entry) — EnvLoader is
   // injected into the hub. Same shape as the TUI: construct → pass
   // envProvider through to the hub → subscribe triggers hub.reloadFromEnv
-  // for hot rebuild (whitelisted fields, e.g. model, changed).
+  // for hot apply (whitelisted fields, e.g. apiKey, changed).
   // EnvLoader.stop() releases synchronously during listening.close()
   // (mirrors the TUI combined shutdown).
   const envLoader: EnvLoader = createServeEnvLoader(opts);
@@ -253,9 +253,11 @@ export async function startSessionServe(
     // no-recents semantics, see hub.ts.
     recentsHome: homedir(),
     // ADR-0094: env source — previously serve called loadIknowEnv() once;
-    // now EnvLoader.get() feeds every ensureDeps / reloadFromEnv, so editing
-    // whitelisted settings.json fields (model / apiKey / headers) takes
-    // effect on the next POST /messages.
+    // now EnvLoader.get() feeds every ensureDeps / reloadFromEnv. ADR-0145
+    // splits the whitelisted settings.json fields: editing `model` applies
+    // to new conversations only (a live conversation keeps its own route),
+    // while `apiKey` / `headers` and the other credential / limit fields
+    // still apply on the next POST /messages.
     envProvider: () => envLoader.get(),
     // Prefer the full handle when provided so web can resolve asks; fall back
     // to the bare askUser (back-compat for callers that only wire `.ask`).
@@ -265,8 +267,9 @@ export async function startSessionServe(
   });
 
   // ADR-0094: subscribe to the EnvLoader — settings file changes → reload
-  // env → the hub's adapter hot-rebuild path (build-engine is never touched
-  // directly). A reload throw (bad JSON / missing apiKey) → the EnvLoader
+  // env → the hub's hot-reload path (build-engine is never touched
+  // directly). ADR-0145: a reload never moves a live conversation off its
+  // own route. A reload throw (bad JSON / missing apiKey) → the EnvLoader
   // keeps the old env internally and fires onError; the .catch here swallows
   // it (same as the TUI: cachedDeps untouched, the old adapter is silently
   // retained — degraded semantics aligned).

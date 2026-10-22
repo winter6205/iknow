@@ -1,5 +1,5 @@
 /**
- * Frontmatter block parse + the scalar coerce boundary (ADR-0123).
+ * Frontmatter block parse + the scalar coerce boundary (ADR-0144).
  *
  * Contract (the frontmatter coercion boundary in docs/CONTEXT.md): string / number /
  * boolean / null → string; scalar array → folded with `", "`; mapping → key

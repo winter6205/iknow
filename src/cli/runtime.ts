@@ -59,7 +59,15 @@ export type RuntimeBundle = {
  */
 export function resolvePermissionMode(
   explicit: unknown,
-  projectDefaultModeSettings?: { readonly cwd: string }
+  projectDefaultModeSettings?: { readonly cwd: string },
+  /**
+   * ADR-0141: the user-layer `permissions.defaultMode`, which the new
+   * permission write-back persists (`/permissions plan` writes it). Injected
+   * rather than resolved here so `runtime.ts` keeps no settings-path logic and
+   * the caller decides which home the write-back targeted. The write is
+   * user-layer only by ADR-0090, so this arm never admits `full_auto`.
+   */
+  userDefaultMode?: "default" | "plan"
 ): PermissionModeContext {
   const projectDefaultMode =
     projectDefaultModeSettings === undefined
@@ -68,7 +76,8 @@ export function resolvePermissionMode(
   const parsed =
     parsePermissionMode(explicit) ??
     parsePermissionMode(process.env.IKNOW_PERMISSION_MODE) ??
-    projectDefaultMode;
+    projectDefaultMode ??
+    userDefaultMode;
   return createPermissionModeContext(parsed ?? "default");
 }
 

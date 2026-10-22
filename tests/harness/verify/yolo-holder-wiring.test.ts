@@ -12,7 +12,7 @@
  *      `makeDefaultRunVerify` (the closure is built fresh each round => the
  *      snapshot vintage is that round) -> with yolo ON the verify fence argv is
  *      bare, with yolo absent it still carries the bwrap prefix;
- *   3. absent / false -> non-yolo (fail-closed keeps the fence, the V1 baseline is
+ *   3. absent / false -> fence live (fail-closed keeps it, the V1 baseline is
  *      byte-identical);
  *   4. an in-flight flip is not cross-route atomic (Contract §6): a `/yolo` flip
  *      landing inside a call keeps that call's entry-vintage shape (foreground
@@ -55,6 +55,7 @@ import { createDefaultAciRegistry } from "../../../src/harness/aci/tools/registr
 import { createBashTool } from "../../../src/harness/aci/tools/bash.ts";
 import { runVerifyLoop } from "../../../src/harness/verify/verify-loop.ts";
 import { createYoloContext } from "../../../src/harness/sandbox/yolo.ts";
+import { deriveFenceRetired } from "../../../src/harness/sandbox/yolo.js";
 import type {
   BackgroundSpawnRequest,
   BackgroundTaskManager,
@@ -166,7 +167,7 @@ async function runVerifyOnce(
     config: { command: "echo hi" },
     sessionId: "yolo-holder-wiring",
     cwd: FIX_CWD,
-    ...(yolo !== undefined ? { yolo } : {}),
+    ...(yolo !== undefined ? { fenceRetired: yolo } : {}),
   });
   expect(capturedArgvs.length).toBeGreaterThan(0);
   return capturedArgvs[0]!;
@@ -177,7 +178,7 @@ describe("registry -> bash factory: the yolo holder passes by reference (ADR-011
     const reg = createDefaultAciRegistry({
       env: WEB_ENV,
       sandboxRoot: FIX_SANDBOX,
-      yolo: createYoloContext(true),
+      fenceRetired: createYoloContext(true),
     });
     await runRegistryBash(reg);
     expect(capturedArgvs).toHaveLength(1);
@@ -196,17 +197,18 @@ describe("registry -> bash factory: the yolo holder passes by reference (ADR-011
     expect(capturedArgvs).toHaveLength(1);
     expect(capturedArgvs[0]![0]).toBe("bwrap");
     expect(capturedArgvs[0]!).toContain("--unshare-net");
-    expect(vi.mocked(sandboxRunner.requireBwrap)).toHaveBeenCalledTimes(1);
+    // ADR-0141 invariant 9: the probe runs at assembly AND on this fenced call.
+    expect(vi.mocked(sandboxRunner.requireBwrap)).toHaveBeenCalledTimes(2);
   });
 
   it("flipping the holder after assembly -> the next handler call reads the new value (per-call snapshot, D2)", async () => {
-    // At assembly time the holder's initial value is false (non-yolo), so the
+    // At assembly time the holder's initial value is false (fence live), so the
     // factory-time requireBwrap probe runs as before.
     const holder = createYoloContext(false);
     const reg = createDefaultAciRegistry({
       env: WEB_ENV,
       sandboxRoot: FIX_SANDBOX,
-      yolo: holder,
+      fenceRetired: holder,
     });
     await runRegistryBash(reg);
     expect(capturedArgvs[0]![0]).toBe("bwrap");
@@ -248,13 +250,34 @@ describe("runVerifyLoop -> makeDefaultRunVerify: yolo holder pass-through (ADR-0
   });
 });
 
+describe("deriveFenceRetired: single-site derivation with the simultaneous-effective invariant (ADR-0141 §6)", () => {
+  it.each([
+    ["declared true at global -> retired", true, "global", true],
+    ["declared false at workspace -> kept", false, "workspace", false],
+    ["declared false at global -> kept", false, "global", false],
+  ] as const)("%s", (_name, fenceRetired, fsMode, expected) => {
+    expect(deriveFenceRetired({ fenceRetired, fsMode })).toBe(expected);
+  });
+
+  it("true at workspace -> typed invariant error (spec invariant 7, never a silent correction)", () => {
+    try {
+      deriveFenceRetired({ fenceRetired: true, fsMode: "workspace" });
+      expect.unreachable("expected the invariant error");
+    } catch (err) {
+      expect((err as { kind?: string }).kind).toBe(
+        "fence_retirement_invariant"
+      );
+    }
+  });
+});
+
 describe("in-flight /yolo flip keeps each route's entry vintage (Contract §6, no cross-route atomicity)", () => {
   it("foreground: a flip landing inside the call never re-fences it — the in-flight argv stays bwrap, the next call is bare", async () => {
     const holder = createYoloContext(false);
     const reg = createDefaultAciRegistry({
       env: WEB_ENV,
       sandboxRoot: FIX_SANDBOX,
-      yolo: holder,
+      fenceRetired: holder,
     });
     // The flip fires between handler entry (snapshot taken) and completion:
     // per-call snapshot semantics mean THIS call keeps the bwrap fence.
@@ -274,7 +297,7 @@ describe("in-flight /yolo flip keeps each route's entry vintage (Contract §6, n
     expect(capturedArgvs[1]!.slice(0, 3)).toEqual(["bash", "-c", "echo hi"]);
   });
 
-  it("background: the request is frozen at handler entry — a flip landing inside manager.spawn keeps this request non-yolo, the next call carries yolo:true", async () => {
+  it("background: the request is frozen at handler entry — a flip landing inside manager.spawn keeps this request fenced, the next call carries fenceRetiredAtSpawn:true", async () => {
     const holder = createYoloContext(false);
     const captured: BackgroundSpawnRequest[] = [];
     const manager = {
@@ -292,19 +315,19 @@ describe("in-flight /yolo flip keeps each route's entry vintage (Contract §6, n
     } as unknown as BackgroundTaskManager;
     const tool = createBashTool(FIX_CWD, {
       tmpDir: FIX_SANDBOX,
-      yolo: holder,
+      fenceRetired: holder,
       backgroundManager: manager,
     });
     await tool.handler(
       { command: "echo hi", background: true },
       { conversationId: "yolo-vintage" }
     );
-    expect(captured[0]!.yolo).toBeUndefined();
+    expect(captured[0]!.fenceRetiredAtSpawn).toBeUndefined();
 
     await tool.handler(
       { command: "echo hi", background: true },
       { conversationId: "yolo-vintage" }
     );
-    expect(captured[1]!.yolo).toBe(true);
+    expect(captured[1]!.fenceRetiredAtSpawn).toBe(true);
   });
 });

@@ -40,7 +40,10 @@ import {
   openPty,
   probeReadiness,
 } from "../../../../scripts/eval/tui/pty.ts";
-import { runTuiCalibration } from "../../../../scripts/eval/tui/run.ts";
+import {
+  runTuiCalibration,
+  verdictExitCode,
+} from "../../../../scripts/eval/tui/run.ts";
 import {
   listSessionFiles,
   sessionFilePath,
@@ -560,11 +563,15 @@ describe("runTuiCalibration — the measured sequence on a live terminal", () =>
           command: process.execPath,
           // A round that settles far inside the inner wall, so the only thing
           // that can keep the run open afterwards is the refused stimulus.
-          // The margin is deliberately wide: the wall must not be reachable
-          // before the round settles even on a loaded machine.
+          // The refusal can only be recorded by a tick that lands while S1 is
+          // still un-settled (between S2's due time and S1's settlement), so
+          // the round is long enough to keep that window ~7.5s wide: under
+          // heavy fork contention a single tick can be delayed by seconds, and
+          // a narrow window let one loaded run submit S2 legitimately after S1
+          // had already settled. The margin to the 30s inner wall stays wide.
           args: childArgs(h, {
             "accept-delay-ms": 200,
-            "round-ms": 2500,
+            "round-ms": 8000,
           }),
         },
         stop: {
@@ -601,6 +608,215 @@ describe("runTuiCalibration — the measured sequence on a live terminal", () =>
       "a halting run must still reap everything it started"
     );
   });
+
+  it("refuses a second stimulus while an ACCEPTED round is still un-settled, and still proves the first", async () => {
+    const h = makeHarness();
+    // One instance shared by the run and the readback below, so the exit
+    // contract is judged against the exact protocol that produced the verdict.
+    let p: ReturnType<typeof protocol> | null = null;
+    // WHY a settle-bound refusal and not an acceptance-phase one: the
+    // outstanding gate's acceptance phase and `expireAcceptance` share the same
+    // `acceptTimeoutMs` budget and the same `sent_at_ms` origin, so a refusal
+    // while S1 is still being ACCEPTED would coincide with S1 timing out — S1
+    // could never end up accepted. Once S1's acceptance persisted (its
+    // `boundary:"input"` is the busy signal), the scheduler holds S2 for the
+    // bounded `settleWaitMs` and then refuses it at that bound while S1's round
+    // is still un-settled. The refusal is final — there is no blind resend —
+    // so once S1 settles, nothing further can be delivered or verified.
+    const result = await runTuiCalibration(
+      (p = protocol(h, {
+        stimuli: [
+          { at: 300, tag: "S1", text: "FIRST-STIMULUS-TEXT" },
+          { at: 800, tag: "S2", text: "REFUSED-STIMULUS-TEXT" },
+        ],
+        delivery: {
+          chunkBytes: 8,
+          chunkDelayMs: 5,
+          settleBeforeSubmit: true,
+          // S2 is HELD from its due time (800ms) and refused only once the
+          // bounded wait has actually elapsed — the bound is exercised, not an
+          // instant refusal. 300ms is far inside S1's 4000ms round, so the
+          // refusal always lands while S1 is accepted-but-unsettled.
+          settleWaitMs: 300,
+          acceptTimeoutMs: 8000,
+          retryEnter: false,
+        },
+        child: {
+          command: process.execPath,
+          // A round that outlives the settle wait by an order of magnitude: the
+          // only way S2 can be refused is the outstanding S1, and the only way
+          // S1 still ends settled is its own round finishing after the refusal.
+          args: childArgs(h, {
+            "accept-delay-ms": 150,
+            "round-ms": 4000,
+          }),
+        },
+        stop: {
+          minSettleMs: 100,
+          horizonMs: 200,
+          exitGraceMs: 3000,
+          innerWallMs: 30000,
+        },
+      }))!
+    );
+
+    const kinds = result.events.map((e) => e.kind);
+    assert.equal(
+      result.acceptance[1]?.verdict,
+      "refused",
+      `S2 must be refused while S1's round is still un-settled; got: ${JSON.stringify(result.acceptance)}`
+    );
+    assert.equal(
+      result.acceptance[1]?.sent_at_ms,
+      null,
+      "a refused stimulus was never submitted"
+    );
+    assert.ok(
+      result.acceptance[0]?.verdict === "accepted" &&
+        result.acceptance[0]?.accepted_event_id !== null,
+      `the refusal must be attributable to the outstanding S1, not a broken child: S1 must still be accepted with an event id; got: ${JSON.stringify(result.acceptance[0])}`
+    );
+    assert.ok(
+      result.acceptance[0]?.settled_at_ms !== null,
+      `S1's own round must eventually settle, proving the surface recovered; got: ${JSON.stringify(result.acceptance[0])}`
+    );
+    assert.ok(
+      kinds.includes("sequence_halted"),
+      `once S2 is refused and S1 settled, nothing can be delivered or verified, so the run must halt; got: ${JSON.stringify(kinds)}`
+    );
+    assert.ok(
+      !kinds.includes("wall_exhausted"),
+      `the run must not spin to the inner wall after the refusal; got: ${JSON.stringify(kinds)}`
+    );
+    assert.deepEqual(
+      result.strayProcesses,
+      [],
+      "a halting run must still reap everything it started"
+    );
+    // The REAL verdict contract: S2 was never accepted, so `acceptance.all_required`
+    // fails, and that is what makes the report unusable. Also exercise the
+    // persisted-verdict readback (`verdictExitCode`) so the retained file backs
+    // the non-zero exit an auditor's rerun of the CLI would produce.
+    const acceptanceGate = result.report.checks.find(
+      (c) => c.id === "acceptance.all_required"
+    );
+    assert.equal(
+      acceptanceGate?.ok,
+      false,
+      `a refused stimulus has no persisted acceptance, so the gate must fail; got: ${JSON.stringify(acceptanceGate)}`
+    );
+    assert.ok(
+      result.report.blockedBy.includes("acceptance.all_required"),
+      `the acceptance gate must block the verdict; got: ${JSON.stringify(result.report.blockedBy)}`
+    );
+    assert.equal(
+      result.report.usable,
+      false,
+      "a run with a refused stimulus can never sit beside a usable verdict"
+    );
+    assert.equal(
+      verdictExitCode(p, result.report),
+      1,
+      "the persisted verdict is unusable, so the exit contract is 1"
+    );
+  }, 30_000);
+
+  it("retains a counters-derivation diagnostic when the retained store copy is corrupted mid-run", async () => {
+    const h = makeHarness();
+    const runDir = join(h.artifactsDir, "pty-fixture");
+    let injectedFault = false;
+    // One instance shared by the run and the readback below, so the exit
+    // contract is judged against the exact protocol that produced the verdict.
+    const p = protocol(h);
+    const result = await runTuiCalibration(p, {
+      log: (line) => {
+        // Inject AFTER readiness so the run proceeds: the fault is aimed at
+        // Phase 4, not at the probe or the measured sequence.
+        if (!injectedFault && line.startsWith("readiness:")) {
+          injectedFault = true;
+          // `finalizeEvidence` copies the LIVE store into `store.jsonl` before
+          // deriving, so the corruption must be visible in the live store
+          // HERE, after readiness and before the first tick. Two lines:
+          // a malformed record AND a valid record after it — the production
+          // parser drops only a TRAILING corrupt line (crash mid-append), so a
+          // bare malformed append would validate fine at finalize; with a
+          // valid line behind it the corruption is genuinely mid-file and
+          // `validateWholeFile` must fail. The run observes it as an observer
+          // error and halts before submitting, which is fine: the fault is
+          // aimed at Phase 4's derivation, not at the sequence.
+          appendRaw(
+            {
+              dataDir: h.dataDir,
+              cwd: h.cwd,
+              conversationId: h.conversationId,
+            },
+            '{"type":"unknown-kind"'
+          );
+          appendRaw(
+            {
+              dataDir: h.dataDir,
+              cwd: h.cwd,
+              conversationId: h.conversationId,
+            },
+            '{"type":"head","id":"e0"}'
+          );
+        }
+      },
+    });
+
+    assert.equal(
+      injectedFault,
+      true,
+      "the test fault must actually have been injected"
+    );
+    // The counters were NOT derived: the derivation throws, and the retained
+    // diagnostics must name the broken artifact beside a null counters file.
+    assert.equal(
+      result.counters,
+      null,
+      "a corrupted retained store cannot yield counters"
+    );
+    const countersErrorPath = join(runDir, "counters.error.txt");
+    assert.ok(
+      existsSync(countersErrorPath),
+      `the retained diagnostic must exist on disk; run dir: ${JSON.stringify(existsSync(runDir) ? readFileSync(join(runDir, "events.jsonl"), "utf8") : "missing")}`
+    );
+    const countersError = readFileSync(countersErrorPath, "utf8");
+    assert.ok(
+      /store|parser|production/i.test(countersError),
+      `the diagnostic must name the broken artifact (the store copy fails the production parser); got: ${countersError}`
+    );
+    const countersJson = JSON.parse(
+      readFileSync(join(runDir, "counters.json"), "utf8")
+    ) as unknown;
+    assert.equal(
+      countersJson,
+      null,
+      `counters.json must hold an explicit null, not an absent file; got: ${JSON.stringify(countersJson)}`
+    );
+    const countersGate = result.report.checks.find(
+      (c) => c.id === "evidence.counters_derived"
+    );
+    assert.equal(
+      countersGate?.ok,
+      false,
+      `the counters gate must fail; got: ${JSON.stringify(countersGate)}`
+    );
+    assert.ok(
+      result.report.blockedBy.includes("evidence.counters_derived"),
+      `the counters gate must block the verdict; got: ${JSON.stringify(result.report.blockedBy)}`
+    );
+    assert.equal(
+      result.report.usable,
+      false,
+      "an underivable counter can never sit beside a usable verdict"
+    );
+    assert.deepEqual(
+      result.strayProcesses,
+      [],
+      "the failed run must still reap everything it started"
+    );
+  }, 30_000);
 
   it("reports an observer error as its own failed check, never as clean", async () => {
     const h = makeHarness();

@@ -69,7 +69,7 @@ import {
 import { createLiveGraphLedgerHost } from "./harness/graph/ledger.js";
 import { createFsModeContext } from "./harness/sandbox/fs-mode.js";
 import type { FsModeContext } from "./harness/sandbox/fs-mode.js";
-import type { YoloContext } from "./harness/sandbox/yolo.js";
+import type { FenceRetirementReader } from "./harness/sandbox/yolo.js";
 // ADR-0130 eval state: the headless, named entry to the same runtime posture
 // `--yolo` reaches through the TUI (fence retired, permission full_auto, fs tier
 // global). The entry notice and the published state label are this module's SSOT.
@@ -96,6 +96,7 @@ export { isWorkspaceRootError, renderWorkspaceRootError };
 import {
   formatLlmProviderConfigError,
   isLlmProviderConfigError,
+  loadIknowEnv,
   type LlmProviderConfigError,
 } from "./config/env.js";
 import { MaxTurnsExceeded, ProtocolError } from "./harness/errors.js";
@@ -291,10 +292,10 @@ function printChatError(err: unknown): void {
  * debt. The consumers are object-literal targets with declared key sets, and
  * they read only their own keys, so spreading the whole projection is inert for
  * the ones that do not take all three (`formatRunJson` reads `opts.runState`;
- * `buildHarnessEngine` reads `opts.yolo` / `opts.fsMode`).
+ * `buildHarnessEngine` reads `opts.fenceRetired` / `opts.fsMode`).
  */
 interface EvalStateProjection {
-  readonly yolo: YoloContext;
+  readonly fenceRetired: FenceRetirementReader;
   readonly fsMode: FsModeContext;
   /** ADR-0130 §5: the state a number produced here must be published under. */
   readonly runState: EvalStateRunLabel;
@@ -317,7 +318,7 @@ function evalStateSpread(
 }
 
 /**
- * ADR-0130 eval state at the ask entry: `--eval-state` → the yolo-shaped holders,
+ * ADR-0130 eval state at the ask entry: `--eval-state` → the posture holders,
  * anything else → `undefined`, so the call site keeps the fenced baseline.
  */
 function enterEvalStateForAsk(
@@ -330,7 +331,7 @@ function enterEvalStateForAsk(
   const holders = enterEvalState({
     permission,
     // Seeded from settings like every other entry (runChat / tui), so the
-    // workspace → global flip yolo's enter combination performs is the real one
+    // workspace → global flip the enter combination performs is the real one
     // rather than a no-op on a holder nobody seeded.
     fsMode: createFsModeContext(resolveFsIsolationMode(loadIknowSettings())),
   });
@@ -341,7 +342,7 @@ function enterEvalStateForAsk(
   // re-asked at two call sites (which is what grew `runOneShot` past its S5
   // baseline — see `evalStateSpread` for the spread-guard rationale).
   return {
-    yolo: holders.yolo,
+    fenceRetired: holders.fenceRetired,
     fsMode: holders.fsMode,
     runState: EVAL_STATE_RUN_LABEL,
   };
@@ -399,12 +400,13 @@ async function runOneShot(parsed: ParsedCli): Promise<void> {
       surface: "ask",
       memory: { enabled: false },
       permissionMode,
-      // ADR-0130 eval state → the same two assembly fields yolo uses: `yolo`
-      // retires the fence on all four routes (ADR-0119 §ruling 2), `fsMode`
-      // carries the global tier the enter combination landed on. Emitted only
-      // when the flag was asked for: a non-eval ask keeps the absent-holder V1
-      // baseline (no tier holder → global at the factory, no yolo holder → the
-      // fence stays up), byte-identical to before this entry existed.
+      // ADR-0130 eval state → the same two assembly fields a preset uses:
+      // `fenceRetired` retires the fence on all four routes (ADR-0119 §ruling
+      // 2), `fsMode` carries the global tier the enter combination landed on.
+      // Emitted only when the flag was asked for: a non-eval ask keeps the
+      // absent-reader V1 baseline (no tier holder → global at the factory, no
+      // fence reader → the fence stays up), byte-identical to before this entry
+      // existed.
       ...evalStateSpread(evalState),
       // Gate on `!== undefined`, not truthiness — an empty string must reach
       // buildHarnessEngine explicitly to trigger the resolver's empty_explicit.
@@ -963,43 +965,35 @@ async function runSubagentWorkerCommand(): Promise<void> {
 }
 
 /**
- * ADR-0119 ruling 7 / spec yolo-mode EXIT: `--yolo` is reachable only from the
- * TUI entry. When any of the five non-TUI public session commands (chat /
- * serve / ask / oneshot / trace) carries it, parse time has already filled a
- * typed rejection (discriminated union) — here we only read that one value,
- * not re-decide `yolo` at dispatch (single read point, so the two decisions
- * cannot drift). The message is built once in `yolo.ts` (includes the
- * `${kind}: ...` prefix and the command name) and written straight to stderr.
+ * ADR-0119 ruling 7 / ADR-0130 §1 / ADR-0119's bare-launch amendment: every typed
+ * refusal a parse result can carry is rendered here, at the one read point. The
+ * parser decided which family fires and filled at most one field (`baseParsed` in
+ * src/cli/parse-args.ts), so this is a lookup, not a precedence decision — and the
+ * `err instanceof Error ? err.message : String(err)` collapse stays forbidden,
+ * because a plain union would print `[object Object]` and hide kind / command.
  *
- * Exit code 1, no service / session started, no settings / session file
- * written. The display paths (`-h` / `--help` / `-V` / `--version` and bare
- * `--yolo` → help) already returned before this call — an explicitly declared
- * pass-through (exit 0, no session started). The subagent-worker early arm runs
- * above this call; `__subagent_worker__` is never one of the five non-TUI
- * commands, so it carries no yoloRejection and the ordering is immaterial.
- */
-function rejectNonTuiYoloEntry(parsed: ParsedCli): void {
-  const rejection = parsed.yoloRejection;
-  if (rejection !== undefined) {
-    writeErr(rejection.message);
-    process.exit(1);
-  }
-}
-
-/**
- * ADR-0130 §1 / §5: `--eval-state` is refused on every entry but the two headless
- * one-shot faces, and refused outright when combined with `--resume`. The parser
- * has already decided (single read point, same face as the yolo guard above); this
- * only renders it, strictly after `rejectNonTuiYoloEntry` so a request carrying
- * both flags reports the yolo refusal alone.
+ * The families: `--yolo` on one of the five non-TUI session commands
+ * (`yolo_non_tui_entry`); a flag and the terminal UI that cannot both be honored
+ * (`tui_posture_conflict` from an inferred chat route, `tui_entry_refusal` from the
+ * explicit `tui` head); `--eval-state` outside its two named one-shot entries or
+ * combined with `--resume`. A bare `--yolo` **on a TTY** is not a refusal: it routes
+ * to the TUI, the flag's legal home, and reaches here only when the same invocation
+ * also anchored chat (`--json` / `--resume`).
  *
- * It has to run before any dispatch: `chat --eval-state` must not reach
- * `prepareRuntime`, or the refusal would arrive as a settings error and the
- * session would already have started.
+ * The display paths (`-h` / `--help` / `-V` / `--version`, a non-TTY bare
+ * invocation) already returned before this call — an explicitly declared
+ * pass-through (exit 0, nothing started). The subagent-worker early arm runs above
+ * it and is never one of the refused commands, so it carries no rejection.
  */
-function rejectEvalStateRequest(parsed: ParsedCli): void {
-  const rejection = parsed.evalStateRejection;
+function rejectParsedRequest(parsed: ParsedCli): void {
+  const rejection =
+    parsed.yoloRejection ??
+    parsed.tuiEntryRejection ??
+    parsed.evalStateRejection;
   if (rejection !== undefined) {
+    // EXIT: typed refusal present → actionable message on stderr, exit 1, before
+    // prepareRuntime, so no session, service, settings write or session file
+    // exists. Neither half of a two-flag request is silently discarded.
     writeErr(rejection.message);
     process.exit(1);
   }
@@ -1026,8 +1020,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  rejectNonTuiYoloEntry(parsed);
-  rejectEvalStateRequest(parsed);
+  rejectParsedRequest(parsed);
 
   if (parsed.command === "chat") {
     await runChat(parsed);
@@ -1062,7 +1055,23 @@ async function runTui(parsed: ParsedCli): Promise<void> {
     const cliFile = fileURLToPath(import.meta.url);
     const reexec = await reexecTuiUnderBun(cliFile, process.argv.slice(2));
     if (reexec.kind === "missing") {
-      process.stderr.write(tuiNodeInterceptMessage(cliFile));
+      // EXIT: Bun is not on PATH. Two answers, split by launch origin (the parser
+      // recorded it, this only reads it): an ordinary bare TTY launch asked for the
+      // default terminal UI, which the chat REPL can serve on Node, so it continues
+      // there after one notice. A launch that named a TUI-only posture, and an
+      // explicit `iknow tui`, would have to lose that request to fall back — so they
+      // exit non-zero here, before anything starts, instead of downgrading.
+      if (parsed.implicitTuiLaunch) {
+        writeErr(
+          "tui: Bun not found — starting the chat REPL instead; run 'iknow tui' once Bun is on PATH for the terminal UI"
+        );
+        await runChat(parsed);
+        return;
+      }
+      // One stderr writer for both arms of this branch: the notice and the
+      // intercept copy go through the same helper, so the two cannot drift on
+      // newline handling.
+      writeErr(tuiNodeInterceptMessage(cliFile));
       process.exitCode = 1;
       return;
     }
@@ -1086,13 +1095,23 @@ async function runTui(parsed: ParsedCli): Promise<void> {
       resolveServeDataDir(parsed.dataDir)
     ),
     ...(parsed.autoMode ? { permissionMode: "full_auto" } : {}),
+    // `--max-turns` passes through to the engine cap: the TUI assembly is the
+    // only surface that had no route for it, so an absent flag must stay the
+    // env/settings value rather than becoming "unlimited" (spread-guard shape
+    // shared with `--auto-mode` / `--yolo`).
+    ...(parsed.maxTurns !== undefined ? { maxTurns: parsed.maxTurns } : {}),
     // ADR-0119 / spec yolo-mode: the start-in-yolo switch — same
     // spread-guard shape as `--auto-mode` (absent = key not present = the
     // non-yolo fail-closed default). Reachable only via the tui command: the
     // other five public entries already filled a typed rejection at parse
-    // time, and main() exits non-zero via `rejectNonTuiYoloEntry` before
+    // time, and main() exits non-zero via `rejectParsedRequest` before
     // dispatch (nothing started).
     ...(parsed.yolo === true ? { yolo: true } : {}),
+    // ADR-0141: `--no-sandbox` rides the same route as `--yolo` and the same
+    // spread-guard shape. It MUST be forwarded here too: without it the flag
+    // parses, clears the non-TUI refusal, and is then dropped on the floor
+    // before the TUI entry — a preset that silently starts without its posture.
+    ...(parsed.noSandbox === true ? { noSandbox: true } : {}),
   });
   process.exitCode = exitCode;
 }
@@ -1140,9 +1159,14 @@ async function runServe(parsed: ParsedCli): Promise<void> {
   // Single shared handle — `.ask` is what the harness consumes; the full
   // handle is also passed so the SPA can list + resolve pending requests
   // and the hub can accumulate "always-allow" rules.
-  const askHandle = createServeAskUser();
   const sessionGrants = createSessionGrants();
   try {
+    // Approval wait timeout: IKNOW_APPROVAL_TIMEOUT_MS > settings.approval.timeoutMs
+    // (undefined / 0 = wait without limit). startSessionServe already loads the
+    // same env unconditionally, so reading it here adds no new failure mode.
+    const askHandle = createServeAskUser({
+      timeoutMs: loadIknowEnv().approval?.timeoutMs,
+    });
     const { listening, hub } = await startSessionServe({
       host: parsed.host,
       port: parsed.port,
@@ -1158,9 +1182,9 @@ async function runServe(parsed: ParsedCli): Promise<void> {
       hubOptions: {
         askUser: askHandle.ask,
         sessionGrants,
-        // ADR-0127: the SPA ask queue (5s fail-closed) is the serve entry's
-        // interactive review route; without askHandle consumers headless
-        // builds get no route and deny typed.
+        // ADR-0127: the SPA ask queue (no default timeout; configured only)
+        // is the serve entry's interactive review route; without askHandle
+        // consumers headless builds get no route and deny typed.
         securityReview: securityReviewRouteFromAsk(askHandle.ask),
       },
     });

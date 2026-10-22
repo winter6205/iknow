@@ -37,6 +37,11 @@ import {
 import type { SessionFileV1 } from "../../src/session-api/store/index.ts";
 import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentEnvelope } from "../../src/harness/subagent/envelope.ts";
+import {
+  createDeliveryLedger,
+  deliveryKey,
+  type ClaimedDelivery,
+} from "../../src/harness/subagent/delivery-ledger.ts";
 import type { GraphAssembly } from "../../src/harness/graph/assembly.ts";
 import type {
   AutoMemoryHook,
@@ -145,7 +150,10 @@ function makeManagerStub(
     // Required by the interface; returns the unsubscribe seam and never fires.
     subscribe: () => () => {},
     ...opts.overrides,
-  };
+    // No claim seam on purpose: the rebind closeout path reads through
+    // `drainCompleted`, so this fake stays on the read-only host-drain path
+    // (ADR-0150). The cast only satisfies the widened manager interface.
+  } as unknown as SubAgentManager;
 }
 
 describe("chat-session rebind 重建缝（review High-1）", () => {
@@ -993,6 +1001,356 @@ describe("rebind 后主会话写根段（specs/skill-load-write-root.md T5）", 
       segments.length,
       0,
       "exit 回身份根不得注入写根段（文案会自相矛盾）"
+    );
+  });
+});
+
+/* -------------------------------------------------------------------------- *
+ * ADR-0150 — exactly-once sub-agent result delivery across a rebind.
+ * -------------------------------------------------------------------------- */
+
+interface DeliveryEntry {
+  readonly taskId: string;
+  readonly terminalSeq: number;
+  readonly envelope: SubAgentEnvelope;
+}
+
+interface RebindDeliveryFixture {
+  readonly manager: SubAgentManager;
+  /** Entries handed out per claim call, in call order (0 = nothing claimable). */
+  readonly claimBatches: number[];
+  readonly drainCalls: () => number;
+  readonly shutdownCalls: () => number;
+  readonly isDelivered: (taskId: string) => boolean;
+}
+
+/**
+ * A manager view over the REAL delivery ledger (ADR-0150). `shutdown`
+ * mirrors the production manager: it drops the buffer and the ledger, so a
+ * shut-down manager can never replay a result.
+ */
+function makeRebindDeliveryManager(
+  entries: ReadonlyArray<DeliveryEntry>
+): RebindDeliveryFixture {
+  const ledger = createDeliveryLedger();
+  const claimBatches: number[] = [];
+  let drainCalls = 0;
+  let shutdownCalls = 0;
+  let closed = false;
+  const ledgerEntries = (): ReadonlyArray<{
+    conversationId: string;
+    taskId: string;
+    terminalSeq: number;
+    envelope: SubAgentEnvelope;
+  }> =>
+    entries.map((entry) => ({
+      conversationId: "",
+      taskId: entry.taskId,
+      terminalSeq: entry.terminalSeq,
+      envelope: entry.envelope,
+    }));
+  const manager = {
+    drainCompleted: (
+      _conversationId?: string,
+      drainOpts?: { readonly includeDelivered?: boolean }
+    ): ReadonlyArray<{ taskId: string; envelope: SubAgentEnvelope }> => {
+      drainCalls += 1;
+      if (closed) return [];
+      const visible =
+        drainOpts?.includeDelivered === true
+          ? ledgerEntries()
+          : ledger.undelivered(ledgerEntries());
+      return visible.map(({ taskId, envelope }) => ({ taskId, envelope }));
+    },
+    claimCompleted: () => {
+      if (closed) return [];
+      const claims = ledger.claim(ledgerEntries());
+      claimBatches.push(claims.length);
+      return claims;
+    },
+    acknowledgeDeliveries: (
+      claims: ReadonlyArray<ClaimedDelivery<unknown>>
+    ): void => {
+      ledger.acknowledge(claims);
+    },
+    releaseDeliveries: (
+      claims: ReadonlyArray<ClaimedDelivery<unknown>>
+    ): void => {
+      ledger.release(claims);
+    },
+    listActive: () => [],
+    waitFor: async (): Promise<SubAgentEnvelope> => {
+      throw new Error("delivery fixture: waitFor is not used");
+    },
+    queryBuffer: () => ({ status: "not_found" as const }),
+    shutdown: async () => {
+      shutdownCalls += 1;
+      closed = true;
+      ledger.clear();
+    },
+    spawn: () => ({ taskId: "delivery-fixture" }),
+    abortTask: () => false,
+    getCapacity: () => 15,
+    listSubagents: () => [],
+    subscribe: () => () => {},
+  } as unknown as SubAgentManager;
+  return {
+    manager,
+    claimBatches,
+    drainCalls: () => drainCalls,
+    shutdownCalls: () => shutdownCalls,
+    isDelivered: (taskId: string) => {
+      const entry = entries.find((candidate) => candidate.taskId === taskId);
+      return ledger.isDelivered(
+        deliveryKey({
+          conversationId: "",
+          taskId,
+          terminalSeq: entry?.terminalSeq ?? 0,
+        })
+      );
+    },
+  };
+}
+
+/** Record the model-visible history of every main model call. */
+function withHistoryList(deps: LoopEngineDeps): {
+  readonly deps: LoopEngineDeps;
+  readonly histories: () => readonly string[];
+} {
+  const histories: string[] = [];
+  const base = deps.adapter;
+  return {
+    deps: {
+      ...deps,
+      adapter: {
+        ...base,
+        step: async (state, request, signal) => {
+          if (request.tools !== undefined) {
+            histories.push(JSON.stringify(state.messages));
+          }
+          return base.step(state, request, signal);
+        },
+      },
+    },
+    histories: () => histories,
+  };
+}
+
+/** Message events in the persisted JSONL that carry `needle`. */
+function countMessageEvents(filePath: string, needle: string): number {
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf8");
+  } catch {
+    return 0;
+  }
+  let count = 0;
+  for (const line of raw.split("\n")) {
+    if (line.trim().length === 0) continue;
+    const record = JSON.parse(line) as {
+      readonly type?: string;
+      readonly message?: {
+        readonly content?: ReadonlyArray<{
+          readonly type?: string;
+          readonly text?: string;
+        }>;
+      };
+    };
+    if (record.type !== "message") continue;
+    const text = (record.message?.content ?? [])
+      .map((block) => block.text ?? "")
+      .join("");
+    if (text.includes(needle)) count += 1;
+  }
+  return count;
+}
+
+/** Occurrences of `needle` in `haystack`. */
+function occurrences(haystack: string, needle: string): number {
+  return haystack.split(needle).length - 1;
+}
+
+describe("ADR-0150 rebind delivery is exactly-once", () => {
+  it("delivers the old and the new manager results each exactly once across a rebind", async () => {
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir, process.cwd());
+    const conversationId = "conv-rebind-delivery-once";
+    const mainRoot = join(dir, "main");
+    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
+
+    const oldMarker = "old result summary a1b2";
+    const newMarker = "new result summary c3d4";
+    const oldDelivery = makeRebindDeliveryManager([
+      {
+        taskId: "old-task",
+        terminalSeq: 1,
+        envelope: { status: "ok", summary: oldMarker, result: "old body" },
+      },
+    ]);
+    const newDelivery = makeRebindDeliveryManager([
+      {
+        taskId: "new-task",
+        terminalSeq: 2,
+        envelope: { status: "ok", summary: newMarker, result: "new body" },
+      },
+    ]);
+    const captured = withHistoryList(
+      makeDeps([
+        assistantResult({ texts: ["first answer"] }),
+        assistantResult({ texts: ["second answer"] }),
+      ])
+    );
+
+    const ctx = makeCtx({
+      responses: [],
+      stateOverrides: { conversationId },
+    });
+    ctx.deps = captured.deps;
+    ctx.checkpointStore = store;
+    ctx.workspaceRoot = wtRoot;
+    ctx.engineRoot = mainRoot;
+    ctx.subagentManager = oldDelivery.manager;
+    ctx.engineShutdown = {
+      current: oldDelivery.manager.shutdown.bind(oldDelivery.manager),
+    };
+    ctx.rebuildDeps = async () => ({
+      deps: captured.deps,
+      subagentManager: newDelivery.manager,
+    });
+
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: wtRoot },
+    });
+
+    const first = await processChatLine({ line: "first question", ctx });
+    assert.equal(first.ranQuery, true);
+
+    // Both generations reached the first post-rebind run, once.
+    assert.equal(ctx.subagentManager, newDelivery.manager);
+    assert.equal(captured.histories().length, 1);
+    const oldOccurrences = occurrences(captured.histories()[0]!, oldMarker);
+    const newOccurrences = occurrences(captured.histories()[0]!, newMarker);
+    assert.ok(oldOccurrences > 0);
+    assert.ok(newOccurrences > 0);
+
+    // The closeout only READS the old manager; the round's claim belongs to
+    // the new manager and was acknowledged by the digest-carrying save.
+    assert.deepEqual(oldDelivery.claimBatches, []);
+    assert.equal(oldDelivery.shutdownCalls(), 1);
+    assert.equal(newDelivery.isDelivered("new-task"), true);
+
+    // "The old manager's shutdown does not replay a delivered result":
+    // after shutdown its buffer and ledger are empty.
+    assert.deepEqual(oldDelivery.manager.drainCompleted(), []);
+    const drainCallsAfterRebind = oldDelivery.drainCalls();
+
+    const second = await processChatLine({ line: "second question", ctx });
+    assert.equal(second.ranQuery, true);
+
+    // No replay: the second round's model history carries neither result a
+    // second time (the delivered digest stays in the conversation history,
+    // but it is not re-injected).
+    assert.equal(captured.histories().length, 2);
+    assert.equal(
+      occurrences(captured.histories()[1]!, oldMarker),
+      oldOccurrences
+    );
+    assert.equal(
+      occurrences(captured.histories()[1]!, newMarker),
+      newOccurrences
+    );
+    assert.equal(
+      oldDelivery.drainCalls(),
+      drainCallsAfterRebind,
+      "the rebind closeout runs once; the old manager is never drained again"
+    );
+
+    const jsonlPath = join(
+      store.getProjectDir(),
+      conversationId,
+      `${conversationId}.jsonl`
+    );
+    assert.equal(countMessageEvents(jsonlPath, oldMarker), 1);
+    assert.equal(countMessageEvents(jsonlPath, newMarker), 1);
+  });
+
+  it("clears the rebind closeout text after the round that carried it", async () => {
+    const dir = makeStoreDir();
+    const store = new SessionStore(dir, process.cwd());
+    const conversationId = "conv-rebind-closeout-clear";
+    const mainRoot = join(dir, "main");
+    const wtRoot = join(mainRoot, ".iknow", "worktrees", conversationId);
+    await store.save({
+      id: conversationId,
+      file: makeSessionFile(conversationId, mainRoot),
+    });
+
+    const oldMarker = "closeout summary e5f6";
+    const oldDelivery = makeRebindDeliveryManager([
+      {
+        taskId: "old-task",
+        terminalSeq: 1,
+        envelope: { status: "ok", summary: oldMarker, result: "old body" },
+      },
+    ]);
+    // The new manager has no terminal result: the closeout text is the only
+    // drain in the first post-rebind round.
+    const newDelivery = makeRebindDeliveryManager([]);
+    const captured = withHistoryList(
+      makeDeps([
+        assistantResult({ texts: ["first answer"] }),
+        assistantResult({ texts: ["second answer"] }),
+      ])
+    );
+
+    const ctx = makeCtx({
+      responses: [],
+      stateOverrides: { conversationId },
+    });
+    ctx.deps = captured.deps;
+    ctx.checkpointStore = store;
+    ctx.workspaceRoot = wtRoot;
+    ctx.engineRoot = mainRoot;
+    ctx.subagentManager = oldDelivery.manager;
+    ctx.engineShutdown = {
+      current: oldDelivery.manager.shutdown.bind(oldDelivery.manager),
+    };
+    ctx.rebuildDeps = async () => ({
+      deps: captured.deps,
+      subagentManager: newDelivery.manager,
+    });
+
+    const file = await store.load(conversationId);
+    await store.save({
+      id: conversationId,
+      file: { ...file, workspaceRoot: wtRoot },
+    });
+
+    await processChatLine({ line: "first question", ctx });
+
+    const closeoutOccurrences = occurrences(
+      captured.histories()[0]!,
+      oldMarker
+    );
+    assert.ok(closeoutOccurrences > 0);
+    // The closeout text is host text, not a claimed generation: it clears
+    // after the successful round.
+    assert.equal(ctx.pendingSubagentDrain, undefined);
+
+    await processChatLine({ line: "second question", ctx });
+
+    // The second round carries the closeout text only as history, never as a
+    // re-injected drain.
+    assert.equal(captured.histories().length, 2);
+    assert.equal(
+      occurrences(captured.histories()[1]!, oldMarker),
+      closeoutOccurrences
     );
   });
 });

@@ -269,7 +269,13 @@ export interface RuntimeSavedStateRequest<M> {
  * recorded, and it must never let the rejection look like success.
  */
 export interface RuntimePersistenceSink<M> {
-  publishSavedState(request: RuntimeSavedStateRequest<M>): Promise<void>;
+  /** Publish one complete saved state. Resolves `true` when the state was
+   *  actually written and `false` when the host skipped it (nothing to
+   *  publish yet, or no anchor to publish it at). A skip is a normal
+   *  outcome, so the flag is what separates "the write landed" from "there
+   *  was nothing to write" — a caller that treats a resolved call as proof
+   *  of durability over-claims. */
+  publishSavedState(request: RuntimeSavedStateRequest<M>): Promise<boolean>;
   appendOperationFact(fact: RuntimeOperationFact<M>): Promise<void>;
 }
 

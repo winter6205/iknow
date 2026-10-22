@@ -278,9 +278,14 @@ describe("createRuntimePersistenceBinder — publishSavedState", () => {
 
     const sink = binder.bind(id);
     assert.ok(sink);
-    await sink.publishSavedState(request("accepted_input"));
+    const written = await sink.publishSavedState(request("accepted_input"));
 
     assert.equal(await readFile(jsonlFor(id), "utf8"), before);
+    assert.equal(
+      written,
+      false,
+      "a skipped publication reports that it wrote nothing"
+    );
   });
 
   it("(b) an async gate is honored", async () => {
@@ -289,8 +294,9 @@ describe("createRuntimePersistenceBinder — publishSavedState", () => {
     const { binder } = binderWith({ shouldPublish: async () => false });
     const sink = binder.bind(id);
     assert.ok(sink);
-    await sink.publishSavedState(request("accepted_input"));
+    const written = await sink.publishSavedState(request("accepted_input"));
     assert.equal((await nativeStates(id)).length, 0);
+    assert.equal(written, false);
   });
 
   it("(c) a headless session skips the publication and writes nothing", async () => {
@@ -304,8 +310,13 @@ describe("createRuntimePersistenceBinder — publishSavedState", () => {
     const sink = binder.bind(id);
     assert.ok(sink);
 
-    await sink.publishSavedState(request("accepted_input"));
+    const written = await sink.publishSavedState(request("accepted_input"));
     assert.equal((await nativeStates(id)).length, 0);
+    assert.equal(
+      written,
+      false,
+      "the skip is reported, so a caller cannot read it as a durable write"
+    );
   });
 
   it("(c2) once the session has a head, the same publication lands and blocks on failure", async () => {
@@ -317,8 +328,9 @@ describe("createRuntimePersistenceBinder — publishSavedState", () => {
     const sink = binder.bind(id);
     assert.ok(sink);
 
-    await sink.publishSavedState(request("accepted_input"));
+    const written = await sink.publishSavedState(request("accepted_input"));
     assert.equal((await nativeStates(id)).length, 1);
+    assert.equal(written, true, "a landed publication reports that it wrote");
   });
 
   it("(d) an unknown session is a typed pre-write rejection, not a persist failure", async () => {

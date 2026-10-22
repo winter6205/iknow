@@ -96,8 +96,33 @@ describe("resolvePermissionMode — T5 project defaultMode seed (ADR-0090)", () 
     expect(ctx.get()).toBe("default");
   });
 
-  it("project file without a `permissions` section → 'default'", () => {
+  it("ADR-0141 §5: the user-layer defaultMode is read, so the write-back is not inert", () => {
+    // The write side exists (persistPermissionModeChanges writes the user
+    // file's `permissions.defaultMode`). Without this arm in the chain the
+    // write lands and the next launch ignores it — `/permissions plan` would
+    // report success and then start in `default`.
     const root = scratchRoot();
+
+    const ctx = resolvePermissionMode(undefined, { cwd: root }, "plan");
+    expect(ctx.get()).toBe("plan");
+  });
+
+  it("the project layer still outranks the user layer", () => {
+    const root = scratchRoot();
+    writeProjectSettings(root, { permissions: { defaultMode: "default" } });
+
+    const ctx = resolvePermissionMode(undefined, { cwd: root }, "plan");
+    expect(ctx.get()).toBe("default");
+  });
+
+  it("an absent user value falls through to 'default'", () => {
+    const root = scratchRoot();
+
+    const ctx = resolvePermissionMode(undefined, { cwd: root });
+    expect(ctx.get()).toBe("default");
+  });
+
+  it("project file without a `permissions` section → 'default'", () => {    const root = scratchRoot();
     writeProjectSettings(root, { verify: { command: "npm test" } });
 
     const ctx = resolvePermissionMode(undefined, { cwd: root });

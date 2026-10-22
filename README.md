@@ -35,17 +35,27 @@ npm run build
 
 Before the first run, configure your model and API key, and set a custom endpoint if needed. See the [LLM configuration guide](docs/llm-config-quickstart.md).
 
-Start the TUI:
+Start the TUI — a bare invocation on a terminal is the TUI entry:
+
+```bash
+node dist/cli.js
+```
+
+The TUI needs Bun on PATH (OpenTUI's native FFI). If Bun is missing, a bare launch prints one notice and continues in the chat REPL; `node dist/cli.js tui` fails loudly instead of downgrading.
+
+To start the chat REPL directly:
+
+```bash
+node dist/cli.js chat
+```
+
+From a clone of this repo you can also run the TUI from source:
 
 ```bash
 npm run dev:tui
 ```
 
-To start the interactive CLI instead:
-
-```bash
-npx tsx src/cli.ts chat
-```
+`npm run dev:tui` is valid only at the iknow repo root — it launches the source CLI, so it does not open another project's workspace. Use the built `iknow` (or `node dist/cli.js`) for that, and `iknow --help` for every route and flag.
 
 To build and run the web interface:
 

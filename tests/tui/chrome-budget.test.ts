@@ -1,7 +1,7 @@
 /**
  * tests/tui/chrome-budget.test.ts
  *
- * Unit tests for the pure functions chromeReserveRows + noticeRenderRows
+ * Unit tests for the pure functions chromeReserveRows + noticePhysicalLines
  * (the line-accounting SSOT). They own the per-item budget logic for
  * viewportRows; any new bottom line must be accounted here.
  *
@@ -10,8 +10,8 @@
  *    (rows + 1) + bgLine; plus agentStatusRows (live agent status, 0-6 rows
  *    dynamic, default 0 — zero impact on baseline cases; see
  *    agent-status-panel.test.ts).
- *  - noticeRenderRows: line count after empty / empty-string / multi-line /
- *    visual-width wrapping.
+ *  - noticePhysicalLines: the painted row list, whose length is the row count
+ *    after empty / empty-string / multi-line / visual-width wrapping.
  *  - compactProgressRows (/compact progress panel, 6 rows) is its own
  *    section: compactRows defaults to 0 — zero impact on baseline cases and
  *    old callers.
@@ -30,7 +30,7 @@ import {
   chromeReserveRows,
   inputVisibleLineCount,
   inputWrapLineCount,
-  noticeRenderRows,
+  noticePhysicalLines,
 } from "../../src/tui/app.js";
 import { thinkingPickerRows } from "../../src/tui/thinking-picker.js";
 import { memoryPickerRows } from "../../src/tui/memory-picker.js";
@@ -67,6 +67,23 @@ describe("chromeReserveRows", () => {
       inputRows: 1,
     });
     expect(withBg - base).toBe(1);
+  });
+
+  test("可见后台任务行逐条占用 chrome 行预算", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const withTasks = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      backgroundTaskRows: 3,
+      inputRows: 1,
+    });
+    expect(withTasks - base).toBe(3);
   });
 
   test("有 hint：hintRows 计入", () => {
@@ -329,36 +346,36 @@ describe("inputWrapLineCount: T9 wrap-aware 输入框行数（修「输入多少
   });
 });
 
-describe("noticeRenderRows", () => {
+describe("noticePhysicalLines", () => {
   test("undefined / 空数组 → 0", () => {
-    expect(noticeRenderRows(undefined, 80)).toBe(0);
-    expect(noticeRenderRows([], 80)).toBe(0);
+    expect(noticePhysicalLines(undefined, 80).length).toBe(0);
+    expect(noticePhysicalLines([], 80).length).toBe(0);
   });
 
   test("每条空字符串 → 1 行", () => {
-    expect(noticeRenderRows([""], 80)).toBe(1);
+    expect(noticePhysicalLines([""], 80).length).toBe(1);
   });
 
   test("单条短行 → 1 行", () => {
-    expect(noticeRenderRows(["hello"], 80)).toBe(1);
+    expect(noticePhysicalLines(["hello"], 80).length).toBe(1);
   });
 
   test("多行：每条独立折行后行数合计", () => {
     const lines = ["第一行", "第二行", "第三行"];
-    expect(noticeRenderRows(lines, 80)).toBe(3);
+    expect(noticePhysicalLines(lines, 80).length).toBe(3);
   });
 
   test("窄终端：单条长字符串按视觉宽度折多行", () => {
     const long = "这是一个比较长的 notice 文本用来测试折行行为";
-    const wide = noticeRenderRows([long], 80);
-    const narrow = noticeRenderRows([long], 10);
+    const wide = noticePhysicalLines([long], 80).length;
+    const narrow = noticePhysicalLines([long], 10).length;
     expect(narrow).toBeGreaterThan(wide);
     expect(narrow).toBeGreaterThan(1);
   });
 
   test("cols 极小（<2）→ 仍按物理行数返回（不抛）", () => {
-    expect(noticeRenderRows(["abc"], 0)).toBe(1);
-    expect(noticeRenderRows(["abc"], 1)).toBe(1);
+    expect(noticePhysicalLines(["abc"], 0).length).toBe(1);
+    expect(noticePhysicalLines(["abc"], 1).length).toBe(1);
   });
 });
 
@@ -688,5 +705,32 @@ describe("configPickerRows（/config 设置面板行账）", () => {
 
   test("与 memory picker 对比：config 多 1 行（多 1 内容行）", () => {
     expect(configPickerRows() - memoryPickerRows()).toBe(1);
+  });
+});
+
+describe("turn-gap queue row", () => {
+  test("queueRows 1 adds one chrome row and 0 adds none", () => {
+    const base = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+    });
+    const queued = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      queueRows: 1,
+    });
+    const explicitZero = chromeReserveRows({
+      noticeRows: 0,
+      inputHintRows: 0,
+      bgLine: false,
+      inputRows: 1,
+      queueRows: 0,
+    });
+    expect(queued - base).toBe(1);
+    expect(explicitZero).toBe(base);
   });
 });

@@ -17,8 +17,10 @@
  * EventEmitter + PassThrough stdin/stdout/stderr + kill spy.
  */
 import assert from "node:assert/strict";
-import { realpathSync } from "node:fs";
-import { describe, it, vi } from "vitest";
+import { mkdtempSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { afterEach, beforeEach, describe, it, vi } from "vitest";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 import type { ChildProcess } from "node:child_process";
@@ -77,6 +79,7 @@ function makeHarness(
   opts: {
     readonly taskTimeoutMs?: number;
     readonly maxConcurrentWorkers?: number;
+    readonly subagentsDir?: string;
   } = {}
 ) {
   const spawned: FakeChild[] = [];
@@ -97,6 +100,9 @@ function makeHarness(
       : {}),
     ...(opts.maxConcurrentWorkers !== undefined
       ? { maxConcurrentWorkers: opts.maxConcurrentWorkers }
+      : {}),
+    ...(opts.subagentsDir !== undefined
+      ? { subagentsDir: opts.subagentsDir }
       : {}),
   });
   return { manager, spawned, spawnCalls };
@@ -1053,6 +1059,21 @@ describe("SubAgentManager drainCompleted (T7 host-drain 最小枚举)", () => {
     assert.equal(drained.length, 1);
     assert.equal(drained[0]!.taskId, visible);
     assert.ok(!drained.some((d) => d.taskId === hidden));
+
+    // The claim seam shares the drain filter: an excluded task never claims.
+    const claims = manager.claimCompleted!();
+    assert.equal(claims.length, 1);
+    assert.equal(claims[0]!.taskId, visible);
+    assert.ok(!claims.some((c) => c.taskId === hidden));
+  });
+
+  it("excludeFromHostDrain=true 任务从不被 claim", () => {
+    const { manager, spawned } = makeHarness();
+    manager.spawn({ excludeFromHostDrain: true });
+    emitEnvelope(spawned[0]!, okEnvelope("hidden"));
+
+    assert.equal(manager.drainCompleted().length, 0);
+    assert.equal(manager.claimCompleted!().length, 0);
   });
 
   it("excludeFromHostDrain 与 role 并存：payload 只拷 role", () => {
@@ -1062,6 +1083,167 @@ describe("SubAgentManager drainCompleted (T7 host-drain 最小枚举)", () => {
     assert.equal(spawnCalls[0]!.payload.role, "explore");
     assert.equal("excludeFromHostDrain" in spawnCalls[0]!.payload, false);
     assert.equal(manager.drainCompleted().length, 0);
+  });
+});
+
+// ── delivery ledger: exactly-once per terminal generation (ADR-0150) ─────────
+
+describe("SubAgentManager delivery ledger (ADR-0150)", () => {
+  it("claim consumes; ack keeps it absent; release makes it claimable again", () => {
+    const { manager, spawned } = makeHarness();
+    const taskId = manager.spawn({}).taskId;
+    emitEnvelope(spawned[0]!, okEnvelope("done"));
+
+    // The read is stable before any claim.
+    assert.equal(manager.drainCompleted().length, 1);
+    const claims = manager.claimCompleted!();
+    assert.equal(claims.length, 1);
+    assert.equal(claims[0]!.taskId, taskId);
+    assert.equal(claims[0]!.envelope.result, "done");
+    // Claimed is no longer drained.
+    assert.equal(manager.drainCompleted().length, 0);
+    assert.equal(manager.claimCompleted!().length, 0, "second claim is empty");
+
+    manager.releaseDeliveries!(claims);
+    assert.equal(manager.drainCompleted().length, 1, "release restores");
+    const reClaimed = manager.claimCompleted!();
+    manager.acknowledgeDeliveries!(reClaimed);
+    assert.equal(manager.drainCompleted().length, 0, "acked stays absent");
+    manager.releaseDeliveries!(reClaimed);
+    assert.equal(
+      manager.drainCompleted().length,
+      0,
+      "a stale release cannot undo an ack"
+    );
+  });
+
+  it("includeDelivered reports a delivered id (diagnostics only)", () => {
+    const { manager, spawned } = makeHarness();
+    const taskId = manager.spawn({}).taskId;
+    emitEnvelope(spawned[0]!, okEnvelope("done"));
+    manager.acknowledgeDeliveries!(manager.claimCompleted!());
+
+    assert.equal(manager.drainCompleted().length, 0);
+    const delivered = manager.drainCompleted(undefined, {
+      includeDelivered: true,
+    });
+    assert.equal(delivered.length, 1);
+    assert.equal(delivered[0]!.taskId, taskId);
+  });
+
+  it("keeps the claim-time envelope when a timeout fallback is replaced after emitStop", async () => {
+    vi.useFakeTimers();
+    try {
+      const { manager, spawned } = makeHarness();
+      const taskId = manager.spawn({ timeoutMs: 50 }).taskId;
+      await vi.advanceTimersByTimeAsync(50);
+
+      // emitStop has fired: the generic timeout fallback is the terminal
+      // generation and therefore the claim-time text.
+      const claims = manager.claimCompleted!();
+      assert.equal(claims.length, 1);
+      assert.equal(claims[0]!.taskId, taskId);
+      assert.equal(claims[0]!.envelope.reason, "timeout");
+      assert.match(claims[0]!.envelope.summary, /timeout after 50ms/);
+      assert.equal(claims[0]!.envelope.result, "");
+
+      // The worker's SIGTERM epilogue writes back a richer envelope; the
+      // stdout handler replaces task.envelope even though emitStop is latched.
+      spawned[0]!.stdout.write(
+        JSON.stringify({
+          status: "failed",
+          reason: "timeout",
+          summary: "worker epilogue",
+          result: "richer body",
+        }) + "\n"
+      );
+      await vi.advanceTimersByTimeAsync(0);
+
+      const after = manager.queryBuffer(taskId);
+      assert.equal(after.status, "failed");
+      assert.equal(
+        (after as SubAgentEnvelope).summary,
+        "worker epilogue",
+        "the source Task carries the replacement envelope"
+      );
+      assert.equal(
+        claims[0]!.envelope.summary,
+        "timeout after 50ms",
+        "the claim keeps the envelope captured at claim time"
+      );
+      assert.equal(claims[0]!.envelope.result, "");
+
+      manager.acknowledgeDeliveries!(claims);
+      assert.equal(
+        manager.claimCompleted!().length,
+        0,
+        "the replacement is not delivered as a second generation"
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("two terminal generations are independently claimable", () => {
+    const { manager, spawned } = makeHarness();
+    manager.spawn({});
+    manager.spawn({});
+    emitEnvelope(spawned[0]!, okEnvelope("one"));
+    emitEnvelope(spawned[1]!, okEnvelope("two"));
+    const claims = manager.claimCompleted!();
+    assert.equal(claims.length, 2);
+    assert.notEqual(claims[0]!.terminalSeq, claims[1]!.terminalSeq);
+  });
+
+  it("shutdown clears the ledger: a fresh manager has nothing to redeliver", async () => {
+    const { manager, spawned } = makeHarness();
+    manager.spawn({});
+    emitEnvelope(spawned[0]!, okEnvelope("done"));
+    await manager.shutdown();
+    assert.equal(manager.drainCompleted().length, 0);
+    assert.equal(manager.claimCompleted!().length, 0);
+
+    const fresh = makeHarness();
+    assert.equal(fresh.manager.drainCompleted().length, 0);
+  });
+
+  describe("resume replaces the generation", () => {
+    let dir: string;
+    let subagentsDir: string;
+    beforeEach(() => {
+      dir = mkdtempSync(join(tmpdir(), "iknow-delivery-"));
+      subagentsDir = join(dir, "subagents");
+    });
+    afterEach(() => rmSync(dir, { recursive: true, force: true }));
+
+    it("same taskId, new terminal result → new result delivered once, old not replayed", async () => {
+      const { manager, spawned, spawnCalls } = makeHarness({ subagentsDir });
+      const taskId = manager.spawn({ task: "hop 1" }).taskId;
+      const transcriptPath = spawnCalls[0]!.payload.transcriptPath;
+      assert.ok(transcriptPath, "spawn payload must carry transcriptPath");
+      const { appendWorkerTranscript } =
+        await import("../../src/session-api/store/index.ts");
+      await appendWorkerTranscript({
+        location: { transcriptPath, taskId },
+        events: [{ role: "user", content: [{ type: "text", text: "hop 1" }] }],
+      });
+      emitEnvelope(spawned[0]!, okEnvelope("first"));
+      manager.acknowledgeDeliveries!(manager.claimCompleted!());
+      assert.equal(manager.drainCompleted().length, 0);
+
+      manager.resumeTask!(taskId, { task: "hop 2" });
+      emitEnvelope(spawned[1]!, okEnvelope("second"));
+
+      const claims = manager.claimCompleted!();
+      assert.equal(claims.length, 1);
+      assert.equal(claims[0]!.taskId, taskId);
+      assert.equal(claims[0]!.envelope.result, "second");
+      assert.equal(
+        manager.drainCompleted(undefined, { includeDelivered: true }).length,
+        1,
+        "the replaced Task record carries only the new generation"
+      );
+    });
   });
 });
 

@@ -10,7 +10,7 @@
  *   d. turnCount anchor: no repeat firing within one turn, lastCompactTurn holds
  *      the anchor (extreme-length conversation + low threshold -> compaction
  *      happens >= 1 and <= N/2 times);
- *   e. deps.compress.thresholdTokens = undefined -> default floor(0.95 × window)
+ *   e. deps.compress.thresholdTokens = undefined -> default floor(0.9 × window)
  *      (ADR-0100); huge contextWindow -> no trigger; tiny contextWindow -> triggers.
  *
  * No real-LLM token values are hardcoded; only estimate-function semantics
@@ -274,7 +274,7 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
     }
   });
 
-  it("thresholdTokens=undefined → 缺省推导 floor(0.95×window);极大 window 不触发,极小 window 触发", async () => {
+  it("thresholdTokens=undefined → 缺省推导 floor(0.9×window);极大 window 不触发,极小 window 触发", async () => {
     // (a) Huge contextWindow -> enormous default threshold -> no trigger.
     const bigModel = createStubModel({ responses: buildResponses(5) });
     const big = await run("hello", {
@@ -292,9 +292,9 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
       "极大 contextWindow + 缺省阈值不得触发压缩"
     );
 
-    // (b) Tiny contextWindow -> default gate = floor(0.95 × 2000) = 1900, and
+    // (b) Tiny contextWindow -> default gate = floor(0.9 × 2000) = 1800, and
     // the fixture's 5-turn conversation estimates far above it -> triggers.
-    // The 95% ratio never lifts the gate out of triggering just because the window is small.
+    // The 90% ratio never lifts the gate out of triggering just because the window is small.
     const smallModel = createStubModel({ responses: buildResponses(5) });
     const small = await run("hello", {
       adapter: smallModel,
@@ -311,8 +311,8 @@ describe("loop-engine compress 接线 (#119 T7)", () => {
 
     // (c) Semantics self-check: the default gate is a positive ratio, not the
     // old buffer formula's negative coincidence — the tiny-window trigger comes
-    // from the estimate crossing floor(0.95 × window).
-    assert.equal(getAutoCompactThreshold(2000, undefined), 1_900);
+    // from the estimate crossing floor(0.9 × window).
+    assert.equal(getAutoCompactThreshold(2000, undefined), 1_800);
     assert.ok(getAutoCompactThreshold(2000, undefined) > 0);
     // The huge window's default gate still sits above the estimate -> same root cause as (a)'s no-trigger.
     assert.ok(
@@ -517,7 +517,7 @@ describe("loop-engine compress boundaryAttachment (#458 T7 SC11)", () => {
       executor,
       registry,
       maxTurns: 10,
-      // Huge contextWindow -> default gate floor(0.95 × 1e7) far above the estimate -> no trigger.
+      // Huge contextWindow -> default gate floor(0.9 × 1e7) far above the estimate -> no trigger.
       compress: { contextWindow: 10_000_000, thresholdTokens: undefined },
       boundaryAttachment: () => {
         calls++;

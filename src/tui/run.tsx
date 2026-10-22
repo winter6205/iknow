@@ -63,22 +63,34 @@ import {
   type BuildTuiDepsOptions,
   type TuiExtensions,
 } from "./deps.js";
-import { createTuiAskUserBridge } from "./ask-user.js";
+import { createTuiAskUserBridge, type TuiAskUserBridge } from "./ask-user.js";
+import { createQuitBackgroundTasks } from "./quit-background-tasks.js";
 import { securityReviewRouteFromAsk } from "../harness/build-engine.js";
-import { createInflightRegistry, createTuiBridge } from "./hub-bridge.js";
+import {
+  createInflightRegistry,
+  createTuiBridge,
+  type TuiBridge,
+} from "./hub-bridge.js";
 import { resolveTraceRoot } from "../cli/trace-root.js";
 import { createToolEventSink, TuiApp, type TuiAppProps } from "./app.js";
+import { createRemoteInputPort } from "./remote/input-port.js";
+import {
+  createRemoteSeatLifecycle,
+  isRemoteSeatConfigured,
+} from "./remote/seat.js";
 import {
   attachSession,
   recoveryNoticeLines,
   type TuiLoadedSessionFile,
   type TuiSessionRecovery,
   type TuiSessionState,
+  withSessionRoute,
 } from "./session-state.js";
 import { createSessionGrants } from "../harness/permission/session-grants.js";
 import { initIknowWorkspaceSafe } from "../harness/identity/index.js";
 import { deriveProjectIdentityRoot } from "../harness/session-roots.js";
 import { resolvePermissionMode } from "../cli/runtime.js";
+import type { PermissionMode } from "../harness/permission/modes.js";
 import {
   createGraphModeContext,
   resolveGraphMode,
@@ -100,9 +112,12 @@ import { createFsModeContext } from "../harness/sandbox/fs-mode.js";
 import {
   createYoloContext,
   createYoloController,
+  isRunningAsRoot,
+  rejectPresetAsRoot,
   type YoloContext,
   type YoloController,
 } from "../harness/sandbox/yolo.js";
+import { createPresetOverlay } from "../harness/sandbox/no-sandbox-marker.js";
 import { createSubagentCapacityHolder } from "../harness/subagent/manager.js";
 import { createWorktreeOnMutateHolder } from "../harness/isolation/worktree-gate.js";
 import { createTuiWorktreeIsolationHost } from "./worktree-host.js";
@@ -114,6 +129,7 @@ import {
   isLlmProviderConfigError,
 } from "../config/env.js";
 import { persistModelFailure } from "./persist-model-failure.js";
+import { persistModelAct } from "./persist-model-act.js";
 import { createEnvDisplayStore } from "./env-display-store.js";
 import {
   WORKSPACE_ROOT_ENV_KEY,
@@ -123,6 +139,7 @@ import {
 } from "../config/workspace-root.js";
 import {
   persistFsModeChanges,
+  persistPermissionModeChanges,
   persistMemoryChanges,
   persistModelChanges,
   persistSubagentCapChanges,
@@ -132,8 +149,14 @@ import {
   type SubagentCapPersistPatch,
 } from "../config/persist-settings.js";
 import { homedir } from "node:os";
+import { readFileSync, writeSync } from "node:fs";
 import { shutdownDefaultLspPool } from "../harness/lsp/client.js";
 import { beginStderrGate, endStderrGate } from "./stderr-gate.js";
+import {
+  createTuiShutdownCoordinator,
+  scheduleTuiExitWatchdog,
+  type TuiShutdownReport,
+} from "./shutdown.js";
 
 /** Typed error prefix for renderer startup failures (message constants, no magic strings). */
 export const TUI_RENDERER_ERROR_PREFIX = "TUI 渲染后端初始化失败";
@@ -173,6 +196,22 @@ export interface RunTuiOptions {
    * (spec §5).
    */
   readonly yolo?: boolean;
+  /**
+   * ADR-0141: the `--no-sandbox` startup entry. true → the session starts with
+   * the fence retired and the filesystem tier at global, permission untouched.
+   * Refused as root, and refused outright on a non-TUI entry.
+   */
+  readonly noSandbox?: boolean;
+  /**
+   * `iknow tui --max-turns <n>`: the turn cap for the engine this entry builds.
+   * An explicit flag wins over `env.llm.maxTurns`; **absent keeps that value
+   * unchanged**, because undefined here means "no opinion", not "unlimited" —
+   * unlimited is what an absent `env.llm.maxTurns` already means (ADR-0012).
+   *
+   * The cap is per run: every message starts a fresh engine turn count, so
+   * hitting it stops one run and never spends the session's remaining budget.
+   */
+  readonly maxTurns?: number;
   /** Test seam: override the renderer factory (to induce startup errors);
    *  production uses createCliRenderer. */
   readonly createRenderer?: (config: CliRendererConfig) => Promise<CliRenderer>;
@@ -249,6 +288,51 @@ export interface TuiTerminalStdin {
  *  failure does not roll back the holder. `activeEnvLoader.markSelfWrite`
  *  prevents the settings self-write loop, as in `persistThinking` /
  *  `persistFsMode`. */
+/**
+ * ADR-0141 §5: the READ side of the permission write-back. Without it the
+ * write is inert — `/permissions plan` writes the user file, reports success,
+ * and the next launch reads a chain that has no user-layer arm and starts in
+ * `default` again. Narrow on purpose: only `"default" | "plan"` can appear on
+ * disk (ADR-0090 keeps `full_auto` out of the user layer entirely), and an
+ * absent / unreadable / illegal value leaves the chain to its lower tiers.
+ */
+function readUserDefaultMode(): "default" | "plan" | undefined {
+  try {
+    const path = resolveThinkingSettingsPath({ home: homedir() });
+    const raw: unknown = JSON.parse(readFileSync(path, "utf8"));
+    if (typeof raw !== "object" || raw === null) return undefined;
+    const section = (raw as { permissions?: unknown }).permissions;
+    if (typeof section !== "object" || section === null) return undefined;
+    const mode = (section as { defaultMode?: unknown }).defaultMode;
+    return mode === "default" || mode === "plan" ? mode : undefined;
+  } catch {
+    // EXIT: no user settings file, or unreadable — the lower tiers decide.
+    return undefined;
+  }
+}
+
+/** ADR-0141 §5 — permission-mode persistence channel (fire-and-forget;
+ *  failures surface as app.tsx notices). Same user-layer discipline as
+ *  `persistSubagentCapImpl`, with the one ADR-0090 rule on top: `full_auto` is
+ *  a per-session operator choice and is never written to disk, so the write is
+ *  skipped rather than rejected. Throws (unlike the subagent channel) because
+ *  TuiAppProps.onPersistPermissionMode's contract is a rejected promise. */
+async function persistPermissionModeToSettings(
+  mode: PermissionMode,
+  activeEnvLoader: EnvLoader
+): Promise<void> {
+  if (mode === "full_auto") return;
+  try {
+    const path = resolveThinkingSettingsPath({ home: homedir() });
+    const { bytes } = await persistPermissionModeChanges(path, {
+      defaultMode: mode,
+    });
+    activeEnvLoader.markSelfWrite(path, bytes);
+  } catch (err) {
+    throw err instanceof Error ? err : new Error(String(err));
+  }
+}
+
 async function persistSubagentCapImpl(
   patch: SubagentCapPersistPatch,
   activeEnvLoader: EnvLoader
@@ -309,14 +393,32 @@ function drainTuiStdin(stdin: TuiTerminalStdin): void {
 }
 
 /**
+ * ADR-0145: the conversation's own route, as the hub knows it (the bridge
+ * exposes the hub's read). undefined = the hub cannot name one.
+ *
+ * Kept out of `runTui` so the optional bridge member adds no branch to it.
+ */
+async function sessionRouteOf(
+  bridge: TuiBridge,
+  conversationId: string
+): Promise<string | undefined> {
+  return bridge.getSessionModel?.(conversationId);
+}
+
+/**
  * Startup resume attach. A log the entry could not read has no session view to
  * attach, so its classification goes to stderr before the first render instead
  * of being dropped — the operator is told why nothing opened, and nothing is
  * reconstructed (spec §2.1).
+ *
+ * `route` (ADR-0145) is the conversation's own route: the model row, the
+ * `/info` Model row and the `/model` cursor must show the route this
+ * conversation RUNS on, not the default.
  */
 function attachOpenedSession(
   file: TuiLoadedSessionFile | null,
-  recovery: TuiSessionRecovery
+  recovery: TuiSessionRecovery,
+  route: string | undefined
 ): TuiSessionState | undefined {
   if (file === null) {
     process.stderr.write(
@@ -324,7 +426,7 @@ function attachOpenedSession(
     );
     return undefined;
   }
-  return attachSession(file, recovery);
+  return withSessionRoute(attachSession(file, recovery), route);
 }
 
 /**
@@ -397,10 +499,102 @@ export function teardownTuiTerminal(
  * the raw flag value. No probe gate: a bwrap-less host still assembles yolo
  * (requireBwrap sequencing ruling); its exit refusal stays symmetric.
  */
-function applyYoloLaunchSeed(yolo: YoloContext, controller: YoloController) {
-  if (yolo.get()) {
-    controller.enterAtLaunch();
+function applyYoloLaunchSeed(
+  yolo: YoloContext,
+  controller: YoloController,
+  options: RunTuiOptions
+) {
+  // ADR-0141: the two named entries are two declarations, not one flag with
+  // two spellings — `--no-sandbox` declares two axes and leaves permission be.
+  //
+  // The seed is routed on WHICH preset was asked, not on the holder: the yolo
+  // holder is seeded true at assembly for both flags (so the fence is retired
+  // from the first fenced call on any host), but `enterNoSandbox` is
+  // idempotent and short-circuits on an already-true holder — which is correct
+  // for the in-session `/yolo` re-entry and wrong here, where the OVERLAY has
+  // not been declared yet. Reading the holder to route would therefore return
+  // "already on" and start the session with the fence up and no posture. Each
+  // branch calls the entry that declares its own preset.
+  if (options.noSandbox === true) {
+    controller.enterNoSandbox();
+    return;
   }
+  if (!yolo.get()) return;
+  controller.enterAtLaunch();
+}
+
+/**
+ * ADR-0141 guardrail, the second half of the non-TTY refusal text: a preset
+ * launch has no screen on which the 无沙箱 marker could explain the missing
+ * fence, so the preset flags are named. Empty string for a plain launch, which
+ * keeps that refusal text byte-identical to what it was before ADR-0141.
+ */
+function presetNonTtyNote(options: RunTuiOptions): string {
+  if (!presetLaunchAsked(options)) return "";
+  return "\n提示：--yolo / --no-sandbox 会退掉沙箱围栏，但无沙箱标识只出现在交互界面里；无 TTY 时请不要使用这两个标志。";
+}
+
+/**
+ * The non-TTY refusal line, or undefined when this launch may proceed. Test
+ * paths that inject `createRenderer` skip the check — they induce renderer
+ * error paths, unrelated to TTY probing.
+ */
+function nonTtyRefusalText(options: RunTuiOptions): string | undefined {
+  if (options.createRenderer !== undefined) return undefined;
+  if (process.stdin.isTTY && process.stdout.isTTY) return undefined;
+  return `${TUI_RENDERER_ERROR_PREFIX}：未检测到交互终端（TTY），TUI 需在交互终端中运行（管道/重定向场景请用非交互子命令）${presetNonTtyNote(options)}\n`;
+}
+
+/**
+ * ADR-0141: whether this launch declared either preset. One predicate for all
+ * four call sites (the non-TTY note, the root refusal, the holder seed and the
+ * entry router) so a third preset flag has exactly one place to be added.
+ */
+function presetLaunchAsked(options: RunTuiOptions): boolean {
+  return options.yolo === true || options.noSandbox === true;
+}
+
+/** ADR-0141 guardrail: a preset launch as root is refused, before any state. */
+function presetLaunchRefused(options: RunTuiOptions): boolean {
+  return presetLaunchAsked(options) && isRunningAsRoot();
+}
+
+/**
+ * The TUI ask bridge carrying the approval wait timeout resolved from `env`
+ * (IKNOW_APPROVAL_TIMEOUT_MS > settings.approval.timeoutMs, project over user;
+ * undefined / 0 = wait without limit). Read once at startup like the other
+ * settings; an explicit bridge profile argument wins. Module-level so the
+ * optional-chain read does not spend `runTui`'s branch budget.
+ */
+function createApprovalAskBridge(env: IknowEnv): TuiAskUserBridge {
+  return createTuiAskUserBridge({ timeoutMs: env.approval?.timeoutMs });
+}
+
+function tuiShutdownStatus(report: TuiShutdownReport): number {
+  const unresolved = [...report.pendingOperations, ...report.failedOperations];
+  if (unresolved.length > 0) {
+    writeSync(
+      2,
+      `[tui] Shutdown could not confirm cleanup: ${unresolved.join(", ")}\n`
+    );
+  }
+  scheduleTuiExitWatchdog(report, {
+    onProcessStillAlive: (current) => {
+      const remaining = [
+        ...current.pendingOperations,
+        ...current.failedOperations,
+      ];
+      const detail =
+        remaining.length === 0
+          ? "residual event-loop handles remain"
+          : `cleanup remains unconfirmed: ${remaining.join(", ")}`;
+      writeSync(
+        2,
+        `[tui] Process still alive after shutdown; ${detail}. Exiting with status 1.\n`
+      );
+    },
+  });
+  return report.cleanupConfirmed ? 0 : 1;
 }
 
 /**
@@ -415,29 +609,33 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   // clean, so this path intentionally stays outside the single catch below.
   // Test paths that inject createRenderer skip the check — they induce
   // renderer error paths, unrelated to TTY probing.
-  if (
-    options.createRenderer === undefined &&
-    (!process.stdin.isTTY || !process.stdout.isTTY)
-  ) {
-    process.stderr.write(
-      `${TUI_RENDERER_ERROR_PREFIX}：未检测到交互终端（TTY），TUI 需在交互终端中运行（管道/重定向场景请用非交互子命令）\n`
-    );
+  //
+  // ADR-0141 guardrail: for a preset launch this is an **entry rule**, not only a
+  // renderer rule — `presetNonTtyNote` supplies the second half of the text.
+  const nonTtyRefusal = nonTtyRefusalText(options);
+  if (nonTtyRefusal !== undefined) {
+    process.stderr.write(nonTtyRefusal);
     return 1;
   }
   const factory = options.createRenderer ?? createCliRenderer;
   let renderer: CliRenderer | undefined;
-  let onQuitBridge: { destroy: (conversationId?: string) => void } | undefined;
+  let onQuitBridge:
+    | {
+        destroy: (
+          conversationId?: string,
+          inflightTurns?: ReadonlyArray<Promise<unknown>>
+        ) => void;
+      }
+    | undefined;
   // conversationId of the active session at /quit time (passed by app.tsx
-  // quit() via onQuit). The resume hint prints after whenDestroyed +
-  // shutdownExtensions have restored the terminal to the main screen; an
-  // unfiled draft (undefined) prints nothing.
+  // quit() via onQuit). The resume hint prints after whenDestroyed and
+  // terminal restoration; an unfiled draft (undefined) prints nothing.
   let quitResumeConversationId: string | undefined;
   // Expose the TUI extension surface (skillCatalog / mcp.status / mcp.reload
   // / shutdown), injected synchronously by buildTuiDeps' onExtensions
-  // callback. The exit path calls shutdownExtensions() to close the MCP
-  // manager (avoiding leaked stdio children); the idempotent wrapper lets
-  // onQuit and the whenDestroyed fallback share one shutdown promise, so a
-  // double close cannot produce a spurious warn.
+  // callback. The exit path calls shutdownExtensions() to close all managers
+  // owned by this TUI; the idempotent wrapper lets onQuit and the
+  // whenDestroyed fallback share one shutdown promise.
   let tuiExtensions: TuiExtensions | undefined;
   // Settings hot-reload: EnvLoader is hoisted outside the try — all three
   // exit paths (/quit onQuitBridge / signal registerShutdown / catch) must
@@ -446,51 +644,39 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
   // succeeds; stop() is idempotent, so an uninitialized (pre-assembly throw)
   // case is a no-op.
   let envLoader: EnvLoader | undefined;
-  let shutdownPromise: Promise<void> | undefined;
+  let shutdownPromise: Promise<TuiShutdownReport> | undefined;
+  const shutdownCoordinator = createTuiShutdownCoordinator();
   // Late-bound hub reference box — declared before shutdownExtensions (that
-  // closure lives outside the try and cannot see try-local state). The /quit
-  // path must also close per-root rebuilt engines via shutdownExtensions;
-  // the signal path is covered by combinedShutdown (hub.shutdown is
-  // idempotent, so dual-path calls are harmless).
+  // closure lives outside the try and cannot see try-local state). It closes
+  // per-root rebuilt engines along with the startup engine managers.
   const hubRef: { current?: { shutdown: () => Promise<void> } } = {};
-  const shutdownExtensions = (): Promise<void> => {
+  // Late-bound remote seat stop: the seat lifecycle is assembled inside the
+  // try (it needs the bridge), while shutdownExtensions lives outside it.
+  // `stop()` is idempotent, so the /quit and signal paths may both call it.
+  const remoteSeatRef: { stop?: () => Promise<void> } = {};
+  const shutdownExtensions = (
+    inflightTurns: ReadonlyArray<Promise<unknown>> = []
+  ): Promise<TuiShutdownReport> => {
     if (shutdownPromise === undefined) {
-      shutdownPromise = (async () => {
-        // Release the watcher first (no more reload events), then close MCP/subagent.
-        envLoader?.stop();
-        // Kill the process-wide LSP pool (root cause of /quit hangs):
-        // language-server children from warmup / lsp_* spawn keep stdio
-        // pipes open, so the event loop never drains. Placed before any
-        // early return — even an early assembly failure (before onExtensions
-        // injection) must reap warmup children; idempotent + latched, no-op
-        // when nothing was spawned. Engine shutdown does not own this
-        // (rebind calls it mid-flight and must not latch the shared pool).
-        await shutdownDefaultLspPool();
-        const ext = tuiExtensions;
-        if (!ext) return;
-        try {
-          await ext.shutdown();
-        } catch (err) {
-          process.stderr.write(
-            `[tui] MCP shutdown failed: ${
-              err instanceof Error ? err.message : String(err)
-            }\n`
-          );
-        }
-        // ext.shutdown() only closes the initial engine; when tuiExtensions
-        // was never injected (early exit during assembly) the line above has
-        // already returned — hub.shutdown is the backstop that closes
-        // per-root rebuilt engines (the hub holds all engineByRoot handles).
-        try {
-          await hubRef.current?.shutdown();
-        } catch (err) {
-          process.stderr.write(
-            `[tui] hub shutdown failed: ${
-              err instanceof Error ? err.message : String(err)
-            }\n`
-          );
-        }
-      })();
+      shutdownPromise = shutdownCoordinator.begin(
+        [
+          { name: "environment watcher", stop: () => envLoader?.stop() },
+          { name: "remote seat", stop: () => remoteSeatRef.stop?.() },
+          {
+            name: "LSP pool",
+            stop: () => shutdownDefaultLspPool(),
+          },
+          {
+            name: "initial engine managers",
+            stop: () => tuiExtensions?.shutdown(),
+          },
+          {
+            name: "session hub and rebound engines",
+            stop: () => hubRef.current?.shutdown(),
+          },
+        ],
+        inflightTurns
+      );
     }
     return shutdownPromise;
   };
@@ -552,7 +738,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // back to settings.json. ADR-0084 write-target layering: thinking /
     // memory are **user-layer keys** (llm / memory sections) and project
     // files no longer adopt them (the project allowlist = verify / secrets /
-    // permissions), so writes always target <home>/.iknow/settings.json
+    // permissions / approval), so writes always target <home>/.iknow/settings.json
     // regardless of whether a project file exists (the old project-preferred
     // rule would have written user-layer keys into files nobody reads
     // anymore). After each write, register the self-write sentinel
@@ -621,58 +807,95 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       }
     };
 
-    // /model panel Enter persistence (ADR-0093). Unlike thinking / memory
-    // this **must explicitly refresh env and rebuild the adapter** — the
-    // model is a next-round assembly parameter and writing the file alone
-    // does not switch it. Chain:
-    //   1) persistModelChanges atomically writes <home>/.iknow/settings.json;
-    //   2) markSelfWrite registers the content hash so the watcher event
-    //      triggered by our own write is swallowed (otherwise it would race
-    //      the explicit reload below);
-    //   3) activeEnvLoader.reload(): EnvLoader.get() caches, so a bare get()
-    //      still returns the old env — the explicit reload reads the new
-    //      model into the cache;
-    //   4) bridge.hub.reloadFromEnv(): the hub rebuilds the adapter from
-    //      envProvider = () => get() and, on success, fires onEnvChange →
-    //      envDisplay.publish → display syncs in place (ContextBar / /info
-    //      Model rows).
+    // ADR-0141 §5: the permission write-back, same user layer and same
+    // self-write suppression as the fsMode closure above. The caller only
+    // passes postures settings may hold (`default` / `plan`), so `full_auto`
+    // never reaches here.
+    const persistPermissionMode = (mode: PermissionMode): Promise<void> =>
+      persistPermissionModeToSettings(mode, activeEnvLoader);
+
+    // /model panel Enter persistence (ADR-0093 + ADR-0145 §5). The act has
+    // TWO effects, in this order:
+    //   1) the CURRENT conversation's own route:
+    //      `hub.setSessionModel(conversationId, route)` — the hub resolves the
+    //      route first (a route that does not resolve throws the typed
+    //      LlmProviderConfigError and changes NOTHING) and then writes the
+    //      route map entry + the session file inside that conversation's
+    //      serialize slot. A draft has no conversation yet → the call is
+    //      skipped; the draft's first turn inherits the default written in
+    //      step 2.
+    //   2) the DEFAULT write (`settings.json` → `llm.model`) — the default
+    //      for conversations started LATER; a live conversation keeps its own
+    //      route. Chain (unchanged):
+    //      1a) persistModelChanges atomically writes
+    //          <home>/.iknow/settings.json;
+    //      1b) markSelfWrite registers the content hash so the watcher event
+    //          triggered by our own write is swallowed (otherwise it would race
+    //          the explicit reload below);
+    //      1c) activeEnvLoader.reload(): EnvLoader.get() caches, so a bare get()
+    //          still returns the old env — the explicit reload reads the new
+    //          model into the cache;
+    //      1d) bridge.hub.reloadFromEnv(): the hub rebuilds the adapter from
+    //          envProvider = () => get() and, on success, fires onEnvChange →
+    //          envDisplay.publish → the DEFAULT moves in place. The ContextBar /
+    //          /info Model rows follow their conversation's own route, not it
+    //          (ADR-0145).
+    // A step-1 failure → { ok:false, stage:"route" } and step 2 does NOT run
+    // (the default must not move either). A step-2 failure → the conversation
+    // KEEPS its new route and the notice reports the default-write failure.
     // Any step failing → { ok:false, reason } rendered as a notice by app;
     // no TUI crash.
     const persistModel: NonNullable<TuiAppProps["onPersistModel"]> = async (
-      patch
-    ) => {
-      let wrote = false;
-      try {
-        // Same as persistThinking: model is also a user-layer key → always write <home>/.iknow/settings.json.
-        const path = resolveThinkingSettingsPath({
-          home: homedir(),
-        });
-        const { bytes } = await persistModelChanges(path, patch);
-        wrote = true;
-        activeEnvLoader.markSelfWrite(path, bytes);
-        activeEnvLoader.reload();
-        await bridge.hub.reloadFromEnv();
-        return { ok: true as const };
-      } catch (err) {
-        // Typed **plain objects** (provider_api_key_missing) are not Errors:
-        // persistModelFailure dispatches on the discriminated union first
-        // (typed-error catch contract).
-        return persistModelFailure(wrote, err);
-      }
-    };
+      patch,
+      conversationId
+    ) =>
+      persistModelAct({
+        conversationId,
+        route: patch.model,
+        setSessionModel: (id, route) => bridge.hub.setSessionModel(id, route),
+        writeDefault: async () => {
+          let wrote = false;
+          try {
+            // Same as persistThinking: model is also a user-layer key → always write <home>/.iknow/settings.json.
+            const path = resolveThinkingSettingsPath({
+              home: homedir(),
+            });
+            const { bytes } = await persistModelChanges(path, patch);
+            wrote = true;
+            activeEnvLoader.markSelfWrite(path, bytes);
+            activeEnvLoader.reload();
+            await bridge.hub.reloadFromEnv();
+            return { ok: true as const };
+          } catch (err) {
+            // Typed **plain objects** (provider_api_key_missing) are not Errors:
+            // persistModelFailure dispatches on the discriminated union first
+            // (typed-error catch contract).
+            return persistModelFailure(wrote, err);
+          }
+        },
+      });
 
     const inflight = createInflightRegistry();
     const toolEventSink = createToolEventSink();
-    const askBridge = createTuiAskUserBridge();
+    // Approval wait timeout comes from `currentEnv` — see createApprovalAskBridge
+    // for the resolution order and the no-timeout default.
+    const askBridge = createApprovalAskBridge(currentEnv);
     // ADR-0090: startup permission-mode precedence: `--auto-mode` (explicit) >
     // IKNOW_PERMISSION_MODE > project permissions.defaultMode > "default".
     // The project settings root is projectIdentityRoot, not cwd: after a
     // rebind the cwd is a bare task worktree without `.iknow`. Fail-loud
     // values (legacy / full_auto) propagate up through
     // resolvePermissionMode and are rendered by this function's error path.
-    const permissionMode = resolvePermissionMode(options.permissionMode, {
-      cwd: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
-    });
+    const permissionMode = resolvePermissionMode(
+      options.permissionMode,
+      {
+        cwd: deriveProjectIdentityRoot({ cwd: workspaceRoot }),
+      },
+      // ADR-0141: the user layer of the chain, so a `/permissions plan`
+      // write-back actually takes effect on the next launch instead of being
+      // written and then ignored.
+      readUserDefaultMode()
+    );
     const sessionGrants = createSessionGrants();
     // Graph-mode session holder (ADR-0030) — initial value from settings
     // (off by default); Shift+Tab and `/graph` flip it in place without
@@ -691,24 +914,39 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // permissionMode / graphMode — Shift+Tab does not touch it. Settings are
     // read once at startup (see the startupSettings note).
     const fsMode = createFsModeContext(resolveFsIsolationMode(startupSettings));
-    // ADR-0119 / specs/yolo-mode.md: the yolo-axis holder + the single-point
-    // enter/exit action. Initial value comes from the `--yolo` flag
-    // (`createYoloContext` normalizes fail-closed: illegal input → false =
-    // fence on); at runtime `/yolo` + the confirm modal flip it in place (the
-    // idempotent set, the snapshot + symmetric bwrap-probe semantics live in
-    // harness/sandbox/yolo.ts). The holder feeds the engine (buildTuiDeps →
-    // BuildEngineOpts.yolo → the bash factory per-call read / the subagent env
-    // wire), bridge → hub (the verify command surface, homomorphic) and TuiApp
-    // (command surface + the mode-row red marker). **Not persisted**: the yolo
-    // axis never enters settings / session files / a config-panel row, so
-    // there is no persist channel and no markSelfWrite here (spec §5).
-    const yolo = createYoloContext(options.yolo);
+    // ADR-0141 guardrail: root is refused for either preset, and the refusal is
+    // raised BEFORE the overlay is created below — a session must never come up
+    // holding a declaration it is about to be told to drop.
+    if (presetLaunchRefused(options)) {
+      process.stderr.write(`${rejectPresetAsRoot("tui").message}\n`);
+      return 1;
+    }
+    // ADR-0141: the session overlay + the single-point enter/exit action. The
+    // overlay is the only carrier consumers see — they get the derived
+    // `fenceRetired` reader below and never the mutable axis. Initial posture
+    // comes from the `--yolo` flag (`createYoloContext` normalizes fail-closed:
+    // illegal input → false = fence on); at runtime `/yolo` + the confirm modal
+    // declare into the overlay (the symmetric bwrap-probe semantics live in
+    // harness/sandbox/yolo.ts). The reader feeds the engine (buildTuiDeps →
+    // BuildEngineOpts.fenceRetired → the bash factory per-call read / the
+    // subagent env wire), bridge → hub (the verify command surface,
+    // homomorphic) and TuiApp (command surface + the derived markers).
+    // **Not persisted**: the posture never enters settings / session files / a
+    // config-panel row, so there is no persist channel and no markSelfWrite
+    // here (spec §5).
+    const yolo = createYoloContext(presetLaunchAsked(options));
+    const overlay = createPresetOverlay({
+      settingsFsMode: fsMode.get(),
+      settingsPermission: permissionMode.get(),
+    });
+    const fenceRetired = { get: (): boolean => overlay.fenceRetired() };
     const yoloController = createYoloController({
       yolo,
       permission: permissionMode,
       fsMode,
+      overlay,
     });
-    applyYoloLaunchSeed(yolo, yoloController);
+    applyYoloLaunchSeed(yolo, yoloController, options);
     // ADR-0096: subagent concurrency-cap holder (same shape as fsMode).
     // Initial value comes from env.subagent.maxConcurrentWorkers (the
     // env > settings > default-15 chain is pinned in env.ts). At runtime the
@@ -821,10 +1059,17 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // ADR-0092: pass the fs-isolation holder to the engine (build-engine →
       // BuildEngineOpts.fsMode → bash factory per-call read).
       fsMode,
-      // ADR-0119 / specs/yolo-mode.md: the yolo holder to the engine
-      // (build-engine → BuildEngineOpts.yolo → the bash factory per-call read
-      // / the subagent env wire).
-      yolo,
+      // ADR-0141: the derived reader to the engine (build-engine →
+      // BuildEngineOpts.fenceRetired → the bash factory per-call read / the
+      // subagent env wire).
+      fenceRetired,
+      // `--max-turns` rides on this one object because `depsOpts` is the single
+      // carrier both build sites read: the initial `buildTuiDeps` below and the
+      // rebind rebuild, which re-spreads `depsOpts` with a new root. Spelling
+      // the cap at either call site instead would let a rebound session lose it.
+      // An absent flag passes `undefined`, which deps.ts reads as "no opinion"
+      // and leaves the env/settings value in place.
+      maxTurns: options.maxTurns,
       // ADR-0096: subagent concurrency-cap holder — buildTuiDeps →
       // BuildEngineOpts.subagentCapacityHolder → createSubAgentManager
       // (spawn gate reads it live per call) + registry → spawn_subagent tool
@@ -899,7 +1144,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // the two handles, leaving LoopEngineDeps.
     const {
       subagentManager,
-      shutdown,
+      backgroundManager,
       graphAssembly,
       autoMemory,
       overlayMemoryPrefetch,
@@ -907,6 +1152,10 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       invalidateMemorySystem,
       ...deps
     } = await buildTuiDeps(bundle, depsOpts);
+    // /quit keeps every engine manager: rebuilt roots can leave live tasks
+    // behind until process teardown reaps them.
+    const quitBackgroundTasks = createQuitBackgroundTasks();
+    quitBackgroundTasks.register(backgroundManager);
     // Attach the MCP + subagent combined shutdown to process signal handling
     // (runtime.ts semantics, consistent with chat/serve). registerShutdown
     // takes a structural `{ shutdown?: }`, so the TUI passes only the handle
@@ -915,24 +1164,15 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // registerShutdown is a no-op internally. The TUI's exitOnCtrlC=false
     // means the renderer does not consume Ctrl+C (the app layer only uses it
     // for selection copy), so SIGINT still reaches the Node process handler.
-    // Settings hot-reload: envLoader.stop() must also run on shutdown —
-    // long-lived processes must release the fs watcher handle before exit
-    // (avoid leaked watcher loops). The signal path (registerShutdown) does
-    // not pass through onQuitBridge, so release the watcher here; the /quit
-    // path releases via shutdownExtensions (idempotent, double stop is
-    // harmless). The late-bound hub reference lets combinedShutdown —
-    // registered before the bridge exists — close rebuilt engines via
-    // bridgeRef.
+    // Signal shutdown restores the terminal before reporting cleanup; the
+    // shared coordinator releases the watcher and closes rebuilt engines
+    // through the late-bound hub reference.
     const combinedShutdown = async (): Promise<void> => {
-      envLoader?.stop();
-      if (shutdown) await shutdown();
-      // Per-root rebuilt engines (created via the buildEngine seam after a
-      // rebind) are closed by the hub here (the initial engine is not in
-      // engineByRoot, so no double close).
-      if (bridgeRef.hub) await bridgeRef.hub.shutdown();
-      // Signal path shares the /quit root cause: LSP child stdio pipes keep
-      // the event loop non-empty.
-      await shutdownDefaultLspPool();
+      const shutdown = shutdownExtensions();
+      teardownTerminal();
+      endStderrGate();
+      const report = await shutdown;
+      tuiShutdownStatus(report);
     };
     registerShutdown({ shutdown: combinedShutdown });
     const bridge = createTuiBridge({
@@ -947,6 +1187,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       ...(workspaceRoot ? { productRoot: workspaceRoot } : {}),
       deps,
       subagentManager,
+      listLiveBackgroundTasks: () => quitBackgroundTasks.listLiveTasks(),
       // Ledger host injected into the bridge — the hub resolves it by conversationId.
       liveGraphLedger,
       // Shared preimage accumulator: the hub drains what the engine's write
@@ -967,6 +1208,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         // are overridden.
         const {
           subagentManager: sm,
+          backgroundManager: bgm,
           shutdown: sd,
           graphAssembly: ga,
           autoMemory: am,
@@ -977,6 +1219,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           cwd: root,
           workspaceRoot: root,
         });
+        // Keep this manager in /quit's projection even after another root is built.
+        quitBackgroundTasks.register(bgm);
         return {
           deps: flatDeps,
           ...(sd ? { shutdown: sd } : {}),
@@ -1034,12 +1278,11 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // reads the holder per call; a `/config` flip affects the next call,
       // same instance as bash). serve uses the same wiring.
       fsMode,
-      // ADR-0119 / specs/yolo-mode.md: the same yolo holder forwarded to
-      // bridge → hub — the TUI's verify command surface and bash tool surface
-      // must be homomorphic (the hub's verify call site reads the holder per
-      // call, so a `/yolo` flip affects the next call, the same instance as
-      // the bash side).
-      yolo,
+      // ADR-0141: the same reader forwarded to bridge → hub — the TUI's verify
+      // command surface and bash tool surface must be homomorphic (the hub's
+      // verify call site reads the reader per call, so a preset flip affects
+      // the next call, the same instance as the bash side).
+      fenceRetired,
     });
     // Once the bridge is ready, backfill the late-bound hub reference (see bridgeRef above).
     bridgeRef.hub = bridge.hub;
@@ -1048,6 +1291,28 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     bridgeRef.store = bridge.store;
     // The same backfill point feeds shutdownExtensions (the /quit path).
     hubRef.current = bridge.hub;
+    // Remote seat assembly (spec §3.1, §4.5-§4.6, ADR-0149 §1): only when
+    // remote.enabled or a publishable remote.notify is configured. The input
+    // port exists before the first render so the app binds it on mount; the
+    // seat itself starts after mount below, never on the readiness path.
+    const remoteSeatLifecycle = isRemoteSeatConfigured(startupSettings.remote)
+      ? createRemoteSeatLifecycle({
+          settings: startupSettings.remote,
+          dataDir,
+          cwd,
+          hub: {
+            subscribeEvents: (listener) => bridge.hub.subscribeEvents(listener),
+          },
+          askBridge,
+          toolEventSink,
+          loadTranscript: (conversationId) =>
+            bridge.loadSessionFile(conversationId),
+          inputPort: createRemoteInputPort(),
+        })
+      : undefined;
+    if (remoteSeatLifecycle !== undefined) {
+      remoteSeatRef.stop = () => remoteSeatLifecycle.stop();
+    }
     // Settings hot-reload: subscribe to EnvLoader — settings file changes →
     // reload env (on success) → the hub's adapter hot-rebuild path (never
     // touching build-engine directly). A failed reload (bad JSON, etc.) →
@@ -1069,14 +1334,21 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       // in-progress label has no notice lane to land in before the first
       // render, so only the classified status reaches the view.
       const { file, recovery } = await bridge.openSession(options.sessionId);
-      initialSession = attachOpenedSession(file, recovery);
+      // ADR-0145: the conversation's own route. The hub knows it (its map
+      // entry, else the route the file carries, else the current default).
+      const route = await sessionRouteOf(bridge, options.sessionId);
+      initialSession = attachOpenedSession(file, recovery, route);
     }
 
     onQuitBridge = {
-      destroy: (conversationId?: string): void => {
-        // /quit double-confirm → wait for in-flight flush → trigger onQuit.
-        // shutdown closes the MCP layer (clients + in-flight cancellation +
-        // SIGTERM to stdio children), then destroys the renderer.
+      destroy: (
+        conversationId?: string,
+        inflightTurns: ReadonlyArray<Promise<unknown>> = []
+      ): void => {
+        // /quit confirmation closes admission in app.tsx, aborts every turn
+        // owned by this TUI, and starts all host cleanup before bounded turn
+        // settlement. Restore the terminal in the same tick before any
+        // asynchronous cleanup output can be replayed.
         // Fire-and-forget: app proceeds to its own destroy (see the end of
         // app.tsx quit()), so nothing hangs; whenDestroyed awaits the same
         // shutdown as a fallback.
@@ -1086,8 +1358,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         // (ordering contract in teardownTuiTerminal). Since this function
         // destroys on its own, app.tsx's `if (!renderer.isDestroyed)` guard
         // naturally skips (idempotent, no double native release).
+        const shutdown = shutdownExtensions(inflightTurns);
         teardownTerminal();
-        void shutdownExtensions();
+        void shutdown;
       },
     };
 
@@ -1118,6 +1391,13 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           bridge={bridge}
           askBridge={askBridge}
           toolEventSink={toolEventSink}
+          {...(remoteSeatLifecycle !== undefined
+            ? {
+                remoteInputPort: remoteSeatLifecycle.inputPort,
+                onProjectionActive: remoteSeatLifecycle.setProjectionActive,
+                onRemoteNoticeSink: remoteSeatLifecycle.registerNoticeSink,
+              }
+            : {})}
           initialSession={initialSession}
           cwd={cwd}
           dataDir={dataDir}
@@ -1127,14 +1407,16 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
           // surface (the engine-side holder goes via depsOpts.fsMode).
           fsMode={fsMode}
           onPersistFsMode={persistFsMode}
-          // ADR-0119 / specs/yolo-mode.md: the yolo holder + controller to the
-          // command surface (`/yolo` reads the holder to decide the confirm
-          // direction, and after confirmation runs the controller's enter /
-          // exit; the engine-side holder goes via depsOpts.yolo, the
-          // bridge → hub side via the same yolo reference). **No persist
-          // callback** — the yolo axis is not persisted (spec §5).
+          onPersistPermissionMode={persistPermissionMode}
+          // ADR-0141: the mutable axis + controller to the command surface
+          // (`/yolo` reads the axis to decide the confirm direction, and after
+          // confirmation runs the controller's enter / exit; the engine-side
+          // reader goes via depsOpts.fenceRetired, the bridge → hub side via
+          // the same reader reference). **No persist callback** — the posture
+          // is not persisted (spec §5).
           yolo={yolo}
           yoloController={yoloController}
+          presetOverlay={overlay}
           // ADR-0096: cap holder + persist callback for the command surface
           // (same shape as fsMode); the engine-side holder goes via
           // depsOpts.subagentCapHolder. Same reference, so one /config panel
@@ -1207,6 +1489,9 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
       );
     };
     mountApp();
+    // Optional remote seat: starts after the first render and is never
+    // awaited here (a start that resolves after shutdown stops immediately).
+    remoteSeatLifecycle?.startAfterMount();
     await whenDestroyed(renderer);
     // Normal exit (signal close / direct destroy returns this await) also
     // tops up teardown before returning — app.tsx /quit already destroyed
@@ -1221,7 +1506,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // destroy): if shutdownExtensions has started it is a no-op; otherwise
     // ensure MCP shutdown completes before runTui returns, avoiding leaked
     // stdio descendants.
-    await shutdownExtensions();
+    const shutdownReport = await shutdownExtensions();
     // /quit on a filed session → print the resume hint after terminal
     // restore (drafts without an id print nothing).
     if (quitResumeConversationId) {
@@ -1229,7 +1514,7 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
         `Resume this session with:\niknow --resume ${quitResumeConversationId}\n`
       );
     }
-    return 0;
+    return tuiShutdownStatus(shutdownReport);
   } catch (err) {
     // The single catch point: write a typed message to stderr; terminal
     // teardown converges here. describeTuiStartError dispatches
@@ -1247,7 +1532,8 @@ export async function runTui(options: RunTuiOptions = {}): Promise<number> {
     // Best-effort MCP close on the error path too (if the throw came after
     // buildTuiDeps, tuiExtensions is already injected; if buildTuiDeps itself
     // threw, no-op). Does not affect the exit code.
-    await shutdownExtensions();
+    const shutdownReport = await shutdownExtensions();
+    tuiShutdownStatus(shutdownReport);
     void onQuitBridge;
     return 1;
   }

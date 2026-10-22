@@ -37,6 +37,7 @@ import { createTuiAskUserBridge } from "../../src/tui/ask-user.js";
 import { createPermissionModeContext } from "../../src/harness/permission/index.js";
 import { createSessionGrants } from "../../src/harness/permission/session-grants.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
+import { composerText } from "./_fixtures.tsx";
 
 async function untilFrame(
   setup: TestRendererSetup,
@@ -112,6 +113,7 @@ function fakeBridge(opts: FakeBridgeOptions): TuiBridge {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
+    listLiveBackgroundTasks: () => [],
     listSubagents: () => [],
     abortSessionForegroundWork: () => [],
     abortSubagentTask: () => false,
@@ -232,6 +234,17 @@ describe("TUI 异常 stopReason notice（Bug 2）", () => {
     );
     // Old generic text must not leak in (the API-error branch must not be swallowed by it).
     expect(app.setup.captureCharFrame()).not.toContain("连接或模型");
+
+    // Plan T2: a gateway failure on a submitted request is visible AND the UI
+    // stays usable — the renderer is alive, the composer still takes input.
+    expect(app.setup.renderer.isDestroyed).toBe(false);
+    for (const ch of "next") {
+      app.setup.mockInput.pressKey(ch);
+      await new Promise((r) => setTimeout(r, 20));
+    }
+    await app.setup.renderOnce();
+    expect(app.setup.renderer.isDestroyed).toBe(false);
+    expect(composerText(app.setup)).toContain("next");
 
     await new Promise((r) => setTimeout(r, 500));
     expect(rejections).toHaveLength(0);

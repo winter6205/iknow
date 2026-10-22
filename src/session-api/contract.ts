@@ -5,6 +5,7 @@
  * ApiErrorBody is nested under { error: { kind, message, ... } }.
  */
 import type {
+  AnthropicContentBlock,
   StopReason,
   SupplierStopDetail,
   TokenUsage,
@@ -309,8 +310,30 @@ export interface WireThinkingOverride {
   readonly effort?: ThinkingEffortWire;
 }
 
+/**
+ * One block of an ordered user message payload: the host's text plus a pasted
+ * Anthropic base64 image, in submission order. Additive to `text` — a caller
+ * that submits no blocks keeps the single-text-block path unchanged.
+ */
+export type UserContentBlock =
+  | Extract<AnthropicContentBlock, { type: "text" }>
+  | Extract<AnthropicContentBlock, { type: "image" }>;
+
 export type PostMessageRequest = {
   text: string;
+  /**
+   * Ordered payload for the accepted user message. When present it is the
+   * authoritative content of the message; `text` stays required and remains
+   * what the command parser, the input length cap and the memory-prefetch
+   * query read. The serialized image payload is deliberately NOT measured
+   * against `MAX_MESSAGE_CHARS` — that cap is a text cap, and the store's own
+   * 1 MiB image tier bounds the attachment.
+   *
+   * In-process / TUI-only: the HTTP `POST /messages` route reads `text` alone
+   * and rejects a non-empty `content` with a typed error, so the field can
+   * never be silently dropped on the wire.
+   */
+  readonly content?: readonly UserContentBlock[];
   /** Per-turn override of the harness thinking control arm. Default → reuse
    *  the cached ensureDeps configuration (behavior unchanged). */
   readonly thinking?: WireThinkingOverride;

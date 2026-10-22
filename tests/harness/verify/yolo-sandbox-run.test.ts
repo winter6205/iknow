@@ -61,10 +61,7 @@ import * as sandboxRunner from "../../../src/harness/sandbox/runner.ts";
 import * as egressSessionModule from "../../../src/harness/sandbox/egress/session.ts";
 import { createEgressViolationSink } from "../../../src/harness/sandbox/egress/violations.js";
 import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts";
-import {
-  createYoloContext,
-  type YoloContext,
-} from "../../../src/harness/sandbox/yolo.ts";
+import { createYoloContext } from "../../../src/harness/sandbox/yolo.ts";
 
 interface CapturedRun {
   readonly fence: { readonly argv: readonly string[] };
@@ -127,7 +124,7 @@ describe("verify sandbox-run face — yolo wiring (ADR-0119)", () => {
     const runVerify = makeDefaultRunVerify({
       cwd: FIX_CWD,
       tmpDir: FIX_TMP,
-      yolo: createYoloContext(true),
+      fenceRetired: createYoloContext(true),
       egressPolicy: EGRESS_POLICY,
     });
     const result = await runVerify("echo hi", {});
@@ -166,7 +163,7 @@ describe("verify sandbox-run face — yolo wiring (ADR-0119)", () => {
     const falseVerify = makeDefaultRunVerify({
       cwd: FIX_CWD,
       tmpDir: FIX_TMP,
-      yolo: createYoloContext(false),
+      fenceRetired: createYoloContext(false),
     });
     await falseVerify("echo hi", {});
     expect(capturedRuns).toHaveLength(2);
@@ -180,10 +177,10 @@ describe("verify sandbox-run face — yolo wiring (ADR-0119)", () => {
     const runVerify = makeDefaultRunVerify({
       cwd: FIX_CWD,
       tmpDir: FIX_TMP,
-      yolo: createYoloContext(true) as YoloContext,
+      fenceRetired: createYoloContext(true),
       fsMode: "workspace",
-      // homeRoot is missing on purpose — under non-yolo bwrap fails loud with a
-      // typed error; under yolo the fence retires wholesale, so that guard must
+      // homeRoot is missing on purpose — a live fence fails loud with a typed
+      // error; with the fence retired the guard must
       // not fire.
     });
     await runVerify("echo hi", {});

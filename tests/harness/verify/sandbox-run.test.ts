@@ -28,6 +28,46 @@ vi.mock("../../../src/harness/sandbox/index.ts", async () => {
   };
 });
 
+// The awaited walk, spied THROUGH (passthrough: the real walk still runs, so
+// every argv pin in this file keeps its meaning). This route reaches the
+// protected-fence pair only through `prepareProtectedFenceWiring`, so the walk
+// the seam performs is the one observable that separates the awaited arm from a
+// regression to the synchronous one — which would leave every mount token
+// present, protection intact, and the whole-UI freeze back again.
+vi.mock(
+  "../../../src/harness/sandbox/protected-targets.js",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../../../src/harness/sandbox/protected-targets.js")
+      >();
+    return {
+      ...actual,
+      prewalkProtectedTargets: vi.fn(actual.prewalkProtectedTargets),
+    };
+  }
+);
+
+const prewalkSpy = (
+  await import("../../../src/harness/sandbox/protected-targets.js")
+).prewalkProtectedTargets as unknown as ReturnType<typeof vi.fn>;
+
+/** Exactly one awaited walk of the inventory this call hands the fence. */
+function assertRoutePrewalked(): void {
+  assert.equal(
+    prewalkSpy.mock.calls.length,
+    1,
+    "the verify route walked the workspace behind the name arm once"
+  );
+  const inventory = prewalkSpy.mock.calls[0]?.[0] as {
+    entries: readonly { rule: { kind: string } }[];
+  };
+  assert.ok(
+    inventory.entries.some((entry) => entry.rule.kind === "name"),
+    "the pre-walk was given the inventory that carries the name rules"
+  );
+}
+
 import * as sandboxIndex from "../../../src/harness/sandbox/index.ts";
 import { makeDefaultRunVerify } from "../../../src/harness/verify/sandbox-run.ts";
 import {
@@ -60,9 +100,12 @@ function fenceEnv(fence: CapturedFence): Record<string, string> {
 
 /**
  * The verify cwd IS the name-pattern scan root (specs/effect-boundary-protection
- * .md "Scan scope"), so it must be a real directory — the inventory refuses an
- * absent root at assembly rather than assembling a fence whose name arm matched
- * nothing. These cases never enumerate it, so a scratch dir is the whole cost.
+ * .md "Scan scope"), and the route walks it before assembling the fence, so it
+ * must be a real, SMALL, controlled directory: a shared tree like `/tmp` would
+ * be walked into other processes' subtrees (unreadable → typed refusal) and into
+ * directories that other cases create and remove while this walk is outstanding.
+ * An absent root is refused at assembly too — the route never assembles a fence
+ * whose name arm matched nothing.
  */
 const scratchRoots: string[] = [];
 function scratchCwd(prefix: string): string {
@@ -100,13 +143,14 @@ vi.mocked(sandboxIndex.runInSandbox).mockReset().mockResolvedValue({
 
 beforeEach(() => {
   captured.length = 0;
+  prewalkSpy.mockClear();
   vi.mocked(sandboxIndex.runInSandbox).mockClear();
 });
 
 describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
   it("threads a global fs-policy whose tmpRoot is the session tmp host path", async () => {
     captured.length = 0;
-    const cwd = tmpdir();
+    const cwd = scratchCwd("verify-tmproot-");
     const runVerify = makeDefaultRunVerify({ cwd });
     await runVerify("true", {});
     expect(captured).toHaveLength(1);
@@ -120,11 +164,12 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
     assert.equal("readRoots" in policy, false);
     assert.equal("writeRoots" in policy, false);
     assert.equal("optionalReadRoots" in policy, false);
+    assertRoutePrewalked();
   });
 
   it("explicit tmpDir overrides the process tmpdir() fallback", async () => {
     captured.length = 0;
-    const cwd = tmpdir();
+    const cwd = scratchCwd("verify-cwd-");
     const sessionTmp = mkdtempSync(join(tmpdir(), "verify-session-tmp-"));
     try {
       const runVerify = makeDefaultRunVerify({
@@ -145,7 +190,7 @@ describe("makeDefaultRunVerify — global-mode assembly (ADR-0092)", () => {
     // `/x` and were denied. This pins "explicitly injected, value = session
     // tmp's real host path".
     captured.length = 0;
-    const cwd = tmpdir();
+    const cwd = scratchCwd("verify-cwd-");
     const sessionTmp = mkdtempSync(join(tmpdir(), "verify-fence-env-tmp-"));
     try {
       const runVerify = makeDefaultRunVerify({ cwd, tmpDir: sessionTmp });

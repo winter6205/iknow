@@ -34,6 +34,7 @@ import type { PermissionModeContext } from "../permission/modes.js";
 import type { FsIsolationMode, FsModeContext } from "./fs-mode.js";
 import { FS_ISOLATION_MODE_DEFAULT } from "./fs-mode.js";
 import { requireBwrap } from "./runner.js";
+import type { PresetId, PresetOverlay } from "./no-sandbox-marker.js";
 
 /**
  * Typed refusal for a non-TUI entry point carrying `--yolo` — discriminated
@@ -51,6 +52,47 @@ export interface YoloNonTuiEntryError {
   readonly message: string;
 }
 
+/**
+ * ADR-0141 guardrail: the preset entry refusals. Root is refused for BOTH
+ * presets — retiring the fence as uid 0 removes the last boundary between the
+ * session and the host, and the refusal is raised BEFORE the overlay is seeded
+ * so nothing is declared on the way out.
+ */
+export type PresetEntryRefusalKind =
+  | "yolo_non_tui_entry"
+  | "preset_root_entry";
+
+/** The typed refusal for a preset entry that must not proceed. */
+export interface PresetEntryRefusal {
+  readonly kind: PresetEntryRefusalKind;
+  readonly command: string;
+  readonly message: string;
+}
+
+/**
+ * Root refusal for a preset entry. Same discriminated-union shape as
+ * `YoloNonTuiEntryError` so one renderer covers both.
+ */
+export function rejectPresetAsRoot(command: string): PresetEntryRefusal {
+  return {
+    kind: "preset_root_entry",
+    command,
+    message:
+      `preset_root_entry: --yolo / --no-sandbox retire the sandbox fence, ` +
+      `which is refused while the process runs as root; '${command}' does not ` +
+      `start. Run as an unprivileged user.`,
+  };
+}
+
+/**
+ * True when the process runs as root. `getuid` is absent on Windows, where the
+ * question does not arise — the guard reads false there rather than refusing a
+ * platform it cannot reason about.
+ */
+export function isRunningAsRoot(): boolean {
+  return typeof process.getuid === "function" && process.getuid() === 0;
+}
+
 /** The non-TUI commands that reject `--yolo` (ADR-0119 §ruling 7). */
 export const YOLO_TUI_ONLY_REJECTED_COMMANDS = [
   "chat",
@@ -65,16 +107,60 @@ export const YOLO_TUI_ONLY_REJECTED_COMMANDS = [
  * so the message has one source.
  *
  * `command` is echoed verbatim so `iknow chat --yolo` names the offending
- * command; the copy matches the usage text (pointing at `iknow tui --yolo`).
+ * command. ADR-0141: the flag named in the message is the one actually typed,
+ * because both preset flags share this refusal and telling an operator who typed
+ * `--no-sandbox` to "drop --yolo" would send them looking for the wrong token.
  */
-export function rejectYoloForCommand(command: string): YoloNonTuiEntryError {
+export function rejectYoloForCommand(
+  command: string,
+  flag: "yolo" | "no-sandbox" = "yolo"
+): YoloNonTuiEntryError {
+  const literal = flag === "yolo" ? "--yolo" : "--no-sandbox";
   return {
     kind: "yolo_non_tui_entry",
     command,
     message:
-      `yolo_non_tui_entry: --yolo is available only for the TUI entry (iknow tui); ` +
-      `'${command}' does not support it. Drop --yolo, or run 'iknow tui --yolo'.`,
+      `yolo_non_tui_entry: ${literal} is available only for the TUI entry ` +
+      `(iknow tui); '${command}' does not support it. Drop ${literal}, or run ` +
+      `'iknow tui ${literal}'.`,
   };
+}
+
+/**
+ * Typed invariant violation (spec invariant 7: `fsMode: workspace` and a retired
+ * fence are never simultaneously effective) — same discriminated union form as
+ * `YoloNonTuiEntryError`, message rendered `${kind}: ${detail}`.
+ */
+export interface FenceRetirementInvariantError {
+  readonly kind: "fence_retirement_invariant";
+  readonly fsMode: FsIsolationMode;
+  readonly message: string;
+}
+
+/** What the derivation consumes: the declared fence posture plus the effective fs tier. */
+export interface FenceRetirementDeclaration {
+  readonly fenceRetired: boolean;
+  readonly fsMode: FsIsolationMode;
+}
+
+/**
+ * The one site that derives `fenceRetired` (ADR-0141 §6 "derived at exactly one
+ * site", spec invariant 2). `true` declared at `workspace` throws the typed
+ * invariant error — never a silent correction (spec invariant 7).
+ */
+export function deriveFenceRetired(decl: FenceRetirementDeclaration): boolean {
+  if (decl.fenceRetired === true && decl.fsMode === "workspace") {
+    const err: FenceRetirementInvariantError = {
+      kind: "fence_retirement_invariant",
+      fsMode: decl.fsMode,
+      message:
+        `fence_retirement_invariant: fenceRetired=true is declared with ` +
+        `fsMode="${decl.fsMode}" — a retired fence and a workspace tier are ` +
+        "never simultaneously effective (spec invariant 7).",
+    };
+    throw err;
+  }
+  return decl.fenceRetired;
 }
 
 /**
@@ -88,22 +174,43 @@ export interface YoloContext {
   readonly set: (on: boolean) => void;
 }
 
+/**
+ * ADR-0141: the face every consumer below the controller reads. It is
+ * **get-only by construction** — a consumer cannot flip the axis, and it cannot
+ * read the raw holder, so "the fence layer reads exactly one derived boolean"
+ * is a type fact rather than a convention.
+ *
+ * The controller hands out the overlay-backed reader when a session overlay is
+ * wired and falls back to the holder when it is not (the minimal assembly
+ * shape), so `get()` is derived in every case.
+ */
+export interface FenceRetirementReader {
+  /** The derived fence posture: true means the fence is retired for this call. */
+  readonly get: () => boolean;
+}
+
 /** yolo initial value — defaults to `false` (V1 baseline: fence up, argv byte-identical to today). */
 export const YOLO_DEFAULT = false;
 
 /**
- * ADR-0119: env var carrying the yolo posture across the same process
+ * ADR-0141: env var carrying the derived fence posture across the same process
  * boundary (parent session → subagent worker). Sits with the other two
  * parent-set / worker-read wires (`IKNOW_WORKSPACE_ROOT` / `IKNOW_FS_MODE`);
- * the value domain is a single token `"1"` — yolo is a boolean axis, so the
+ * the value domain is a single token `"1"` — the fence is a boolean axis, so the
  * wire carries presence, not a posture vocabulary. The parser SSOT is
  * `parseYoloFlag` in this module, which the worker applies fail-closed; a
  * worker that finds the var absent or unparsable keeps the default fenced
- * posture (byte-identical to the pre-wire shape). The key is defined here
- * (not in `config/workspace-root.ts`) because new env keys for the yolo axis
- * live in the yolo module.
+ * posture. The key renames with its carrier (ADR-0141): `IKNOW_YOLO` named the
+ * preset, this names the axis.
  */
-export const YOLO_ENV_KEY = "IKNOW_YOLO";
+export const FENCE_RETIRED_ENV_KEY = "IKNOW_FENCE_RETIRED";
+
+/**
+ * The pre-ADR-0141 spelling, scrubbed alongside the current one so an ambient
+ * value of either name can never seed a child. There is no compatibility shim
+ * for the VALUE — only the scrub outlives the rename.
+ */
+export const LEGACY_YOLO_ENV_KEY = "IKNOW_YOLO";
 
 /**
  * Literal parsing for `--yolo` / env values — any input fails closed to `false`
@@ -165,6 +272,11 @@ export interface YoloActionOptions {
   readonly yolo: YoloContext;
   readonly permission?: PermissionModeContext;
   readonly fsMode?: FsModeContext;
+  /**
+   * ADR-0141: the session overlay the preset declares into. Absent keeps the
+   * pre-overlay shape (a bare boolean holder with no declared axes).
+   */
+  readonly overlay?: PresetOverlay;
   /** bwrap availability probe — throws when unavailable. Defaults to `requireBwrap`. */
   readonly probe?: () => void;
 }
@@ -178,10 +290,9 @@ export type YoloActionResult =
   | { readonly ok: false; readonly text: string };
 
 /**
- * Pre-entry snapshot — the fence axis' own values only. What makes repeated
- * entry idempotent: a second entry must not re-snapshot, or the snapshot gets
- * polluted by the previous yolo posture and exit can no longer restore the real
- * pre-entry fs tier.
+ * Pre-entry snapshot — the fence axis' own values only. Retained only for the
+ * no-overlay assembly shape; with an overlay the declared axes replace it and
+ * exit clears the overlay instead of restoring (ADR-0141, ruling 6 replaced).
  */
 interface YoloSnapshot {
   readonly fsMode: FsIsolationMode | undefined;
@@ -200,17 +311,30 @@ export interface YoloController {
   /** Idempotent entry: already yolo -> no second snapshot, no repeat probe. */
   readonly enter: () => YoloActionResult;
   /**
-   * Startup entry for `--yolo` (ADR-0119 §launch): apply the same state
-   * combination as `enter()`, but without the probe-refusal gate — the holder
-   * was already seeded true by `createYoloContext`, so the fence is retired at
-   * assembly time on every host, and the spec's requireBwrap sequencing ruling
-   * says a bwrap-less host must not block yolo assembly. The exit-side probe
-   * stays symmetric (refusal to leave on such a host is the honest
-   * fail-closed). Once-guard: a repeat call never re-snapshots (ruling 6).
+   * Startup entry for `--yolo` / `--no-sandbox`: apply the same declaration as
+   * the in-session entry, but without the probe-refusal gate — the holder was
+   * already seeded true by `createYoloContext`, so the fence is retired at
+   * assembly time on every host, and the requireBwrap sequencing ruling says a
+   * bwrap-less host must not block preset assembly. The exit-side probe stays
+   * symmetric (refusal to leave on such a host is the honest fail-closed).
+   * Once-guard: a repeat call never re-seeds (ADR-0141).
    */
   readonly enterAtLaunch: () => YoloActionResult;
   /** Idempotent exit: not yolo -> no-op; yolo -> probe, then leave. */
   readonly exit: () => YoloActionResult;
+  /**
+   * ADR-0141: enter the `--no-sandbox` preset — fence retired + `fsMode: global`
+   * declared, permission left alone. It declares two axes, so a later permission
+   * change does not clear it.
+   *
+   * The already-on guard reads the **declared** preset when an overlay is wired,
+   * not the yolo holder. The holder is seeded true at assembly for BOTH presets
+   * (the fence must be retired from the first fenced call on any host), so a
+   * holder-only guard would short-circuit the launch seed and leave the overlay
+   * undeclared — a session with the fence up and no posture, which is the silent
+   * drop this guard exists to distinguish from a real repeat entry.
+   */
+  readonly enterNoSandbox: () => YoloActionResult;
 }
 
 /** Successful-entry notice (consumed by the TUI). */
@@ -220,26 +344,34 @@ export const YOLO_ENTER_TEXT =
 /** Idempotent notice when already in the yolo posture. */
 export const YOLO_ALREADY_ON_TEXT = "yolo mode is already ON.";
 
+/**
+ * ADR-0141: the `--no-sandbox` entry notice. It names the two axes the preset
+ * declared and states that permission is untouched, because that is what
+ * separates this preset from the yolo one.
+ */
+export const NO_SANDBOX_ENTER_TEXT =
+  "no-sandbox mode ON — sandbox fence retired for this session (bash argv is bare; network and filesystem are unrestricted); filesystem tier set to global; permission mode unchanged.";
+
 /** Successful-exit notice. */
 export const YOLO_EXIT_TEXT =
-  "yolo mode OFF — sandbox fence restored; fs mode rolled back to its pre-yolo value; the permission posture was never touched and is unchanged.";
+  "yolo mode OFF — sandbox fence restored; filesystem tier and permission mode are back to the values your settings hold (the preset is not persisted, so the next launch starts there too).";
 
 /** Idempotent notice when exiting from a non-yolo posture. */
 export const YOLO_ALREADY_OFF_TEXT = "yolo mode is already OFF.";
 
 /**
  * Spread-guard helper for the S5 discipline — moves the "emit the key only when
- * the holder exists" branch out of every call site. `lint:s5:staged` gates
+ * the reader exists" branch out of every call site. `lint:s5:staged` gates
  * per-function complexity: one more ternary at a call site can push the hosting
  * god function over the threshold, while a named projection leaves the call site
  * branch-free.
  *
- * Semantics are byte-identical to the inline `...(holder !== undefined ? { holder } : {})`.
+ * Semantics are byte-identical to the inline `...(reader !== undefined ? { reader } : {})`.
  */
-export function yoloHolderSpread(holder: YoloContext | undefined): {
-  readonly yolo?: YoloContext;
+export function fenceRetiredSpread(reader: FenceRetirementReader | undefined): {
+  readonly fenceRetired?: FenceRetirementReader;
 } {
-  return holder !== undefined ? { yolo: holder } : {};
+  return reader !== undefined ? { fenceRetired: reader } : {};
 }
 
 /**
@@ -292,21 +424,39 @@ function typedCauseText(cause: unknown): string {
 }
 
 /**
+ * Drop the overlay's declared axes and hand the holders back the tier that was
+ * seeded in (the one the operator owned). Clearing the overlay alone is not
+ * enough: the enter side wrote the declared axes into the holders, so without
+ * this the session would keep running fenced-off-but-`full_auto` with an
+ * overlay that says nothing is in force (ADR-0141 — no snapshot channel).
+ */
+function releaseOverlayTier(opts: YoloActionOptions, overlay: PresetOverlay): void {
+  const tier = overlay.declaredTier();
+  overlay.clear();
+  if (tier.fsMode !== undefined) opts.fsMode?.set(tier.fsMode);
+  if (tier.permission !== undefined) opts.permission?.set(tier.permission);
+}
+
+/**
  * Build the yolo controller.
  *
- * **Enter** (spec / ADR-0119 §ruling 1, 6, 8, as amended by ADR-0139): return
- * idempotently when already yolo; probe bwrap and refuse with zero state change
- * on a host without it; snapshot the fsMode holder; force a non-default fsMode
- * to `global` through the holder only, never rewriting user settings; then set
- * yolo true. The permission axis is not read, written, snapshotted or restored
- * on any entry path (ADR-0139) — the fence axis writes the fence axis.
+ * **Enter** (ADR-0141): the preset declares its axes into the overlay AND into
+ * the holders, because a declaration no consumer reads is not one — the
+ * permission policy reads `PermissionModeContext` and the fence reads the
+ * fsMode holder, while `effectivePermission()` has no caller. `--yolo`
+ * declares all three (fence, `fsMode: global`, `full_auto`); `--no-sandbox`
+ * declares two and writes nothing to the permission holder, which is exactly
+ * why it survives a later permission change. Entry is idempotent on the
+ * **declared** state, and probes bwrap with zero state change on a host
+ * without it.
  *
  * **Exit** — deliberately asymmetric with entry: leaving is always safe in
  * principle, but **still probes**. On a host without bwrap the exit is refused,
  * because with no usable non-yolo fence every bash call would become a runtime
  * failure, so refusing is the only honest fail-closed (ADR-0119 §requireBwrap
- * sequencing ruling). Otherwise restore the snapshotted fsMode, then set yolo
- * false.
+ * sequencing ruling). Otherwise clear the overlay whole and return both
+ * holders to the tier that was seeded in — the value the operator owned, not
+ * a snapshot taken at enter time (ADR-0141 deleted the snapshot channel).
  *
  * **Launch entry** (`enterAtLaunch`): the `--yolo` startup path applies the
  * same combination as enter — the flag only seeds the holder, which by itself
@@ -332,6 +482,35 @@ export function createYoloController(opts: YoloActionOptions): YoloController {
     opts.yolo.set(true);
   };
 
+  /**
+   * ADR-0141: declare the preset's axes into the overlay instead of snapshotting.
+   * The settings tier stays where the user put it — the overlay shadows it while
+   * a preset is in force and exit drops the overlay rather than restoring.
+   */
+  const applyOverlayCombination = (preset: PresetId): void => {
+    if (opts.overlay === undefined) {
+      applyEnterCombination();
+      return;
+    }
+    // Seed FIRST: this captures the tier the user owns, which is what `exit`
+    // restores after the whole clear.
+    opts.overlay.seedSettingsTier({
+      fsMode: opts.fsMode?.get() ?? FS_ISOLATION_MODE_DEFAULT,
+      permission: opts.permission?.get() ?? "default",
+    });
+    opts.overlay.declare(preset);
+    // The declared axes must reach the HOLDERS, not only the overlay: the
+    // permission policy reads `PermissionModeContext`, and nothing else reads
+    // `effectivePermission()`. Without this write the yolo preset declares
+    // `full_auto` into a field no consumer reads and ships as `--no-sandbox`
+    // under another name. `--no-sandbox` declares no permission axis, so it
+    // writes nothing here — which is exactly what makes it survive a later
+    // permission change.
+    if (preset === "yolo") opts.permission?.set("full_auto");
+    opts.fsMode?.set("global");
+    opts.yolo.set(true);
+  };
+
   const enter = (): YoloActionResult => {
     if (opts.yolo.get()) {
       return { ok: true, yolo: true, text: YOLO_ALREADY_ON_TEXT };
@@ -343,8 +522,30 @@ export function createYoloController(opts: YoloActionOptions): YoloController {
       // (spec EXIT / ADR-0119 §requireBwrap sequencing ruling).
       return { ok: false, text: yoloProbeRefusalText(cause) };
     }
-    applyEnterCombination();
+    applyOverlayCombination("yolo");
     return { ok: true, yolo: true, text: YOLO_ENTER_TEXT };
+  };
+
+  const enterNoSandbox = (): YoloActionResult => {
+    // Declared-state guard, not holder-state: at launch the holder is seeded
+    // true for both presets while the overlay is still undeclared (see the
+    // interface note). Reading the overlay makes "already on" mean "already
+    // DECLARED", which is the only reading that distinguishes a repeat entry
+    // from the first one.
+    if (opts.overlay !== undefined) {
+      if (opts.overlay.preset() !== undefined) {
+        return { ok: true, yolo: true, text: YOLO_ALREADY_ON_TEXT };
+      }
+    } else if (opts.yolo.get()) {
+      return { ok: true, yolo: true, text: YOLO_ALREADY_ON_TEXT };
+    }
+    try {
+      probe();
+    } catch (cause) {
+      return { ok: false, text: yoloProbeRefusalText(cause) };
+    }
+    applyOverlayCombination("no-sandbox");
+    return { ok: true, yolo: true, text: NO_SANDBOX_ENTER_TEXT };
   };
 
   const enterAtLaunch = (): YoloActionResult => {
@@ -352,9 +553,9 @@ export function createYoloController(opts: YoloActionOptions): YoloController {
       return { ok: true, yolo: true, text: YOLO_ALREADY_ON_TEXT };
     }
     launchEntered = true;
-    // Snapshot is taken before the flip, so a yolo session that started via
-    // `--yolo` rolls back to its startup values on exit (ADR-0119 §ruling 8).
-    applyEnterCombination();
+    // The launch path applies the same declaration as `enter()`; `seedSettingsTier`
+    // captures the startup tier first, so exit returns to it (ADR-0141).
+    applyOverlayCombination("yolo");
     return { ok: true, yolo: true, text: YOLO_ENTER_TEXT };
   };
 
@@ -372,10 +573,20 @@ export function createYoloController(opts: YoloActionOptions): YoloController {
     }
     const snap = snapshot;
     snapshot = undefined;
-    if (snap?.fsMode !== undefined) opts.fsMode?.set(snap.fsMode);
+    if (opts.overlay !== undefined) {
+      releaseOverlayTier(opts, opts.overlay);
+    } else if (snap?.fsMode !== undefined) {
+      opts.fsMode?.set(snap.fsMode);
+    }
     opts.yolo.set(false);
     return { ok: true, yolo: false, text: YOLO_EXIT_TEXT };
   };
 
-  return Object.freeze({ context: opts.yolo, enter, enterAtLaunch, exit });
+  return Object.freeze({
+    context: opts.yolo,
+    enter,
+    enterAtLaunch,
+    exit,
+    enterNoSandbox,
+  });
 }

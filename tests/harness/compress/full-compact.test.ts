@@ -21,6 +21,7 @@ import {
   runFullCompact,
 } from "../../../src/harness/compress/full-compact.ts";
 import { DEFAULT_KEEP_RECENT } from "../../../src/harness/compress/constant.ts";
+import { isEmptyFinalResponseStop } from "../../../src/harness/model-adapter/types.ts";
 import type { CompactAdapter } from "../../../src/harness/compress/full-compact.ts";
 import type {
   AnthropicNativeMessage,
@@ -51,12 +52,20 @@ function assistantTurn(
     role: "assistant",
     content: texts.map((t) => ({ type: "text", text: t })),
   };
+  // This builder's blocks are text-only: it never carries thinking content.
+  const hasThinking = false;
   return {
     nativeMessage: native,
     projection: { nativeMessage: native, texts, toolCalls: [] },
     supplierStop: "success",
     needsTools: false,
-    isEmptyFinalResponse: texts.length === 0,
+    hasThinking,
+    isEmptyFinalResponse: isEmptyFinalResponseStop(
+      "success",
+      texts,
+      [],
+      hasThinking
+    ),
     ...(opts.usage !== undefined && { usage: opts.usage }),
   };
 }

@@ -4,7 +4,7 @@ Operators choose the model a sub-agent runs on in user settings. The parent mode
 
 ## Objective
 
-A sub-agent worker builds its adapter from `settings.subagent.model` when that route can be turned into a transport, and otherwise from `settings.llm.model`. `spawn_subagent` stays resident in the parent prompt and does not gain a model argument or a route list.
+A sub-agent worker builds its adapter from `settings.subagent.model` when that route can be turned into a transport, otherwise from the parent conversation's model route (`parentModelRoute` on the worker envelope) when the conversation runs on a non-default route, and otherwise from `settings.llm.model`. `spawn_subagent` stays resident in the parent prompt and does not gain a model argument or a route list.
 
 ## Boundaries
 
@@ -17,17 +17,18 @@ A sub-agent worker builds its adapter from `settings.subagent.model` when that r
 - Assembled `spawn_subagent` input schema has no `model` property.
 - `WORKER_SCHEMA.properties` has no `model`. A parent→worker payload that still contains `model` fails envelope parse (`additionalProperties: false`).
 - `subagent.model` set to a `provider/model` whose provider is registered and whose api-key env is non-empty: the worker adapter's wire model is `wireModelFromRoute` of that route, and the client uses that provider's `baseUrl` / apiKey / headers.
-- `subagent.model` absent, empty after trim, or not a string: the resolved field is absent and the adapter uses `settings.llm.model` and the main-session transport.
-- `subagent.model` set, but resolution throws `LlmProviderConfigError` (`provider_model_not_registered` or `provider_api_key_missing`, recognized only by `isLlmProviderConfigError`): the resolved field is absent (not `null`), the parent spawn is not failed, and the worker still starts on `settings.llm.model`. The catch rethrows anything that is not that typed error. The fallback carries an `// EXIT:` naming that condition.
-- When the route differs from `settings.llm.model`, adapter `thinking` and `maxOutputTokens` are still the main `llm` values.
+- `subagent.model` absent, empty after trim, or not a string: the resolved field is absent and the adapter uses the parent conversation's route when the envelope carries one, and `settings.llm.model` with the main-session transport otherwise.
+- `subagent.model` set, but resolution throws `LlmProviderConfigError` (`provider_model_not_registered` or `provider_api_key_missing`, recognized only by `isLlmProviderConfigError`): the resolved field is absent (not `null`), the parent spawn is not failed, and the worker still starts on the parent conversation's route, or on `settings.llm.model` when the envelope carries none. The catch rethrows anything that is not that typed error. The fallback carries an `// EXIT:` naming that condition.
+- The parent conversation's route rides on the worker envelope as `parentModelRoute` and is copied through the definition. `settings.subagent.model` still wins over it — it is an explicit operator setting for sub-agents. Otherwise the worker resolves that route against the provider registry and its wire model, client transport, and output budget all follow that route. A route that does not resolve throws the typed `LlmProviderConfigError`; the worker never falls back to `settings.llm.model` silently.
+- When the route differs from `settings.llm.model`, adapter `thinking` stays host-level (the parent turn's snapshot, else the main `llm` value) and the output budget follows the route's own `models[].maxTokens` — 32,000 when that entry is silent (ADR-0122's 2026-09-26 amendment).
 
 Public entry for the route string is user settings consumed by `loadIknowEnv`. Input classes:
 
-- empty: absent / blank → field absent, main route. Applicable.
-- invalid: wrong JSON type → field dropped, main route. Numeric "negative" does not apply to a route string.
+- empty: absent / blank → field absent, the parent conversation's route (the main route when the envelope carries none). Applicable.
+- invalid: wrong JSON type → field dropped, the parent conversation's route (the main route when the envelope carries none). Numeric "negative" does not apply to a route string.
 - overflow: no length cap. A string that is not a registered provider is the exception class below, not a size class. N/A.
 - concurrent: each worker process loads env once; this spec adds no shared mutable settings object. N/A.
-- exception: the two `LlmProviderConfigError` kinds → field absent and main route; any other throw from resolution propagates.
+- exception: the two `LlmProviderConfigError` kinds → field absent, the parent conversation's route (the main route when the envelope carries none); any other throw from resolution propagates.
 - A `subagent_spawn` record written after this change has no `model` field. A previously stored line that already has `model` still parses.
 - A `subagent` section in a project settings file does not override the user-layer `subagent.model`.
 
@@ -50,7 +51,7 @@ minimal-change-verifier: yes — one task; panel, parent override, and per-route
 Inherits, quoted:
 
 - **主会话** model: "`settings.llm.model`（字面值，唯一来源，trim 后非空串）: **主会话**模型路由 ID 的全局可寻址位" (`docs/CONTEXT.md`). Missing main model stays fail-fast. This spec does not add a second source for that slot.
-- **lite model** shape, not its failure policy: "与 `llm.model` 同形的 `provider/model` 路由，走同一 `providers[]`". `subagent.model` reuses that registry. It does not add a second provider table. Unlike lite, an unusable sub-agent route still runs the worker, on the main route.
+- **lite model** shape, not its failure policy: "与 `llm.model` 同形的 `provider/model` 路由，走同一 `providers[]`". `subagent.model` reuses that registry. It does not add a second provider table. Unlike lite, an unusable sub-agent route still runs the worker, on the parent conversation's route (the main route when the envelope carries none).
 - **wire model**: "Anthropic SDK 请求体里的 `model` 字段 = 注册表 `models[].id` 原文（路由 `provider/model` 第一个 `/` 之后）".
 - **项目 settings 允许名单**: "共享项目 `<仓>/.iknow/settings.json` 只采纳 `verify` / `secrets` / `permissions`". _Avoid_: "项目文件盖 isolation / llm / memory / subagent". ADR-0084.
 - **Retired model env**: "`IKNOW_LLM_MODEL`（env 覆盖 model）已不再读取". No `IKNOW_SUBAGENT_MODEL`.

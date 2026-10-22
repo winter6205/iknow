@@ -20,6 +20,7 @@ import { tmpdir } from "node:os";
 import { run } from "../loop-engine.js";
 import { createExecutor } from "../tools/executor.js";
 import { createStubModel } from "../stubs/stub-model.js";
+import { isEmptyFinalResponseStop } from "../model-adapter/types.js";
 
 import type { LoopEngineDeps } from "../loop-engine.js";
 import type {
@@ -56,15 +57,20 @@ function assistantResult(opts: AssistantResultOpts): AssistantTurnResult {
     blocks.push({ type: "tool_use", id: c.id, name: c.name, input: c.input });
   }
   const native: AnthropicNativeMessage = { role: "assistant", content: blocks };
+  // The demo scripts text / tool_use blocks only — it never fakes thinking content.
+  const hasThinking = false;
   return {
     nativeMessage: native,
     projection: { nativeMessage: native, texts, toolCalls },
     supplierStop,
     needsTools: toolCalls.length > 0,
-    isEmptyFinalResponse:
-      supplierStop === "success" &&
-      texts.length === 0 &&
-      toolCalls.length === 0,
+    hasThinking,
+    isEmptyFinalResponse: isEmptyFinalResponseStop(
+      supplierStop,
+      texts,
+      toolCalls,
+      hasThinking
+    ),
   };
 }
 

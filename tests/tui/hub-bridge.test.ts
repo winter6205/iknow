@@ -33,6 +33,7 @@ import {
 import { deriveProjectIdentityRoot } from "../../src/harness/session-roots.js";
 import { writeWorkerIdentityRecord } from "../../src/harness/subagent/worker-identity-record.js";
 import type { AnthropicNativeMessage } from "../../src/harness/model-adapter/types.js";
+import type { HarnessStreamEvent } from "../../src/harness/stream.js";
 import type { SessionFileV1 } from "../../src/session-api/store/schema.js";
 import { resolveProjectSessionDir } from "../../src/session-api/store/session-store.js";
 import { createStubModel } from "../../src/harness/stubs/stub-model.js";
@@ -47,6 +48,13 @@ import {
   startLlmCapture,
   type LlmCapture,
 } from "../session-api/_helpers/llm-capture.ts";
+
+/** Narrow a stream event to the `context_usage` beats (measured + projected). */
+function isContextUsageEvent(
+  event: HarnessStreamEvent
+): event is Extract<HarnessStreamEvent, { readonly type: "context_usage" }> {
+  return event.type === "context_usage";
+}
 
 describe("inflight registry", () => {
   test("soleId：空 → undefined；单会话 → 该 id；多会话 → undefined", () => {
@@ -346,6 +354,58 @@ describe("hub-bridge compactSession（/compact）", () => {
     expect(events).toContain("compaction_failed");
   });
 
+  // Plan A T4: the `context_usage` beats travel through the bridge unchanged —
+  // the host receives the measured (post_call) variant with its `usage` and
+  // the projected variant (which carries NO `usage` at all) exactly as the
+  // harness emitted them. The bridge rewrites nothing (ADR-0008 D6: the
+  // projected value must stay a display-only reading).
+  test("context_usage 拍透传桥（measured / projected 原样到达宿主）", async () => {
+    const usage = {
+      inputTokens: 12_800,
+      outputTokens: 7,
+      cacheCreationInputTokens: null,
+      cacheReadInputTokens: null,
+    };
+    const bridge = createTuiBridge({
+      dataDir: baseDir,
+      workspaceRoot: baseDir,
+      deps: makeDeps([assistantResult({ texts: ["answer"], usage })]),
+      inflight: createInflightRegistry(),
+    });
+    const id = await bridge.ensureSession(undefined);
+    const events: HarnessStreamEvent[] = [];
+    await bridge.postMessage({
+      conversationId: id,
+      text: "hi",
+      onStream: (event) => events.push(event),
+    });
+
+    const beats = events.filter(isContextUsageEvent);
+    expect(beats.length).toBeGreaterThan(0);
+
+    const postCall = beats.find((beat) => beat.phase === "post_call");
+    expect(postCall).toBeDefined();
+    if (postCall === undefined || postCall.phase === "projected") {
+      throw new Error("no post_call beat");
+    }
+    expect(postCall.source).toBe("measured");
+    // The confirmed usage arrives verbatim (no rewrite by the bridge).
+    expect(postCall.usage).toEqual(usage);
+    expect(postCall.projectedNext).toEqual({
+      tokens: 12_807,
+      source: "projected",
+    });
+
+    const projected = beats.find((beat) => beat.phase === "projected");
+    expect(projected).toBeDefined();
+    if (projected === undefined) throw new Error("no projected beat");
+    // The projected variant carries no usage at all — it can never become a
+    // confirmed reading downstream.
+    expect("usage" in projected).toBe(false);
+    expect(projected.occupancy.source).toBe("projected");
+    expect(projected.occupancy.tokens).toBeGreaterThan(0);
+  });
+
   // A pre-aborted signal → runFullCompact exits early with signal_aborted → hub
   // takes the keep-state path → bridge returns compacted=false (same shape as
   // cancellation) and writes nothing to disk.
@@ -494,9 +554,10 @@ describe("hub-bridge subagentManager 透传（#365 T3）", () => {
   test("独立参数注入 → hub 经 host-drain 消费该 manager（drain 结果拼入 run priorMessages）", async () => {
     // subagentManager is a standalone parameter (no longer passed via deps.subagentManager).
     // Verified: the hub internally holds the injected manager and consumes it during
-    // postMessage via drainPendingSubagents. Technique: hand-rolled fake manager
-    // (drainCompleted returns 1 completed entry) + capturing adapter to assert the
-    // condensed section appears in state.messages received by stub-model's first turn.
+    // postMessage via claimPendingSubagents (ADR-0150; read-only gates use
+    // peekPendingSubagents). Technique: hand-rolled fake manager (drainCompleted
+    // returns 1 completed entry) + capturing adapter to assert the condensed section
+    // appears in state.messages received by stub-model's first turn.
     // If the hub did not hold the manager → drain takes the undefined path → no
     // injection → the assertion fails.
     const fakeMgr: SubAgentManager = {

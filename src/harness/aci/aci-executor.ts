@@ -39,14 +39,19 @@ import type { PermissionOutcome } from "../permission/types.js";
 import {
   createPermissionRuntime,
   type PermissionExecutorOptions,
+  type PermissionGate,
+  type PermissionPrepare,
   type PermissionRuntime,
 } from "../permission/permission-executor.js";
-import { partitionConcurrencyWaves } from "../tools/concurrency-waves.js";
 import { createAciCatalog } from "../permission/permission-executor.js";
-import { checkPermission, fsBoundaryOption } from "../permission/policy.js";
+import {
+  decidePermission,
+  type PermissionPolicy,
+} from "../permission/policy.js";
 import { SECURITY_REVIEW_OPTION } from "../permission/security-review.js";
 import type { SecurityReviewRoute } from "../permission/security-review.js";
 import { errorMessage } from "../errors.js";
+import { isConcurrencySafeForCall } from "../tools/concurrency-waves.js";
 import { createPermissionPolicy } from "./permission.js";
 import { TIMEOUT_TIER_MS, type AciCatalog, type AciToolDef } from "./types.js";
 import type { CleanupEvidence } from "../sandbox/cleanup-result.js";
@@ -129,13 +134,32 @@ export interface AciExecutorOptions {
  * aci/) keep passing without changing their call sites.
  *
  * Safe batches may overlap — executeAll schedules waves along the
- * `isConcurrencySafe` dimension annotated in the catalog: consecutive calls
- * marked `isConcurrencySafe: true` start concurrently via Promise.all
- * within one wave; calls marked `isConcurrencySafe: false` (and the
- * conservative default for catalog misses) must occupy a singleton wave
- * that overlaps nothing else. Result order follows the input calls order,
- * and per-call pre/permission/post steps still run inside each call's own
- * routeOneCall (the 5-step middleware is unchanged).
+ * concurrency-safety dimension annotated in the catalog: a call is
+ * concurrency-safe when the tool's per-call predicate
+ * (`isConcurrencySafeForInput`) answers true for THAT call's input, or — for
+ * a tool that declares no predicate — when the tool-level default
+ * `isConcurrencySafe: true` says so. The wave's allowed calls start
+ * together — one wave runs at a time, its calls are started eagerly and
+ * settled with `Promise.allSettled`; a call that is neither concurrency-safe
+ * nor DENIED starts the next wave, and the conservative default for a
+ * catalog miss is such a call. (A DENIED call joins its neighbours' wave: it
+ * has no side effect, so it rides along — the #653 behaviour.) Result order
+ * follows the input calls order, and per-call pre/permission/post steps still
+ * run inside each call's own routeOneCall (the 5-step middleware is
+ * unchanged).
+ *
+ * A wave is gated in two stages: the calls the policy ALLOWS start
+ * immediately, and the calls it ASKS about are put to the user one at a
+ * time, in input order — an allowed call never waits for an earlier call's
+ * approval, and two approval questions are never in flight at once.
+ *
+ * The wave's SHAPE and its members' VERDICTS are taken together, per wave,
+ * right before that wave runs (the wave scan). A verdict taken before the
+ * batch ran is a verdict the gate may no longer enforce — the permission
+ * mode can be flipped between two waves — and a stale verdict is a
+ * fail-open. The observation hook fires for a call BEFORE that call's
+ * prepare, with the scan's verdict, so the observer and the gate can never
+ * report different verdicts for the same call.
  */
 export function createAciExecutor(opts: AciExecutorOptions): Executor {
   // ADR-0132/ADR-0133: the fallback policy deliberately carries NO host root
@@ -213,22 +237,29 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
       turnId?: string,
       onStream?: (event: HarnessStreamEvent) => void,
       messages?: ToolExecutionContext["messages"],
-      parentThinking?: ToolExecutionContext["parentThinking"]
+      parentThinking?: ToolExecutionContext["parentThinking"],
+      parentModelRoute?: ToolExecutionContext["parentModelRoute"]
     ): Promise<ReadonlyArray<ToolExecutionResult>> => {
       if (calls.length === 0) return [];
-      const waves = partitionConcurrencyWaves(
-        calls.map((call) =>
-          toWaveItem(call, catalogForT5, opts, _timeoutMs, policy)
-        ),
-        (item) => item.doesNotBreakWave
-      );
+      // The waves are scanned ONE AT A TIME: each wave's shape and its
+      // members' verdicts are taken together, right before that wave runs.
+      // A batch-level plan phase would take every call's verdict before the
+      // first wave ran, and a verdict that goes stale before it is enforced
+      // is a fail-open.
       const out: ToolExecutionResult[] = [];
+      let pending: ReadonlyArray<ToolCall> = calls;
       let indexBase = 0;
-      for (const wave of waves) {
-        const part = await runWave({
-          wave,
-          perm,
+      while (pending.length > 0) {
+        const scanned = scanWave({
+          calls: pending,
+          catalog: catalogForT5,
           policy,
+          executorOpts: opts,
+          fallbackTimeoutMs: _timeoutMs,
+        });
+        const part = await runWave({
+          wave: scanned.wave,
+          perm,
           onDecision: opts.onDecision,
           onDiagnostic: opts.onDiagnostic,
           signal,
@@ -239,9 +270,11 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
           onStream,
           messages,
           parentThinking,
+          parentModelRoute,
         });
         for (const r of part) out.push(r);
-        indexBase += wave.length;
+        indexBase += scanned.wave.length;
+        pending = scanned.rest;
       }
       return out;
     },
@@ -251,80 +284,130 @@ export function createAciExecutor(opts: AciExecutorOptions): Executor {
 type WaveItem = {
   readonly call: ToolCall;
   readonly def: AciToolDef | undefined;
+  /**
+   * The verdict the wave scan took for this call, right before the wave ran.
+   * Undefined for a catalog miss — there is nothing to judge, the call is
+   * delegated to inner.
+   */
+  readonly decision: PermissionOutcome | undefined;
   readonly tierTimeoutMs: number | undefined;
   readonly doesNotBreakWave: boolean;
 };
 
+/** One wave's scan: its members, and the calls it did not consume. */
+interface ScannedWave {
+  readonly wave: ReadonlyArray<WaveItem>;
+  /** The calls the scan did not consume — the next wave's candidates. */
+  readonly rest: ReadonlyArray<ToolCall>;
+}
+
+/**
+ * One call's wave placement: its catalog entry and its tier timeout. The
+ * verdict is NOT taken here — the wave scan takes it, right before the wave
+ * runs.
+ */
 function toWaveItem(
   call: ToolCall,
   catalog: AciCatalog,
   opts: AciExecutorOptions,
-  fallbackTimeoutMs: number | undefined,
-  policy: ReturnType<typeof createPermissionPolicy>
+  fallbackTimeoutMs: number | undefined
 ): WaveItem {
   const def = catalog.get(call.name);
-  const predictedDeny =
-    def !== undefined &&
-    checkPermission({
-      def,
-      input: call.input,
-      sources: policy.sources,
-      hardWalls: policy.hardWalls,
-      defaultByCategory: policy.defaultByCategory,
-    }).decision === "deny";
   return {
     call,
     def,
+    decision: undefined,
     tierTimeoutMs:
       opts.timeoutMsOverride ??
       (def ? TIMEOUT_TIER_MS[def.aci.timeoutTier] : fallbackTimeoutMs),
-    doesNotBreakWave: def?.aci.isConcurrencySafe === true || predictedDeny,
+    doesNotBreakWave: isConcurrencySafeForCall(def?.aci, call.input),
   };
 }
 
+/**
+ * The wave scan: the shape of ONE wave and the verdict of each of its
+ * members, both taken at the same moment — right before that wave runs.
+ *
+ * The shape's rule is the one the wave partitioner has always used: a call
+ * joins the current wave iff it is concurrency-safe OR its verdict is "deny"
+ * (a denied call has no side effect, so it may ride along in its
+ * neighbours' wave). A call that is neither breaks the wave: it starts the
+ * NEXT wave, and its verdict is taken AGAIN in that wave's scan — the probe
+ * taken here would be stale by the time that wave runs.
+ *
+ * The rule is applied INCREMENTALLY here, not by
+ * `partitionConcurrencyWaves` over the whole batch: that partitioner scans
+ * the entire array in one pass, so its predicate would decide every call
+ * before the first wave ran — the staleness this scan exists to remove. The
+ * shape it produces is the same one the partitioner produces for the same
+ * verdicts (join → the current wave, break → a singleton wave).
+ *
+ * The scan is per wave, never per batch: that is the whole point. A verdict
+ * taken before the batch ran can be contradicted by the state the gate
+ * enforces it under (the permission mode can be flipped between two waves),
+ * and a stale verdict is a fail-open.
+ */
+function scanWave(opts: {
+  readonly calls: ReadonlyArray<ToolCall>;
+  readonly catalog: AciCatalog;
+  readonly policy: PermissionPolicy;
+  readonly executorOpts: AciExecutorOptions;
+  readonly fallbackTimeoutMs: number | undefined;
+}): ScannedWave {
+  const wave: WaveItem[] = [];
+  for (const [index, call] of opts.calls.entries()) {
+    const item = toWaveItem(
+      call,
+      opts.catalog,
+      opts.executorOpts,
+      opts.fallbackTimeoutMs
+    );
+    const decision =
+      item.def !== undefined
+        ? decidePermission(opts.policy, item.def, call.input)
+        : undefined;
+    const joins = item.doesNotBreakWave || decision?.decision === "deny";
+    if (joins) {
+      wave.push({ ...item, decision });
+      continue;
+    }
+    if (wave.length > 0) {
+      // The call breaks this wave and starts the next one; its verdict is
+      // taken again in that wave's scan.
+      return { wave, rest: opts.calls.slice(index) };
+    }
+    // The wave is empty: the call starts this wave alone.
+    wave.push({ ...item, decision });
+    return { wave, rest: opts.calls.slice(index + 1) };
+  }
+  return { wave, rest: [] };
+}
+
+/**
+ * The observation hook's event: the verdict the wave scan took for this
+ * call. On the allow/deny path that IS the verdict the gate enforces; on the
+ * approval path the gate re-decides before the prompt, so the enforced
+ * verdict may differ (ADR-0147 §3, §7).
+ */
 function emitOnDecision(
   item: WaveItem,
-  policy: ReturnType<typeof createPermissionPolicy>,
   onDecision: AciExecutorOptions["onDecision"]
 ): void {
   if (!onDecision) return;
-  if (!item.def) {
+  if (item.decision === undefined) {
     onDecision(item.call, {
       decision: "allow",
       reason: "unknown tool — delegated to inner",
     });
     return;
   }
-  onDecision(
-    item.call,
-    checkPermission({
-      def: item.def,
-      input: item.call.input,
-      sources: policy.sources,
-      hardWalls: policy.hardWalls,
-      defaultByCategory: policy.defaultByCategory,
-      // The observer must reach the same verdict as the gate that actually
-      // enforces it: without the mode and the host's root context, a call the
-      // policy admits is reported here as a different decision than the one
-      // the runtime applies.
-      mode: policy.mode,
-      ...(policy.hostRoots !== undefined
-        ? { hostRoots: policy.hostRoots }
-        : {}),
-      // ADR-0140: the fs boundary is a fourth input the enforcing gate reads,
-      // so the observer must read it too — without it an out-of-reach write is
-      // reported `allow` here while the runtime raises the boundary ask. Same
-      // helper the gate and the policy factory use, so the absent-vs-empty
-      // rule is one rule.
-      ...fsBoundaryOption(policy),
-    })
-  );
+  onDecision(item.call, item.decision);
 }
 
-async function runWave(opts: {
+/** Everything one wave's run needs — one options object, one parameter. */
+interface WaveRunOptions {
   readonly wave: ReadonlyArray<WaveItem>;
   readonly perm: PermissionRuntime;
-  readonly policy: ReturnType<typeof createPermissionPolicy>;
   readonly onDecision: AciExecutorOptions["onDecision"];
   readonly onDiagnostic: AciExecutorOptions["onDiagnostic"];
   readonly signal: AbortSignal | undefined;
@@ -337,52 +420,447 @@ async function runWave(opts: {
   readonly onStream: ((event: HarnessStreamEvent) => void) | undefined;
   readonly messages: ToolExecutionContext["messages"];
   readonly parentThinking: ToolExecutionContext["parentThinking"];
-}): Promise<ReadonlyArray<ToolExecutionResult>> {
-  const gated: Array<{
-    readonly item: WaveItem;
-    readonly blocked: ToolExecutionResult | undefined;
-    readonly def: AciToolDef | undefined;
-  }> = [];
-  for (const item of opts.wave) {
-    emitOnDecision(item, opts.policy, opts.onDecision);
-    const gate = await opts.perm.gateOne(item.call, opts.signal);
-    gated.push({
+  readonly parentModelRoute: ToolExecutionContext["parentModelRoute"];
+}
+
+/** One prepared call: its position in the wave and the gate's answer. */
+interface PreparedCall {
+  readonly index: number;
+  readonly item: WaveItem;
+  readonly gate: PermissionPrepare;
+}
+
+/** One call waiting for the operator's answer. */
+interface ApprovalEntry {
+  readonly index: number;
+  readonly item: WaveItem;
+  readonly def: AciToolDef;
+}
+
+/**
+ * The wave's three stages.
+ *
+ * Stage 1 — prepare: for each call, in input order, the observer event (with
+ * the scan's verdict) and then the gate's non-approval part (hydrate path →
+ * pre-hook), which enforces that very verdict.
+ *
+ * Stage 2 — start: the allowed calls start immediately, concurrently; the
+ * calls that need an approval are collected for stage 3.
+ *
+ * Stage 3 — ask: the approvals, ONE AT A TIME, in input order: never two
+ * questions in flight. Each one re-decides with the current policy state
+ * first, so an "always allow" answer to an earlier question reaches the
+ * next same-tool call.
+ */
+async function runWave(
+  opts: WaveRunOptions
+): Promise<ReadonlyArray<ToolExecutionResult>> {
+  const prepared = await prepareWave(opts);
+  // The calls of THIS wave whose inner execution has started, in start
+  // order. A held call's result names them (ADR-0147 R3): they are the calls
+  // that ran while it waited, under the verdict the wave scan gave them.
+  const startedIds: string[] = [];
+  const { works, approvals } = startAllowedCalls(opts, prepared, startedIds);
+  try {
+    await runApprovals(opts, approvals, works, startedIds);
+  } catch (err) {
+    // The inner calls that are already running are settled, not abandoned:
+    // a rejected one must not become an unhandled rejection while this
+    // failure travels up. The failure itself stays typed and propagates.
+    // EXIT: the error is re-thrown UNCHANGED below — this branch only
+    // observes the already-running inner calls first, so their rejections are
+    // settled instead of becoming unhandled rejections.
+    await Promise.allSettled(works.filter(isStarted));
+    throw err;
+  }
+  return await collectWaveResults(opts, works);
+}
+
+/**
+ * Stage 1 — the observer event and the gate's non-approval part for every
+ * call in the wave, in input order. The observer reports the scan's verdict;
+ * the gate enforces that very verdict.
+ */
+async function prepareWave(opts: WaveRunOptions): Promise<PreparedCall[]> {
+  const prepared: PreparedCall[] = [];
+  for (const [index, item] of opts.wave.entries()) {
+    emitOnDecision(item, opts.onDecision);
+    prepared.push({
+      index,
       item,
-      blocked: gate.kind === "blocked" ? gate.result : undefined,
-      def: gate.kind === "proceed" ? gate.def : item.def,
+      gate: await opts.perm.prepareOne(item.call, item.decision),
     });
   }
-  return Promise.all(
-    gated.map((g, i) => {
-      const work =
-        g.blocked !== undefined
-          ? Promise.resolve(g.blocked)
-          : routeOneCall({
-              runInner: (effectiveSignal) =>
-                opts.perm.runAllowed(
-                  g.item.call,
-                  g.def,
-                  effectiveSignal,
-                  undefined,
-                  opts.conversationId,
-                  opts.turnId,
-                  opts.onStream,
-                  opts.messages,
-                  opts.parentThinking
-                ),
-              call: g.item.call,
-              def: g.item.def,
-              tierTimeoutMs: g.item.tierTimeoutMs,
-              callerSignal: opts.signal,
-              onDiagnostic: opts.onDiagnostic,
-              onStream: opts.onStream,
-            });
-      return work.then(async (result) => {
-        await opts.onSettled?.(result, opts.indexBase + i);
-        return result;
-      });
-    })
+  return prepared;
+}
+
+/**
+ * Stage 2 — the allowed calls start immediately, concurrently: an allowed
+ * call does not wait for an earlier call's approval. The calls that need an
+ * approval are collected for stage 3.
+ */
+function startAllowedCalls(
+  opts: WaveRunOptions,
+  prepared: ReadonlyArray<PreparedCall>,
+  startedIds: string[]
+): {
+  readonly works: Array<Promise<ToolExecutionResult> | undefined>;
+  readonly approvals: ApprovalEntry[];
+} {
+  const works: Array<Promise<ToolExecutionResult> | undefined> = new Array(
+    prepared.length
   );
+  const approvals: ApprovalEntry[] = [];
+  for (const entry of prepared) {
+    if (entry.gate.kind === "blocked") {
+      works[entry.index] = settledResult(opts, entry.gate.result, entry.index);
+      continue;
+    }
+    if (entry.gate.kind === "proceed") {
+      startedIds.push(entry.item.call.id);
+      works[entry.index] = startInner(
+        opts,
+        entry.item,
+        entry.gate.def,
+        entry.index
+      );
+      continue;
+    }
+    approvals.push({
+      index: entry.index,
+      item: entry.item,
+      def: entry.gate.def,
+    });
+  }
+  return { works, approvals };
+}
+
+/**
+ * Stage 3 — the approvals, ONE AT A TIME, in input order: never two
+ * questions in flight. Each one re-decides with the current policy state
+ * first, so an "always allow" answer to an earlier question reaches the
+ * next same-tool call.
+ *
+ * ADR-0147 R3: once a question has settled, the calls that started earlier
+ * in this wave are snapshotted (the current call has not started yet, so it
+ * is excluded) and, when a question was shown or the re-decision denied, the
+ * call's result carries one `[approval]` line naming them.
+ */
+async function runApprovals(
+  opts: WaveRunOptions,
+  approvals: ReadonlyArray<ApprovalEntry>,
+  works: Array<Promise<ToolExecutionResult> | undefined>,
+  startedIds: string[]
+): Promise<void> {
+  for (const approval of approvals) {
+    const gate = await opts.perm.approveOne(
+      approval.item.call,
+      approval.def,
+      opts.signal,
+      {
+        ...(opts.conversationId !== undefined
+          ? { conversationId: opts.conversationId }
+          : {}),
+        ...(opts.onStream !== undefined ? { onStream: opts.onStream } : {}),
+      }
+    );
+    const siblings = [...startedIds];
+    if (gate.kind === "blocked") {
+      const note = approvalNote(gate, siblings);
+      works[approval.index] = settledResult(
+        opts,
+        note === undefined ? gate.result : withApprovalNote(gate.result, note),
+        approval.index
+      );
+      continue;
+    }
+    startedIds.push(approval.item.call.id);
+    works[approval.index] = startInner(
+      opts,
+      approval.item,
+      gate.def,
+      approval.index,
+      approvalNote(gate, siblings)
+    );
+  }
+}
+
+/** The wave's sibling list for an `[approval]` note: ids that started, or none. */
+function siblingList(startedIds: ReadonlyArray<string>): string {
+  return startedIds.length === 0 ? "none" : startedIds.join(", ");
+}
+
+/**
+ * The R3 line a gate earns, or undefined when no question was shown and no
+ * re-decision denied (an allow call's result says nothing about approvals).
+ */
+function approvalNote(
+  gate: PermissionGate,
+  startedIds: ReadonlyArray<string>
+): string | undefined {
+  if (gate.approval !== undefined) {
+    return (
+      `[approval] held for user approval (${gate.approval.outcome}); ` +
+      `calls that ran in this wave meanwhile under the wave-start verdict: ${siblingList(startedIds)}`
+    );
+  }
+  if (gate.redecidedDeny === true) {
+    return (
+      `[approval] permission state changed while this wave was running; ` +
+      `calls already started under the wave-start verdict: ${siblingList(startedIds)}`
+    );
+  }
+  return undefined;
+}
+
+/**
+ * Append an `[approval]` line to a result without changing its kind: an `ok`
+ * result gets a final text block after the tool's own payload; a result that
+ * carries a message gets the line on a new line. A result with no message
+ * (`tool_not_found`) is left untouched.
+ */
+function withApprovalNote(
+  result: ToolExecutionResult,
+  note: string
+): ToolExecutionResult {
+  if (result.kind === "ok") {
+    return {
+      ...result,
+      payload: [...result.payload, { type: "text", text: note }],
+    };
+  }
+  if (
+    result.kind === "execution_failed" ||
+    result.kind === "validation_failed"
+  ) {
+    return { ...result, message: `${result.message}\n${note}` };
+  }
+  return result;
+}
+
+/**
+ * Per-slot settlement state, keyed by the promise the slot carries.
+ *
+ * `invoked` records that the settlement callback was CALLED for this slot —
+ * the "every result settles exactly once" contract counts invocations, and
+ * the callback is what commits the result downstream.
+ * `failed` records that the CALLBACK itself threw. That is a failure of the
+ * settlement, not of the call: the call produced its result, so there is no
+ * failure result to produce, and the slot must not be settled a second time.
+ */
+interface SettlementState {
+  invoked: boolean;
+  failed: boolean;
+  failure?: unknown;
+}
+
+/**
+ * The settlement state of the slots that carry a promise, keyed by that
+ * promise. A WeakMap, so a slot's bookkeeping dies with the promise — it
+ * holds no data of its own.
+ */
+const settlementStates = new WeakMap<
+  Promise<ToolExecutionResult>,
+  SettlementState
+>();
+
+/**
+ * The `[approval]` line a STARTED call owes its result (ADR-0147 R3: the held
+ * call's result says it was held, whatever the outcome), keyed by that call's
+ * promise.
+ *
+ * WHY a registry instead of a closure: the fulfilment path applies the note
+ * itself, but a REJECTED inner execution has no result to decorate — the wave
+ * rebuilds an `execution_failed` from the rejection reason afterwards
+ * (`collectWaveResults`), which cannot see the note that `startInner` was
+ * given. Registering it against the promise is what lets that rebuilt result
+ * carry it too, while every promise that was never held stays absent from the
+ * map and therefore unannotated. A WeakMap, so the note dies with the promise.
+ */
+const heldCallNotes = new WeakMap<Promise<ToolExecutionResult>, string>();
+
+/** The `[approval]` line this started call owes its result, if it was held. */
+function heldCallNoteOf(
+  work: Promise<ToolExecutionResult> | undefined
+): string | undefined {
+  return work === undefined ? undefined : heldCallNotes.get(work);
+}
+
+/** A call that needs no execution: its result is already decided. */
+function settledResult(
+  opts: WaveRunOptions,
+  result: ToolExecutionResult,
+  index: number
+): Promise<ToolExecutionResult> {
+  const state: SettlementState = { invoked: false, failed: false };
+  const started = Promise.resolve(result).then(async (r) => {
+    state.invoked = true;
+    try {
+      await opts.onSettled?.(r, opts.indexBase + index);
+    } catch (err) {
+      state.failed = true;
+      state.failure = err;
+      throw err;
+    }
+    return r;
+  });
+  settlementStates.set(started, state);
+  return started;
+}
+
+/**
+ * A call that may run: the inner execution starts here, not later.
+ *
+ * The rejection handler is attached NOW, not at the wave's final
+ * aggregation: the wave's approval round-trips can take minutes, and an
+ * inner rejection landing in that window would otherwise be an unhandled
+ * rejection — and Node kills the process on one. The original promise stays
+ * in the wave's work list, so the final aggregation still observes it.
+ */
+function startInner(
+  opts: WaveRunOptions,
+  item: WaveItem,
+  def: AciToolDef | undefined,
+  index: number,
+  note?: string
+): Promise<ToolExecutionResult> {
+  const state: SettlementState = { invoked: false, failed: false };
+  const started = routeOneCall({
+    runInner: (effectiveSignal) =>
+      opts.perm.runAllowed(
+        item.call,
+        def,
+        effectiveSignal,
+        undefined,
+        opts.conversationId,
+        opts.turnId,
+        opts.onStream,
+        opts.messages,
+        opts.parentThinking,
+        opts.parentModelRoute
+      ),
+    call: item.call,
+    def: item.def,
+    tierTimeoutMs: item.tierTimeoutMs,
+    callerSignal: opts.signal,
+    onDiagnostic: opts.onDiagnostic,
+    onStream: opts.onStream,
+  }).then(async (result) => {
+    // ADR-0147 R3: the held call's line is part of what the agent receives,
+    // so it is applied BEFORE the settlement commits the result.
+    const noted = note === undefined ? result : withApprovalNote(result, note);
+    state.invoked = true;
+    try {
+      await opts.onSettled?.(noted, opts.indexBase + index);
+    } catch (err) {
+      state.failed = true;
+      state.failure = err;
+      throw err;
+    }
+    return noted;
+  });
+  settlementStates.set(started, state);
+  // ADR-0147 R3: registered for the aggregation too — a rejection is an
+  // outcome as well, and its rebuilt result must carry the same line.
+  if (note !== undefined) heldCallNotes.set(started, note);
+  // EXIT: the rejection is NOT swallowed. The same promise stays in `works`,
+  // and `collectWaveResults` observes it with `allSettled`, which reports it
+  // as this call's `execution_failed` result. This handler exists only so
+  // Node does not see an unhandled rejection in the window between the inner
+  // call's failure and that observation.
+  void started.catch(() => undefined);
+  return started;
+}
+
+/** A started work slot — the approval slots are empty until stage 3 runs. */
+function isStarted(
+  work: Promise<ToolExecutionResult> | undefined
+): work is Promise<ToolExecutionResult> {
+  return work !== undefined;
+}
+
+/**
+ * The message of a wave slot that was never filled: an INTERNAL invariant
+ * breach (the inner executor resolved that slot with `undefined`), not a
+ * policy denial.
+ *
+ * It deliberately carries NO violation prefix: `categorizeResult`
+ * (`src/harness/sandbox/violation-handling.ts`) counts violations, and an
+ * internal breach must not be counted as one. The absence of a prefix is the
+ * point, so the string lives here as a named constant instead of an inline
+ * literal — a reader must not "fix" it by adding a prefix.
+ */
+// EXIT: the only exit from this branch is a wave slot the inner executor
+// resolved with `undefined`; the call still gets a result (an
+// `execution_failed` one), because the wave owes every call a result.
+const WAVE_SLOT_NEVER_FILLED = "internal: the wave slot was never filled";
+
+/**
+ * The settlement failure of a slot, if its SETTLEMENT callback failed.
+ *
+ * `failed` false → the slot either never settled, or settled normally, or
+ * failed for a reason that is NOT the settlement (the inner call raised).
+ * `failed` true → the callback itself threw; `failure` carries what it threw.
+ */
+function settlementFailureOf(work: Promise<ToolExecutionResult> | undefined): {
+  readonly failed: boolean;
+  readonly failure?: unknown;
+} {
+  if (work === undefined) return { failed: false };
+  const state = settlementStates.get(work);
+  if (state === undefined || !state.failed) return { failed: false };
+  return { failed: true, failure: state.failure };
+}
+
+/**
+ * The wave's results, one per call, in input order.
+ *
+ * A call whose inner execution rejected still gets a result: the failure is
+ * reported as an `execution_failed` result instead of discarding the wave's
+ * other results. The work list holds the ORIGINAL promises, so the
+ * aggregation observes the very failure the inner raised.
+ */
+async function collectWaveResults(
+  opts: WaveRunOptions,
+  works: ReadonlyArray<Promise<ToolExecutionResult> | undefined>
+): Promise<ReadonlyArray<ToolExecutionResult>> {
+  const settled = await Promise.allSettled(works);
+  const out: ToolExecutionResult[] = [];
+  for (const [index, item] of opts.wave.entries()) {
+    const entry = settled[index];
+    if (entry !== undefined && entry.status === "fulfilled") {
+      if (entry.value !== undefined) {
+        out.push(entry.value);
+        continue;
+      }
+    }
+    const settlement = settlementFailureOf(works[index]);
+    if (settlement.failed) {
+      // EXIT: the SETTLEMENT callback failed, not the call. The call produced
+      // its result and was settled once, so there is no failure result to
+      // fabricate and the slot must not be settled a second time. The error
+      // travels up, as it did before the two-stage gate.
+      throw settlement.failure;
+    }
+    const message =
+      entry !== undefined && entry.status === "rejected"
+        ? errorMessage(entry.reason)
+        : WAVE_SLOT_NEVER_FILLED;
+    const failed: ToolExecutionResult = {
+      kind: "execution_failed",
+      toolUseId: item.call.id,
+      message,
+    };
+    // ADR-0147 R3: a rejection is an outcome too — the held call's rebuilt
+    // result carries the line its promise was started with. The note is
+    // appended BEFORE settlement, so what the engine commits is what the
+    // caller receives. A call that was never held has no registered note.
+    const note = heldCallNoteOf(works[index]);
+    const noted = note === undefined ? failed : withApprovalNote(failed, note);
+    await opts.onSettled?.(noted, opts.indexBase + index);
+    out.push(noted);
+  }
+  return out;
 }
 
 /**

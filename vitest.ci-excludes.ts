@@ -57,6 +57,8 @@ export const CI_EXCLUDES: readonly string[] = [
   "tests/harness/sandbox/exec-signal-termination.test.ts",
   "tests/harness/aci/bash-sandbox.test.ts",
   "tests/harness/aci/bash-background.test.ts",
+  "tests/harness/aci/bash-setsid-detached.test.ts",
+  "tests/harness/background/pidns-teardown-race.test.ts",
   "tests/harness/aci/bash-output-stop.test.ts",
   "tests/harness/aci/bash-service-loop.e2e.test.ts",
   "tests/harness/aci/demo.test.ts",
@@ -392,6 +394,13 @@ export const CI_EXCLUDES: readonly string[] = [
   // are registered only because the guard anchor is a call shape in source text.
   "tests/harness/aci/bash-protected-erofs-feedback.test.ts",
   "tests/harness/aci/tools/bash-substitution-description.test.ts",
+  // Offline Agent QA paths that build a real bwrap fence, not only the
+  // version probe. Local run printed `[sandbox] protected target absent`
+  // from bwrap.ts while these files executed: attempt cancellation, and
+  // tool-04's shell redirect. test-full installs bwrap but the runner still
+  // has no user namespace, so a fence spawn fails there too.
+  "tests/scripts/eval/agent-qa/attempt.test.ts",
+  "tests/scripts/eval/agent-qa/tool-cases.test.ts",
 ];
 
 /**
@@ -411,4 +420,61 @@ export const CI_FAST_EXCLUDES: readonly string[] = [
   "tests/integration/**",
   // Without bwrap installed the whole directory is pointless (full excludes only the single e2e.test.ts).
   "tests/harness/secret-roundtrip/**",
+  // Real product TUI on a real pty. test-fast does not install bwrap, and
+  // `bun src/cli.ts tui` assembles through buildTuiDeps → createBashTool →
+  // requireBwrap (bash.ts) BEFORE createCliRenderer (run.tsx). The version
+  // probe throws, the single catch returns 1, and the composer never paints.
+  // Measured on GHA test-fast run 38064158117 and, once that file was
+  // excluded, run 38068247494: relay `SIZE ok` then `EXIT 1` in about a
+  // second, cases red on "composer never painted". The one green case in
+  // the acceptance file (a named missing conversation) only asserts a
+  // non-zero exit and an unpainted composer, which the same assembly throw
+  // satisfies, so a per-case gate would keep a vacuous pass. Both files boot
+  // through `startRealTui`. Not in CI_EXCLUDES: test-full installs bwrap, so
+  // the version probe passes, and these cases never spawn a fence (the stub
+  // emits no tool_use).
+  "tests/scripts/eval/tui/real-tui-input-acceptance.test.ts",
+  "tests/scripts/eval/tui/readiness-probe-real-surface.test.ts",
+  // Offline Agent QA cases that boot the real harness. `runSuiteOffline` /
+  // `runAttempt` / `dispatchAttempt` / `main(["run"])` call `buildHarnessEngine`
+  // (dispatch.ts `assembleEngine`), and the registry instantiates `bash` via
+  // `createBashTool` → `requireBwrap` unless yolo. The default posture is
+  // `full_auto`, so test-fast (no bwrap) throws at assembly. These files did
+  // not build a fence in the local run (no protected-target warning); the two
+  // that did are in CI_EXCLUDES. test-full installs bwrap and still runs this
+  // list. Pure report / plan / catalog / oracle files stay on test-fast.
+  "tests/scripts/eval/agent-qa/cli.test.ts",
+  "tests/scripts/eval/agent-qa/dispatch.test.ts",
+  "tests/scripts/eval/agent-qa/lifecycle-negative.test.ts",
+  "tests/scripts/eval/agent-qa/recovery-cases.test.ts",
+  "tests/scripts/eval/agent-qa/safety-cases.test.ts",
+  "tests/scripts/eval/agent-qa/secret-scan.test.ts",
+  "tests/scripts/eval/agent-qa/suite.test.ts",
+  "tests/scripts/eval/agent-qa/task-cases.test.ts",
+  "tests/scripts/eval/agent-qa/turn-cases.test.ts",
+  // Preparation-window egress ownership: every case builds the tool through
+  // `createBashTool` and calls the real handler, so fast (no bwrap installed)
+  // throws at `requireBwrap` — which probes `bwrap --version` and nothing else
+  // — before any assertion runs. All three then refuse during fence
+  // preparation and assert `spawn` was never called, so no fence is built and
+  // none is executed: test-full installs bwrap, the version probe passes, and
+  // these cases run there. Not in CI_EXCLUDES.
+  "tests/harness/aci/bash-egress-preparation-cleanup.test.ts",
+  // Fence assembly through the bwrap factory. These three call
+  // `createBwrapFence(...)` (src/harness/sandbox/bwrap.ts:763) → `requireBwrap`
+  // (src/harness/sandbox/runner.ts:445), whose `bwrap --version` probe throws
+  // before any assertion runs — test-fast installs no bubblewrap, so every case
+  // in them fails at assembly. test-full installs bwrap, so the version probe
+  // passes and they run there (measured: the same commit's test-fast failed on
+  // exactly these three files while its test-full was green).
+  //
+  // They escape the forward bwrap-dependency scan
+  // (scripts/ci-check-test-excludes.ts) because its call-shape anchors are
+  // `requireBwrap(` / `runInSandbox(` / `createBashTool(` and friends, and
+  // these files call `createBwrapFence(` — a fence-assembly entry point the
+  // anchor set does not list. That is a gap in the anchor set, not a claim
+  // that these files are bwrap-free.
+  "tests/harness/sandbox/bwrap-protected-mounts.test.ts",
+  "tests/harness/sandbox/credential-read-mask.test.ts",
+  "tests/harness/sandbox/fence-walk-nonblocking.test.ts",
 ];

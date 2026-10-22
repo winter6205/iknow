@@ -79,7 +79,11 @@ import type {
   ToolDef,
   ToolExecutionResult,
 } from "./tools/types.js";
-import { partitionConcurrencyWaves } from "./tools/concurrency-waves.js";
+import {
+  partitionConcurrencyWaves,
+  isConcurrencySafeForCall,
+  type ConcurrencySafetyMeta,
+} from "./tools/concurrency-waves.js";
 import type { CancelKind, LoopTrace, TurnTrace } from "./loop-trace.js";
 import { computeTotals } from "./loop-trace.js";
 import type {
@@ -90,6 +94,7 @@ import type {
   ToolCallCause,
   ToolCallRecord,
   CleanupTraceEvidence,
+  TurnRecord,
 } from "./trace/index.js";
 import { safeTrace } from "./trace/index.js";
 import type { HarnessStreamEvent } from "./stream.js";
@@ -117,7 +122,10 @@ import {
   sleepWithAbort,
   TRANSPORT_MAX_ATTEMPTS,
 } from "./model-adapter/with-transport-retry.js";
-import { stampHostInjected } from "./model-adapter/outbound-projection.js";
+import {
+  stampHostInjected,
+  wireToolDescriptors,
+} from "./model-adapter/outbound-projection.js";
 import {
   observeModelIdle,
   resolveModelClocks,
@@ -127,13 +135,22 @@ import {
   buildCompactedMessages,
   buildCompactPrompt,
   compactMessages,
+  containsImageBlocks,
   estimateMessagesTokens,
   evaluateCompactTrigger,
   getAutoCompactThreshold,
+  occupancyFromUsage,
+  projectOccupancy,
   runFullCompact,
   splitForCompaction,
 } from "./compress/index.js";
-import type { FullCompactOutcome, CompactAdapter } from "./compress/index.js";
+import type {
+  FullCompactOutcome,
+  CompactAdapter,
+  OccupancyAnchor,
+  OccupancyReading,
+} from "./compress/index.js";
+import type { RequestEstimateInput } from "./compress/projection.js";
 import { recognize } from "./secret-roundtrip/index.js";
 import type { SecretRegistry } from "./secret-roundtrip/index.js";
 import {
@@ -171,6 +188,37 @@ function toTraceErrorType(reason: string): TraceErrorType {
 }
 
 /**
+ * Cap for a non-completed stop's stored trace `error.message`. The stop
+ * reason stays in `type`; this only keeps a gateway body from inflating
+ * the jsonl row.
+ */
+const TRACE_STOP_ERROR_MESSAGE_MAX_CHARS = 500;
+
+/**
+ * Trace error for a non-completed stop. `type` stays the stop-reason trace
+ * type. `message` stays the reason string when this stop has no apiError
+ * summary, so genuine protocol corruption remains distinguishable. When a
+ * transport summary is already in scope, the message carries that cause
+ * text, truncated to TRACE_STOP_ERROR_MESSAGE_MAX_CHARS.
+ */
+function traceStopError(
+  reason: string,
+  apiError: ApiErrorSummary | undefined
+): TraceError {
+  const type = toTraceErrorType(reason);
+  const cause = apiError?.message.trim() ?? "";
+  if (cause === "") return { type, message: reason };
+  const combined = `${reason}: ${cause}`;
+  return {
+    type,
+    message:
+      combined.length > TRACE_STOP_ERROR_MESSAGE_MAX_CHARS
+        ? combined.slice(0, TRACE_STOP_ERROR_MESSAGE_MAX_CHARS)
+        : combined,
+  };
+}
+
+/**
  * Map StopReason to TurnRecord.decision without `as` casts. maxTurns early
  * stops never record a turn, so that branch is unreachable; the
  * "nonSuccessStop" fallback keeps the mapping total.
@@ -193,16 +241,35 @@ function toDecision(
 }
 
 /**
+ * The envelope tag a failed result carries: the FIRST line of its message,
+ * matched exactly by the caller.
+ *
+ * ADR-0147 R3 appends an `[approval] ...` line to a shown-question result, so
+ * the whole message is no longer the tag — and that appended line names the
+ * approval outcome, not why the call failed. Reading only the first line is
+ * what keeps the tag readable without loosening the match: nothing gains a
+ * tag it did not carry, and a tag that is not on the first line is not a tag.
+ */
+function envelopeTagOf(result: {
+  readonly message?: string;
+}): string | undefined {
+  return result.message?.split("\n", 1)[0];
+}
+
+/**
  * Derive a tool call's typed trace cause from the result the executor returned.
  *
- * The three sources are the result's own structured fields, never the message
- * text: ADR-0005's envelope tags a per-call deadline as `execution_failed` with
- * `message: "timeout"` and an outer cancel as `message: "cancelled"`, and the
- * spec forbids recognizing a failure class by substring-matching a model-facing
- * message. `computeToolStopFlags` already reads these two tags by strict
- * equality for control flow; this reads the same two facts for the trace, and
- * that agreement is the point — the row a reviewer reads and the stop the
- * engine took cannot disagree about why a call failed.
+ * The three sources are the result's own structured fields: ADR-0005's envelope
+ * tags a per-call deadline as `execution_failed` with `message: "timeout"` and
+ * an outer cancel as `message: "cancelled"`, and the spec forbids recognizing a
+ * failure class by substring-matching a model-facing message. The tag is that
+ * message's FIRST line, matched exactly — never a search anywhere in the text.
+ * A shown-question result has the two-stage gate's ADR-0147 R3 `[approval]`
+ * line appended after it, and that line names the approval outcome, not why
+ * the call failed; reading the whole message would drop the cancel such a
+ * result still carries. Any other message, first line included, maps to
+ * nothing. `computeToolStopFlags` reads the same two tags for control flow, so
+ * the row a reviewer reads and the stop the engine took come from one field.
  *
  * `cleanup_unconfirmed` outranks the other two: an unconfirmed teardown is a
  * fault of its own that a reader must be able to filter on, and it does not
@@ -220,8 +287,14 @@ function toToolCallCause(result: {
 }): ToolCallCause | undefined {
   if (result.cleanup?.state === "unconfirmed") return "cleanup_unconfirmed";
   if (result.kind !== "execution_failed") return undefined;
-  if (result.message === "timeout") return "timeout";
-  if (result.message === "cancelled") return "cancelled";
+  // A shown-question result carries an appended `[approval]` line (ADR-0147
+  // R3), so the envelope tag is the message's first line (`envelopeTagOf`) —
+  // the appended line names the approval outcome, not why the call failed.
+  // Nothing else changes: the tag still has to match exactly, so no other
+  // message gains a cause.
+  const tag = envelopeTagOf(result);
+  if (tag === "timeout") return "timeout";
+  if (tag === "cancelled") return "cancelled";
   return undefined;
 }
 
@@ -291,6 +364,17 @@ function toolCallRecordFor(input: {
 }
 
 /**
+ * Timing observed for one tool result. Starts at its wave's executeAll call,
+ * so it includes executor admission/approval, and ends at the first onSettled
+ * callback line, before runtime persistence or transcript flushing.
+ */
+interface ToolCallTiming {
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly durationMs: number;
+}
+
+/**
  * The full Adapter interface Loop Engine needs: besides step, the adapter
  * must encode user text and tool results for the history append. Both the
  * Anthropic Adapter and the stub model implement this interface.
@@ -338,6 +422,14 @@ export interface LoopAdapter {
    */
   readonly streamMode?: boolean;
   readonly encodeUserText: (userText: string) => AnthropicNativeMessage;
+  /**
+   * Block payload sibling of `encodeUserText` (text + a pasted image, in
+   * order). Optional because it is only reached when a host submits a block
+   * payload; a stub adapter that never sees one keeps compiling unchanged.
+   */
+  readonly encodeUserContent?: (
+    blocks: ReadonlyArray<AnthropicContentBlock>
+  ) => AnthropicNativeMessage;
   readonly encodeToolResults: (
     results: ReadonlyArray<ToolExecutionResult>
   ) => AnthropicContentBlock[];
@@ -349,6 +441,11 @@ export interface LoopEngineDeps {
   readonly registry: Registry;
   /** Effective thinking settings for this engine turn, forwarded to tools. */
   readonly parentThinking?: ThinkingParams;
+  /**
+   * The conversation's model route (`provider/model`), forwarded to tools so a
+   * spawned sub-agent inherits the route the conversation runs on.
+   */
+  readonly parentModelRoute?: string;
   /**
    * ADR-0012: max loop turns per session (optional). `undefined`
    * (default) = unlimited (the loop never stops on turn count); when
@@ -430,7 +527,7 @@ export interface LoopEngineDeps {
    * Compaction config seam. Field absent = compaction disabled (zero
    * behavior change). contextWindow is the strategy budget window
    * (default 256000); thresholdTokens defaults to
-   * `floor(0.95 × window)` (see harness/compress/threshold.ts, ADR-0100).
+   * `floor(0.9 × window)` (see harness/compress/threshold.ts, ADR-0100).
    */
   readonly compress?: {
     readonly contextWindow: number;
@@ -1915,7 +2012,7 @@ interface SummaryOutcome {
  * if an extreme history still exceeds after one cut → close in with
  * compactMessages (which preserves tool pairing).
  */
-function truncateTailForSummary(
+export function truncateTailForSummary(
   messages: ReadonlyArray<AnthropicNativeMessage>
 ): ReadonlyArray<AnthropicNativeMessage> {
   let tail = messages;
@@ -2565,25 +2662,62 @@ async function awaitRetryBackoff(
  */
 const noCountTokensWarned = new WeakSet<LoopAdapter>();
 
-/** Run the adapter's countTokens against the exact outgoing request triple
- *  and gate the reading by the declared validity contract; null = no real
- *  measurement this beat (missing hook, failure, non-finite / non-positive). */
-async function measurePreCallInputTokens(
+/** The exact tool descriptor set the request will carry (same expression as
+ *  the dispatch path). */
+function currentToolDefs(deps: LoopEngineDeps): ReadonlyArray<ToolDef> {
+  return deps.promptTools?.() ?? deps.registry.list();
+}
+
+/** Wire-shaped serialization for the occupancy estimate, through the same
+ *  `wireToolDescriptors` projection the adapter sends: nothing when the
+ *  request carries no tools (the adapter omits the field entirely). */
+function toolsTextOf(defs: ReadonlyArray<ToolDef>): string {
+  const wire = wireToolDescriptors(defs);
+  return wire === undefined ? "" : JSON.stringify(wire);
+}
+
+/** ADR-0118: the ONE request-shape seam of the occupancy projection. The
+ *  gate probe and the projected display event both build their estimate input
+ *  here, so the two numerators can never diverge on messages / system / tools. */
+function requestEstimateInput(
   deps: LoopEngineDeps,
-  state: LoopState,
-  systemText: string | undefined
+  messages: RequestEstimateInput["messages"],
+  anchor: OccupancyAnchor | null,
+  systemText: RequestEstimateInput["systemText"]
+): RequestEstimateInput & { readonly anchor: OccupancyAnchor | null } {
+  return {
+    messages,
+    anchor,
+    systemText,
+    toolsText: toolsTextOf(currentToolDefs(deps)),
+  };
+}
+
+/** ADR-0118: the ONE *measurement* request-shape seam both probes share (the
+ *  projection's equivalent is `requestEstimateInput`). The proactive gate and
+ *  the usage bar must measure one occupancy, so the triple handed to
+ *  `countTokens` is assembled here once — identical expressions, identical
+ *  conditional spreads, identical validity contract. The two probes remain
+ *  separate *call sites* (ADR-0118 keeps two seams with independent one-time-warn
+ *  slots); what they may never diverge on is the request shape.
+ *
+ *  null = no real measurement (missing hook / throw / non-finite / non-positive). */
+async function countRequestTokens(
+  deps: LoopEngineDeps,
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  system: string | undefined
 ): Promise<number | null> {
   const countTokens = deps.adapter.countTokens;
   if (countTokens === undefined) return null;
   try {
-    const tools = deps.promptTools?.() ?? deps.registry.list();
+    const tools = currentToolDefs(deps);
     const measured = await countTokens({
       ...(tools.length > 0 ? { tools } : {}),
-      ...(systemText !== undefined ? { system: systemText } : {}),
-      messages: state.messages,
+      ...(system !== undefined ? { system } : {}),
+      messages,
     });
-    // Same validity gate the countTokens contract declares: non-finite /
-    // non-positive = failure, treated exactly like a throw (skip the beat).
+    // The countTokens validity contract: non-finite / non-positive = failure,
+    // treated exactly like a throw (skip the beat).
     return Number.isFinite(measured.inputTokens) && measured.inputTokens > 0
       ? measured.inputTokens
       : null;
@@ -2594,10 +2728,135 @@ async function measurePreCallInputTokens(
   }
 }
 
+/** The shared skip decision for the two probes (gate + display). One result
+ *  shape so "skipped for images" and "measurement unavailable" cannot be
+ *  conflated by a `null`. */
+type OccupancyProbe =
+  | { readonly kind: "measured"; readonly tokens: number }
+  | { readonly kind: "projected"; readonly reading: OccupancyReading }
+  | { readonly kind: "unavailable" };
+
+/**
+ * One request-shape decision, two consumers (Plan A T3). Priority:
+ *   1. image-bearing request → projection; `countTokens` is never called
+ *      (the gateway prices base64 text, not pixels);
+ *   2. image-free → measured `countTokens`;
+ *   3. measurement absent but the anchor is still valid → anchored projection;
+ *   4. otherwise `unavailable` (the gate then keeps previous usage → estimate;
+ *      the display emits nothing). Absence never means "below threshold".
+ */
+async function probeRequestOccupancy(opts: {
+  readonly deps: LoopEngineDeps;
+  readonly messages: RequestEstimateInput["messages"];
+  readonly systemText: RequestEstimateInput["systemText"];
+  readonly anchor: OccupancyAnchor | null;
+  readonly noCountTokensWarned: WeakSet<LoopAdapter>;
+  readonly warnMessage: string;
+}): Promise<OccupancyProbe> {
+  const anchorValid =
+    opts.anchor !== null &&
+    opts.messages.indexOf(opts.anchor.assistantMessage) !== -1;
+  const project = (): OccupancyReading =>
+    projectOccupancy(
+      requestEstimateInput(
+        opts.deps,
+        opts.messages,
+        opts.anchor,
+        opts.systemText
+      )
+    );
+  if (containsImageBlocks(opts.messages)) {
+    return { kind: "projected", reading: project() };
+  }
+  if (opts.deps.adapter.countTokens === undefined) {
+    if (!opts.noCountTokensWarned.has(opts.deps.adapter)) {
+      opts.noCountTokensWarned.add(opts.deps.adapter);
+      // Pre-existing diagnostic relocated from the old display/gate probes
+      // (存量代码不追溯); the loop engine has no diagnostic seam to route it to.
+      console.warn(opts.warnMessage);
+    }
+  } else {
+    const measured = await countRequestTokens(
+      opts.deps,
+      opts.messages,
+      opts.systemText
+    );
+    if (measured !== null) return { kind: "measured", tokens: measured };
+  }
+  if (anchorValid) return { kind: "projected", reading: project() };
+  return { kind: "unavailable" };
+}
+
+/** Projected (unmeasured) `context_usage` event. Emitted after the assistant
+ *  append, after each tool-result batch, and after compaction. Display-only:
+ *  the value never reaches `lastUsage` / the trace / billing. */
+function emitProjectedContextUsage(opts: {
+  readonly deps: LoopEngineDeps;
+  readonly messages: RequestEstimateInput["messages"];
+  readonly anchor: OccupancyAnchor | null;
+  readonly systemText: RequestEstimateInput["systemText"];
+  readonly hostStreamPresent: boolean;
+  readonly onStream: ((event: HarnessStreamEvent) => void) | undefined;
+}): void {
+  if (!opts.hostStreamPresent || opts.onStream === undefined) return;
+  const reading = projectOccupancy(
+    requestEstimateInput(opts.deps, opts.messages, opts.anchor, opts.systemText)
+  );
+  safeEmitStream(opts.onStream, {
+    type: "context_usage",
+    phase: "projected",
+    occupancy: reading,
+  });
+}
+
+function frozenSystemText(frozen: FrozenSystemPrefix): string | undefined {
+  return frozen.resolved ? frozen.prefix : undefined;
+}
+
+/** Plan A T2: the anchor is the exact frozen array entry (`freezeMessage`
+ *  cloned `turnResult.nativeMessage`) plus the confirmed usage of the call
+ *  that produced it. Captured immediately after the append, so every later
+ *  projection can prove by reference that the anchor is still in the history.
+ *  No usage (stub / vendor withheld) → the box keeps its previous anchor; the
+ *  projection still validates it by indexOf. */
+function captureOccupancyAnchor(
+  box: { current: OccupancyAnchor | null },
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  usage: TokenUsage | undefined
+): void {
+  const appendedEntry = messages.at(-1);
+  if (usage !== undefined && appendedEntry !== undefined) {
+    box.current = { usage, assistantMessage: appendedEntry };
+  }
+}
+
+/** `run()` variant of the projected publish: the host stream callback lives in
+ *  an optional options box, so the optional read stays here instead of in the
+ *  run body. Post-compaction the anchor is gone (null) and `messages` is the
+ *  freshly compacted history. */
+function emitRunProjectedContextUsage(opts: {
+  readonly deps: LoopEngineDeps;
+  readonly messages: ReadonlyArray<AnthropicNativeMessage>;
+  readonly frozenSystemPrefix: FrozenSystemPrefix;
+  readonly hostStreamPresent: boolean;
+  readonly runOptions?:
+    { readonly onStream?: (event: HarnessStreamEvent) => void } | undefined;
+}): void {
+  emitProjectedContextUsage({
+    deps: opts.deps,
+    messages: opts.messages,
+    anchor: null,
+    systemText: frozenSystemText(opts.frozenSystemPrefix),
+    hostStreamPresent: opts.hostStreamPresent,
+    onStream: opts.runOptions?.onStream,
+  });
+}
+
 async function emitPreCallContextUsage(opts: {
   readonly state: LoopState;
   readonly deps: LoopEngineDeps;
   readonly systemText: string | undefined;
+  readonly anchor: OccupancyAnchor | null;
   readonly hostStreamPresent: boolean;
   readonly onStream: ((event: HarnessStreamEvent) => void) | undefined;
 }): Promise<void> {
@@ -2605,26 +2864,30 @@ async function emitPreCallContextUsage(opts: {
   // runModelPhase's onStream is the in-flight-window wrapper (always a
   // function inside run()); the host-presence flag is the real gate.
   if (!opts.hostStreamPresent || onStream === undefined) return;
-  if (opts.deps.adapter.countTokens === undefined) {
-    if (!noCountTokensWarned.has(opts.deps.adapter)) {
-      noCountTokensWarned.add(opts.deps.adapter);
-      console.warn(
-        "context-usage pre-call measurement skipped: adapter has no countTokens (beats without a real reading emit nothing)"
-      );
-    }
+  const probe = await probeRequestOccupancy({
+    deps: opts.deps,
+    messages: opts.state.messages,
+    systemText: opts.systemText,
+    anchor: opts.anchor,
+    noCountTokensWarned,
+    warnMessage:
+      "context-usage pre-call measurement skipped: adapter has no countTokens (beats without a measured or anchored reading emit nothing)",
+  });
+  if (probe.kind === "unavailable") return;
+  if (probe.kind === "projected") {
+    safeEmitStream(onStream, {
+      type: "context_usage",
+      phase: "projected",
+      occupancy: probe.reading,
+    });
     return;
   }
-  const inputTokens = await measurePreCallInputTokens(
-    opts.deps,
-    opts.state,
-    opts.systemText
-  );
-  if (inputTokens === null) return;
   safeEmitStream(onStream, {
     type: "context_usage",
     phase: "pre_call",
+    source: "measured",
     usage: {
-      inputTokens,
+      inputTokens: probe.tokens,
       // A countTokens reading knows nothing about output / cache split;
       // 0 / null are "not generated yet / not measured", never estimates
       // (the display numerator adds these as 0).
@@ -2639,16 +2902,30 @@ async function emitPreCallContextUsage(opts: {
  *  `AssistantTurnResult.usage` passthrough, no second ledger) goes out
  *  immediately — the host sees beat N's truth before beat N's tool loop ends.
  *  usage absent (stub / vendor withheld) → nothing emitted, the pre_call
- *  reading stands until the next real one. */
+ *  reading stands until the next real one.
+ *
+ *  `projectedNext` is the next request's projection from the anchored base
+ *  (previous input + generated output). No appended messages exist yet: this
+ *  emit keeps its position before the assistant append. */
 function emitPostCallContextUsage(
   onStream: ((event: HarnessStreamEvent) => void) | undefined,
   turnResult: AssistantTurnResult
 ): void {
   if (turnResult.usage === undefined) return;
+  const projectedNext: OccupancyReading = {
+    tokens:
+      occupancyFromUsage(turnResult.usage) + turnResult.usage.outputTokens,
+    source: "projected",
+  };
   safeEmitStream(onStream, {
     type: "context_usage",
     phase: "post_call",
+    source: "measured",
     usage: turnResult.usage,
+    projectedNext,
+    ...(turnResult.generationMs !== undefined
+      ? { generationMs: turnResult.generationMs }
+      : {}),
   });
 }
 
@@ -2658,39 +2935,65 @@ function emitPostCallContextUsage(
 const noCountTokensWarnedAtGate = new WeakSet<LoopAdapter>();
 
 /**
- * ADR-0118 proactive-gate measurement: this-beat `countTokens` over exactly
- * the message array the gate is about to evaluate. Deliberately *not* the
- * display triple (system/tools are assembled later inside `runModelPhase`),
- * so no sharing with `measurePreCallInputTokens`. null = no real measurement
- * this beat (hook absent / throw / non-finite / ≤0) — the gate then falls
- * through previous usage → estimate; absence never means
- * `below_token_threshold`.
+ * ADR-0118 proactive-gate measurement: this-beat `countTokens` over the same
+ * `tools` + `system` + `messages` triple the usage bar displays, so gate and
+ * display report one occupancy (`docs/CONTEXT.md` §occupancy). Measuring
+ * messages alone under-counted the request payload — the two probes disagreed
+ * by the whole system+tools share (~18% of the request bytes; measured on
+ * trace `9c76ddb8-fd16-4a15-a2b3-c55f4c11b8fe`, dispatch_evidence 363803
+ * messages / 20563 system / 57780 tools), so a gate set at 95% of the window
+ * fired around 102-103% on the display scale.
+ *
+ * Still a *separate* seam from `measurePreCallInputTokens` (its own one-time-warn
+ * slot, its own validity-reporting path); ADR-0118 keeps the two apart on
+ * purpose. What they now share is `countRequestTokens` — the request shape,
+ * never the measurement seam.
+ *
+ * `system` comes from the run-scoped `FrozenSystemPrefix` box, not a fresh
+ * `deps.system?.()` call: re-assembling per step costs file I/O, and the box is
+ * what the persistence layer treats as authoritative for what a request was
+ * sent. Two consequences, both accepted: the box's only writers (`runModelPhase`
+ * and the one-shot publication seed) run *after* this probe on the run's first
+ * step, so that one measurement carries no `system` field — a prior-continuation
+ * session (turnCount=0) is NOT exempt from the gate itself (see the anchor
+ * comment in `run()`), so it reaches the threshold one step later; and
+ * thereafter the prefix is the one the *previous* request used, so a seam that
+ * drifts mid-run makes that share one beat stale. From step 2 on the triple is
+ * complete.
+ *
+ * null = no real measurement this beat (hook absent / throw / non-finite /
+ * ≤0) — the gate then falls through previous usage → estimate; absence never
+ * means `below_token_threshold`.
  */
 async function measureGateThisBeatOccupancy(
   deps: LoopEngineDeps,
-  messages: ReadonlyArray<AnthropicNativeMessage>
+  messages: ReadonlyArray<AnthropicNativeMessage>,
+  frozenSystemPrefix: FrozenSystemPrefix,
+  anchor: OccupancyAnchor | null
 ): Promise<number | null> {
-  const countTokens = deps.adapter.countTokens;
-  if (countTokens === undefined) {
-    if (!noCountTokensWarnedAtGate.has(deps.adapter)) {
-      noCountTokensWarnedAtGate.add(deps.adapter);
-      console.warn(
-        "context-usage proactive gate skipped measurement: adapter has no countTokens (gate falls back to previous usage → estimate)"
-      );
-    }
-    return null;
-  }
-  try {
-    const measured = await countTokens({ messages });
-    // Same validity gate as the display path: non-finite / non-positive =
-    // no measurement this beat, never a fake below-threshold verdict.
-    return Number.isFinite(measured.inputTokens) && measured.inputTokens > 0
-      ? measured.inputTokens
-      : null;
-  } catch {
-    // countTokens failure (API error / abort) must never break the loop turn.
-    return null;
-  }
+  // The gate reads the run-scoped frozen prefix rather than calling
+  // `deps.system?.()` again: re-assembling per step costs file I/O, and the box
+  // is what the persistence layer treats as authoritative for what a request was
+  // sent. Two consequences, both accepted and documented: the box is written
+  // *after* this probe on the run's first step, so that one measurement carries
+  // no `system` field; and thereafter the prefix is the one the *previous*
+  // request used, so a seam that drifts mid-run makes that share one beat stale.
+  //
+  // The skip decision is the same one the display probe makes
+  // (`probeRequestOccupancy`): image-bearing requests are projected, never
+  // measured; an absent image-free measurement still falls through to previous
+  // usage → estimate, never to `below_token_threshold`.
+  const probe = await probeRequestOccupancy({
+    deps,
+    messages,
+    systemText: frozenSystemText(frozenSystemPrefix),
+    anchor,
+    noCountTokensWarned: noCountTokensWarnedAtGate,
+    warnMessage:
+      "context-usage proactive gate skipped measurement: adapter has no countTokens (gate falls back to previous usage → estimate)",
+  });
+  if (probe.kind === "unavailable") return null;
+  return probe.kind === "measured" ? probe.tokens : probe.reading.tokens;
 }
 
 /** Await the structured race outcome, keeping the SDK-first error catch contract. */
@@ -2712,6 +3015,8 @@ async function runModelPhase(opts: {
   /** ADR-0013: run-scoped reactive-compact attempted flag;
    *  true = already compacted and retried once this run, no second time. */
   readonly reactiveAttemptedRef: { attempted: boolean };
+  /** Run-scoped occupancy anchor (Plan A T2); cleared by any compaction. */
+  readonly anchorRef: { current: OccupancyAnchor | null };
   /** Run-scoped frozen prompt prefix; the resolved `system` lands in it here. */
   readonly frozenSystemPrefix: FrozenSystemPrefix;
   /** Per-model-step evidence sink, shared by the transport
@@ -2742,6 +3047,7 @@ async function runModelPhase(opts: {
       state: opts.state,
       deps: opts.deps,
       systemText,
+      anchor: opts.anchorRef.current,
       hostStreamPresent: opts.hostStreamPresent,
       onStream: opts.onStream,
     });
@@ -2802,6 +3108,10 @@ async function runModelPhase(opts: {
         !opts.reactiveAttemptedRef.attempted
       ) {
         opts.reactiveAttemptedRef.attempted = true;
+        // The usage described a prompt whose prefix no longer exists after
+        // compaction: base + delta would overcount. The next successful call
+        // re-anchors.
+        opts.anchorRef.current = null;
         const compactedState = await applyCompactAttachment(
           opts.state,
           opts.deps,
@@ -2926,6 +3236,11 @@ export const TURN_CLOCK_ABORT_REASON = "turn-timeout";
  * attribution. Without clockAbort, cancelled keeps the old shape (plain abort
  * or "cancelled" tag).
  *
+ * The result tag is the message's FIRST line (`envelopeTagOf`), exactly as
+ * `toToolCallCause` reads it: ADR-0147 R3 appends an `[approval]` line to a
+ * shown-question result, and a cancelled held call must still stop the turn.
+ * The match itself stays exact, so no other message gains a tag.
+ *
  * No producer today: the tool phase has no turn clock — only an abort with
  * reason exactly TURN_CLOCK_ABORT_REASON can land timedOut (same shape as
  * modelStop's hostCancel: production-unreachable, pinned by a test seam).
@@ -2941,7 +3256,11 @@ export function computeToolStopFlags(opts: {
     !clockAbort &&
     (opts.signal?.aborted === true ||
       opts.results.some(
-        (r) => r.kind === "execution_failed" && r.message === "cancelled"
+        (r) =>
+          r.kind === "execution_failed" &&
+          // First line only (ADR-0147 R3 appends an `[approval]` line to a
+          // shown-question result): a cancelled held call still stops the turn.
+          envelopeTagOf(r) === "cancelled"
       ));
   return { timedOut: clockAbort, cancelled };
 }
@@ -2965,6 +3284,8 @@ async function executeWaveAndCommit(opts: {
   readonly signal: AbortSignal | undefined;
   readonly toolTimeout: number;
   readonly results: ToolExecutionResult[];
+  /** Per-result observation, kept out of model and persistence payloads. */
+  readonly timingByToolUseId: Map<string, ToolCallTiming>;
   readonly blocks: AnthropicContentBlock[];
   /** This turn's trace turn id, passed through to ctx.turnId (spawn_subagent attribution). */
   readonly turnId: string;
@@ -3012,12 +3333,24 @@ async function executeWaveAndCommit(opts: {
       flushing = false;
     }
   };
+  // Start at the executor boundary: permission preparation and approval are
+  // part of the time the caller waits for this wave. Settlement is captured in
+  // onSettled before persistence and ordered transcript flushing begin.
+  const waveStartedAt = new Date().toISOString();
+  const waveStartMono = performance.now();
   const waveResults = await opts.deps.executor.executeAll(
     opts.wave,
     opts.signal,
     opts.toolTimeout,
     opts.deps.conversationId,
     async (result, index) => {
+      if (!opts.timingByToolUseId.has(result.toolUseId)) {
+        opts.timingByToolUseId.set(result.toolUseId, {
+          startedAt: waveStartedAt,
+          endedAt: new Date().toISOString(),
+          durationMs: performance.now() - waveStartMono,
+        });
+      }
       slots[index] = result;
       await appendSettledResultFactOrThrow(opts, result, index);
       await flushPrefix();
@@ -3025,10 +3358,24 @@ async function executeWaveAndCommit(opts: {
     opts.turnId,
     opts.onStream,
     opts.messages,
-    opts.deps.parentThinking
+    opts.deps.parentThinking,
+    opts.deps.parentModelRoute
   );
+  // Legacy executors may return only after the whole wave and omit onSettled.
+  // Their rows retain a truthful but coarse wave interval; never label it as a
+  // per-handler measurement.
+  const waveEndedAt = new Date().toISOString();
+  const waveDurationMs = performance.now() - waveStartMono;
   for (let i = 0; i < waveResults.length; i++) {
-    if (slots[i] === undefined) slots[i] = waveResults[i];
+    const result = waveResults[i];
+    if (slots[i] === undefined) slots[i] = result;
+    if (!opts.timingByToolUseId.has(result.toolUseId)) {
+      opts.timingByToolUseId.set(result.toolUseId, {
+        startedAt: waveStartedAt,
+        endedAt: waveEndedAt,
+        durationMs: waveDurationMs,
+      });
+    }
   }
   await flushPrefix();
 }
@@ -3046,12 +3393,18 @@ async function runToolPhase(opts: {
   /** Injected messages flush in the batch of the first tool_result commit. */
   readonly pendingInjected: PendingInjected;
   readonly onStream?: (event: HarnessStreamEvent) => void;
+  /** Whether the host itself consumes stream events (gates display-only
+   *  projected occupancy events). */
+  readonly hostStreamPresent: boolean;
+  /** Run-scoped occupancy anchor (Plan A T2). */
+  readonly anchorRef: { current: OccupancyAnchor | null };
   /** Run-scoped frozen prompt prefix; see FrozenSystemPrefix. */
   readonly frozenSystemPrefix: FrozenSystemPrefix;
 }): Promise<{
   transition: Transition;
   turn: TurnTrace;
   toolResults: ReadonlyArray<ToolExecutionResult>;
+  toolCallTimings: ReadonlyMap<string, ToolCallTiming>;
   toolCallViews: ReadonlyArray<{ id: string; name: string; input: unknown }>;
 }> {
   const toolCallViews = opts.turnResult.projection.toolCalls.map((c) => ({
@@ -3062,13 +3415,14 @@ async function runToolPhase(opts: {
   const toolTimeout =
     opts.deps.toolTimeoutMs ?? opts.deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const waves = partitionConcurrencyWaves(toolCallViews, (call) => {
-    const def = opts.deps.registry.get(call.name);
-    return (
-      (def as { aci?: { isConcurrencySafe?: boolean } } | undefined)?.aci
-        ?.isConcurrencySafe === true
-    );
+    // The structural cast is deliberate: this file does NOT import the aci
+    // layer (the registry's tool defs carry the aci metadata as an extension).
+    const def = opts.deps.registry.get(call.name) as
+      { aci?: ConcurrencySafetyMeta } | undefined;
+    return isConcurrencySafeForCall(def?.aci, call.input);
   });
   const results: ToolExecutionResult[] = [];
+  const toolCallTimings = new Map<string, ToolCallTiming>();
   const blocks: AnthropicContentBlock[] = [];
   // skill() second-call short circuit: the snapshot is
   // afterAssistantState.messages (includes this wave's assistant tool_use
@@ -3089,6 +3443,7 @@ async function runToolPhase(opts: {
       signal: opts.signal,
       toolTimeout,
       results,
+      timingByToolUseId: toolCallTimings,
       blocks,
       turnId: opts.turnId,
       pendingInjected: opts.pendingInjected,
@@ -3104,6 +3459,16 @@ async function runToolPhase(opts: {
   const finalState = appendMessage({
     state: opts.afterAssistantState,
     msg: toolResultMsg,
+  });
+  // Plan A T4: the tool-result batch raised the context; publish the next
+  // request's projection so the bar moves by the estimated appended cost.
+  emitProjectedContextUsage({
+    deps: opts.deps,
+    messages: finalState.messages,
+    anchor: opts.anchorRef.current,
+    systemText: frozenSystemText(opts.frozenSystemPrefix),
+    hostStreamPresent: opts.hostStreamPresent,
+    onStream: opts.onStream,
   });
   const durationMs = performance.now() - opts.started;
   const nameById = toolNameById(toolCallViews);
@@ -3145,6 +3510,7 @@ async function runToolPhase(opts: {
       transition: { kind: "stop", reason: "cancelled", finalState },
       turn,
       toolResults: results,
+      toolCallTimings,
       toolCallViews,
     };
   }
@@ -3153,6 +3519,7 @@ async function runToolPhase(opts: {
       transition: { kind: "stop", reason: "timeout", finalState },
       turn,
       toolResults: results,
+      toolCallTimings,
       toolCallViews,
     };
   }
@@ -3160,6 +3527,7 @@ async function runToolPhase(opts: {
     transition: { kind: "continue", nextState: finalState },
     turn,
     toolResults: results,
+    toolCallTimings,
     toolCallViews,
   };
 }
@@ -3341,10 +3709,52 @@ type StepResult = {
 };
 
 /**
- * ADR-0126: the arms of a turn that ends with no tool phase — the plain finish
- * and the output-limit stop that already closed its own tool_uses — share this
- * one trace-and-return; only the final state differs. `durationMs` arrives
- * measured by the caller, so the closeout commit stays outside the timed span.
+ * A turn that ends with no tool phase records one trace row and one TurnTrace
+ * from the same measured duration; the caller owns the transition those rows
+ * describe. `durationMs` arrives measured by the caller, so the closeout commit
+ * stays outside the timed span.
+ */
+async function recordToolFreeTurn(args: {
+  readonly deps: LoopEngineDeps;
+  readonly supplierStop: TurnTrace["supplierStop"];
+  readonly turnIndex: number;
+  readonly turnId: string;
+  readonly turnStartedAt: string;
+  readonly durationMs: number;
+  readonly llmCallId: string | undefined;
+  readonly decision: TurnRecord["decision"];
+  readonly status: TraceStatus;
+  readonly error?: TraceError;
+}): Promise<TurnTrace> {
+  if (args.deps.trace) {
+    await safeTrace(() =>
+      args.deps.trace!.recordTurn({
+        id: args.turnId,
+        turnIndex: args.turnIndex,
+        startedAt: args.turnStartedAt,
+        endedAt: new Date().toISOString(),
+        durationMs: args.durationMs,
+        llmCallIds: args.llmCallId ? [args.llmCallId] : [],
+        toolCallIds: [],
+        decision: args.decision,
+        status: args.status,
+        error: args.error,
+      })
+    );
+  }
+  return mkTurn({
+    turnIndex: args.turnIndex,
+    supplierStop: args.supplierStop,
+    toolCalls: [],
+    durationMs: args.durationMs,
+    cancelKind: "none",
+  });
+}
+
+/**
+ * ADR-0126: the arms of a turn that ends with no tool phase and stops the run —
+ * the plain finish and the output-limit stop that already closed its own
+ * tool_uses — share this one stop assembly; only the final state differs.
  */
 async function settleStopTurn(args: {
   readonly deps: LoopEngineDeps;
@@ -3358,37 +3768,44 @@ async function settleStopTurn(args: {
 }): Promise<StepResult> {
   const reason =
     args.turnResult.supplierStop === "success" ? "completed" : "nonSuccessStop";
-  if (args.deps.trace) {
-    await safeTrace(() =>
-      args.deps.trace!.recordTurn({
-        id: args.turnId,
-        turnIndex: args.turnIndex,
-        startedAt: args.turnStartedAt,
-        endedAt: new Date().toISOString(),
-        durationMs: args.durationMs,
-        llmCallIds: args.llmCallId ? [args.llmCallId] : [],
-        toolCallIds: [],
-        decision: reason,
-        status: reason === "completed" ? "ok" : "error",
-        error:
-          reason === "completed"
-            ? undefined
-            : { type: toTraceErrorType("nonSuccessStop"), message: reason },
-      })
-    );
-  }
+  const turn = await recordToolFreeTurn({
+    deps: args.deps,
+    supplierStop: args.turnResult.supplierStop,
+    turnIndex: args.turnIndex,
+    turnId: args.turnId,
+    turnStartedAt: args.turnStartedAt,
+    durationMs: args.durationMs,
+    llmCallId: args.llmCallId,
+    decision: reason,
+    status: reason === "completed" ? "ok" : "error",
+    error:
+      reason === "completed"
+        ? undefined
+        : { type: toTraceErrorType("nonSuccessStop"), message: reason },
+  });
   return {
     transition: { kind: "stop", reason, finalState: args.finalState },
-    turn: mkTurn({
-      turnIndex: args.turnIndex,
-      supplierStop: args.turnResult.supplierStop,
-      toolCalls: [],
-      durationMs: args.durationMs,
-      cancelKind: "none",
-    }),
+    turn,
     modelUsage: args.turnResult.usage,
     ...supplierDetailField(supplierDetailOf(args.turnResult)),
   };
+}
+
+/**
+ * A success that carried no text but did report progress content: the model
+ * worked without answering yet, so the run continues instead of settling here.
+ * The adapter reports the block mix (`hasThinking`); the rule that reads it
+ * into a stop decision is `isEmptyFinalResponseStop` in
+ * model-adapter/types.ts. This arm asks for the reported fact, never
+ * re-derives the rule from `isEmptyFinalResponse`, because a hand-built
+ * `AssistantTurnResult` (stubs) can carry either field inconsistently.
+ */
+function isThinkingOnlyProgressStep(turnResult: AssistantTurnResult): boolean {
+  return (
+    turnResult.supplierStop === "success" &&
+    turnResult.projection.texts.length === 0 &&
+    turnResult.hasThinking
+  );
 }
 
 /**
@@ -3422,6 +3839,8 @@ async function stepWithTrace(opts: {
   readonly hostStreamPresent: boolean;
   /** ADR-0013: run-scoped reactive-compact attempted flag (carried across steps). */
   readonly reactiveAttemptedRef: { attempted: boolean };
+  /** Run-scoped occupancy anchor (Plan A T2), shared across steps. */
+  readonly anchorRef: { current: OccupancyAnchor | null };
   /**
    * ADR-0028: run-scoped mutable ref for the status bar's last_tool. run()
    * creates it and shares it across steps (one run = one user turn); public
@@ -3579,6 +3998,7 @@ async function stepWithTrace(opts: {
     hostStreamPresent: opts.hostStreamPresent,
     onStream: modelOnStream,
     reactiveAttemptedRef: opts.reactiveAttemptedRef,
+    anchorRef: opts.anchorRef,
     frozenSystemPrefix: opts.frozenSystemPrefix,
     dispatchEvidence,
   });
@@ -3632,6 +4052,20 @@ async function stepWithTrace(opts: {
             opts.pendingInjected
           );
           effectiveState = compactedWithDelta;
+          // The reactive compaction replaced the history: the old usage's
+          // prefix is gone (runModelPhase already cleared the box; repeated
+          // here so the retry contract does not depend on that call order).
+          // The bar drops to a projected full estimate until the retry
+          // re-anchors.
+          opts.anchorRef.current = null;
+          emitProjectedContextUsage({
+            deps: opts.deps,
+            messages: compactedWithDelta.messages,
+            anchor: null,
+            systemText: frozenSystemText(opts.frozenSystemPrefix),
+            hostStreamPresent: opts.hostStreamPresent,
+            onStream: opts.onStream,
+          });
           // The retry below is the request that reads this array, so it is the
           // exact post-compaction context to publish — no re-compaction, and no
           // reset of the progress already folded into the product.
@@ -3663,6 +4097,7 @@ async function stepWithTrace(opts: {
             hostStreamPresent: opts.hostStreamPresent,
             onStream: retryOnStream,
             reactiveAttemptedRef: opts.reactiveAttemptedRef,
+            anchorRef: opts.anchorRef,
             frozenSystemPrefix: opts.frozenSystemPrefix,
             dispatchEvidence,
           });
@@ -3720,7 +4155,7 @@ async function stepWithTrace(opts: {
           // there is nothing to fill on success or failure alike.
           status: "error",
           ...evidenceField,
-          error: { type: toTraceErrorType(reason), message: reason },
+          error: traceStopError(reason, modelPhase.apiError),
         })
       );
     } else {
@@ -3775,7 +4210,7 @@ async function stepWithTrace(opts: {
           toolCallIds: [],
           decision: toDecision(reason),
           status: "error",
-          error: { type: toTraceErrorType(reason), message: reason },
+          error: traceStopError(reason, modelPhase.apiError),
         })
       );
     }
@@ -3798,38 +4233,25 @@ async function stepWithTrace(opts: {
     turnResult.isEmptyFinalResponse
   ) {
     const durationMs = performance.now() - started;
-    if (opts.deps.trace) {
-      await safeTrace(() =>
-        opts.deps.trace!.recordTurn({
-          id: turnId,
-          turnIndex: opts.state.turnCount,
-          startedAt: turnStartedAt,
-          endedAt: new Date().toISOString(),
-          durationMs,
-          llmCallIds: llmCallId ? [llmCallId] : [],
-          toolCallIds: [],
-          decision: "emptyFinalResponse",
-          status: "error",
-          error: {
-            type: "emptyFinalResponse",
-            message: "emptyFinalResponse",
-          },
-        })
-      );
-    }
+    const turn = await recordToolFreeTurn({
+      deps: opts.deps,
+      supplierStop: turnResult.supplierStop,
+      turnIndex: opts.state.turnCount,
+      turnId,
+      turnStartedAt,
+      durationMs,
+      llmCallId,
+      decision: "emptyFinalResponse",
+      status: "error",
+      error: { type: "emptyFinalResponse", message: "emptyFinalResponse" },
+    });
     return {
       transition: {
         kind: "stop",
         reason: "emptyFinalResponse",
         finalState: effectiveState,
       },
-      turn: mkTurn({
-        turnIndex: opts.state.turnCount,
-        supplierStop: turnResult.supplierStop,
-        toolCalls: [],
-        durationMs,
-        cancelKind: "none",
-      }),
+      turn,
       modelUsage: turnResult.usage,
     };
   }
@@ -3842,6 +4264,15 @@ async function stepWithTrace(opts: {
     messages: nextState.messages,
     turnCount: effectiveState.turnCount + 1,
   };
+  captureOccupancyAnchor(opts.anchorRef, nextState.messages, turnResult.usage);
+  emitProjectedContextUsage({
+    deps: opts.deps,
+    messages: nextState.messages,
+    anchor: opts.anchorRef.current,
+    systemText: frozenSystemText(opts.frozenSystemPrefix),
+    hostStreamPresent: opts.hostStreamPresent,
+    onStream: opts.onStream,
+  });
   // As soon as the assistant message enters the authoritative history it is
   // committed to disk through the host hook (write-as-you-run); the plain-text
   // finish and tool turns share this commit point. The assistant commit also
@@ -3857,6 +4288,26 @@ async function stepWithTrace(opts: {
   );
 
   if (turnResult.projection.toolCalls.length === 0) {
+    // A thinking-only success is an intermediate step; settling it would end
+    // the run on an answer-less turn.
+    if (isThinkingOnlyProgressStep(turnResult)) {
+      const turn = await recordToolFreeTurn({
+        deps: opts.deps,
+        supplierStop: turnResult.supplierStop,
+        turnIndex: opts.state.turnCount,
+        turnId,
+        turnStartedAt,
+        durationMs: performance.now() - started,
+        llmCallId,
+        decision: "completed",
+        status: "ok",
+      });
+      return {
+        transition: { kind: "continue", nextState: afterAssistantState },
+        turn,
+        modelUsage: turnResult.usage,
+      };
+    }
     return settleStopTurn({
       deps: opts.deps,
       turnResult,
@@ -3898,9 +4349,6 @@ async function stepWithTrace(opts: {
     });
   }
 
-  const toolStartedAt = new Date().toISOString();
-  const toolStartMono = performance.now();
-
   const toolPhase = await runToolPhase({
     afterAssistantState,
     entryTurnCount: opts.state.turnCount,
@@ -3911,6 +4359,8 @@ async function stepWithTrace(opts: {
     turnId,
     pendingInjected: opts.pendingInjected,
     onStream: opts.onStream,
+    hostStreamPresent: opts.hostStreamPresent,
+    anchorRef: opts.anchorRef,
     frozenSystemPrefix: opts.frozenSystemPrefix,
   });
 
@@ -3926,8 +4376,6 @@ async function stepWithTrace(opts: {
     if (name !== undefined) opts.lastToolRef.lastTool = name;
   }
 
-  const toolEndedAt = new Date().toISOString();
-  const toolDurationMs = performance.now() - toolStartMono;
   const toolCallIds: string[] = [];
   if (opts.deps.trace) {
     // tool_call persistence needs arguments (a trace-observability pain point:
@@ -3943,6 +4391,9 @@ async function stepWithTrace(opts: {
       toolPhase.toolCallViews.map((v) => [v.id, v.input] as const)
     );
     for (const result of toolPhase.toolResults) {
+      // Every committed result was timed at onSettled or the legacy-wave
+      // fallback in executeWaveAndCommit before it entered toolResults.
+      const timing = toolPhase.toolCallTimings.get(result.toolUseId)!;
       const record = toolCallRecordFor({
         parentLlmCallId: llmCallId,
         result,
@@ -3950,9 +4401,9 @@ async function stepWithTrace(opts: {
           nameById.get(result.toolUseId) ??
           (result.kind === "tool_not_found" ? result.toolName : ""),
         arguments: inputById.get(result.toolUseId),
-        startedAt: toolStartedAt,
-        endedAt: toolEndedAt,
-        durationMs: toolDurationMs,
+        startedAt: timing.startedAt,
+        endedAt: timing.endedAt,
+        durationMs: timing.durationMs,
       });
       const toolCallId = await safeTrace(() =>
         opts.deps.trace!.recordToolCall(record)
@@ -4062,6 +4513,7 @@ export async function step(
     signal,
     hostStreamPresent: false,
     reactiveAttemptedRef: { attempted: false },
+    anchorRef: { current: null },
     lastToolRef: { lastTool: AGENT_STATUS_IDLE_TOOL },
     reconcileRef: { stamped: undefined },
     toolLoopRef: { events: [], nextPhase: 0 },
@@ -4069,6 +4521,31 @@ export async function step(
     frozenSystemPrefix: createFrozenSystemPrefix(),
   });
   return transition;
+}
+
+/**
+ * The accepted user message that opens a new-input run.
+ *
+ * Two entry shapes, one call site. A host that owns an ordered text + image
+ * payload passes its own encoded message: secret masking of a block payload has
+ * to skip image data, which only the host that built the block list can decide,
+ * so re-deriving a text-only message here would drop the attachment (and running
+ * recognition over the base64 would corrupt it). Without a host message the
+ * engine keeps its own text path — including the placeholder substitution that
+ * must stay off when the host already handled masking.
+ */
+function entryUserMessage(
+  userText: string,
+  deps: LoopEngineDeps,
+  hostEncoded: AnthropicNativeMessage | undefined
+): AnthropicNativeMessage {
+  if (hostEncoded !== undefined) return hostEncoded;
+  let effectiveUserText = userText;
+  if (deps.secretsMode !== "block" && deps.secretRegistry !== undefined) {
+    const { replaced } = recognize(userText, deps.secretRegistry);
+    effectiveUserText = replaced;
+  }
+  return deps.adapter.encodeUserText(effectiveUserText);
 }
 
 /**
@@ -4099,6 +4576,15 @@ export async function run(
      *  `onStream !== undefined`. Gates the #1079 pre-call countTokens probe
      *  so wrapper-only hosts pay no per-call measurement cost. */
     hostStreamPresent?: boolean;
+    /**
+     * The accepted user message already encoded by the host (an ordered text +
+     * image payload). When present it is appended verbatim and `userText` is
+     * NOT encoded: secret masking of a block payload has to skip image data,
+     * which only the host that owns the block list can decide, so the host
+     * masks and encodes once instead of the engine re-deriving a text-only
+     * message that would drop the attachment.
+     */
+    userMessage?: AnthropicNativeMessage;
   }
 ): Promise<{ result: RunResult; trace: LoopTrace }> {
   // priorMessages continuation seam: history prefix frozen entry by entry, turnCount still starts at 0.
@@ -4117,15 +4603,10 @@ export async function run(
   const acceptedUserText = opts?.appendUserText !== false;
   let state: LoopState;
   if (acceptedUserText) {
-    let effectiveUserText = userText;
-    if (deps.secretsMode !== "block" && deps.secretRegistry !== undefined) {
-      const { replaced } = recognize(userText, deps.secretRegistry);
-      effectiveUserText = replaced;
-    }
     state = {
       messages: Object.freeze([
         ...(opts?.priorMessages ?? []).map(freezeMessage),
-        freezeMessage(deps.adapter.encodeUserText(effectiveUserText)),
+        freezeMessage(entryUserMessage(userText, deps, opts?.userMessage)),
       ]),
       turnCount: 0,
     };
@@ -4146,6 +4627,10 @@ export async function run(
   // Initial null = no successful model call this run; updated only when a step
   // succeeds and usage is present.
   let lastUsage: TokenUsage | null = null;
+  // Plan A T2: run-scoped occupancy anchor, reset by any compaction. Distinct
+  // from `lastUsage`: the anchor carries the exact history entry the usage
+  // describes, so a replaced history invalidates it.
+  const anchorRef: { current: OccupancyAnchor | null } = { current: null };
   let turns: ReadonlyArray<TurnTrace> = [];
   // Start/end anchors for the run-level L1 root record (honest values: no
   // upfront estimation). endedAt / durationMs / status are only known when the
@@ -4215,7 +4700,14 @@ export async function run(
       );
       // ADR-0118: occupancy chain = this-beat measurement → previous usage →
       // estimate. The probe failing must never skip the gate evaluation.
-      const thisBeat = await measureGateThisBeatOccupancy(deps, state.messages);
+      // Scope parity with the usage bar: same tools + frozen system prefix +
+      // messages triple the display probe measures.
+      const thisBeat = await measureGateThisBeatOccupancy(
+        deps,
+        state.messages,
+        frozenSystemPrefix,
+        anchorRef.current
+      );
       const decision = evaluateCompactTrigger(state.messages, {
         contextWindow: deps.compress.contextWindow,
         threshold,
@@ -4247,6 +4739,17 @@ export async function run(
           // authoritative history and violate the append-only invariant.
           state = compactedState;
           lastCompactTurn = state.turnCount;
+          // The usage described a prompt whose prefix no longer exists:
+          // `base + delta` would overcount. The next successful call
+          // re-anchors; until then the bar shows a projected full estimate.
+          anchorRef.current = null;
+          emitRunProjectedContextUsage({
+            deps,
+            messages: state.messages,
+            frozenSystemPrefix,
+            hostStreamPresent,
+            runOptions: opts,
+          });
           // The compaction product can never LCP-align with the old chain
           // (existing fork-copy semantics), and old pending injections can only
           // point at message positions that no longer exist — drop the buffer
@@ -4286,6 +4789,7 @@ export async function run(
         onStream: opts?.onStream,
         hostStreamPresent,
         reactiveAttemptedRef,
+        anchorRef,
         lastToolRef,
         reconcileRef,
         toolLoopRef,
@@ -4390,9 +4894,7 @@ export async function run(
         const sessionStatus: TraceStatus =
           reason === "completed" ? "ok" : "error";
         const sessionError: TraceError | undefined =
-          reason === "completed"
-            ? undefined
-            : { type: toTraceErrorType(reason), message: reason };
+          reason === "completed" ? undefined : traceStopError(reason, apiError);
         await safeTrace(() =>
           deps.trace!.recordSession({
             startedAt: sessionStartedAt,

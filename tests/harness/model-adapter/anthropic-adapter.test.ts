@@ -544,9 +544,10 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
 
     // projection.texts is empty (thinking never enters texts)
     assert.deepEqual(result.projection.texts, []);
-    // thinking only + success stop_reason -> isEmptyFinalResponse must be true
-    // (stopped successfully but produced no text block)
-    assert.equal(result.isEmptyFinalResponse, true);
+    // thinking only + success stop_reason -> NOT an empty final response:
+    // thinking is progress-bearing, so the turn is an intermediate step that
+    // must reach the next model call instead of ending the run.
+    assert.equal(result.isEmptyFinalResponse, false);
     assert.equal(result.needsTools, false);
   });
 
@@ -634,7 +635,9 @@ describe("anthropic-adapter T3 thinking/redacted_thinking passthrough (#150, clo
     assert.equal(rBlock.data, "redacted_blob_v1");
 
     assert.deepEqual(result.projection.texts, []);
-    assert.equal(result.isEmptyFinalResponse, true);
+    // redacted_thinking is a thinking block: progress-bearing, so a success
+    // carrying it is an intermediate step, not an empty final response.
+    assert.equal(result.isEmptyFinalResponse, false);
   });
 
   it("unsupported block type still throws ProtocolError (regression: #134 invariant preserved)", async () => {

@@ -1,6 +1,6 @@
 /**
  * src/harness/frontmatter/index.ts — barrel for the shared frontmatter leaf
- * module (ADR-0123). Two functions, one per contract, plus the field-map type:
+ * module (ADR-0144). Two functions, one per contract, plus the field-map type:
  *
  *   - `stripFence`: the `---` fence slice that is content-independent, never
  *     throws and slices byte-identically (the frontmatter fence strip contract in CONTEXT);

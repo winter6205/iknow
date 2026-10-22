@@ -152,15 +152,42 @@ describe("CLI dispatch: the tui entry is not refused by --yolo (the only legal f
     // dispatch lets `tui --yolo` through and hands the flag to the TUI assembly
     // layer, so a non-zero exit here can only come from a post-dispatch runtime
     // guard. Under tsx/Node two such guards exist and either is legitimate:
-    //   - no Bun on PATH        -> usage.ts "未找到 Bun" intercept copy;
+    //   - no Bun on PATH        -> usage.ts "Bun not found" intercept copy;
     //   - Bun present, no TTY   -> run.tsx renderer guard "未检测到交互终端".
     // Which one fires is a property of the host, not of yolo, so the assertion
     // accepts either downstream guard while still forbidding the dispatch-time
     // yolo refusal — that pairing is the invariant.
     const { err } = await runCli(["tui", "--yolo"]);
     assert.equal(err.includes("yolo_non_tui_entry"), false);
-    assert.match(err, /未检测到交互终端|未找到 Bun/);
+    assert.match(err, /未检测到交互终端|Bun not found/);
   });
+
+  it("iknow tui --no-sandbox does not hit the dispatch-time yolo_non_tui_entry", async () => {
+    const { err } = await runCli(["tui", "--no-sandbox"]);
+    assert.equal(err.includes("yolo_non_tui_entry"), false);
+    assert.match(err, /未检测到交互终端|Bun not found/);
+  });
+});
+
+describe("CLI dispatch: a preset flag reaches the TUI assembly layer", () => {
+  // The gap this pins: parse-args tests cover READING a flag, and the
+  // dispatch tests cover the non-TUI refusal, but nothing covered the hop
+  // between them — `cli.ts` forwarding `ParsedCli` into `runTui`. A flag that
+  // parses, clears the refusal, and is then not forwarded starts a TUI with no
+  // posture at all: the fence stays up, so the session is safe, but the
+  // operator asked for a preset and silently did not get one. That is the
+  // failure mode the 无沙箱 marker exists to make visible, and it is invisible
+  // if the flag never reaches the layer that would render it.
+  it.each(["--yolo", "--no-sandbox"])(
+    "%s is forwarded into the TUI launch (the non-TTY note names both flags)",
+    async (flag) => {
+      const { err } = await runCli(["tui", flag]);
+      // The ADR-0141 non-TTY entry rule: when a preset was actually forwarded,
+      // the refusal text names the preset flags. Without the forward this
+      // second line is absent and the flag was dropped on the floor.
+      assert.match(err, /--yolo \/ --no-sandbox 会退掉沙箱围栏/);
+    }
+  );
 });
 
 describe("CLI dispatch: pure display paths are explicitly allowed (exit 0, no session start)", () => {
@@ -187,7 +214,7 @@ describe("CLI dispatch: pure display paths are explicitly allowed (exit 0, no se
   it("iknow --yolo (bare, no subcommand) -> exit 0, usage, no session start", async () => {
     const { code, out, err } = await runCli(["--yolo"]);
     assert.equal(code, 0, `expected exit 0, stderr=${err}`);
-    assert.match(out, /用法 \/ Usage:/);
+    assert.match(out, /^Usage:/m);
     assert.equal(err.includes("yolo_non_tui_entry"), false);
   });
 });

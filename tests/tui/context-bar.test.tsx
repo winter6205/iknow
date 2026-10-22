@@ -14,7 +14,8 @@
  *    (captureSpans);
  *  - lastUsage null (before the first turn) → full 0% frame; narrow cols
  *    (<40) degrade to just `ctx NN%`;
- *  - activeToolName suffix indicator ([tool] name, no extra chrome row);
+ *  - a permanent token-speed readout shares the context row; tool activity
+ *    cannot replace or suppress it;
  *  - the component renders left-aligned with flex-start (parent
  *    justifyContent is controlled by app.tsx; no right-align inside);
  *  - the model prefix comes from an envDisplay store subscription: host
@@ -28,10 +29,13 @@ import {
   contextColor,
   CTX_BLUE,
   ContextBar,
+  displayedModelRoute,
+  formatTokenSpeed,
   modelPrefix,
-  toolIndicator,
   valueBand,
 } from "../../src/tui/context-bar.js";
+import type { OccupancyReading } from "../../src/harness/compress/projection.js";
+import type { TokenSpeedReading } from "../../src/tui/token-speed.js";
 import { occupancyFromUsage } from "../../src/harness/compress/occupancy.js";
 import { modelDisplayName } from "../../src/tui/model-picker.js";
 import {
@@ -148,8 +152,12 @@ async function renderBar(props: {
   envDisplay?: EnvDisplayStore;
   providers?: ReadonlyArray<IknowSettingsLlmProvider>;
   effortLabel?: string;
+  displayOccupancy?: OccupancyReading | null;
+  tokenSpeed?: TokenSpeedReading | null;
 }) {
-  const setup = await testRender(<ContextBar {...props} />, {
+  const { activeToolName, ...contextBarProps } = props;
+  void activeToolName;
+  const setup = await testRender(<ContextBar {...contextBarProps} />, {
     width: props.cols,
     height: 5,
   });
@@ -208,20 +216,6 @@ describe("纯函数（数值语义 SSOT）", () => {
     expect(contextColor(81)).toBe(tuiPalette.error);
   });
 
-  test("toolIndicator：放得下原样；放不下前缀 → 空串；超宽 CJK 尾截断补 …", () => {
-    // "[tool] " prefix = 7 columns; name budget = cols - 7.
-    expect(toolIndicator("Bash", 11)).toBe("[tool] Bash");
-    expect(toolIndicator("Bash", stringWidth("[tool] Bash"))).toBe(
-      "[tool] Bash"
-    );
-    expect(toolIndicator("Bash", 0)).toBe("");
-    expect(toolIndicator("Bash", stringWidth("[tool] "))).toBe("");
-    const out = toolIndicator("读写文件工具名很长", 13);
-    expect(out.startsWith("[tool] ")).toBe(true);
-    expect(out.endsWith("…")).toBe(true);
-    expect(stringWidth(out)).toBeLessThanOrEqual(13);
-  });
-
   test("modelPrefix：短名原样 / 超宽 CJK 尾截断补 … / 预算过小回退空串", () => {
     expect(modelPrefix("m3-combo", 20)).toBe("m3-combo");
     expect(modelPrefix("Qwen3.8-Max Model", 40)).toBe("Qwen3.8-Max Model");
@@ -262,20 +256,18 @@ describe("纯函数（数值语义 SSOT）", () => {
     expect(modelDisplayName(undefined, PROVIDERS)).toBeUndefined();
   });
 
-  test("toolIndicator：内嵌空白折叠为单空格（防止换行/多空格导致底栏变形）", () => {
-    // Newlines + runs of spaces → collapse to single spaces; returned as-is
-    // within budget.
-    // "[tool] a b c" is 12 columns wide, exact budget 12 → returned collapsed
-    // as-is.
-    const inBudget = toolIndicator("a\nb  c", stringWidth("[tool] a b c"));
-    expect(inBudget).toBe("[tool] a b c");
-    // Over-budget truncation: iterate over the collapsed text; output
-    // contains no original newline.
-    const truncated = toolIndicator("alpha\nbeta  gamma", 14);
-    expect(truncated.startsWith("[tool] ")).toBe(true);
-    expect(truncated.endsWith("…")).toBe(true);
-    expect(truncated).not.toContain("\n");
-    expect(stringWidth(truncated)).toBeLessThanOrEqual(14);
+  test("displayedModelRoute：会话自己的路由优先于快照里的默认值（ADR-0145 的唯一规则）", () => {
+    // The conversation owns its route → it wins over the default in the snapshot.
+    expect(displayedModelRoute("prov-a/model-2", "prov-a/model-1")).toBe(
+      "prov-a/model-2"
+    );
+    // No route yet (a draft / a file written before the route existed) → the
+    // snapshot's default.
+    expect(displayedModelRoute(undefined, "prov-a/model-1")).toBe(
+      "prov-a/model-1"
+    );
+    // Neither → nothing to show.
+    expect(displayedModelRoute(undefined, undefined)).toBeUndefined();
   });
 });
 
@@ -400,7 +392,7 @@ describe("渲染（只读 lastUsage）", () => {
     expect(frame).toContain("81%");
     expect(frame).not.toContain("alert");
     expect(frame).not.toContain("warn");
-    expect(frame).not.toContain("k/");
+    expect(frame).not.toMatch(/\d+\.\dk\/\d+\.\dk/);
     expect(frame).not.toContain("█");
     expect(frame).not.toContain("░");
     await setup.renderer.destroy();
@@ -424,16 +416,19 @@ describe("渲染（只读 lastUsage）", () => {
     }
   });
 
-  test("activeToolName → 行尾 `⚙ name`（单行）；undefined → 不渲染 ⚙", async () => {
+  test("token speed occupies the old tool-name slot", async () => {
     const withTool = await renderBar({
       lastUsage: makeUsage(5000),
       contextWindow: 10000,
       running: true,
       cols: 80,
       activeToolName: "Bash",
+      tokenSpeed: { value: 42, estimated: false },
     });
     const frame = withTool.captureCharFrame();
-    expect(frame).toContain("[tool] Bash");
+    expect(frame).toContain("5.0k/10.0k · 42 tok/s");
+    expect(frame).toContain("42 tok/s");
+    expect(frame).not.toContain("[tool] Bash");
     expect(frame.split("\n").filter((l) => l.trim().length > 0)).toHaveLength(
       1
     );
@@ -445,7 +440,7 @@ describe("渲染（只读 lastUsage）", () => {
       running: true,
       cols: 80,
     });
-    expect(noTool.captureCharFrame()).not.toContain("[tool]");
+    expect(noTool.captureCharFrame()).toContain("0 tok/s");
     await noTool.renderer.destroy();
   });
 
@@ -457,8 +452,8 @@ describe("渲染（只读 lastUsage）", () => {
       cols: 80,
     });
     const frame = setup.captureCharFrame();
-    expect(frame).toContain("│ ctx ░░░░░░░░░░ 0% ok 0.0k/10.0k");
-    expect(frame).not.toContain("·");
+    expect(frame).toContain("│ ctx ░░░░░░░░░░ 0% ok 0.0k/10.0k · 0 tok/s");
+    expect(frame.trimStart().startsWith("│ ctx")).toBe(true);
     await setup.renderer.destroy();
   });
 
@@ -508,7 +503,7 @@ describe("渲染（只读 lastUsage）", () => {
     await setup.renderer.destroy();
   });
 
-  test("宽列前缀预算占用：activeToolName 尾缀不溢出", async () => {
+  test("wide model prefixes reserve room for speed and omit tool names", async () => {
     const cols = 90;
     const setup = await renderBar({
       lastUsage: makeUsage(8100),
@@ -518,6 +513,7 @@ describe("渲染（只读 lastUsage）", () => {
       envDisplay: storeWithModel("Qwen3.8-Max Model"),
       effortLabel: "high",
       activeToolName: "读写文件工具名字特别特别长",
+      tokenSpeed: { value: 1_234, estimated: true },
     });
     const lines = setup
       .captureCharFrame()
@@ -525,7 +521,8 @@ describe("渲染（只读 lastUsage）", () => {
       .filter((l) => l.trim().length > 0);
     expect(lines).toHaveLength(1);
     expect(stringWidth((lines[0] ?? "").trimEnd())).toBeLessThanOrEqual(cols);
-    expect(lines[0] ?? "").toContain("[tool]");
+    expect(lines[0] ?? "").toContain("~1234 tok/s");
+    expect(lines[0] ?? "").not.toContain("[tool]");
     await setup.renderer.destroy();
   });
 
@@ -600,7 +597,7 @@ describe("渲染（只读 lastUsage）", () => {
     await setup.renderer.destroy();
   });
 
-  test("窄列超宽工具名：截断补 …，单行 ≤ cols", async () => {
+  test("narrow rows keep speed when an active tool name is present", async () => {
     const cols = 30;
     const setup = await renderBar({
       lastUsage: makeUsage(8100),
@@ -608,6 +605,7 @@ describe("渲染（只读 lastUsage）", () => {
       running: true,
       cols,
       activeToolName: "读写文件工具名字特别特别特别长",
+      tokenSpeed: { value: 42, estimated: false },
     });
     const lines = setup
       .captureCharFrame()
@@ -615,8 +613,8 @@ describe("渲染（只读 lastUsage）", () => {
       .filter((l) => l.trim().length > 0);
     expect(lines).toHaveLength(1);
     expect(stringWidth((lines[0] ?? "").trimEnd())).toBeLessThanOrEqual(cols);
-    expect(lines[0] ?? "").toContain("[tool]");
-    expect(lines[0] ?? "").toContain("…");
+    expect(lines[0] ?? "").toContain("42 tok/s");
+    expect(lines[0] ?? "").not.toContain("[tool]");
     await setup.renderer.destroy();
   });
 
@@ -657,8 +655,7 @@ describe("渲染（只读 lastUsage）", () => {
   });
 });
 
-// activeToolNameOf strips MCP tool names to the <server>/<tool> short form
-// (ContextBar's only suffix consumer); non-MCP names pass through unchanged.
+// activeToolNameOf remains available to TUI projections outside ContextBar.
 describe("activeToolNameOf / shortenMcpToolName", () => {
   test("activeToolNameOf 取最后一个 running；无 running → undefined", () => {
     const runs = [
@@ -695,5 +692,185 @@ describe("activeToolNameOf / shortenMcpToolName", () => {
     expect(shortenMcpToolName("read_file")).toBe("read_file");
     // Malformed mcp__ shapes (no separator) are returned as-is.
     expect(shortenMcpToolName("mcp__nosep")).toBe("mcp__nosep");
+  });
+});
+
+/** Plan A T4: a projected reading renders `~NN%`; a measured one `NN%`.
+ *  Plan A T6: the speed suffix shares the row (no new chrome row). */
+describe("投影读数 `~NN%` 与速率后缀（Plan A T4 / T6）", () => {
+  test("formatTokenSpeed：精确 `42 tok/s` / 估算 `~42 tok/s`", () => {
+    expect(formatTokenSpeed({ value: 42, estimated: false })).toBe("42 tok/s");
+    expect(formatTokenSpeed({ value: 42, estimated: true })).toBe("~42 tok/s");
+    expect(formatTokenSpeed({ value: 42.6, estimated: false })).toBe(
+      "43 tok/s"
+    );
+    expect(formatTokenSpeed({ value: 0, estimated: true })).toBe("0 tok/s");
+  });
+
+  test("projected 读数 → `~57%`；measured → `57%`（条上唯一数字）", async () => {
+    const projected: OccupancyReading = { tokens: 5_700, source: "projected" };
+    const projectedBar = await renderBar({
+      lastUsage: null,
+      displayOccupancy: projected,
+      contextWindow: 10_000,
+      running: true,
+      cols: 60,
+    });
+    const projectedFrame = projectedBar.captureCharFrame();
+    expect(projectedFrame).toContain("~57%");
+    // The k/k figure is the same projected reading.
+    expect(projectedFrame).toContain("5.7k/10.0k");
+    await projectedBar.renderer.destroy();
+
+    const measuredBar = await renderBar({
+      lastUsage: makeUsage(5_700),
+      displayOccupancy: { tokens: 5_700, source: "measured" },
+      contextWindow: 10_000,
+      running: true,
+      cols: 60,
+    });
+    const measuredFrame = measuredBar.captureCharFrame();
+    expect(measuredFrame).toContain("57%");
+    expect(measuredFrame).not.toContain("~57%");
+    await measuredBar.renderer.destroy();
+  });
+
+  test("displayOccupancy 缺席 → 回落到确认的 lastUsage（重开路径）", async () => {
+    const setup = await renderBar({
+      lastUsage: makeUsage(12_800),
+      contextWindow: 256_000,
+      running: false,
+      cols: 60,
+    });
+    const frame = setup.captureCharFrame();
+    expect(frame).toContain("12.8k/256.0k");
+    expect(frame).not.toContain("~");
+    await setup.renderer.destroy();
+  });
+
+  test("projected 读数多一列（`~`）：40 / 60 / 90 列仍单行不溢出", async () => {
+    for (const cols of [40, 60, 90]) {
+      const setup = await renderBar({
+        lastUsage: null,
+        displayOccupancy: { tokens: 243_200, source: "projected" },
+        contextWindow: 256_000,
+        running: true,
+        cols,
+      });
+      const lines = setup
+        .captureCharFrame()
+        .split("\n")
+        .filter((l) => l.trim().length > 0);
+      expect(lines.length, `cols=${cols} 应单行`).toBe(1);
+      expect(
+        stringWidth((lines[0] ?? "").trimEnd()),
+        `cols=${cols} 投影读数不得溢出`
+      ).toBeLessThanOrEqual(cols);
+      expect(lines[0] ?? "").toContain("~95%");
+      await setup.renderer.destroy();
+    }
+  });
+
+  test("narrow rows keep speed and context occupancy on one line", async () => {
+    for (const cols of [16, 18, 20, 24, 30, 39]) {
+      const setup = await renderBar({
+        lastUsage: null,
+        displayOccupancy: { tokens: 8_100, source: "projected" },
+        contextWindow: 10_000,
+        running: true,
+        cols,
+        tokenSpeed: { value: 42, estimated: false },
+      });
+      const lines = setup
+        .captureCharFrame()
+        .split("\n")
+        .filter((l) => l.trim().length > 0);
+      expect(lines.length, `cols=${cols} 应单行`).toBe(1);
+      expect(lines[0] ?? "").toContain("42 tok/s");
+      // At 16 columns the ` · ` separator pushes the compact occupancy body
+      // out of the row: it degrades to speed-only (the rate stays visible).
+      if (cols === 16) {
+        expect(lines[0] ?? "").not.toContain("%");
+      } else {
+        expect(lines[0] ?? "").toContain("~81%");
+        expect(lines[0] ?? "").toContain("% · 42 tok/s");
+      }
+      expect(stringWidth((lines[0] ?? "").trimEnd())).toBeLessThanOrEqual(cols);
+      await setup.renderer.destroy();
+    }
+  });
+
+  test("速率后缀：生成中 `~42 tok/s` / 结束后精确 `42 tok/s`，单行不溢出", async () => {
+    const live = await renderBar({
+      lastUsage: makeUsage(5_700),
+      displayOccupancy: { tokens: 5_700, source: "measured" },
+      tokenSpeed: { value: 42, estimated: true },
+      contextWindow: 256_000,
+      running: true,
+      cols: 60,
+    });
+    const liveFrame = live.captureCharFrame();
+    expect(liveFrame).toContain("~42 tok/s");
+    expect(
+      liveFrame.split("\n").filter((l) => l.trim().length > 0)
+    ).toHaveLength(1);
+    await live.renderer.destroy();
+
+    const final = await renderBar({
+      lastUsage: makeUsage(5_700),
+      displayOccupancy: { tokens: 5_700, source: "measured" },
+      tokenSpeed: { value: 42, estimated: false },
+      contextWindow: 256_000,
+      running: false,
+      cols: 60,
+    });
+    const finalFrame = final.captureCharFrame();
+    expect(finalFrame).toContain("42 tok/s");
+    expect(finalFrame).not.toContain("~");
+    await final.renderer.destroy();
+  });
+
+  test("tool activity does not suppress speed at 40, 60, or 90 columns", async () => {
+    for (const cols of [40, 60, 90]) {
+      const setup = await renderBar({
+        lastUsage: null,
+        displayOccupancy: { tokens: 5_700, source: "projected" },
+        tokenSpeed: { value: 42, estimated: false },
+        contextWindow: 256_000,
+        running: true,
+        cols,
+        activeToolName: "读写文件工具名字特别特别长",
+      });
+      const lines = setup
+        .captureCharFrame()
+        .split("\n")
+        .filter((l) => l.trim().length > 0);
+      expect(lines.length, `cols=${cols} 应单行`).toBe(1);
+      expect(stringWidth((lines[0] ?? "").trimEnd())).toBeLessThanOrEqual(cols);
+      expect(lines[0] ?? "").toContain("42 tok/s");
+      expect(lines[0] ?? "").not.toContain("[tool]");
+      await setup.renderer.destroy();
+    }
+  });
+
+  test("default zero speed stays visible when a long model name yields", async () => {
+    for (const cols of [20, 24, 39, 40]) {
+      const setup = await renderBar({
+        lastUsage: null,
+        contextWindow: 256_000,
+        running: false,
+        cols,
+        envDisplay: storeWithModel("A-very-long-model-name-that-must-yield"),
+      });
+      const line =
+        setup
+          .captureCharFrame()
+          .split("\n")
+          .find((value) => value.trim().length > 0) ?? "";
+      expect(line).toContain("0 tok/s");
+      expect(line).not.toContain("~0 tok/s");
+      expect(stringWidth(line.trimEnd())).toBeLessThanOrEqual(cols);
+      await setup.renderer.destroy();
+    }
   });
 });

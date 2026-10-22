@@ -10,7 +10,7 @@
  * exercise the default route-resolution branch.
  */
 import assert from "node:assert/strict";
-import { describe, it, beforeEach, vi } from "vitest";
+import { describe, it, beforeEach, afterEach, vi } from "vitest";
 
 const ctorOpts = vi.hoisted(() => [] as Array<Record<string, unknown>>);
 const adapterArgs = vi.hoisted(() => [] as Array<Record<string, unknown>>);
@@ -50,9 +50,11 @@ import { createSkillCatalog } from "../../src/harness/skill/catalog.ts";
 import { createNoopTraceService } from "../../src/harness/trace/noop.ts";
 import {
   createWorkerDeps,
+  runEscapeEnvelope,
   type CreateWorkerDepsOptions,
 } from "../../src/harness/subagent/worker.ts";
 import { DEFAULT_MAX_OUTPUT_TOKENS } from "../../src/config/env.ts";
+import { isLlmProviderConfigError } from "../../src/config/env.ts";
 import type { IknowEnv } from "../../src/config/env.ts";
 
 /** Main-session transport the client must fall back to when no route resolved. */
@@ -93,7 +95,8 @@ function probeOpts(
   parentThinking?: {
     readonly mode: "off" | "adaptive";
     readonly effort: string;
-  }
+  },
+  parentModelRoute?: string
 ): CreateWorkerDepsOptions {
   return {
     env,
@@ -104,6 +107,7 @@ function probeOpts(
     system: async () => undefined,
     trace: createNoopTraceService(),
     ...(parentThinking !== undefined ? { parentThinking } : {}),
+    ...(parentModelRoute !== undefined ? { parentModelRoute } : {}),
   } as unknown as CreateWorkerDepsOptions;
 }
 
@@ -262,5 +266,124 @@ describe("worker adapter route (settings.subagent.model)", () => {
     adapterArgs.length = 0;
     await createWorkerDeps(probeOpts(baseEnv()));
     assert.equal(adapterArgs[0]!.maxTokens, DEFAULT_MAX_OUTPUT_TOKENS);
+  });
+});
+
+/**
+ * ADR-0145 §8: the worker inherits the parent conversation's model route.
+ * `settings.subagent.model` still wins (an explicit operator setting for
+ * sub-agents); otherwise the parent route; otherwise the process default.
+ */
+describe("worker adapter route (parent conversation's route)", () => {
+  const PARENT_KEY_ENV = "IKNOW_TEST_PARENT_ROUTE_KEY";
+
+  /** Env carrying the provider registry the parent route resolves against. */
+  function envWithRegistry(): IknowEnv {
+    const env = baseEnv();
+    env.llm.providers = [
+      {
+        id: "main",
+        baseUrl: "http://main.test/v1",
+        apiKeyEnv: "IKNOW_TEST_MAIN_ROUTE_KEY",
+        headers: { "X-Main": "m" },
+        models: [{ id: "main-model", maxTokens: 72_000 }],
+      },
+      {
+        id: "parent",
+        baseUrl: "http://parent.test/v1",
+        apiKeyEnv: PARENT_KEY_ENV,
+        headers: { "X-Parent": "p" },
+        models: [{ id: "parent-model", maxTokens: 16_000 }],
+      },
+    ];
+    return env;
+  }
+
+  beforeEach(() => {
+    process.env[PARENT_KEY_ENV] = "parent-key";
+  });
+
+  afterEach(() => {
+    delete process.env[PARENT_KEY_ENV];
+  });
+
+  it("settings.subagent.model still wins over the parent route", async () => {
+    const env = envWithRegistry();
+    env.subagent.model = {
+      model: "sub/sub-model",
+      baseUrl: "http://sub.test/v1",
+      apiKey: "sub-key",
+      headers: { "X-Sub": "s" },
+      maxTokens: 64_000,
+    };
+
+    await createWorkerDeps(probeOpts(env, undefined, "parent/parent-model"));
+
+    assert.equal(adapterArgs[0]!.model, "sub-model");
+    const client = ctorOpts[0]!;
+    assert.equal(client.baseURL, "http://sub.test/v1");
+    assert.equal(client.apiKey, "sub-key");
+    assert.deepEqual(client.defaultHeaders, { "X-Sub": "s" });
+    assert.equal(adapterArgs[0]!.maxTokens, 64_000);
+  });
+
+  it("no sub-agent route → the parent route's model, transport and budget", async () => {
+    const env = envWithRegistry();
+
+    await createWorkerDeps(probeOpts(env, undefined, "parent/parent-model"));
+
+    assert.equal(adapterArgs[0]!.model, "parent-model");
+    const client = ctorOpts[0]!;
+    assert.equal(client.baseURL, "http://parent.test/v1");
+    assert.equal(client.apiKey, "parent-key");
+    assert.deepEqual(client.defaultHeaders, { "X-Parent": "p" });
+    assert.equal(adapterArgs[0]!.maxTokens, 16_000);
+  });
+
+  it("no parent route → the process default transport (unchanged)", async () => {
+    const env = envWithRegistry();
+
+    await createWorkerDeps(probeOpts(env));
+
+    assert.equal(adapterArgs[0]!.model, "main-model");
+    const client = ctorOpts[0]!;
+    assert.equal(client.baseURL, "http://main.test/v1");
+    assert.equal(client.apiKey, "main-key");
+    assert.deepEqual(client.defaultHeaders, { "X-Main": "m" });
+  });
+
+  it("parent route equal to env.llm.model → not resolved again (registry-less env still works)", async () => {
+    const env = baseEnv(); // no providers registry at all
+
+    await createWorkerDeps(probeOpts(env, undefined, env.llm.model));
+
+    assert.equal(adapterArgs[0]!.model, "main-model");
+    assert.equal(ctorOpts[0]!.baseURL, "http://main.test/v1");
+    assert.equal(ctorOpts[0]!.apiKey, "main-key");
+  });
+
+  it("a parent route that does not resolve → the typed error surfaces, no silent fallback", async () => {
+    const env = envWithRegistry();
+
+    let caught: unknown;
+    try {
+      await createWorkerDeps(probeOpts(env, undefined, "ghost/ghost-model"));
+    } catch (err) {
+      caught = err;
+    }
+
+    assert.ok(
+      isLlmProviderConfigError(caught) &&
+        caught.kind === "provider_model_not_registered" &&
+        caught.model === "ghost/ghost-model",
+      "the unresolvable parent route must surface the typed LlmProviderConfigError"
+    );
+    // The worker never built a client on the process default behind the failure.
+    assert.equal(ctorOpts.length, 0);
+    assert.equal(adapterArgs.length, 0);
+    // The typed error reaches the parent's failure envelope, not a swallowed one.
+    const envelope = runEscapeEnvelope(caught);
+    assert.equal(envelope.status, "failed");
+    assert.match(envelope.summary, /provider_model_not_registered/);
   });
 });

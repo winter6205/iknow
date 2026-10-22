@@ -9,7 +9,7 @@
  *     missing OR the snapshot is `undefined` (degraded git env);
  *   - produces byte-identical output across adjacent turns (D9 contract).
  */
-import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 import { mkdtemp, rm, mkdir, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -145,7 +145,7 @@ describe("assembleIdentityContext — git segment injection", () => {
     const baseline = await assembleIdentityContext(baseCtx("/x"));
     const withDegraded = await assembleIdentityContext({
       ...baseCtx("/x"),
-      git: () => undefined,
+      git: async () => undefined,
     });
     expect(withDegraded).toBe(baseline);
   });
@@ -169,10 +169,44 @@ describe("assembleIdentityContext — git segment injection", () => {
   it("non-git cwd → seam returns undefined → segment absent (assembly does NOT throw)", async () => {
     const out = await assembleIdentityContext({
       ...baseCtx("/x"),
-      git: () => undefined,
+      git: async () => undefined,
     });
     expect(out).toBeDefined();
     expect(out).not.toContain(GIT_SEGMENT_TITLE);
+  });
+
+  it("records an unexpected git capture failure and degrades safely (no ## Git segment)", async () => {
+    // The production path: the provider's exec seam throws → the capture
+    // REJECTS (an unexpected failure is not a degradation) → the assembly
+    // layer's catch logs the diagnostic and degrades to snapshot = undefined.
+    // Before the failure/rejection split this diagnostic was unreachable: the
+    // capture swallowed the throw and resolved with undefined, so a missing
+    // git binary / timeout / thrown exec vanished with no trace.
+    const provider = createGitSnapshotProvider({
+      cwd: "/x",
+      exec: async () => {
+        throw new Error("boom");
+      },
+    });
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const out = await assembleIdentityContext({
+        ...baseCtx("/x"),
+        git: provider,
+      });
+      expect(out).toBeDefined();
+      // No half-rendered segment: the failure degrades to "segment absent".
+      expect(out).not.toContain(GIT_SEGMENT_TITLE);
+      // The diagnostic is emitted — the failure stays observable.
+      const warnings = warn.mock.calls.map((call) => String(call[0]));
+      expect(
+        warnings.some((message) =>
+          message.includes("[identity/assemble] git snapshot resolver failed:")
+        )
+      ).toBe(true);
+    } finally {
+      warn.mockRestore();
+    }
   });
 
   it("SC2 / D9: adjacent-turn deep-equal — git segment text is byte-stable across turns", async () => {

@@ -123,7 +123,7 @@ function makeTool(opts: {
     ...(opts.holder !== undefined
       ? { worktreeOnMutate: { get: () => opts.holder!.get() } }
       : {}),
-    ...(opts.yoloOn === true ? { yolo: makeHolder(true) } : {}),
+    ...(opts.yoloOn === true ? { fenceRetired: makeHolder(true) } : {}),
     ...(opts.background === true
       ? {
           backgroundManager: createBackgroundTaskManager({

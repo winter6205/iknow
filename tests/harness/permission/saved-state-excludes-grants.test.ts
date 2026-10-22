@@ -506,6 +506,9 @@ describe("a runtime holding no stored rule asks again under current rules", () =
     const sink = {
       publishSavedState: async (r: RuntimeSavedStateRequest<string>) => {
         published.push(r);
+        // The recorded array IS the write here: the publication is stored, so
+        // the sink reports the write as durable.
+        return true;
       },
       appendOperationFact: async (f: unknown) => {
         facts.push(f);

@@ -8,7 +8,7 @@
  *
  * **Do not use the drain read side as synchronization**: a `wait:false` spawn
  * returns `{task_id}` at once, and `run()` may close before the fake binary
- * emits an envelope; meanwhile host drain (`drainPendingSubagents`) is exactly
+ * emits an envelope; meanwhile host drain (`peekPendingSubagents`) is exactly
  * the channel these cases **assert on** — waiting on it via its own output is
  * self-proving. The criterion is therefore the manager's own four-state
  * projection (`listSubagents()`): tasks spawned (≥1) and all terminal, i.e.

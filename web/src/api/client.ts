@@ -311,6 +311,10 @@ export interface PendingAsk {
   readonly id: string;
   readonly tool: string;
   readonly summaryHint: string;
+  /** The `tool_use` id of the call this question is about (ADR-0147 R1). */
+  readonly toolUseId: string;
+  /** The wave's conversation; absent only for a caller that has none. */
+  readonly conversationId?: string;
 }
 
 export type AskDecision = "allow-once" | "always-allow" | "deny";

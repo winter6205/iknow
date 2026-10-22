@@ -29,6 +29,84 @@ import {
   parsePermissionsCommand,
   splitPermissionArgs,
 } from "../../../src/harness/permission/permissions-command.js";
+import {
+  clearOverlayForUserChange,
+  createPresetOverlay,
+  type PresetOverlay,
+} from "../../../src/harness/sandbox/no-sandbox-marker.js";
+import {
+  createYoloContext,
+  createYoloController,
+} from "../../../src/harness/sandbox/yolo.js";
+
+/** A session overlay with a preset already declared, as `/yolo` leaves it. */
+function declaredOverlay(preset: "yolo" | "no-sandbox"): {
+  readonly overlay: PresetOverlay;
+  readonly permission: ReturnType<typeof createPermissionModeContext>;
+} {
+  const permission = createPermissionModeContext("default");
+  const overlay = createPresetOverlay();
+  const controller = createYoloController({
+    yolo: createYoloContext(false),
+    permission,
+    overlay,
+    probe: () => undefined,
+  });
+  if (preset === "yolo") controller.enter();
+  else controller.enterNoSandbox();
+  return { overlay, permission };
+}
+
+// ADR-0141 invariant 6: the hook fires only for an axis the preset DECLARES.
+describe("applyPermissionsCommand 的 overlay 清空钩子（ADR-0141）", () => {
+  it("yolo 预设：/permissions set 清空 overlay（permission 是声明轴）", () => {
+    const { overlay, permission } = declaredOverlay("yolo");
+    assert.equal(overlay.preset(), "yolo");
+
+    const res = applyPermissionsCommand(permission, ["plan"], {
+      onUserPermissionChange: (): void => {
+        clearOverlayForUserChange(overlay, "permission");
+      },
+    });
+    assert.equal(res.ok, true);
+    assert.equal(permission.get(), "plan");
+    assert.equal(overlay.preset(), undefined);
+  });
+
+  it("no-sandbox 预设：permission 不是声明轴 → overlay 存活", () => {
+    const { overlay, permission } = declaredOverlay("no-sandbox");
+    assert.equal(overlay.preset(), "no-sandbox");
+
+    applyPermissionsCommand(permission, ["plan"], {
+      onUserPermissionChange: (): void => {
+        clearOverlayForUserChange(overlay, "permission");
+      },
+    });
+    assert.equal(permission.get(), "plan");
+    assert.equal(overlay.preset(), "no-sandbox");
+  });
+
+  it("无 overlay 的入口（REPL / ask / serve）行为不变", () => {
+    const ctx = createPermissionModeContext("default");
+    assert.deepEqual(applyPermissionsCommand(ctx, ["plan"]), {
+      ok: true,
+      text: "权限模式已切换: plan",
+    });
+    assert.equal(ctx.get(), "plan");
+  });
+
+  it("usage / status 不清空 overlay（没有用户改动发生）", () => {
+    const { overlay, permission } = declaredOverlay("yolo");
+    const hook = (): void => {
+      clearOverlayForUserChange(overlay, "permission");
+    };
+    applyPermissionsCommand(permission, [], { onUserPermissionChange: hook });
+    applyPermissionsCommand(permission, ["help"], {
+      onUserPermissionChange: hook,
+    });
+    assert.equal(overlay.preset(), "yolo");
+  });
+});
 
 /** The REPL's exact literals — the acceptance is "shared behaviour", not restyled copy. */
 const REPL_STATUS = "权限模式: default";

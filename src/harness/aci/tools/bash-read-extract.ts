@@ -738,8 +738,15 @@ function stepQuoted(state: TokenizeState, segment: string, i: number): number {
 function stepEscape(state: TokenizeState, segment: string, i: number): number {
   const next = segment[i + 1];
   if (next === undefined) return -1;
-  state.current += next;
-  state.started = true;
+  // A backslash-escaped line break is a continuation: Bash drops both bytes and
+  // the token keeps building, so it contributes neither a character nor a
+  // separator. Any other escape keeps the escaped byte. An even run is already
+  // correct here: its first backslash consumes its partner and the byte after
+  // the pair reaches the main loop as an ordinary literal or separator.
+  if (next !== "\n") {
+    state.current += next;
+    state.started = true;
+  }
   return i + 2;
 }
 

@@ -16,7 +16,10 @@ import {
   CURRENT_SCHEMA_VERSION,
   extractGoal,
   isSessionFileV1,
+  parseSessionJsonl,
+  projectSessionLog,
   sanitizeSessionFile,
+  sessionFileToJsonl,
   validateSessionFile,
   MAX_GOAL_CHARS,
   validateGoalText,
@@ -483,6 +486,68 @@ describe("validateSessionFile — workspaceRoot field (serve-workspace T1)", () 
         `must reject ${JSON.stringify(workspaceRoot)}`
       );
     }
+  });
+});
+
+// -- ADR-0145 T3: additive conversation model route -------------------------
+
+describe("validateSessionFile — model route field (ADR-0145 T3)", () => {
+  it("accepts a file with model absent (a pre-route file stays valid)", () => {
+    assert.equal(validateSessionFile(valid), null);
+    assert.equal("model" in valid, false);
+  });
+
+  it("keeps a provider/model route byte-identical through sanitize", () => {
+    const withModel = { ...valid, model: "p/m" };
+    assert.equal(validateSessionFile(withModel), null);
+    assert.equal(
+      JSON.stringify(sanitizeSessionFile(withModel)),
+      JSON.stringify(withModel)
+    );
+  });
+
+  it("keeps the route through the on-disk JSONL round trip", () => {
+    const withModel = { ...valid, model: "p/m" };
+    const projected = projectSessionLog(
+      parseSessionJsonl(sessionFileToJsonl(withModel))
+    );
+    assert.deepEqual(projected, withModel);
+  });
+
+  it("a v5 file without model round-trips byte-identical (absent stays absent)", () => {
+    const out = sanitizeSessionFile(valid) as unknown as Record<
+      string,
+      unknown
+    >;
+    assert.equal("model" in out, false);
+    assert.equal(JSON.stringify(out), JSON.stringify(valid));
+  });
+
+  it("returns 'model' for illegal present values", () => {
+    const illegal: unknown[] = [
+      42, // not a string
+      "", // empty
+      "no-slash", // not a provider/model route
+      null,
+      {},
+      ["p/m"],
+    ];
+    for (const model of illegal) {
+      assert.equal(
+        validateSessionFile({ ...valid, model }),
+        "model",
+        `must reject ${JSON.stringify(model) ?? "null"}`
+      );
+    }
+  });
+
+  it("sanitizeSessionFile throws schema_invalid with field 'model'", () => {
+    assert.throws(
+      () => sanitizeSessionFile({ ...valid, model: 42 }),
+      (err: unknown) =>
+        (err as { kind?: string; field?: string }).kind === "schema_invalid" &&
+        (err as { field?: string }).field === "model"
+    );
   });
 });
 

@@ -8,7 +8,8 @@
  * Population: the `DENIED` / `ALLOWED` / `NOT_THE_WALK_WALL` spelling lists
  * of `root-find-hard-wall.test.ts` (byte-copied here on purpose — those consts
  * are not exported and that file's expectations are not this battery's to
- * edit) plus the 421-command column of
+ * edit) plus the four retained backslash-whitespace shapes this file declares
+ * plus the 428-command column of
  * `tests/fixtures/shell-divergence/stage2-differential.jsonl`.
  *
  * Method: the internal `text-segments.splitShellSegments` seam (the retired
@@ -46,49 +47,116 @@ import {
 
 /** Copied from `root-find-hard-wall.test.ts:45-125` — keep in step on edits there. */
 const ROOT_FIND_DENIED: readonly string[] = [
-  "find /", "find / -maxdepth 3", "find / -maxdepth 1", "find / -name x",
-  "find / -type f -print", "find  /", "find / ", 'find "/"', "find '/'",
-  "find //", "find / -maxdepth 3 -name '*.ts'", "find /tmp/.. -maxdepth 2",
-  "find /./ -name x", "find /../ -maxdepth 1", "find -L / -maxdepth 2",
-  "find -- / -maxdepth 1", "find -O2 / -maxdepth 1", "find -D tree / -maxdepth 1",
-  "sudo find / -maxdepth 2", "env -i find / -maxdepth 1", "nohup find / -maxdepth 1",
-  "sudo -u root find / -maxdepth 3", "sudo --user root find / -maxdepth 3",
-  "sudo -uroot find / -maxdepth 3", "env -u HOME find / -maxdepth 3",
-  "env --unset HOME find / -maxdepth 3", "timeout -s KILL 5 find / -maxdepth 3",
-  "nice -n 5 find / -maxdepth 3", "stdbuf -o L find / -maxdepth 3",
-  "setsid find / -maxdepth 3", "xargs find / -maxdepth 3",
-  '"find" / -maxdepth 3', "'find' / -maxdepth 3", "cd / && find ./.. && ls",
-  "cd / && find ../ && ls", "cd / && find ../.", "cd /tmp && find ..",
-  "cd / && find ./.", "cd /home && find ..", "cd /usr && find ..", "find /*",
-  "find /?", "cd / && find .", "cd /; find .", "cd / && find -maxdepth 2",
-  'cd "/" && find .', "cd /tmp/.. && find .", "cd / && find . -name x",
-  "cd -- / && find .", "cd -P / && find .", "cd /tmp && cd .. && find .",
-  "cd /tmp && cd ./.. && find .", "cd / && cd /tmp && cd - && find .",
-  "cd / && find", "cd / && find -name x", "echo go\ncd / && find .", "f\\ind /",
+  "find /",
+  "find / -maxdepth 3",
+  "find / -maxdepth 1",
+  "find / -name x",
+  "find / -type f -print",
+  "find  /",
+  "find / ",
+  'find "/"',
+  "find '/'",
+  "find //",
+  "find / -maxdepth 3 -name '*.ts'",
+  "find /tmp/.. -maxdepth 2",
+  "find /./ -name x",
+  "find /../ -maxdepth 1",
+  "find -L / -maxdepth 2",
+  "find -- / -maxdepth 1",
+  "find -O2 / -maxdepth 1",
+  "find -D tree / -maxdepth 1",
+  "sudo find / -maxdepth 2",
+  "env -i find / -maxdepth 1",
+  "nohup find / -maxdepth 1",
+  "sudo -u root find / -maxdepth 3",
+  "sudo --user root find / -maxdepth 3",
+  "sudo -uroot find / -maxdepth 3",
+  "env -u HOME find / -maxdepth 3",
+  "env --unset HOME find / -maxdepth 3",
+  "timeout -s KILL 5 find / -maxdepth 3",
+  "nice -n 5 find / -maxdepth 3",
+  "stdbuf -o L find / -maxdepth 3",
+  "setsid find / -maxdepth 3",
+  "xargs find / -maxdepth 3",
+  '"find" / -maxdepth 3',
+  "'find' / -maxdepth 3",
+  "cd / && find ./.. && ls",
+  "cd / && find ../ && ls",
+  "cd / && find ../.",
+  "cd /tmp && find ..",
+  "cd / && find ./.",
+  "cd /home && find ..",
+  "cd /usr && find ..",
+  "find /*",
+  "find /?",
+  "cd / && find .",
+  "cd /; find .",
+  "cd / && find -maxdepth 2",
+  'cd "/" && find .',
+  "cd /tmp/.. && find .",
+  "cd / && find . -name x",
+  "cd -- / && find .",
+  "cd -P / && find .",
+  "cd /tmp && cd .. && find .",
+  "cd /tmp && cd ./.. && find .",
+  "cd / && cd /tmp && cd - && find .",
+  "cd / && find",
+  "cd / && find -name x",
+  "echo go\ncd / && find .",
+  "f\\ind /",
 ];
 
 /** Copied from `root-find-hard-wall.test.ts:128-156`. */
 const ROOT_FIND_ALLOWED: readonly string[] = [
-  "find .", "find ..", "find . -name x", "find ./src -name '*.ts'",
-  "find src -maxdepth 2", "find -maxdepth 2 ./src", "find /tmp",
-  "find /tmp -maxdepth 2", "find /tmp -maxdepth 2 -name x", "find /home",
-  "find /usr/share -maxdepth 1", "sudo find /tmp -maxdepth 1",
-  "sudo -u root find /tmp -maxdepth 1", "env -u HOME find /usr/share -maxdepth 1",
-  "cd / && ls", "cd / && head -1 /etc/hostname", "echo find /", "cat find",
-  "which find", "find -maxdepth 1 /", "find -maxdepth 2 /tmp",
+  "find .",
+  "find ..",
+  "find . -name x",
+  "find ./src -name '*.ts'",
+  "find src -maxdepth 2",
+  "find -maxdepth 2 ./src",
+  "find /tmp",
+  "find /tmp -maxdepth 2",
+  "find /tmp -maxdepth 2 -name x",
+  "find /home",
+  "find /usr/share -maxdepth 1",
+  "sudo find /tmp -maxdepth 1",
+  "sudo -u root find /tmp -maxdepth 1",
+  "env -u HOME find /usr/share -maxdepth 1",
+  "cd / && ls",
+  "cd / && head -1 /etc/hostname",
+  "echo find /",
+  "cat find",
+  "which find",
+  "find -maxdepth 1 /",
+  "find -maxdepth 2 /tmp",
 ];
 
 /** Copied from `root-find-hard-wall.test.ts:164-179`. */
 const NOT_THE_WALK_WALL: readonly string[] = [
-  "cd /tmp && find .", "cd /usr/share && find .", "cd ~ && find .",
-  "cd && find .", "cd /tmp && find", "cd / && cd /tmp && find .",
-  "cd / && cd /tmp && find", "cd / && cd ~ && find .", "cd / && cd $HOME && find .",
+  "cd /tmp && find .",
+  "cd /usr/share && find .",
+  "cd ~ && find .",
+  "cd && find .",
+  "cd /tmp && find",
+  "cd / && cd /tmp && find .",
+  "cd / && cd /tmp && find",
+  "cd / && cd ~ && find .",
+  "cd / && cd $HOME && find .",
 ];
 
 function corpusCommands(): string[] {
-  const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+  const repoRoot = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "..",
+    "..",
+    ".."
+  );
   const fixture = join(
-    repoRoot, "tests", "fixtures", "shell-divergence", "stage2-differential.jsonl"
+    repoRoot,
+    "tests",
+    "fixtures",
+    "shell-divergence",
+    "stage2-differential.jsonl"
   );
   const seen = new Set<string>();
   for (const line of readFileSync(fixture, "utf8").split("\n")) {
@@ -98,19 +166,43 @@ function corpusCommands(): string[] {
   return [...seen];
 }
 
+/**
+ * The four retained backslash-whitespace shapes of
+ * `specs/backslash-whitespace-veto-repair.md`: real Bash disagrees with the
+ * facade on each, so each must keep carrying the class-bearing hard denial
+ * `echo\ test` used to stand for before the repair admitted ordinary escaped
+ * spaces. Two of the four arrive through the corpus column; the backslash+CR
+ * and double-quoted-LF rows are declared here so the roster is covered whole.
+ * Every entry is spelled by escape, so no control byte lands in this source.
+ */
+const RETAINED_FIDELITY: readonly string[] = [
+  "printf '<%s>\\n' a\\\nb",
+  "printf '<%s>\\n' a\\\tb",
+  `printf '<%s>\\n' a\\${String.fromCharCode(13)}b`,
+  "printf '<%s>\\n' \"a\\\nb\"",
+];
+
 function population(): string[] {
-  return [...new Set([
-    ...ROOT_FIND_DENIED, ...ROOT_FIND_ALLOWED, ...NOT_THE_WALK_WALL,
-    ...corpusCommands(),
-  ])];
+  return [
+    ...new Set([
+      ...ROOT_FIND_DENIED,
+      ...ROOT_FIND_ALLOWED,
+      ...NOT_THE_WALK_WALL,
+      ...RETAINED_FIDELITY,
+      ...corpusCommands(),
+    ]),
+  ];
 }
 
-/** The four population shapes that carry no `ok` payload — the census pins them. */
+/** The population shapes that carry no `ok` payload — the census pins them. */
 const NON_OK_ROWS: ReadonlyMap<string, string> = new Map([
   ["[[ a == b ]]", "unknown-syntax"],
   ["echo hi &&", "malformed"],
   ["powershell -c Remove-Item -Recurse -Force C:\\", "malformed"],
-  ["echo\\ test", "vetoed"],
+  ...RETAINED_FIDELITY.map((command): readonly [string, string] => [
+    command,
+    "vetoed",
+  ]),
 ]);
 
 function okRows(): { command: string; ok: SecurityParseOk }[] {
@@ -179,7 +271,8 @@ function factsBoundaries(ok: SecurityParseOk): Map<number, string> {
   const out = new Map<number, string>();
   for (const op of ok.operators) out.set(op.span.start, op.kind);
   for (const offset of ok.bareNewlineOffsets) out.set(offset, "newline");
-  for (const offset of ok.bareCarriageReturnOffsets) out.set(offset, "carriage");
+  for (const offset of ok.bareCarriageReturnOffsets)
+    out.set(offset, "carriage");
   return out;
 }
 
@@ -200,9 +293,17 @@ function protectedAt(ok: SecurityParseOk, offset: number): boolean {
 /* ---------- consumer-answer prototypes (pre-move demonstrations only) ---------- */
 
 const COMPOUND_SCOPES = [
-  "arithmetic_expansion", "case_statement", "c_style_for_statement",
-  "compound_statement", "for_statement", "function_definition", "if_statement",
-  "negated_command", "subshell", "test_command", "while_statement",
+  "arithmetic_expansion",
+  "case_statement",
+  "c_style_for_statement",
+  "compound_statement",
+  "for_statement",
+  "function_definition",
+  "if_statement",
+  "negated_command",
+  "subshell",
+  "test_command",
+  "while_statement",
   "until_statement",
 ];
 
@@ -234,20 +335,30 @@ function isAllowedFromFacts(ok: SecurityParseOk): boolean {
  * whole-command `includes` fallback (forbidden by the spec: it would break
  * the pinned allow `ls && pwd`).
  */
+function isNumericFdDuplication(
+  redirect: SecurityParseOk["redirects"][number]
+): boolean {
+  return redirect.op === ">&" && /^\d+$/.test(redirect.target.text);
+}
+
 function readonlyStrictenedByFacts(ok: SecurityParseOk): boolean {
   const wordMarks = ok.words.some(
     (word) => word.text.includes("&") || word.text.includes(">")
   );
-  const ownedRedirect = ok.redirects.some((redirect) => redirect.op.includes(">"));
+  const ownedRedirect = ok.redirects.some(
+    (redirect) => !isNumericFdDuplication(redirect) && redirect.op.includes(">")
+  );
   const background = ok.operators.some((op) => op.kind === "background");
   return wordMarks || ownedRedirect || background;
 }
 
-/** Today's readonly strictenings, read off the oracle's segments. */
+/** Today's readonly strictenings, read off the oracle's segments.
+ * Numeric fd duplication (`2>&1`) is not one of them. */
 function readonlyStrictenedBySegments(command: string): boolean {
-  return splitShellSegments(command).some(
-    (segment) => segment.includes("&") || segment.includes(">")
-  );
+  return splitShellSegments(command).some((segment) => {
+    const residue = segment.replace(/\d*>&[ \t]*\d+(?=$|[\s|&;<>()])/g, "");
+    return residue.includes("&") || residue.includes(">");
+  });
 }
 
 /**
@@ -278,12 +389,52 @@ function basenameLower(text: string): string {
 /* ---------- the battery ---------- */
 
 describe("the pinned population parses, and its non-ok rows are exactly the census", () => {
-  it("carries 508 shapes of which only the four census rows are non-ok", () => {
-    // 508 after the corpus gained its mutating root search (`find / -delete`),
-    // which SC6 left a deny and which the population therefore now carries.
+  it("carries 516 shapes of which only the seven census rows are non-ok", () => {
+    // 508 before #1188, then the corpus gained two incident spellings and
+    // four more admitted/retained shapes (+6), and this file declared the two
+    // retained shapes the corpus does not carry: backslash+CR and the
+    // double-quoted LF fold.
     const rows = okRows();
-    expect(population().length).toBe(508);
-    expect(rows.length).toBe(504);
+    expect(population().length).toBe(516);
+    expect(rows.length).toBe(509);
+  });
+
+  it("keeps every retained shape on the class-bearing denial, with no rewrite", () => {
+    // The census names the verdict kind only; this pins the class and the
+    // diagnostic SC6 constrains, so a future narrowing that kept returning
+    // some non-`ok` verdict would still fail here.
+    for (const command of RETAINED_FIDELITY) {
+      const result = parseForSecurity(command);
+      expect(result.kind, command).toBe("vetoed");
+      if (result.kind !== "vetoed") continue;
+      expect(result.class, command).toBe("backslash-whitespace");
+      expect(result.reason, command).toContain("backslash-whitespace");
+      expect(result.reason, command).not.toContain("改用引号承载该词");
+    }
+  });
+});
+
+describe("the admitted #1188 spellings reach a complete `ok` payload", () => {
+  it("folds the escaped space and the separator continuation into real words", () => {
+    // SC4: the facts a consumer reads must agree with the Bash the two
+    // incident rows were measured against — one argument for `a\ b`, two for
+    // `a \<LF> b` — and the admitted escaped LF must not reach the
+    // bare-newline fact that drives the segment splits above.
+    const cases: readonly (readonly [string, readonly (string | null)[]])[] = [
+      ["printf '<%s>\\n' a\\ b", ["printf", "<%s>\\n", "a b"]],
+      ["printf '<%s>\\n' a \\\n b", ["printf", "<%s>\\n", "a", "b"]],
+    ];
+    for (const [command, values] of cases) {
+      const result = parseForSecurity(command);
+      expect(result.kind, command).toBe("ok");
+      if (result.kind !== "ok") continue;
+      expect(
+        result.words.map((word) => word.value ?? null),
+        command
+      ).toEqual(values);
+      expect(result.bareNewlineOffsets, command).toEqual([]);
+      expect(result.bareCarriageReturnOffsets, command).toEqual([]);
+    }
   });
 });
 
@@ -299,12 +450,20 @@ describe("oracle fidelity: the boundary replica is the oracle", () => {
 
 describe("dangerous-scan segmentation parity (splitShellSegments, quote-blind arm)", () => {
   it("E1: every facts boundary is a splitter boundary, or a superset separator", () => {
-    const superset = new Set(["background", "pipe-both", "newline", "carriage"]);
+    const superset = new Set([
+      "background",
+      "pipe-both",
+      "newline",
+      "carriage",
+    ]);
     for (const { command, ok } of okRows()) {
       const splitter = new Set(scanBoundaries(command, false));
       for (const [offset, kind] of factsBoundaries(ok)) {
         if (superset.has(kind)) continue;
-        expect(splitter.has(offset), `${JSON.stringify(command)}@${offset}`).toBe(true);
+        expect(
+          splitter.has(offset),
+          `${JSON.stringify(command)}@${offset}`
+        ).toBe(true);
       }
     }
   });
@@ -314,7 +473,10 @@ describe("dangerous-scan segmentation parity (splitShellSegments, quote-blind ar
       const facts = factsBoundaries(ok);
       for (const offset of scanBoundaries(command, false)) {
         if (facts.has(offset)) continue;
-        expect(protectedAt(ok, offset), `${JSON.stringify(command)}@${offset}`).toBe(true);
+        expect(
+          protectedAt(ok, offset),
+          `${JSON.stringify(command)}@${offset}`
+        ).toBe(true);
       }
     }
   });
@@ -324,7 +486,9 @@ describe("dangerous-scan segmentation parity (splitShellSegments, quote-blind ar
       const facts = factsBoundaries(ok);
       for (const offset of scanBoundaries(command, true)) {
         if (protectedAt(ok, offset)) continue;
-        expect(facts.has(offset), `${JSON.stringify(command)}@${offset}`).toBe(true);
+        expect(facts.has(offset), `${JSON.stringify(command)}@${offset}`).toBe(
+          true
+        );
       }
     }
   });
@@ -346,7 +510,13 @@ describe("declarative superset segmentation parity (SC-S4-3 separators)", () => 
         hasBuf = true;
         continue;
       }
-      if (ch === ";" || ch === "&" || ch === "|" || ch === "\n" || ch === "\r") {
+      if (
+        ch === ";" ||
+        ch === "&" ||
+        ch === "|" ||
+        ch === "\n" ||
+        ch === "\r"
+      ) {
         if (hasBuf) out.push(i);
         hasBuf = false;
         continue;
@@ -360,7 +530,9 @@ describe("declarative superset segmentation parity (SC-S4-3 separators)", () => 
     for (const { command, ok } of okRows()) {
       const cuts = new Set(declarativeCuts(command));
       for (const offset of factsBoundaries(ok).keys()) {
-        expect(cuts.has(offset), `${JSON.stringify(command)}@${offset}`).toBe(true);
+        expect(cuts.has(offset), `${JSON.stringify(command)}@${offset}`).toBe(
+          true
+        );
       }
     }
   });
@@ -370,7 +542,10 @@ describe("declarative superset segmentation parity (SC-S4-3 separators)", () => 
       const facts = factsBoundaries(ok);
       for (const offset of declarativeCuts(command)) {
         if (facts.has(offset)) continue;
-        expect(protectedAt(ok, offset), `${JSON.stringify(command)}@${offset}`).toBe(true);
+        expect(
+          protectedAt(ok, offset),
+          `${JSON.stringify(command)}@${offset}`
+        ).toBe(true);
       }
     }
   });
@@ -378,17 +553,26 @@ describe("declarative superset segmentation parity (SC-S4-3 separators)", () => 
 
 describe("isAllowedCommand re-home prototype vs today's answer", () => {
   /**
-   * The four rows where the answers differ are all the same licensed class:
+   * The five rows where the answers differ are all the same licensed class:
    * today's scan prices punctuation inside quoted or commented DATA as a
    * metachar (`(`, `)`, backtick), and the facts prove it inert. Deny-to-
    * silence on inert text is SC-S2-6's relaxation family, not a new allow of
    * executable syntax; each row is pinned, not waved through.
+   *
+   * The fifth row is the admitted separator continuation: today's scan ends
+   * the allowlisted command at the physical LF, while the facts prove the LF
+   * is escaped content, so the continuation is ONE command node and the
+   * per-node roster answers for its first token alone. Same class — a
+   * continuation-blind scan denying a word a continuation joined — and the
+   * smuggled-second-command witness below is what keeps it from being an
+   * allow of executable syntax.
    */
   const EXPECTED_DIVERGENCE: ReadonlySet<string> = new Set([
     "echo '$(whoami)'",
     "echo '$(whoami) ${HOME} \\`id\\`'",
     "echo hi # $(whoami) ${HOME} not a command",
     'node -e \'require("child_process").execSync("rm -rf /")\'',
+    "printf '<%s>\\n' a \\\n b",
   ]);
 
   it("agrees everywhere except the pinned inert-punctuation rows", () => {
@@ -399,6 +583,22 @@ describe("isAllowedCommand re-home prototype vs today's answer", () => {
       }
     }
     expect(new Set(seen)).toEqual(EXPECTED_DIVERGENCE);
+  });
+
+  it("refuses the facts arm a second command smuggled past a continuation", () => {
+    // The pinning above is only sound while the re-home cannot read a
+    // continuation as a command boundary in the other direction: an escaped
+    // LF is content (one node, and the per-node roster prices the first token
+    // alone), while a real separator is a second node the roster then refuses.
+    const continued = "ls a \\\n r" + "m -rf /";
+    const bare = "ls a \nr" + "m -rf /";
+    const semi = "ls a; r" + "m -rf /";
+    expect(parseForSecurity(continued).kind).toBe("ok");
+    expect(isAllowedFromFacts(okPayloadOf(continued))).toBe(true);
+    for (const command of [bare, semi]) {
+      expect(isAllowedFromFacts(okPayloadOf(command)), command).toBe(false);
+      expect(isAllowedCommand(command), command).toBe(false);
+    }
   });
 
   it("keeps the SC-S4-2 newline / CR deny pins on both sides", () => {
@@ -467,7 +667,7 @@ describe("readonly strictening claims (1a/1b/1c) vs today's segment scan", () =>
       { command: "ls && pwd", throws: false },
       { command: "ls & pwd", throws: true },
       { command: "ls; echo done > log", throws: true },
-      { command: "ls 2>&1", throws: true },
+      { command: "ls 2>&1", throws: false },
       { command: 'echo "a>b"', throws: true },
       { command: 'find . -name "-delete"', throws: false },
     ];
@@ -480,9 +680,10 @@ describe("readonly strictening claims (1a/1b/1c) vs today's segment scan", () =>
         actual = true;
       }
       expect(actual, row.command).toBe(row.throws);
-      expect(readonlyStrictenedByFacts(okPayloadOf(row.command)), row.command).toBe(
-        row.throws
-      );
+      expect(
+        readonlyStrictenedByFacts(okPayloadOf(row.command)),
+        row.command
+      ).toBe(row.throws);
     }
   });
 });
@@ -490,7 +691,9 @@ describe("readonly strictening claims (1a/1b/1c) vs today's segment scan", () =>
 function okPayloadOf(command: string): SecurityParseOk {
   const result = parseForSecurity(command);
   if (result.kind !== "ok") {
-    throw new Error(`expected ok for ${JSON.stringify(command)}, got ${result.kind}`);
+    throw new Error(
+      `expected ok for ${JSON.stringify(command)}, got ${result.kind}`
+    );
   }
   return result;
 }

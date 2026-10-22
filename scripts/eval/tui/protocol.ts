@@ -65,6 +65,12 @@ export interface StopPolicy {
 export interface ChildSpec {
   readonly command: string;
   readonly args: readonly string[];
+  /**
+   * The EXACT environment the child receives, or `undefined` to inherit the
+   * runner's unchanged. An explicit `{}` is a real, empty environment — which
+   * is a different thing, and is what makes a hermetic run hermetic.
+   */
+  readonly env?: Readonly<Record<string, string>>;
 }
 
 /** The role this run plays in the report. §4 requires the measured session, the
@@ -245,6 +251,55 @@ function parseRunKind(raw: unknown): RunKind {
   return raw as RunKind;
 }
 
+/**
+ * The child's environment, or `undefined` for "inherit the runner's".
+ *
+ * WHY absent is NOT `{}`: `{}` is an empty environment and a child launched
+ * into one behaves differently from one that inherits. Collapsing them would
+ * silently change every protocol that never mentions an environment, so the
+ * absence is carried through as `undefined` all the way to `openPty`, whose
+ * `env: spec.env ?? process.env` already means exactly that.
+ *
+ * WHY the values are inspected at all: an env var VALUE is the one place a
+ * protocol can smuggle a credential into a run's evidence. Values are validated
+ * (a non-string, or an unexpanded `${...}` template, would hand the child a
+ * literal that no shell would ever expand), and a rejection names only the
+ * offending NAME, so the value itself is never echoed into an error, a log or
+ * a retained artifact.
+ */
+function parseChildEnv(raw: unknown): ChildSpec["env"] {
+  if (raw === undefined || raw === null) return undefined;
+  const source = obj(raw, "child.env");
+  const env: Record<string, string> = {};
+  for (const [name, value] of Object.entries(source)) {
+    if (name === "" || name.includes("=") || name.includes("\0")) {
+      throw new ProtocolError(
+        `child.env has an unusable variable name ${JSON.stringify(name)}; ` +
+          "a name must be non-empty, must not carry an assignment, and must not contain NUL"
+      );
+    }
+    if (typeof value !== "string") {
+      throw new ProtocolError(
+        `child.env.${name} must be a string; got: ${typeof value}. ` +
+          "A non-string would be coerced by the OS into something the protocol never said."
+      );
+    }
+    if (value.includes("\0")) {
+      throw new ProtocolError(
+        `child.env.${name} must not contain NUL; the C environment cannot carry it`
+      );
+    }
+    if (/\$\{[^}]*\}/.test(value)) {
+      throw new ProtocolError(
+        `child.env.${name} looks like an unexpanded shell template. ` +
+          `No shell expands it — the child would receive the literal text.`
+      );
+    }
+    env[name] = value;
+  }
+  return env;
+}
+
 function parseChild(raw: unknown): ChildSpec {
   const c = obj(raw, "child");
   const args = c["args"];
@@ -256,6 +311,9 @@ function parseChild(raw: unknown): ChildSpec {
   return {
     command: str(c, "command", "child"),
     args: args as readonly string[],
+    // Explicitly `undefined` when absent, so `p.child.env === undefined` is the
+    // one place that decides "inherit" — no `in` check, no `{}` sentinel.
+    env: parseChildEnv(c["env"]),
   };
 }
 

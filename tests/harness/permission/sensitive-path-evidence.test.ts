@@ -608,6 +608,26 @@ describe("ADR-0131 SC3 — one shared classification at admission and at the han
   // permission-admitted command be rejected by the handler. Both now read the
   // one shared result, so a permission-admitted command is never rejected by
   // a broader duplicate.
+  //
+  // Timeout budget for the cases below. Every one of them calls the REAL
+  // bash handler: the sensitive-path gate refuses before any launch, or a
+  // real bwrap sandbox is spawned and a real command runs inside it. The
+  // default per-test budget (vitest.config.ts → `testTimeout: 30_000`) is
+  // BELOW the intrinsic cost of that work, so these cases are marginal by
+  // construction — they pass alone and time out under load. Measured
+  // standalone on an idle host: "inert code" 9.2 s, "unresolved" 27.6 s, "an
+  // unresolved match is not refused by the handler" 26.2 s; on a loaded host
+  // the first handler call in the file additionally pays the bash tool's
+  // dynamic module import (25.7 s standalone). Under the full suite's
+  // parallel load the same cases cross 30 s and are recorded as timeout
+  // reds — reproduced locally by running this file with eight busy-loop
+  // processes: "inert code" timed out at 30_007 ms.
+  //
+  // The budget is therefore per case, with real headroom (~4x the worst
+  // standalone measurement), rather than a change to the global
+  // `testTimeout` every other case in the repo shares.
+  const REAL_HANDLER_BUDGET_MS = 120_000;
+
   const MATRIX: ReadonlyArray<[string, string]> = [
     ["confirmed direct", "cat /etc/shadow"],
     ["confirmed redirect", "echo a > '/etc/passwd'"],
@@ -651,7 +671,10 @@ describe("ADR-0131 SC3 — one shared classification at admission and at the han
           `${command}: confirmed at admission but the handler allowed it`
         ).toBe(true);
       }
-    });
+    },
+    // Real handler, real sandbox: see REAL_HANDLER_BUDGET_MS above. The
+    // default 30 s budget is below this family's intrinsic cost.
+    REAL_HANDLER_BUDGET_MS);
   }
 
   it("the handler refusal still names the sensitive path for a confirmed match", async () => {
@@ -679,7 +702,10 @@ describe("ADR-0131 SC3 — one shared classification at admission and at the han
         "command targets a sensitive path"
       );
     }
-  });
+  },
+  // Real handler, real sandbox: 26.2 s standalone, over the 30 s default
+  // budget once the host is loaded — same reason as the matrix above.
+  REAL_HANDLER_BUDGET_MS);
 });
 
 /* ------------------------------------------------------------------ */

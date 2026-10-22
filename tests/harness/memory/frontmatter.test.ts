@@ -6,7 +6,7 @@
  * fields / retention of excess fields / refusal of a non-scalar excess field /
  * signature stability / error when the frontmatter fence is missing.
  *
- * The read side parses through the shared frontmatter module (ADR-0123), so
+ * The read side parses through the shared frontmatter module (ADR-0144), so
  * these tests pin both the old flat-subset shapes (they must keep parsing
  * identically) and the coerce-boundary shapes (block scalars, block/flow
  * lists, nested mappings, YAML-invalid blocks). The write side emits its

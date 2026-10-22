@@ -2,13 +2,13 @@
 
 ## Objective
 
-Close the two accepted residuals of ADR-0123 that leave memory store degradations invisible to the operator (issue #1137): (1) a non-scalar unknown extra field is silently dropped by the pure serializer, so a `memory_save` / GC / ingest write-back can replace a file that keeps every canonical field but loses an extra; (2) a file the reader cannot parse is quarantined into `skipped` — its bytes stay intact, but no caller surfaces the fact, so the only way to discover the omission is to inspect the disk. The change is a signal upgrade, not a format change: on-disk shapes for healthy files stay byte-identical.
+Close the two accepted residuals of ADR-0144 that leave memory store degradations invisible to the operator (issue #1137): (1) a non-scalar unknown extra field is silently dropped by the pure serializer, so a `memory_save` / GC / ingest write-back can replace a file that keeps every canonical field but loses an extra; (2) a file the reader cannot parse is quarantined into `skipped` — its bytes stay intact, but no caller surfaces the fact, so the only way to discover the omission is to inspect the disk. The change is a signal upgrade, not a format change: on-disk shapes for healthy files stay byte-identical.
 
 ## Assumptions (confirmed by operator in session)
 
 1. **Posture A (reject, not preserve).** `serializeMemoryEntry` throws a typed error on a non-scalar unknown extra instead of silently omitting it; the write path warns and refuses to replace the file. The alternative (teach the serializer to emit non-scalar YAML) was rejected as an ADR-scale contract change. The pure-serializer contract (no IO, no clock) is kept; pure does not preclude throwing.
 2. **One PR, two commits.** Part A (serialize rejects + write-path warn) and Part B (structured `skipped` + caller warnings) land in one PR, one commit each. Commit grain follows the module convention, not one commit per bullet.
-3. **No new ADR.** Part A is authorized by issue #1137's acceptance criterion ("surface a clear validation result before replacing the file"). Both ADR-0123 accepted-residual bullets are annotated as resolved by #1137 in the PR; no new ADR file.
+3. **No new ADR.** Part A is authorized by issue #1137's acceptance criterion ("surface a clear validation result before replacing the file"). Both ADR-0144 accepted-residual bullets are annotated as resolved by #1137 in the PR; no new ADR file.
 4. **Warn channel.** A module-level `console.warn` seam, same as the existing `[memory/frontmatter]` (src/harness/memory/frontmatter.ts) and `[memory/prefetch]` (src/harness/memory/prefetch.ts) precedents. The host `onError` observer is NOT extended in this change.
 5. **Warning content.** Warnings name the slug / key / error category only — never memory content (title, body, or extra values). Same posture as the existing warn seams.
 6. **Known behavioral shift (accepted, corrected by measurement).** The pinned writer shape has no block/list emission, so `serializeMemoryEntry` no longer silently omits a non-scalar extra — it refuses, and `writeMemoryEntryAtomic` refuses the write with a warning. This converts a silent-corruption path into a loud refusal. Reachability as measured 2026-09-26 (real MCP-interaction transcript, scenario S3): the coerce boundary comma-joins any array read from disk before the writer sees it, and the `memory_save` surface rejects unknown keys at the input schema + `ALLOWED_KEYS` before the writer — so the refusal is reachable only from in-process callers of `writeMemoryEntryAtomic` holding a non-scalar extra: defense-in-depth, not an operator-visible production signal today. Scalar extras (the only shape in the measured 19-file corpus) are unaffected; the earlier draft of this assumption claimed a disk-round-trip path through `tags: [a, b]` — that shape never survives the shared parser's coercion.
@@ -21,7 +21,7 @@ Close the two accepted residuals of ADR-0123 that leave memory store degradation
 
 - Part A: `serializeMemoryEntry` fails closed (typed throw) on a non-scalar unknown extra; `writeMemoryEntryAtomic` warns (`[memory/save]`) and refuses to write when serialization is refused; GC soft-disable and ingest write-backs inherit the refusal through the shared writer.
 - Part B: `MemoryStoreScan.skipped` becomes a structured record (`slug` + machine-usable `reason`); `store.ts` classifies the skip reason (unreadable frontmatter vs other read/parse failure) without carrying file content; every scan consumer (gc, assembly, dream, ingest, prefetch) warns when it drops skipped entries, via the same console seam.
-- Annotate both accepted-residual bullets in ADR-0123 as resolved by #1137.
+- Annotate both accepted-residual bullets in ADR-0144 as resolved by #1137.
 - Tests for both parts against real temp files, asserting stored bytes and observable warnings.
 
 **Confirms with human**
@@ -62,11 +62,11 @@ Recorded so the residuals do not get lost; each item needs its own ticket before
 
 **Inherits (quoted from this workspace):**
 
-- "frontmatter coercion boundary: At the shared parser's output, string/number/boolean/null values become strings, scalar arrays are joined with commas, and mappings are skipped with a warning. A nested key must never silently overwrite a top-level key. Consumers (skill index, subagent catalog, and memory reader) receive only scalar values. ADR-0123." — docs/CONTEXT.md
-- "frontmatter fence strip contract: The shared module removes a leading `---` fence independently of its contents, never throws, and returns a byte-identical body slice... ADR-0123." — docs/CONTEXT.md
-- ADR-0123 Amendment: the memory writer emits `yaml.stringify` with `lineWidth: -1`; pinned shape = `KNOWN_FRONT_KEYS` first, sorted extras afterward, `body` outside frontmatter, comma-flat `supersedes`; measured cost 17/19 byte-identical, 2/19 +2 B (blank `id` → `id: ""`), zero field loss, `computeSignature` stable 19/19.
-- ADR-0123 accepted residual (this spec resolves it): "The pure `serializeMemoryEntry` writer silently drops a non-scalar unknown extra field through its `isScalar` filter... In the 19-file real corpus, every unknown extra is scalar."
-- ADR-0123 accepted residual (this spec resolves it): "The store has no warning outlet for this case... discovering such a file currently requires inspecting it on disk."
+- "frontmatter coercion boundary: At the shared parser's output, string/number/boolean/null values become strings, scalar arrays are joined with commas, and mappings are skipped with a warning. A nested key must never silently overwrite a top-level key. Consumers (skill index, subagent catalog, and memory reader) receive only scalar values. ADR-0144." — docs/CONTEXT.md
+- "frontmatter fence strip contract: The shared module removes a leading `---` fence independently of its contents, never throws, and returns a byte-identical body slice... ADR-0144." — docs/CONTEXT.md
+- ADR-0144 Amendment: the memory writer emits `yaml.stringify` with `lineWidth: -1`; pinned shape = `KNOWN_FRONT_KEYS` first, sorted extras afterward, `body` outside frontmatter, comma-flat `supersedes`; measured cost 17/19 byte-identical, 2/19 +2 B (blank `id` → `id: ""`), zero field loss, `computeSignature` stable 19/19.
+- ADR-0144 accepted residual (this spec resolves it): "The pure `serializeMemoryEntry` writer silently drops a non-scalar unknown extra field through its `isScalar` filter... In the 19-file real corpus, every unknown extra is scalar."
+- ADR-0144 accepted residual (this spec resolves it): "The store has no warning outlet for this case... discovering such a file currently requires inspecting it on disk."
 - Spec `specs/frontmatter-shared-parser.md` SC1/SC4: the pure-serialize + round-trip byte contract and the quarantine-throw contract are inherited verbatim; this spec adds the write-side refusal and the skip-diagnostic layer on top of them.
 - "source: auto: ...落在 frontmatter（sanitizeMemoryFile / serializeMemoryEntry 已 round-trip 未知字段，无需 schema 升版）" — docs/CONTEXT.md: unknown extras are forward-compat metadata and must survive a write-back; this spec makes that survival loud instead of silent.
 
@@ -76,7 +76,7 @@ Recorded so the residuals do not get lost; each item needs its own ticket before
 - `writeMemoryEntryAtomic`: warn + refuse on serialization refusal (no file replaced).
 - `MemoryStoreScan.skipped`: `ReadonlyArray<string>` → `ReadonlyArray<{ slug: string; reason: string }>`; `MemoryGcResult.skipped` follows. Direct cutover, no legacy-shape compat (operator direction, assumption 7). Exported types stay module-internal (verified: no consumer outside src/harness/memory).
 - Scan consumers gain one warn call each when skipped is non-empty.
-- ADR-0123: both accepted-residual bullets annotated resolved by #1137.
+- ADR-0144: both accepted-residual bullets annotated resolved by #1137.
 - New gap register (this file) for the four out-of-scope survey findings.
 
 **待写入**: none — no new domain terms (existing terms reused: quarantine, skipped, frontmatter coercion boundary) and no one-way-door ADR.

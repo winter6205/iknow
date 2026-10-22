@@ -201,6 +201,7 @@ function fakeBridge(opts: FakeBridgeOptions): {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
+    listLiveBackgroundTasks: () => [],
     listSubagents: () => [],
     abortSessionForegroundWork: () => [],
     abortSubagentTask: () => false,

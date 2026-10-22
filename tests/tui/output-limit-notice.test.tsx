@@ -137,6 +137,7 @@ function fakeBridge(opts: LiveOptions): TuiBridge {
     listRewindTargets: async () => [],
     inflight,
     contextWindow: 200_000,
+    listLiveBackgroundTasks: () => [],
     listSubagents: () => [],
     abortSessionForegroundWork: () => [],
     subscribeSubagentTerminal: () => () => undefined,

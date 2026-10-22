@@ -422,11 +422,11 @@ describe("断言② 场景 e — git 块静态(仓库内容变化后仍不变)",
     git(["checkout", "-q", "-b", "feature-branch"]);
 
     const s2 = await resolver();
-    const p2 = provider();
+    const p2 = await provider();
     assert.equal(s2, s0, "仓库变化后 system 必须仍逐字节不变");
     assert.ok(p2, "provider 仍返回会话级冻结快照");
     assert.ok(!s2!.includes("feature-branch"));
-    assert.ok(!s2!.includes("c2"));
+    assert.ok(!/^\s+[0-9a-f]+ c2$/m.test(s2!));
   });
 
   it("e-ii build-engine 装配(真实项目根)相邻轮 system deep-equal 且含 git 块", async () => {

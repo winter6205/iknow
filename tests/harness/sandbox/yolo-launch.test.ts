@@ -23,6 +23,8 @@ import { createFsModeContext } from "../../../src/harness/sandbox/fs-mode.js";
 import {
   createYoloContext,
   createYoloController,
+  isRunningAsRoot,
+  rejectPresetAsRoot,
   YOLO_ALREADY_ON_TEXT,
   YOLO_ENTER_TEXT,
 } from "../../../src/harness/sandbox/yolo.js";
@@ -119,6 +121,50 @@ describe("enterAtLaunch: --yolo startup applies the fence enter combination", ()
       expect(fx.yolo.get()).toBe(false);
       expect(fx.permission.get()).toBe("default");
       expect(fx.fsMode.get()).toBe("workspace");
+    }
+  });
+});
+
+/* -----------------------------------------------------------------------------
+ * ADR-0141 guardrail — root is refused before the overlay is seeded
+ * -------------------------------------------------------------------------- */
+
+describe("ADR-0141 guardrail: root is refused for either preset", () => {
+  it("the refusal is typed, names the kind, and covers both flags", () => {
+    for (const command of ["tui", "chat", "serve"]) {
+      const refusal = rejectPresetAsRoot(command);
+      expect(refusal.kind).toBe("preset_root_entry");
+      expect(refusal.message.startsWith("preset_root_entry: ")).toBe(true);
+      expect(refusal.message).toContain("--yolo");
+      expect(refusal.message).toContain("--no-sandbox");
+      expect(refusal.message).toContain(command);
+    }
+  });
+
+  it("no preset state exists to seed: the refusal is a pure builder, no holders", () => {
+    // The ordering requirement lives at the entry (`src/tui/run.tsx` raises it
+    // before `createPresetOverlay`). What this pins is that the builder itself
+    // takes no holder, so a caller cannot "refuse after seeding" by accident —
+    // there is nothing to seed through it.
+    const refusal = rejectPresetAsRoot("tui");
+    expect(Object.keys(refusal).sort()).toEqual([
+      "command",
+      "kind",
+      "message",
+    ]);
+  });
+
+  it("getuid absent (Windows) reads false — the guard cannot refuse what it cannot read", () => {
+    const original = process.getuid;
+    try {
+      (process as { getuid?: () => number }).getuid = undefined;
+      expect(isRunningAsRoot()).toBe(false);
+      (process as { getuid?: () => number }).getuid = () => 1000;
+      expect(isRunningAsRoot()).toBe(false);
+      (process as { getuid?: () => number }).getuid = () => 0;
+      expect(isRunningAsRoot()).toBe(true);
+    } finally {
+      (process as { getuid?: () => number }).getuid = original;
     }
   });
 });

@@ -48,8 +48,8 @@ function baseFenceOpts(
   };
 }
 
-/** Non-yolo baseline argv — a live sample of the bwrap global-tier (ADR-0092) shape. */
-const BASELINE_NON_YOLO_ARGV = createBwrapFence(baseFenceOpts()).argv;
+/** Fenced baseline argv — a live sample of the bwrap global-tier (ADR-0092) shape. */
+const BASELINE_FENCED_ARGV = createBwrapFence(baseFenceOpts()).argv;
 
 function egressSpec(): EgressFenceSpec {
   return {
@@ -65,64 +65,64 @@ function egressSpec(): EgressFenceSpec {
   };
 }
 
-describe("createBwrapFence yolo branch (ADR-0119)", () => {
-  it("yolo true -> bare argv: argv[0] = command, no bwrap prefix / mounts / env face", () => {
-    const argv = createBwrapFence(baseFenceOpts({ yolo: true })).argv;
+describe("createBwrapFence retirement branch (ADR-0141)", () => {
+  it("fenceRetired true -> bare argv: argv[0] = command, no bwrap prefix / mounts / env face", () => {
+    const argv = createBwrapFence(baseFenceOpts({ fenceRetired: true })).argv;
     expect(argv).toEqual(["bash", "-c", "echo hi"]);
   });
 
-  it("yolo absent -> byte-identical to baseline (argv[0] = bwrap, --unshare-net always present)", () => {
+  it("fenceRetired absent -> byte-identical to baseline (argv[0] = bwrap, --unshare-net always present)", () => {
     const argv = createBwrapFence(baseFenceOpts()).argv;
-    expect(argv).toEqual(BASELINE_NON_YOLO_ARGV);
+    expect(argv).toEqual(BASELINE_FENCED_ARGV);
     expect(argv[0]).toBe("bwrap");
     expect(argv).toContain("--unshare-net");
   });
 
-  it("yolo false -> the same baseline token sequence as when absent (fail-closed, same shape)", () => {
-    const argv = createBwrapFence(baseFenceOpts({ yolo: false })).argv;
-    expect(argv).toEqual(BASELINE_NON_YOLO_ARGV);
+  it("fenceRetired false -> the same baseline token sequence as when absent (fail-closed, same shape)", () => {
+    const argv = createBwrapFence(baseFenceOpts({ fenceRetired: false })).argv;
+    expect(argv).toEqual(BASELINE_FENCED_ARGV);
   });
 
-  it("yolo non-boolean ('true' / 1) -> treated as false, no throw, baseline unchanged", () => {
+  it("fenceRetired non-boolean ('true' / 1) -> treated as false, no throw, baseline unchanged", () => {
     for (const bad of ["true", 1]) {
       const argv = createBwrapFence(
-        baseFenceOpts({ yolo: bad as unknown as boolean })
+        baseFenceOpts({ fenceRetired: bad as unknown as boolean })
       ).argv;
-      expect(argv).toEqual(BASELINE_NON_YOLO_ARGV);
+      expect(argv).toEqual(BASELINE_FENCED_ARGV);
     }
   });
 
-  it("yolo + workspace fsMode -> yolo wins: argv exactly equals yolo + global (fsMode has nothing to carry)", () => {
+  it("a retired fence ignores the fs tier: argv is bare either way", () => {
     const withWorkspace = createBwrapFence(
       baseFenceOpts({
-        yolo: true,
+        fenceRetired: true,
         fsPolicy: createFsPolicy({ tmpDir: TMP, mode: "workspace" }),
         homeRoot: homedir(),
         workspaceRoot: FIX_ROOT,
         tmpRoot: TMP,
       })
     ).argv;
-    const withGlobal = createBwrapFence(baseFenceOpts({ yolo: true })).argv;
+    const withGlobal = createBwrapFence(baseFenceOpts({ fenceRetired: true })).argv;
     // With the fence retired the tier has zero effect on argv, and a missing
     // homeRoot does not fail loud either.
     expect(withWorkspace).toEqual(withGlobal);
     expect(withWorkspace).toEqual(["bash", "-c", "echo hi"]);
   });
 
-  it("yolo + an egress spec -> egress has no effect: no socket --bind, no proxy env", () => {
+  it("a retired fence ignores an egress spec: no socket --bind, no proxy env", () => {
     const spec = egressSpec();
     const argv = createBwrapFence(
-      baseFenceOpts({ yolo: true, egress: spec })
+      baseFenceOpts({ fenceRetired: true, egress: spec })
     ).argv;
     expect(argv).toEqual(["bash", "-c", "echo hi"]);
-    // The yolo branch does not consume egress: no socket bind, no --setenv (the
+    // The retired branch does not consume egress: no socket bind, no --setenv (the
     // bare argv already excludes both; asserted key by key so the bare shape
     // cannot be loosened later without this firing).
     expect(argv.join("\u0000")).not.toContain(spec.unixSocketPath);
     expect(argv).not.toContain("--setenv");
   });
 
-  it("control case: the same egress spec does emit socket bind + proxy env under non-yolo", () => {
+  it("control case: the same egress spec does emit socket bind + proxy env under a live fence", () => {
     const spec = egressSpec();
     const argv = createBwrapFence(baseFenceOpts({ egress: spec })).argv;
     expect(argv).toContain("--bind");

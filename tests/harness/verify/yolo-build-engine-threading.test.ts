@@ -128,7 +128,7 @@ afterEach(async () => {
 });
 
 type ChatEngineOpts = {
-  readonly yolo?: ReturnType<typeof createYoloContext>;
+  readonly fenceRetired?: ReturnType<typeof createYoloContext>;
   readonly fsMode?: ReturnType<typeof createFsModeContext>;
 };
 
@@ -149,7 +149,9 @@ async function buildChat(opts: ChatEngineOpts = {}): Promise<BuiltEngine> {
     // This file verifies the yolo pass-through, not overflow exit / index downgrade
     // (each has its own dedicated test).
     skipCountTokens: true,
-    ...(opts.yolo !== undefined ? { yolo: opts.yolo } : {}),
+    ...(opts.fenceRetired !== undefined
+      ? { fenceRetired: opts.fenceRetired }
+      : {}),
     ...(opts.fsMode !== undefined ? { fsMode: opts.fsMode } : {}),
     createMcpManager: (managerOpts: McpManagerOptions) =>
       createMcpManager(managerOpts),
@@ -180,58 +182,60 @@ function spawnFactoryOpts(): Array<Record<string, unknown>> {
 describe("buildHarnessEngine — yolo holder pass-through (ADR-0119)", () => {
   it("the holder reaches every bash-factory construction point by reference (not a .get() snapshot)", async () => {
     const holder = createYoloContext(false);
-    await buildChat({ yolo: holder });
+    await buildChat({ fenceRetired: holder });
     const opts = bashFactoryOpts();
     expect(opts.length).toBeGreaterThan(0);
     for (const o of opts) {
-      expect(o.yolo).toBe(holder);
+      expect(o.fenceRetired).toBe(holder);
     }
     // After flipping the holder the same object reads the new value — runtime
     // `/yolo` does not rebuild the engine.
     holder.set(true);
     for (const o of opts) {
-      expect((o.yolo as { get: () => boolean }).get()).toBe(true);
+      expect((o.fenceRetired as { get: () => boolean }).get()).toBe(true);
     }
   });
 
   it("the holder also reaches the subagent spawn factory (read fresh per spawn -> env wire)", async () => {
     const holder = createYoloContext(true);
-    await buildChat({ yolo: holder });
+    await buildChat({ fenceRetired: holder });
     const spawnOpts = spawnFactoryOpts();
     expect(spawnOpts.length).toBeGreaterThan(0);
     for (const o of spawnOpts) {
-      expect(o.yolo).toBe(holder);
+      expect(o.fenceRetired).toBe(holder);
     }
   });
 
   it("holder absent -> undefined on both factory faces (V1 baseline: the key is not produced)", async () => {
     await buildChat();
     for (const o of bashFactoryOpts()) {
-      expect(o.yolo).toBeUndefined();
+      expect(o.fenceRetired).toBeUndefined();
     }
     const spawnOpts = spawnFactoryOpts();
     expect(spawnOpts.length).toBeGreaterThan(0);
     for (const o of spawnOpts) {
-      expect(o.yolo).toBeUndefined();
+      expect(o.fenceRetired).toBeUndefined();
     }
   });
 
   it("yolo and fsMode each arrive by reference in the same factory opts (the two channels do not cross)", async () => {
-    const yolo = createYoloContext(true);
+    const fenceRetired = createYoloContext(true);
     const fsMode = createFsModeContext("workspace");
-    await buildChat({ yolo, fsMode });
+    await buildChat({ fenceRetired, fsMode });
     const opts = bashFactoryOpts();
     expect(opts.length).toBeGreaterThan(0);
     for (const o of opts) {
-      expect(o.yolo).toBe(yolo);
+      expect(o.fenceRetired).toBe(fenceRetired);
       expect(o.fsMode).toBe(fsMode);
     }
     // After flipping both axes, the factory face still holds the same pair of
-    // holders (the engine was not rebuilt).
+    // readers (the engine was not rebuilt).
     fsMode.set("global");
-    yolo.set(false);
+    fenceRetired.set(false);
     for (const o of opts) {
-      expect((o.yolo as { get: () => boolean }).get()).toBe(false);
+      expect(
+        (o.fenceRetired as { get: () => boolean }).get()
+      ).toBe(false);
       expect((o.fsMode as { get: () => string }).get()).toBe("global");
     }
   });

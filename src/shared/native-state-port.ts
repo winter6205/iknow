@@ -109,7 +109,19 @@ export type NativeStateContentBlock =
       readonly thinking: string;
       readonly signature: string;
     }
-  | { readonly type: "redacted_thinking"; readonly data: string };
+  | { readonly type: "redacted_thinking"; readonly data: string }
+  | {
+      // A user-pasted image carried inside the accepted user message. Kept
+      // verbatim like `redacted_thinking`: the mirror stores what it is handed,
+      // and a restored context must produce the same wire bytes as the turn
+      // that was saved.
+      readonly type: "image";
+      readonly source: {
+        readonly type: "base64";
+        readonly media_type: string;
+        readonly data: string;
+      };
+    };
 
 /** One saved native message: the append-only unit of context. */
 export interface NativeStateMessage {

@@ -176,7 +176,7 @@ describe("CLI dispatch: display paths with --eval-state are the declared allowan
   it("iknow --eval-state (bare, no subcommand) -> exit 0, usage, no session start", async () => {
     const { code, out, err } = await runCli(["--eval-state"]);
     assert.equal(code, 0, `expected exit 0, stderr=${err}`);
-    assert.match(out, /用法 \/ Usage:/);
+    assert.match(out, /^Usage:/m);
     assert.equal(err.includes("eval_state"), false);
   });
 });

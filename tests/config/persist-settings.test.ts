@@ -52,12 +52,14 @@ import {
   mergeSubagentCapPatch,
   mergeThinkingPatch,
   mergeFsModePatch,
+  mergePermissionModePatch,
   mergeWorktreeOnMutatePatch,
   persistMemoryChanges,
   persistModelChanges,
   persistSubagentCapChanges,
   persistThinkingChanges,
   persistFsModeChanges,
+  persistPermissionModeChanges,
   persistWorktreeOnMutateChanges,
   resolveThinkingSettingsPath,
 } from "../../src/config/persist-settings.ts";
@@ -1318,5 +1320,70 @@ describe("persistModelChanges（原子写 + self-write hash，SC5）", () => {
     const entries = readdirSync(dir);
     expect(entries).not.toContain("settings-missing.json");
     expect(entries.some((e) => e.endsWith(".tmp"))).toBe(false);
+  });
+});
+
+
+// ADR-0141 §5: the permission posture write-back — user layer only.
+describe("mergePermissionModePatch（纯函数）", () => {
+  test("permissions 缺失 → 创建；其它字段原样保留", () => {
+    expect(
+      mergePermissionModePatch({ llm: { model: "m1" } }, { defaultMode: "plan" })
+    ).toEqual({
+      llm: { model: "m1" },
+      permissions: { defaultMode: "plan" },
+    });
+  });
+
+  test("已有 permissions 段 → 仅改 defaultMode，allow/ask/deny 原样保留", () => {
+    expect(
+      mergePermissionModePatch(
+        {
+          permissions: {
+            allow: ["a"],
+            deny: ["d"],
+            defaultMode: "default",
+          },
+        },
+        { defaultMode: "plan" }
+      )
+    ).toEqual({
+      permissions: {
+        allow: ["a"],
+        deny: ["d"],
+        defaultMode: "plan",
+      },
+    });
+  });
+
+  test("full_auto 拒绝写入（ADR-0090：共享仓不得自我授予 full_auto）", () => {
+    expect(() =>
+      mergePermissionModePatch(
+        {},
+        { defaultMode: "full_auto" as unknown as "plan" }
+      )
+    ).toThrow(TypeError);
+  });
+
+  test("值域外的值按 TypeError 拒绝，不静默丢弃", () => {
+    expect(() =>
+      mergePermissionModePatch(
+        {},
+        { defaultMode: "bogus" as unknown as "plan" }
+      )
+    ).toThrow(TypeError);
+  });
+
+  test("非法值不产生任何写入：原文件字节不变", async () => {
+    const root = makeTmpRoot("iknow-perm-reject-");
+    const path = join(root, "settings.json");
+    writeFileSync(path, JSON.stringify({ llm: { model: "m1" } }), "utf8");
+    const before = readFileSync(path, "utf8");
+    await expect(
+      persistPermissionModeChanges(path, {
+        defaultMode: "full_auto" as unknown as "plan",
+      })
+    ).rejects.toThrow(TypeError);
+    expect(readFileSync(path, "utf8")).toBe(before);
   });
 });

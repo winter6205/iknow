@@ -4,7 +4,7 @@
  * Spec: specs/121-memory-injection.md (Project Structure frontmatter.ts,
  * Testing Strategy frontmatter half).
  *
- * Both sides speak YAML (ADR-0123): the read side is a fence slice + YAML parse
+ * Both sides speak YAML (ADR-0144): the read side is a fence slice + YAML parse
  * with the scalar coerce boundary, and the write side emits its frontmatter map
  * through `yaml.stringify`, so a value the flat shape would misread (`": "`,
  * ` #`, a leading indicator, a blank) is quoted rather than silently dropped by

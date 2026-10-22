@@ -24,7 +24,7 @@ import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createSubAgentManager } from "../../src/harness/subagent/manager.ts";
 import { awaitAllTasksTerminal } from "../_helpers/await-terminal.ts";
 import { run } from "../../src/harness/loop-engine.ts";
-import { drainPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
+import { peekPendingSubagents } from "../../src/harness/subagent/host-drain.ts";
 import type { LoopEngineDeps } from "../../src/harness/loop-engine.ts";
 import type { LoopState } from "../../src/harness/model-adapter/types.ts";
 import { createNoAskUser } from "../../src/harness/permission/ask-user.ts";
@@ -166,7 +166,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
     // side as sync would defeat what this file asserts).
     await awaitAllTasksTerminal(fakeMgr);
 
-    const drained = await drainPendingSubagents(fakeMgr);
+    const drained = await peekPendingSubagents(fakeMgr);
     assert.ok(drained.length > 0, "background task should be drained");
 
     // Parse the JSONL
@@ -259,7 +259,7 @@ describe("#361 ADR Decision 6 — subagent tool trace landing", () => {
     // Sync contract: tests/_helpers/await-terminal.ts.
     await awaitAllTasksTerminal(fakeMgr);
 
-    const drained = await drainPendingSubagents(fakeMgr);
+    const drained = await peekPendingSubagents(fakeMgr);
     // This line pins the **background arm** (wait:false): host drain still
     // hands over the condensed envelope and writes it into the next run()'s
     // priorMessages (same splice as chat-session.ts). The foreground arm

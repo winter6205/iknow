@@ -24,6 +24,9 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint:s5": "sh scripts/lint-s5.sh --changed",
+    "lint:s5:staged": "sh scripts/lint-s5.sh --changed --staged",
+    "lint:s5:all": "sh scripts/lint-s5.sh src",
     "typecheck:tests": "tsc -p tsconfig.test.json --noEmit",
     "typecheck:tui-tests": "tsc -p tsconfig.tui-test.json --noEmit",
     "typecheck:web-tests": "tsc -p tsconfig.web-test.json --noEmit",

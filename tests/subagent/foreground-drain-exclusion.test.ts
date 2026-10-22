@@ -29,7 +29,7 @@ import type { SubAgentManager } from "../../src/harness/subagent/manager.ts";
 import type { SubAgentTerminalNotice } from "../../src/harness/subagent/mailbox.ts";
 import { createSpawnSubAgentTool } from "../../src/harness/subagent/spawn-subagent-tool.ts";
 import {
-  drainPendingSubagents,
+  peekPendingSubagents,
   formatDrainedResults,
   SUBAGENT_DRAIN_PREFIX,
 } from "../../src/harness/subagent/host-drain.ts";
@@ -133,7 +133,7 @@ describe("前景交差只走当跳 tool_result（Locked sentence 1）", () => {
     expect({
       drained: rig.manager.drainCompleted(CONVERSATION),
       notices: rig.notices,
-      drainText: await drainPendingSubagents(rig.manager, {
+      drainText: await peekPendingSubagents(rig.manager, {
         conversationId: CONVERSATION,
       }),
     }).toEqual({ drained: [], notices: [], drainText: "" });

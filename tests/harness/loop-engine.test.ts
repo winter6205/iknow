@@ -32,7 +32,9 @@ import type {
 } from "../../src/harness/tools/types.ts";
 import { createRegistry } from "../../src/harness/tools/registry.ts";
 import { createExecutor } from "../../src/harness/tools/executor.ts";
+import { isReadonlyBashConcurrencySafe } from "../../src/harness/aci/tools/bash-concurrency.ts";
 import { toAnthropicToolResults } from "../../src/harness/tools/tool-result.ts";
+import { projectMessagesForWire } from "../../src/harness/model-adapter/outbound-projection.ts";
 import { createStubModel } from "../../src/harness/stubs/stub-model.ts";
 import { createStubTool } from "../../src/harness/stubs/stub-tool.ts";
 import { createStubSignalTool } from "../../src/harness/stubs/stub-signal-tool.ts";
@@ -379,6 +381,170 @@ describe("loop engine S8: empty final response", () => {
     assert.equal(result.turnCount, 0);
     assert.equal(result.messages.length, 1); // only the user message
     assert.equal(result.messages[0]!.role, "user");
+  });
+});
+
+/**
+ * S8b: a success (end_turn) whose only blocks are thinking / redacted_thinking
+ * is a normal intermediate step, not a terminal empty answer — S8 above stays
+ * the `content: []` case (no duplication here).
+ */
+describe("loop engine S8b: thinking-only success is an intermediate step", () => {
+  it("commits the thinking turn, continues, and the next request rebuilds it", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const seen: Array<ReadonlyArray<AnthropicNativeMessage>> = [];
+    const adapter: LoopAdapter = {
+      encodeUserText: (t: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text: t }],
+      }),
+      encodeToolResults: (results) => toAnthropicToolResults(results),
+      step: async (state): Promise<AssistantTurnResult> => {
+        seen.push(state.messages);
+        if (seen.length === 1) {
+          return assistantResult({
+            texts: [],
+            toolCalls: [],
+            supplierStop: "success",
+            thinkingBlocks: [
+              {
+                type: "thinking",
+                thinking: "Weighing options.",
+                signature: "sig_think_only",
+              },
+            ],
+          });
+        }
+        return assistantResult({
+          texts: ["answered"],
+          toolCalls: [],
+          supplierStop: "success",
+        });
+      },
+    };
+
+    const { result } = await run("go", {
+      adapter,
+      executor: exec,
+      registry: reg,
+      maxTurns: 5,
+    });
+
+    assert.notEqual(result.stopReason, "emptyFinalResponse");
+    assert.equal(result.stopReason, "completed");
+    assert.equal(result.turnCount, 2);
+    assert.equal(seen.length, 2);
+    const thinkingTurn = result.messages[1]!;
+    assert.equal(thinkingTurn.role, "assistant");
+    assert.deepEqual(thinkingTurn.content, [
+      {
+        type: "thinking",
+        thinking: "Weighing options.",
+        signature: "sig_think_only",
+      },
+    ]);
+    // The next model call sees the committed thinking turn.
+    assert.equal(seen[1]!.length, 2);
+    assert.deepEqual(seen[1]![1]!.content, thinkingTurn.content);
+    // Outbound projection accepts the rebuilt history (a thinking block needs
+    // string thinking + signature, else OutboundProjectionError).
+    const wire = projectMessagesForWire(seen[1]!);
+    assert.deepEqual(wire[1]!.content, [
+      {
+        type: "thinking",
+        thinking: "Weighing options.",
+        signature: "sig_think_only",
+      },
+    ]);
+    assert.equal(result.finalText, "answered");
+  });
+});
+
+/**
+ * S8c: S8b's continue arm is still bounded. A supplier that answers thinking-only
+ * forever would keep the run alive turn after turn if nothing else stopped it, so
+ * the maxTurns cap — not the empty-answer rule — is what ends the run. ADR-0011:
+ * the cap leaves through the MaxTurnsExceeded throw, which the host maps onto
+ * `stopReason: "maxTurns"`; the throw is also the evidence no
+ * `emptyFinalResponse` was ever reported on this shape — that arm returns a
+ * RunResult after one step instead of running the budget out (S8 pins it).
+ */
+describe("loop engine S8c: an endless thinking-only run stays bounded by maxTurns", () => {
+  it("keeps continuing on thinking-only turns until the maxTurns cap throws", async () => {
+    const tool: ToolDef = createStubTool({ name: "noop", next: () => ({}) });
+    const reg = createRegistry([tool]);
+    const exec = createExecutor(reg);
+    const seen: Array<ReadonlyArray<AnthropicNativeMessage>> = [];
+    const adapter: LoopAdapter = {
+      encodeUserText: (t: string): AnthropicNativeMessage => ({
+        role: "user",
+        content: [{ type: "text", text: t }],
+      }),
+      encodeToolResults: (results) => toAnthropicToolResults(results),
+      step: async (state, request): Promise<AssistantTurnResult> => {
+        // The closing epilogue summary round is the one call made with no tools
+        // (runSummaryWithTimeout); answering it without text means the stub never
+        // reports a summary, and keeps `seen` a record of main-loop hops only.
+        if (request.tools === undefined) {
+          return assistantResult({
+            texts: [],
+            toolCalls: [],
+            supplierStop: "success",
+          });
+        }
+        seen.push(state.messages);
+        return assistantResult({
+          texts: [],
+          toolCalls: [],
+          supplierStop: "success",
+          thinkingBlocks: [
+            {
+              type: "thinking",
+              thinking: `Weighing option ${seen.length}.`,
+              signature: `sig_think_bound_${seen.length}`,
+            },
+          ],
+        });
+      },
+    };
+    const maxTurns = 4;
+
+    await assert.rejects(
+      run("go", {
+        adapter,
+        executor: exec,
+        registry: reg,
+        maxTurns,
+      }),
+      (err: unknown) => {
+        assert.ok(err instanceof MaxTurnsExceeded);
+        assert.equal(err.reason, "maxTurns");
+        assert.equal(err.turnsRan, maxTurns);
+        return true;
+      }
+    );
+
+    assert.equal(seen.length, maxTurns, "the budget was spent on loop steps");
+    assert.deepEqual(
+      seen.map((messages) => messages.length),
+      [1, 2, 3, 4],
+      "each thinking-only turn entered the authoritative history the next hop sees"
+    );
+    const lastHop = seen[seen.length - 1]!;
+    assert.deepEqual(
+      lastHop.map((message) => message.role),
+      ["user", "assistant", "assistant", "assistant"]
+    );
+    assert.ok(
+      lastHop
+        .slice(1)
+        .every((message) =>
+          message.content.some((block) => block.type === "thinking")
+        ),
+      "no answer-less thinking turn was dropped on the way"
+    );
   });
 });
 
@@ -2270,7 +2436,26 @@ describe("T4 onStream pass-through (D3)", () => {
       { onStream: (event) => received.push(event) }
     );
 
-    assert.deepEqual(received, expected);
+    // The stub-emitted sequence is the contract here; the harness also emits
+    // its own occupancy beats (Plan A T4), which are asserted separately below.
+    assert.deepEqual(
+      received.filter((event) => event.type !== "context_usage"),
+      expected
+    );
+    // Every occupancy beat this run published is a projection: the stub has no
+    // `countTokens` and no usage, so no measured reading is ever invented.
+    const beats = received.filter(
+      (
+        event
+      ): event is Extract<HarnessStreamEvent, { type: "context_usage" }> =>
+        event.type === "context_usage"
+    );
+    assert.equal(beats.length > 0, true, "the run published occupancy beats");
+    assert.equal(
+      beats.every((beat) => beat.phase === "projected"),
+      true,
+      "no measured reading is fabricated without a measurement"
+    );
     assert.equal(result.stopReason, "completed");
     assert.equal(result.finalText, "hello");
   });
@@ -2545,7 +2730,7 @@ describe("loop engine T3 #252: reactive compact (ADR-0013)", () => {
 
     // 12 prior messages → state.messages = 13 → reactive compactMessages trims
     // to boundary placeholder + 6 tail. Proactive does not trigger: estimate <<
-    // threshold (default gate on window 200000 is floor(0.95×)=190000; the
+    // threshold (default gate on window 200000 is floor(0.9×)=180000; the
     // explicit threshold 10000 is safer and still < window).
     const longPrior = Array.from({ length: 12 }, (_, i) =>
       makeNative({ role: "user", text: `prior-${i}` })
@@ -3085,7 +3270,7 @@ describe("loop engine manual-compact-trigger T1: 短历史 + 缺省阈值下 pro
         registry: reg,
         maxTurns: 3,
         // thresholdTokens deliberately absent → getAutoCompactThreshold uses
-        // floor(0.95 × 200000) = 190000, far above the estimate of 3 prior + 1 user.
+        // floor(0.9 × 200000) = 180000, far above the estimate of 3 prior + 1 user.
         compress: { contextWindow: 200_000, thresholdTokens: undefined },
       },
       undefined,
@@ -3762,6 +3947,37 @@ function makeSafeTool(
   });
 }
 
+/**
+ * A bash-SHAPED tool: the tool-level default says "not concurrency-safe"
+ * (most bash calls mutate the filesystem), and the PER-CALL predicate — the
+ * REAL production predicate, not a stub — decides for each call.
+ *
+ * The engine's own wave split (runToolPhase → partitionConcurrencyWaves) must
+ * consult that per-call answer. A split that reads only the static default
+ * would give every bash call a singleton wave, which is exactly what the
+ * per-call decision was introduced to change.
+ */
+function makeBashLikeTool(name: string): ToolDef {
+  return Object.freeze({
+    name,
+    description: `bash-like ${name}`,
+    inputSchema: {
+      type: "object",
+      additionalProperties: false,
+      properties: { command: { type: "string" } },
+      required: ["command"],
+    },
+    handler: (async () => `ok:${name}`) as ToolDef["handler"],
+    aci: {
+      category: "execute" as const,
+      isConcurrencySafe: false,
+      isConcurrencySafeForInput: isReadonlyBashConcurrencySafe,
+      interruptBehavior: "cancel" as const,
+      timeoutTier: "default" as const,
+    },
+  });
+}
+
 function makeUnsafeTool(name: string): ToolDef {
   return Object.freeze({
     name,
@@ -4365,6 +4581,101 @@ describe("loop engine T3 wave batching: runToolPhase 真批处理", () => {
     );
     // No batch is lost and the order follows tool_use order.
     assert.deepEqual(committedToolResults, ["a", "b"]);
+  });
+
+  it("AC51 per-call (W1): 相邻的只读 bash 调用被引擎合并为同一批 (5 → 1 wave)", async () => {
+    // The ENGINE's own split site (runToolPhase → partitionConcurrencyWaves)
+    // must use the PER-CALL answer, not the tool's static default. The tool's
+    // static default here is `false` (the bash shape), so a split that reads
+    // only `isConcurrencySafe` yields 5 singleton waves; only the per-call
+    // predicate puts the 5 read-only calls in ONE wave.
+    const tools = [makeBashLikeTool("bash")];
+    const reg = createRegistry(tools);
+    const { executor, intervals } = makeWaveRecordingExecutor();
+    const commands = ["pwd", "ls", "git status", "cat package.json", "ls -la"];
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: commands.map((command, i) => ({
+            id: `b${i}`,
+            name: "bash",
+            input: { command },
+          })),
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    // Key assertion: the engine batched all 5 read-only bash calls into ONE
+    // executeAll([5]) — not 5 executeAll([one]).
+    assert.equal(
+      intervals.length,
+      1,
+      `expected 1 wave call, got ${intervals.length}`
+    );
+    assert.equal(intervals[0]!.batchSize, 5);
+    assert.deepEqual([...intervals[0]!.ids], ["b0", "b1", "b2", "b3", "b4"]);
+    // Order preserved: tool_result block order = tool_use order.
+    const resultBlocks = result.messages[2]!.content.filter(
+      (b) => b.type === "tool_result"
+    );
+    assert.deepEqual(
+      resultBlocks.map(
+        (b) => (b as { type: "tool_result"; tool_use_id: string }).tool_use_id
+      ),
+      ["b0", "b1", "b2", "b3", "b4"]
+    );
+  });
+
+  it("AC51 per-call (W1): 变更命令不并入只读波次 (per-call 判定逐调用生效)", async () => {
+    // The discriminating counterpart: the per-call answer is consulted PER
+    // CALL, so a mutating call breaks the wave and its read-only neighbours
+    // on either side do NOT merge across it.
+    const tools = [makeBashLikeTool("bash")];
+    const reg = createRegistry(tools);
+    const { executor, intervals } = makeWaveRecordingExecutor();
+    const model = createStubModel({
+      responses: [
+        assistantResult({
+          texts: [],
+          toolCalls: [
+            { id: "r1", name: "bash", input: { command: "pwd" } },
+            { id: "r2", name: "bash", input: { command: "ls" } },
+            { id: "w", name: "bash", input: { command: "touch newfile" } },
+            { id: "r3", name: "bash", input: { command: "git status" } },
+            { id: "r4", name: "bash", input: { command: "ls -la" } },
+          ],
+        }),
+        assistantResult({
+          texts: ["done"],
+          toolCalls: [],
+          supplierStop: "success",
+        }),
+      ],
+    });
+    const { result } = await run("go", {
+      adapter: model,
+      executor,
+      registry: reg,
+      maxTurns: 5,
+    });
+    assert.equal(result.stopReason, "completed");
+    // 3 waves: [r1,r2] / [w] (singleton — the mutating call runs alone) / [r3,r4].
+    assert.equal(intervals.length, 3);
+    assert.deepEqual([...intervals[0]!.ids], ["r1", "r2"]);
+    assert.deepEqual([...intervals[1]!.ids], ["w"]);
+    assert.deepEqual([...intervals[2]!.ids], ["r3", "r4"]);
   });
 });
 

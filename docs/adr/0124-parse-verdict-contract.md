@@ -22,6 +22,8 @@ ADR-0123 定了统一解析地基（tree-sitter 原生绑定、同步 `parseForS
 
 **前置否决（分档之前）**：命令含**解析分歧字符**——控制字符（豁免 `\t\n\r`）、Unicode 空白/零宽（NBSP、ZWSP、BOM 等）、反斜杠+空白——连解析都不做，直接**硬拒**，reason 写明字符类别。依据：这些形状使"分析器所见 token ≠ bash 所见 token"，契约的信任基础失效；零宽字符人眼不可见，ask 等于让人盲签。清单住 `shell-parse.ts`、登记进 spec，每发现一个新分歧登记一条（`echo\ test` 类合法惯用法的误拒由 reason 提示改写为引号形式）。
 
+> **2026-10-04 修正（不删除上文）：** 上句列出的「反斜杠+空白」作为**无条件成员**的读法，连同括号里的 `echo\ test` 改写提示，**已被下方 Amendment (2026-10-04) 收窄取代**。控制字符（豁免 `\t\n\r`）与 Unicode 空白/零宽两项成员不变。新名册是「按词边界、引号语境与转义奇偶逐点判定」，不是一刀切；下文原句保留作该条被取代前的历史契约。
+
 ## Consequences
 
 **正面 / Applied:**
@@ -33,7 +35,7 @@ ADR-0123 定了统一解析地基（tree-sitter 原生绑定、同步 `parseForS
 **负面 / Trade-offs:**
 
 - full_auto + 未知句式 = 自动放行（与今天相同，未收紧）；更严选项（未知 → 硬拒）被明确放弃，代价是升级期误拒。
-- 反斜杠+空白入前置否决清单，`echo\ test` 被拒（reason 给改写提示）。
+- 反斜杠+空白入前置否决清单，`echo\ test` 被拒（reason 给改写提示）。**（2026-10-04 修正：此条代价声明描述的是被取代前的名册——`echo\ test` 现属受支持拼写，改写提示也已移除。见下方 Amendment (2026-10-04)。）**
 - malformed / over-cap 比现状更严（今天落正常流程）；误拒成本低：bash 自己多半报语法错、模型可自纠。
 - 旧扫描器必须永久保留为降级层（预答 usp-5"旧扫描器去留"的一半）；红字警示的呈现形态（sticky notice 还是一次性）归 spec。
 
@@ -63,3 +65,111 @@ inside `verdictOfTree` — before any wall reads the tree — walls see an
 Evidence: SC-S3-1 execution record in `specs/hard-wall-ast-migration.md`;
 `tests/harness/permission/bare-metachar-hard-wall.test.ts` and
 `tests/harness/permission/shell-parse.test.ts`.
+
+## Amendment (2026-10-04): the backslash-plus-whitespace roster, narrowed by measurement
+
+This amendment **supersedes** the Decision section's blanket membership of
+"反斜杠+空白" in the pre-parse roster (the clause reconciled above at
+Decision item 「前置否决字符」 and its Consequences trade-off bullet), and it
+**removes** the rewrite compensation those two sentences granted
+(`echo\ test`-shaped false positives were answered with a rewrite hint to the
+quoted form). It narrows one roster entry. Everything else in this ADR —
+the six-verdict set, the destinations in Decision items 1–6, the
+`parser-unavailable` degrade seam as the **only** degrade path, and the
+terminal-`UNAVAILABLE` state — is unchanged, and ADR-0127's Decisions 1–2
+remain as recorded at the top of this file.
+
+**The amendment is measurement-driven, not preference-driven.** The pinned
+parser-versus-real-Bash table in
+`docs/evidence/1188-backslash-whitespace-investigation.md:43-54` shows that
+`\[ \t\n\r\f\v]` conflates shapes with **different** Bash behavior: unquoted
+`a\ b` is one argument `a b` (facade agrees), and separator `a \` LF ` b` is
+two arguments `a`, `b` (facade agrees), while mid-word `a\` LF `b` is the
+single argument `ab` (facade reports two words), `"x\` LF `y"` is `xy`
+(facade's static value still holds backslash and LF), and unquoted
+backslash+TAB is one argument containing a TAB (facade reports two words).
+A predicate that refuses all five refuses two proven agreements to catch
+three measured disagreements. The unavailable-parser counterexample at
+`docs/evidence/1188-backslash-whitespace-investigation.md:58-67` is the
+second measurement: the legacy scan answers `null` for `rm ` + backslash +
+LF + ` -rf /tmp/x` while denying plain `rm -rf /tmp/x`, so a newly supported
+spelling must not reach the degrade path.
+
+### Supported (admitted to ordinary permission flow)
+
+Two shapes, and both only under the stated conditions:
+
+1. **backslash + U+0020** inside an ordinary unquoted argv word, and inside a
+   standalone single- or double-quoted word, when the word's static
+   `WordFact.value` is complete **and** the word is a maximal lexical word —
+   the characters immediately before and after its span are word separators
+   or string bounds.
+2. **unquoted backslash + LF used as a word separator**, when the character
+   before the backslash run is U+0020, the character after the LF is U+0020,
+   the site is inside no quoted span and no word span, and the LF is absent
+   from `bareNewlineOffsets` after the fact-layer parity fix below.
+
+An `ok` parse does not by itself grant execution: a supported spelling
+reaches the same permission flow as its unescaped equivalent and is judged
+by the existing rules there.
+
+### Retained as `vetoed` / class `backslash-whitespace` (hard deny, not overridable)
+
+Unquoted backslash+TAB; backslash+CR and CRLF; mid-word LF continuations;
+double-quoted LF continuations; **any candidate whose parse is not `ok`**;
+**any candidate whose affected lexical site has an incomplete static value**
+(a missing `WordFact.value` is not evidence of agreement, and the unchanged
+AST without `ERROR` does not establish completeness); and **any site whose
+backslash run has EVEN parity** — there the whitespace is not escaped by that
+run, so the shape is unproven and keeps today's denial.
+
+**Class precedence is pinned, not incidental.** Backslash+FF and
+backslash+VT stay denied, but they return class `control-character`, because
+`control-character` is ordered ahead of `backslash-whitespace` and owns U+000C
+and U+000B (`src/harness/permission/shell-parse.ts:538`, order at
+`src/harness/permission/shell-parse.ts:635-641`). The roster therefore does
+not require every retained backslash shape to answer `backslash-whitespace`;
+requiring it would contradict the ordered rule table.
+
+### The parser-unavailable qualification
+
+The exemptions are gated on an available parse foundation. When the binding
+never loaded, every newly supported spelling returns `vetoed` /
+`backslash-whitespace` — it does **not** fall through to the legacy
+allowance, because the measured counterexample shows that route misses
+split destructive flags. After READY, a runtime fault remains `aborted`. The
+terminal `UNAVAILABLE` state, its one-time warning, and the existing legacy
+route for commands outside this exemption surface are unchanged.
+
+### The rewrite compensation is removed
+
+The model-visible retained reason names the character class and the retained
+fidelity limitation, and **suggests no reconstructed command**. The former
+`quotedRewrite` helper produced a rewrite that could split one argument or
+turn a pipeline or redirection into literal text
+(`docs/evidence/1188-backslash-whitespace-investigation.md:16`), so it
+suggested a command that was not the command being denied. A bounded
+limitation statement replaces it; a general shell rewriter is not required.
+
+### Fact-layer consequence
+
+`bareNewlineOffsets` / `bareCarriageReturnOffsets` are escape-parity aware: a
+`\n` / `\r` preceded by an odd-parity backslash run is an escaped line break,
+not a bare statement separator, and is therefore absent from both lists
+(`src/harness/permission/shell-parse.ts:1878`). The comment that previously
+assumed escaped line breaks never reach that scan (`…:1673-1677` at
+`2523c1497`) has been replaced by the parity rule.
+
+Unchanged by this amendment: the verdict union, `VetoClass` identity, the
+synchronous single entry, the 64 KiB byte cap, exact-original-command cache
+keys, source spans, terminal binding-load failure, and the
+parser-unavailable-only legacy fallback. No new permission destination, no
+new domain term, and no dependency, lockfile, or settings change.
+
+Evidence: `docs/evidence/1188-backslash-whitespace-investigation.md:43-54`
+(pinned parser-versus-real-Bash table), `:58-67` (unavailable-parser
+counterexample), `:73-79` (rejected shortcuts, including the recorded
+`bash -n`-is-not-a-fidelity-oracle result that keeps mid-word denied);
+contract and criteria in `specs/backslash-whitespace-veto-repair.md`; glossary
+alignment at `docs/CONTEXT.md` (解析分歧字符); consumer and fact
+documentation at `docs/shell-parse-non-ok-consumer-contracts.md`.

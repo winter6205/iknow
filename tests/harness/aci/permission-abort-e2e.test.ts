@@ -87,7 +87,13 @@ describe("ACI permission gate — caller abort", () => {
     assert.equal(receivedSignal, controller.signal);
     assert.equal(result.kind, "execution_failed");
     if (result.kind === "execution_failed") {
-      assert.equal(result.message, "cancelled");
+      // ADR-0147 R3: the question was shown and the caller aborted it, so the
+      // ending is `cancelled`; no sibling call had started.
+      assert.equal(
+        result.message,
+        "cancelled\n" +
+          "[approval] held for user approval (cancelled); calls that ran in this wave meanwhile under the wave-start verdict: none"
+      );
     }
 
     lateApprove();
@@ -155,7 +161,13 @@ describe("ACI permission gate — caller abort", () => {
     assert.equal(handlerCalls, 0, "late approval must not reach the handler");
     assert.equal(result.kind, "execution_failed");
     if (result.kind === "execution_failed") {
-      assert.equal(result.message, "cancelled");
+      // ADR-0147 R3: the shown question ended cancelled (caller abort wins over
+      // the late approval); no sibling call had started.
+      assert.equal(
+        result.message,
+        "cancelled\n" +
+          "[approval] held for user approval (cancelled); calls that ran in this wave meanwhile under the wave-start verdict: none"
+      );
     }
   });
 

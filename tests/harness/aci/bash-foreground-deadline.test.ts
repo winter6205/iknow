@@ -50,10 +50,20 @@ import type { Executor, ToolCall } from "../../../src/harness/tools/types.ts";
 import type { CleanupEvidence } from "../../../src/harness/sandbox/cleanup-result.ts";
 import type { BwrapFence } from "../../../src/harness/sandbox/bwrap.ts";
 import { runInSandbox } from "../../../src/harness/sandbox/runner.ts";
-import { waitForPidFile } from "./tools/spawn-test-utils.ts";
+import {
+  uniqueProcessMarker,
+  waitForMarkerGone,
+  waitForMarkerProcess,
+} from "./tools/spawn-test-utils.ts";
 
 const scratchPaths: string[] = [];
 const liveGroups: number[] = [];
+/**
+ * Host pids of fenced descendants located by argv marker. Kept apart from
+ * `liveGroups` because that list is signalled as process GROUPS (`kill(-pgid)`)
+ * and these are single pids resolved by pgrep.
+ */
+const liveFenceStrays: number[] = [];
 
 async function makeScratch(prefix: string): Promise<string> {
   const p = await mkdtemp(join(tmpdir(), prefix));
@@ -62,6 +72,13 @@ async function makeScratch(prefix: string): Promise<string> {
 }
 
 afterEach(async () => {
+  for (const pid of liveFenceStrays.splice(0)) {
+    try {
+      process.kill(pid, "SIGKILL");
+    } catch {
+      /* already gone — the assertion under test passed */
+    }
+  }
   for (const pgid of liveGroups.splice(0)) {
     try {
       process.kill(-pgid, "SIGKILL");
@@ -181,7 +198,10 @@ describe("foreground bash deadline — invalid input fails before launch", () =>
       // (whose union TS widens to `unknown` and loses the narrowing below).
       let thrown: unknown;
       try {
-        await tool.handler({ command: "node never-run.cjs", timeout_ms: value });
+        await tool.handler({
+          command: "node never-run.cjs",
+          timeout_ms: value,
+        });
         thrown = undefined;
       } catch (err) {
         thrown = err;
@@ -417,16 +437,19 @@ describe("foreground bash deadline — real process", () => {
     "a SIGTERM-immune descendant does not survive the deadline",
     async () => {
       const cwd = await makeScratch("bash-deadline-escapee-");
-      const descFile = join(cwd, "desc.pid");
       const tool = createBashTool(cwd);
+      // ADR-0142: the descendant is located by a host-visible argv marker, not
+      // by the pid it writes — inside the fence a pid is namespace-local, so a
+      // host probe of it would answer ESRCH for the wrong reason.
+      const marker = uniqueProcessMarker("deadline-escapee");
 
       const execution = tool.handler({
-        // Installs the SIGTERM handler before dropping the pid file, so the
-        // pid file doubles as the "handler installed" barrier; holds no pipe
-        // and the leader stays in `wait`, so the deadline always lands while
-        // the descendant is genuinely alive.
+        // Installs the SIGTERM handler before the marker becomes visible; holds
+        // no pipe and the leader stays in `wait`, so the deadline always lands
+        // while the descendant is genuinely alive. An ignored signal survives
+        // `exec`, so the renamed process is genuinely TERM-immune.
         command: [
-          'node -e \'process.on("SIGTERM",()=>{});require("fs").writeFileSync("desc.pid",String(process.pid));setInterval(()=>{},1000)\' > /dev/null 2>&1 &',
+          `bash -c 'trap "" TERM; exec -a ${marker} sleep 300' > /dev/null 2>&1 &`,
           "wait",
         ].join("\n"),
         timeout_ms: 1_500,
@@ -434,9 +457,10 @@ describe("foreground bash deadline — real process", () => {
       // Observed WHILE the call is still in flight: a "was alive, now gone"
       // proof needs both halves, and the deadline ends the call itself, so
       // the liveness half can only be taken before it returns.
-      const descendantPid = await waitForPidFile(descFile);
-      assert.doesNotThrow(
-        () => process.kill(descendantPid, 0),
+      const descendantPids = await waitForMarkerProcess(marker);
+      liveFenceStrays.push(...descendantPids);
+      assert.ok(
+        descendantPids.length > 0,
         "the descendant must be alive before the deadline lands"
       );
       const payload = parseBashPayload(await execution);
@@ -448,12 +472,11 @@ describe("foreground bash deadline — real process", () => {
         // Confirmed means the whole group drained, not just the leader: the
         // SIGTERM-immune descendant is inside it.
         assert.equal(groupGone(cleanup.pgid), true);
-        assert.equal(
-          groupGone(descendantPid),
-          true,
-          `descendant ${descendantPid} survived the deadline`
-        );
       }
+      assert.ok(
+        await waitForMarkerGone(marker),
+        `the SIGTERM-immune descendant ${marker} survived the deadline`
+      );
     },
     25_000
   );
@@ -515,7 +538,13 @@ describe("foreground bash deadline — executor outcome envelope", () => {
       assert.equal(result?.kind, "execution_failed");
       if (result?.kind !== "execution_failed") return;
       // The pre-existing contract is preserved byte-for-byte...
-      assert.equal(result.message, "timeout");
+      // (ADR-0147 R3 appends the approval note: single-call wave, approved,
+      // no sibling had started — the ending text itself is unchanged.)
+      assert.equal(
+        result.message,
+        "timeout\n" +
+          "[approval] held for user approval (approved); calls that ran in this wave meanwhile under the wave-start verdict: none"
+      );
       // ...and the structured evidence is additive, never a new stop reason.
       const cleanup = result.cleanup;
       assert.equal(cleanup?.state, "confirmed_stopped");
@@ -570,7 +599,12 @@ describe("foreground bash deadline — executor outcome envelope", () => {
       if (result?.kind !== "execution_failed") return;
       // A caller cancel and a deadline expiry are different outcomes, and the
       // 600 s deadline could not be what ended a call cancelled at 1.5 s.
-      assert.equal(result.message, "cancelled");
+      // ADR-0147 R3 appends the approval note (approved, no sibling started).
+      assert.equal(
+        result.message,
+        "cancelled\n" +
+          "[approval] held for user approval (approved); calls that ran in this wave meanwhile under the wave-start verdict: none"
+      );
       assert.notEqual(result.message, "timeout");
     },
     25_000
@@ -608,7 +642,13 @@ describe("foreground bash deadline — executor outcome envelope", () => {
 
       assert.equal(quickResult?.kind, "execution_failed");
       if (quickResult?.kind === "execution_failed") {
-        assert.equal(quickResult.message, "timeout");
+        // ADR-0147 R3: bash is not concurrency-safe, so this expiry is its own
+        // wave — the note names no sibling call.
+        assert.equal(
+          quickResult.message,
+          "timeout\n" +
+            "[approval] held for user approval (approved); calls that ran in this wave meanwhile under the wave-start verdict: none"
+        );
         assert.equal(quickResult.toolUseId, "u-quick");
         // The evidence must be present and must make a claim: a teardown
         // ran, so it is either a confirmed stop or an explicitly
@@ -639,7 +679,9 @@ describe("foreground bash deadline — executor outcome envelope", () => {
         assert.equal(text?.type, "text");
         // The executor already unwrapped bash's `{ output, meta }` envelope, so
         // the text block IS the bash JSON — no second unwrap here.
-        const payload = JSON.parse((text as { text: string }).text) as BashPayload;
+        const payload = JSON.parse(
+          (text as { text: string }).text
+        ) as BashPayload;
         assert.equal(payload.stdout, "survived");
         // A call whose own deadline never expired carries no deadline fields,
         // so its payload is byte-identical to the pre-ADR-0134 shape.
@@ -673,11 +715,20 @@ describe("foreground bash deadline — executor outcome envelope", () => {
       ]);
       assert.equal(results[0]?.kind, "execution_failed");
       if (results[0]?.kind === "execution_failed") {
-        assert.equal(results[0].message, "timeout");
+        // ADR-0147 R3: single-call wave, approved question, no sibling started.
+        assert.equal(
+          results[0].message,
+          "timeout\n" +
+            "[approval] held for user approval (approved); calls that ran in this wave meanwhile under the wave-start verdict: none"
+        );
       }
 
       const flags = computeToolStopFlags({ results, signal: undefined });
-      assert.equal(flags.timedOut, false, "a per-call timeout must not time out the turn");
+      assert.equal(
+        flags.timedOut,
+        false,
+        "a per-call timeout must not time out the turn"
+      );
       assert.equal(flags.cancelled, false, "a timeout is not a cancellation");
     },
     30_000

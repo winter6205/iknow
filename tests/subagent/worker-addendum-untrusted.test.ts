@@ -215,6 +215,7 @@ describe("runWorkerOnce — 对抗句只在 user role 消息 (ADR-0112 T4 accept
       },
       supplierStop: "success",
       needsTools: false,
+      hasThinking: false,
       isEmptyFinalResponse: false,
     },
   ];

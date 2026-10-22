@@ -19,11 +19,26 @@ export {
   createEgressSession,
   EgressRelayUnavailableError,
   wrapCommandWithInnerBridge,
+  type EgressCallEndpoint,
+  type EgressCallPolicy,
+  type EgressEndpointDeps,
   type EgressFenceSpec,
+  type EgressMintOptions,
   type EgressPolicyInput,
+  type EgressProfile,
+  type EgressProfileOptions,
   type EgressSession,
   type EgressSessionOptions,
 } from "./session.js";
+
+// The session-resident egress agent (plan T4) + the per-call endpoint it
+// hands out (plan T5) — the new public surface of the egress domain.
+export {
+  createEgressAgent,
+  EgressAgentDisposedError,
+  type EgressAgent,
+  type EgressAgentOptions,
+} from "./agent.js";
 
 export {
   egressRelayPathsFor,

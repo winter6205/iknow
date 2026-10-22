@@ -40,7 +40,7 @@
  * key treated as undefined / skip the file), never throw — hand-written role
  * files must not break the spawn assembly chain. A frontmatter block that is
  * not valid YAML degrades block-atomically (every field dropped + one warn per
- * rejected key, ADR-0123), never line-by-line.
+ * rejected key, ADR-0144), never line-by-line.
  */
 import { basename, join, resolve } from "node:path";
 import { readdirSync, readFileSync } from "node:fs";

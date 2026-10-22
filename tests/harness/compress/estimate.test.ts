@@ -8,8 +8,45 @@ import {
   evaluateCompactTrigger,
   getAutoCompactThreshold,
 } from "../../../src/harness/compress/index.ts";
+import { truncateTailForSummary } from "../../../src/harness/loop-engine.ts";
 import { TOKEN_ESTIMATION_PADDING } from "../../../src/harness/compress/constant.ts";
 import type { AnthropicNativeMessage } from "../../../src/harness/model-adapter/types.ts";
+
+/** PNG signature + IHDR carrying the dimensions (24 bytes; the image token
+ *  estimator reads only the header). */
+function pngBase64(width: number, height: number): string {
+  return Buffer.from([
+    0x89,
+    0x50,
+    0x4e,
+    0x47,
+    0x0d,
+    0x0a,
+    0x1a,
+    0x0a,
+    0,
+    0,
+    0,
+    13,
+    0x49,
+    0x48,
+    0x44,
+    0x52,
+    (width >>> 24) & 0xff,
+    (width >>> 16) & 0xff,
+    (width >>> 8) & 0xff,
+    width & 0xff,
+    (height >>> 24) & 0xff,
+    (height >>> 16) & 0xff,
+    (height >>> 8) & 0xff,
+    height & 0xff,
+    8,
+    6,
+    0,
+    0,
+    0,
+  ]).toString("base64");
+}
 
 describe("estimateTokens", () => {
   it("空串 → 0", () => assert.equal(estimateTokens(""), 0));
@@ -287,5 +324,105 @@ describe("estimateMessagesTokens", () => {
     const a = estimateMessagesTokens(messages);
     const b = estimateMessagesTokens(messages);
     assert.equal(a, b);
+  });
+
+  it("summary tail: an image-bearing tail now crosses the 8K budget (ADR-0011)", () => {
+    // `truncateTailForSummary` (loop-engine.ts, SUMMARY_TAIL_TOKEN_BUDGET =
+    // 8_000) uses the whole tail at or below the budget and cuts it above.
+    // Two ceiling-priced nested images were 1 token each before this change,
+    // so the epilogue summary saw an over-budget tail whole. The pixel
+    // estimate is the real cost, so the cut now fires.
+    const bigPng = pngBase64(4000, 4000);
+    const tail: AnthropicNativeMessage[] = [
+      {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "img-1",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: bigPng,
+                },
+              },
+            ],
+          },
+          {
+            type: "tool_result",
+            tool_use_id: "img-2",
+            content: [
+              {
+                type: "image",
+                source: {
+                  type: "base64",
+                  media_type: "image/png",
+                  data: bigPng,
+                },
+              },
+            ],
+          },
+        ],
+      },
+    ];
+
+    assert.ok(
+      estimateMessagesTokens(tail) > 8_000,
+      "an image-bearing tail must be over the summary budget so it is cut"
+    );
+  });
+
+  it("truncateTailForSummary actually cuts an image-bearing tail", () => {
+    // Plan A T1: the image-bearing tail must not merely *estimate* over the
+    // 8K summary budget — the helper that consumes it must cut. A regression
+    // to base64-length or one-token image pricing leaves the whole tail under
+    // the budget, so the helper returns all 30 messages and this fails.
+    const bigPng = pngBase64(4000, 4000);
+    const imageMessage: AnthropicNativeMessage = {
+      role: "user",
+      content: [
+        {
+          type: "tool_result",
+          tool_use_id: "img-1",
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: bigPng },
+            },
+          ],
+        },
+        {
+          type: "tool_result",
+          tool_use_id: "img-2",
+          content: [
+            {
+              type: "image",
+              source: { type: "base64", media_type: "image/png", data: bigPng },
+            },
+          ],
+        },
+      ],
+    };
+    const tail: AnthropicNativeMessage[] = [
+      ...Array.from({ length: 29 }, (_, i) => ({
+        role: "user" as const,
+        content: [{ type: "text" as const, text: `m${i}` }],
+      })),
+      imageMessage,
+    ];
+
+    assert.ok(
+      estimateMessagesTokens(tail) > 8_000,
+      "前提：图片尾必须超过 summary 预算"
+    );
+    const cut = truncateTailForSummary(tail);
+    assert.ok(
+      cut.length < tail.length,
+      `图片尾必须被截断，实际保留 ${cut.length} / ${tail.length} 条`
+    );
+    assert.ok(cut.length > 0, "截断后仍保留摘要输入");
   });
 });

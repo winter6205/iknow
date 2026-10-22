@@ -605,9 +605,24 @@ const nextCreateEgressImpl: {
   current: () => Promise<unknown>;
 } = { current: async () => undefined };
 
-vi.mock("../../../src/harness/sandbox/egress/session.js", () => ({
-  createEgressSession: async (_opts: unknown) => nextCreateEgressImpl.current(),
-}));
+// Only `createEgressSession` is faked here; the rest of the module stays real
+// (the `adaptEgressSessionToEndpoint` projection the manager uses is the
+// module's own). A whole-module mock would leave the projection undefined and
+// the manager would degrade to the fail-closed offline path.
+vi.mock(
+  "../../../src/harness/sandbox/egress/session.js",
+  async (importOriginal) => {
+    const actual =
+      await importOriginal<
+        typeof import("../../../src/harness/sandbox/egress/session.js")
+      >();
+    return {
+      ...actual,
+      createEgressSession: async (_opts: unknown) =>
+        nextCreateEgressImpl.current(),
+    };
+  }
+);
 
 describe("BackgroundTaskManager egress 缝装配 (ADR-0097 / T7)", () => {
   it("egressPolicy 缺省 → 不起 session,fence 不带 egress 缝", async () => {

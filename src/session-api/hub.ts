@@ -49,7 +49,14 @@ import {
   type AutoMemoryHook,
   type OverlayPrefetchFn,
 } from "../harness/memory/index.js";
-import { drainPendingSubagents } from "../harness/subagent/host-drain.js";
+import {
+  claimPendingSubagents,
+  type ClaimedSubagentDrain,
+} from "../harness/subagent/host-drain.js";
+import {
+  createDeliveryLatchSet,
+  notifyPersisted,
+} from "../harness/subagent/digest-ack.js";
 import { stampHostInjected } from "../harness/model-adapter/outbound-projection.js";
 import {
   createSubagentWake,
@@ -63,6 +70,7 @@ import type {
 } from "../harness/subagent/manager.js";
 import {
   createSubagentManagerRegistry,
+  type SubagentManagerDrainView,
   type SubagentManagerReadView,
   type SubagentManagerRegistry,
 } from "../harness/subagent/manager-registry.js";
@@ -96,7 +104,7 @@ import type {
   FsIsolationMode,
   FsModeContext,
 } from "../harness/sandbox/fs-mode.js";
-import type { YoloContext } from "../harness/sandbox/yolo.js";
+import type { FenceRetirementReader } from "../harness/sandbox/yolo.js";
 import {
   seedRestoredGraphNodes,
   type LiveGraphLedgerHost,
@@ -118,8 +126,16 @@ import { wrapWithViolationHook } from "../harness/sandbox/violation-executor.js"
 import {
   createOutputMask,
   currentSecretValues,
+  setActiveExtraSecrets,
+  clearActiveExtraSecrets,
 } from "../harness/sandbox/index.js";
-import { loadIknowEnv, type IknowEnv, type LlmEnv } from "../config/env.js";
+import {
+  isLlmProviderConfigError,
+  loadIknowEnv,
+  resolveLlmEnvForRoute,
+  type IknowEnv,
+  type LlmEnv,
+} from "../config/env.js";
 import type { IknowSettings } from "../config/settings.js";
 import {
   MAX_WORKSPACE_ROOT_CHARS,
@@ -135,7 +151,10 @@ import {
   MEMORY_DIR_NAME,
   TASKS_DIR_NAME,
 } from "../shared/session-tree-names.js";
-import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
+import {
+  LLM_API_KEY_MISSING_MESSAGE,
+  LLM_MODEL_MISSING_MESSAGE,
+} from "../config/messages.js";
 import {
   MaxTurnsExceeded,
   McpLifecycleError,
@@ -143,6 +162,7 @@ import {
   unwrapRuntimeStateCause,
   withApiError,
 } from "../harness/errors.js";
+import { safeEmitStream } from "../harness/stream.js";
 import { basename, join } from "node:path";
 import { homedir } from "node:os";
 import type { AciCatalog } from "../harness/aci/types.js";
@@ -180,6 +200,8 @@ import {
   shouldPersistCheckpoint,
   toInterruptReason,
   validateGoalText,
+  type CheckpointRecord,
+  type InterruptReason,
   type RecoveryInProgressLabel,
 } from "./store/index.js";
 // The host-side session-open contract (ADR-0136 §4): one live-root decision and
@@ -191,7 +213,7 @@ import {
   type SessionOpenRecovery,
 } from "./recovery-host.js";
 // Deep import: internal persist-rule helper, deliberately not on the store barrel.
-import { persistedLastUsage } from "./store/schema.js";
+import { isValidModelRoute, persistedLastUsage } from "./store/schema.js";
 import { createNativeStatePort } from "./store/native-state-port-host.js";
 import { createRuntimePersistenceBinder } from "./store/runtime-persistence-host.js";
 import type {
@@ -262,6 +284,8 @@ import type {
   SkillSummaryDto,
   TurnAnswerDto,
   TurnDto,
+  TurnOutcomeView,
+  UserContentBlock,
   VerifyAnswerView,
 } from "./contract.js";
 import { MAX_MESSAGE_CHARS, turnOutcomeFields } from "./contract.js";
@@ -361,6 +385,33 @@ export function parseGoalCommand(text: string): string | null {
   const marker = "## GOAL:";
   if (!trimmed.startsWith(marker)) return null;
   return trimmed.slice(marker.length).trim();
+}
+
+/**
+ * A model route id (`provider/model`) or undefined (ADR-0145).
+ *
+ * The session file's `model` field and the hub's route map carry route ids
+ * only: a bare model name owns no route — the file schema rejects it, and
+ * `resolveLlmEnvForRoute` never resolves one. The gate is the schema's own
+ * (`isValidModelRoute`), so the file and the runtime map cannot drift.
+ */
+function routeIdOf(model: string | undefined): string | undefined {
+  const trimmed = model?.trim();
+  if (trimmed === undefined || trimmed === "") return undefined;
+  return isValidModelRoute(trimmed) ? trimmed : undefined;
+}
+
+/**
+ * "This hub cannot name a default tier" — the only two failures the
+ * default-route read absorbs: a broken provider config (the typed
+ * `LlmProviderConfigError`) and an unset `settings.llm.model`
+ * (`LLM_MODEL_MISSING_MESSAGE`). Every other failure propagates: a bug in the
+ * host's `envProvider` must not silently degrade a routing decision to the
+ * ambient env — the file's own rule is "never falls back to the default".
+ */
+function isAbsentDefaultTier(err: unknown): boolean {
+  if (isLlmProviderConfigError(err)) return true;
+  return err instanceof Error && err.message === LLM_MODEL_MISSING_MESSAGE;
 }
 
 /**
@@ -727,16 +778,46 @@ function builtBackgroundManagerOption(
  * ADR-0136 §3: the per-turn persistence sink for one conversation. An
  * unbindable session (blank id) omits the key, which the engine reads as "no
  * persistence" — the same no-op path a host that wired none takes.
+ *
+ * ADR-0150: `observe` sees the messages of every publication that actually
+ * WROTE, so the run's digest latch can acknowledge the write that carried the
+ * claimed digest. A publication the host skipped (no anchor yet, nothing to
+ * publish) carried nothing, so it observes nothing: acknowledging on a skip
+ * would drop the result without ever delivering it.
  */
 function persistenceSinkOption(
   binder: RuntimePersistenceBinder<NativeStateMessage>,
-  conversationId: string
+  conversationId: string,
+  observe?: (messages: ReadonlyArray<NativeStateMessage>) => void
 ): {
   readonly runtimePersistence?: RuntimePersistenceSink<NativeStateMessage>;
 } {
   const sink = binder.bind(conversationId);
   if (sink === undefined) return {};
-  return { runtimePersistence: sink };
+  if (observe === undefined) return { runtimePersistence: sink };
+  return {
+    runtimePersistence: {
+      publishSavedState: async (request) => {
+        const written = await sink.publishSavedState(request);
+        if (written) observe(request.messages);
+        return written;
+      },
+      appendOperationFact: (fact) => sink.appendOperationFact(fact),
+    },
+  };
+}
+
+/**
+ * ADR-0150: the drain one turn delivers. A pre-claimed drain (the wake gate)
+ * is used as it is; otherwise the turn claims the undelivered generations
+ * itself. The claim is what makes delivery exactly-once.
+ */
+async function takeClaimedDrain(
+  view: SubagentManagerDrainView,
+  conversationId: string,
+  preclaim: ClaimedSubagentDrain | undefined
+): Promise<ClaimedSubagentDrain> {
+  return preclaim ?? (await claimPendingSubagents(view, { conversationId }));
 }
 
 function projectInterruptionItem(
@@ -868,6 +949,144 @@ function outcomeAnchorId(
   const ids = outcomeEvidence?.messageEventIds;
   if (ids === undefined || ids.length === 0) return undefined;
   return ids[Math.min(sliceEnd - 1, ids.length - 1)];
+}
+
+/** One accepted user input on the commit path: the model-visible text plus,
+ *  when the caller submitted a payload, the ordered blocks that text came from. */
+type UserCommitInput = {
+  readonly text: string;
+  readonly content?: readonly UserContentBlock[];
+};
+
+/** An absent or empty block list is not a payload: the turn then takes the
+ *  text-only path, byte-identical to a caller that never heard of blocks. */
+function normalizeUserContent(
+  content: readonly UserContentBlock[] | undefined
+): readonly UserContentBlock[] | undefined {
+  return content !== undefined && content.length > 0 ? content : undefined;
+}
+
+/** The block payload accepted by one turn, or `undefined` for the text-only
+ *  path. A silent host wake carries no accepted input, so it never owns a
+ *  payload.
+ *
+ *  A `## GOAL:` turn runs the PARSED directive body as `query` and re-pins the
+ *  session goal, while a block payload is committed verbatim. A payload
+ *  alongside a goal directive would therefore persist the raw `## GOAL: ` prefix
+ *  into the accepted message (with the memory advisory spliced in front) and
+ *  diverge from the text-only path. The two inputs describe the accepted content
+ *  differently, so reject the combination rather than silently pick one
+ *  representation. */
+function acceptUserContent(opts: {
+  readonly content?: readonly UserContentBlock[];
+  readonly silent: boolean;
+  readonly goalDirective: string | null;
+}): readonly UserContentBlock[] | undefined {
+  const userContent = opts.silent
+    ? undefined
+    : normalizeUserContent(opts.content);
+  if (userContent !== undefined && opts.goalDirective !== null) {
+    throw new ValidationError(
+      "content blocks cannot accompany a ## GOAL: directive",
+      { field: "content" }
+    );
+  }
+  return userContent;
+}
+
+/** Code units of the payload's text blocks, in block order — the quantity the
+ *  user-input cap measures. Image payloads contribute nothing: their size is
+ *  bounded by the store's own 1 MiB image tier, not by this cap. */
+function userContentText(content: ReadonlyArray<UserContentBlock>): string {
+  return content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("");
+}
+
+function hasImageBlock(content: ReadonlyArray<UserContentBlock>): boolean {
+  return content.some((block) => block.type === "image");
+}
+
+/** Single source for the user-input cap rejection, thrown by both admission
+ *  paths (`validateText` and the content-block guard in `validateUserInput`)
+ *  so the message and details shape cannot drift between them. `length` is
+ *  the TRIMMED code units: the content path measured `userText.trim().length`
+ *  and `validateText` measured `query.length` where `query = text.trim()` —
+ *  the same quantity, so trimming here keeps both observable errors verbatim. */
+function inputTooLongError(text: string): ValidationError {
+  return new ValidationError(
+    `message text exceeds max length ${MAX_MESSAGE_CHARS}`,
+    { field: "text", max: MAX_MESSAGE_CHARS, length: text.trim().length }
+  );
+}
+
+/**
+ * Secret masking for a block payload: text blocks only.
+ *
+ * WHY the image payload is skipped: `source.data` is a base64 run, and one of
+ * the recognition patterns is `sk-[A-Za-z0-9_-]{20,}` — a shape a long base64
+ * payload hits by construction. Running the text transform over it would write
+ * a `<<<SECRET_N>>>` placeholder into the attachment before it is ever
+ * persisted, i.e. the transcript would corrupt the bytes it exists to keep.
+ */
+function maskUserContent(
+  content: ReadonlyArray<UserContentBlock>,
+  deps: LoopEngineDeps
+): UserContentBlock[] {
+  return content.map((block) =>
+    block.type === "text"
+      ? { type: "text", text: maskUserText(block.text, deps) }
+      : block
+  );
+}
+
+function maskUserText(text: string, deps: LoopEngineDeps): string {
+  if (deps.secretsMode === "block" || deps.secretRegistry === undefined) {
+    return text;
+  }
+  return recognize(text, deps.secretRegistry).replaced;
+}
+
+/** The adapter owns native message construction; a host whose adapter cannot
+ *  encode a block payload must fail here rather than fall back to
+ *  `encodeUserText`, which would persist the text and drop the attachment. */
+function encodeUserCommit(
+  deps: LoopEngineDeps,
+  content: ReadonlyArray<UserContentBlock>
+): AnthropicNativeMessage {
+  const encode = deps.adapter.encodeUserContent;
+  if (encode === undefined) {
+    throw new ValidationError("adapter cannot carry image content blocks", {
+      field: "content",
+    });
+  }
+  return encode(content);
+}
+
+/**
+ * Re-apply the memory-prefetch overlay to a block payload.
+ *
+ * `attachPrefetch` prepends its advisory to a single text value, so with blocks
+ * the overlay belongs in front of the user's own text — it stays the FIRST text
+ * block and never wraps an image payload. A payload with no text block (an
+ * image-only turn) gains a leading text block for the advisory.
+ */
+function applyOverlayToBlocks(
+  content: ReadonlyArray<UserContentBlock>,
+  original: string,
+  effective: string
+): ReadonlyArray<UserContentBlock> {
+  if (effective === original || !effective.endsWith(original)) return content;
+  const overlay = effective.slice(0, effective.length - original.length);
+  if (overlay.length === 0) return content;
+  const index = content.findIndex((block) => block.type === "text");
+  if (index < 0) return [{ type: "text", text: overlay }, ...content];
+  return content.map((block, i) =>
+    i === index && block.type === "text"
+      ? { type: "text", text: overlay + block.text }
+      : block
+  );
 }
 
 export function projectMessagesToTurns(
@@ -1012,14 +1231,14 @@ export type SessionHubOptions = {
    */
   fsMode?: FsModeContext;
   /**
-   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder (the same instance as
-   * the TUI / serve bash face). Passed through to `runVerifyLoop` — the verify
-   * command's fence must match the bash tool, otherwise verify still runs inside
-   * the fence in a yolo session (spec §6 four-route parity). Absent = this entry
-   * did not wire the yolo axis → the verify face treats it as non-yolo
-   * (fail-closed keeps the fence).
+   * ADR-0141: the derived fence posture (the same reader as the TUI / serve
+   * bash face). Passed through to `runVerifyLoop` — the verify command's fence
+   * must match the bash tool, otherwise verify still runs inside the fence in a
+   * retired-fence session (spec §6 four-route parity). Absent = this entry did
+   * not wire the axis → the verify face treats it as fenced (fail-closed keeps
+   * the fence).
    */
-  yolo?: YoloContext;
+  fenceRetired?: FenceRetirementReader;
   /**
    * Hosts that already built the engine (TUI assembles it in run.tsx) hand
    * `BuiltEngine.graphAssembly` in directly — such hosts use the injected
@@ -1364,8 +1583,75 @@ interface RebindIntent {
   readonly acceptedAt: bigint;
 }
 
+/** Hand-off between a rewind's serialized phase and its worker-cancellation
+ *  phase. `spawnIds` is read before the head moves (after the move the
+ *  abandoned segment reads empty) and `committed` is set only by a head commit
+ *  that landed, so cancellation follows ACCEPTANCE: a rejected rewind cancels
+ *  nothing, an accepted one still cancels when assembling the response
+ *  afterwards throws. Mutable because the acceptance is recorded mid-phase. */
+interface RewindAcceptance {
+  spawnIds: ReadonlySet<string> | undefined;
+  committed: boolean;
+}
+
+/**
+ * One event on the hub bus (spec remote-sync §4.1): every stream event of every
+ * turn, continuation and compaction, plus the host events the stream lacks.
+ * `turnId` is an opaque per-turn correlation id the hub mints; it is not
+ * persisted and means nothing outside one live turn. Compaction gets a
+ * correlation id of its own but is not a turn (no turn_started / turn_ended).
+ */
+export type HubEvent =
+  | {
+      readonly kind: "stream";
+      readonly conversationId: string;
+      readonly turnId: string;
+      readonly event: HarnessStreamEvent;
+    }
+  | {
+      readonly kind: "user_message";
+      readonly conversationId: string;
+      readonly text: string;
+      readonly origin: "local" | "remote";
+    }
+  | {
+      readonly kind: "turn_started";
+      readonly conversationId: string;
+      readonly turnId: string;
+    }
+  | {
+      readonly kind: "turn_ended";
+      readonly conversationId: string;
+      readonly turnId: string;
+      readonly outcome: TurnOutcomeView;
+    };
+
+/**
+ * Per-turn bus correlation: the id streams carry and whether turn_started was
+ * published. A turn rejected before acceptance (validation / continuity
+ * predicate) publishes no bracket at all, so `started` gates turn_ended.
+ */
+interface TurnBusState {
+  readonly turnId: string;
+  started: boolean;
+}
+
+function startShutdownOperation(
+  stop: () => void | Promise<void>
+): Promise<void> {
+  try {
+    return Promise.resolve(stop());
+  } catch (error) {
+    // EXIT: synchronous failure is retained for the shared shutdown result;
+    // callers still start every other owned manager before awaiting cleanup.
+    return Promise.reject(error);
+  }
+}
+
 export class SessionHub {
   private readonly store: SessionStore;
+  /** Session-wide event bus subscribers (spec remote-sync §4.1). */
+  private readonly eventListeners = new Set<(event: HubEvent) => void>();
   /** ADR-0037: task-worktree build + this-session-only root rebind host seam. */
   private readonly worktreeProvisioner: TaskWorktreeProvisioner;
   /** Roots returned by a successful rebind but not yet persisted with the turn.
@@ -1460,6 +1746,8 @@ export class SessionHub {
   private readonly verifyConfig: VerifyConfig | undefined;
   /** built.shutdown cache (composite handle; lazily taken in ensureDeps, triggered by hub.shutdown). */
   private cachedShutdown: (() => Promise<void>) | undefined;
+  /** One shutdown run shared by every exit path that reaches this hub. */
+  private shutdownPromise: Promise<void> | undefined;
   /** Same source as TUI TuiExtensions: only present after lazy ensureDeps; stays absent on the deps-injection test path. */
   private skillCatalog: SkillCatalog | undefined;
   /**
@@ -1600,10 +1888,10 @@ export class SessionHub {
   /** ADR-0092: fs isolation mode holder (injected by serve / TUI; absent =
    *  this entrypoint has no fs mode → engine follows the global default). */
   private readonly fsMode: FsModeContext | undefined;
-  /** ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder (TUI injects; absent
-   *  = this entrypoint did not wire the yolo axis → the verify face treats it as
-   *  non-yolo, fail-closed keeps the fence). */
-  private readonly yolo: YoloContext | undefined;
+  /** ADR-0141: the derived fence posture (TUI injects; absent = this
+   *  entrypoint did not wire the axis → the verify face treats it as fenced,
+   *  fail-closed keeps the fence). */
+  private readonly fenceRetired: FenceRetirementReader | undefined;
   /** Assembly snapshot handle carried by deps-injecting hosts (TUI),
    *  passed via constructor opts. */
   private readonly injectedGraphAssembly: GraphAssembly | undefined;
@@ -1633,6 +1921,42 @@ export class SessionHub {
   private readonly engineByRoot = new Map<string, HubEngineEntry>();
   /** Per-conversation serialization. */
   private readonly inflight = new Map<string, Promise<void>>();
+  /**
+   * ADR-0145 §4: the conversation's own model route (`provider/model`) — the
+   * runtime copy of `SessionFileV1.model`. The map is the runtime truth, the
+   * file is its durable copy: a present entry is never replaced by a snapshot
+   * or by a file read (spec invariant 4), and an absent one is restored from
+   * the file (or backfilled from the current default for a file written
+   * before conversations owned a route). Entries die with `resetSession` and
+   * with `shutdown`; there is no capacity eviction.
+   */
+  private readonly sessionRoutes = new Map<string, string>();
+  /**
+   * ADR-0145 §5: route id → the adapter built for that route. The stored env
+   * reference is half the key: the host's loader hands out a NEW object after a
+   * reload, so a credential or limit edit misses the cache and the adapter is
+   * rebuilt with the new values. `env` is the RESOLVED route env the adapter
+   * was built from — a cache hit hands it back (the tier's env would run the
+   * thinking override on the wrong model). Bounded by the number of distinct
+   * routes in use — one adapter per route, not one per turn.
+   */
+  private readonly routeAdapters = new Map<
+    string,
+    {
+      readonly envRef: { readonly llm: LlmEnv };
+      readonly env: { readonly llm: LlmEnv };
+      readonly adapter: LoopEngineDeps["adapter"];
+    }
+  >();
+  /**
+   * The default env for a hub without an `envProvider` (the
+   * `loadIknowEnv()` fallback). The loader hands out a new object per call,
+   * so the reference is pinned here: the derived route cache is keyed by it
+   * and must not change under it. With an `envProvider`, the loader's own
+   * reference is the key and the new reference it hands out after a settings
+   * reload is the invalidation signal.
+   */
+  private pinnedDefaultEnv: IknowEnv | undefined;
   /**
    * Which writer slot the CALLING async context already holds. The hub runs an
    * entire turn inside one `serialize` slot, so a publication the engine or a
@@ -1700,7 +2024,7 @@ export class SessionHub {
     this.permissionMode = opts.permissionMode;
     this.graphMode = opts.graphMode;
     this.fsMode = opts.fsMode;
-    this.yolo = opts.yolo;
+    this.fenceRetired = opts.fenceRetired;
     this.injectedGraphAssembly = opts.graphAssembly;
     this.liveGraphLedger = opts.liveGraphLedger;
     this.preimageLedger = opts.preimageLedger ?? createPreimageLedger();
@@ -1953,8 +2277,10 @@ export class SessionHub {
 
   /**
    * Snapshot of pending ask requests (process-global; v0 serve hosts one
-   * turn at a time). Returns an empty list when the full handle was not
-   * wired (no SPA capability).
+   * turn at a time). Each entry is call-addressed: it carries the `toolUseId`
+   * of the call the question is about and the wave's `conversationId` when the
+   * caller has one (ADR-0147 R1). Returns an empty list when the full handle
+   * was not wired (no SPA capability).
    */
   listPendingAsks(): ReadonlyArray<PendingAskView> {
     return this.askHandle?.pendingAll() ?? [];
@@ -1971,6 +2297,76 @@ export class SessionHub {
   ): Promise<ReadonlyArray<SubagentInfo>> {
     await this.store.load(conversationId);
     return this.subagentManagers.listSubagents(conversationId);
+  }
+
+  /**
+   * Session-wide event bus (spec remote-sync §4.1): every stream event of
+   * every turn / continuation / compaction, plus the three host events the
+   * stream lacks (`user_message`, `turn_started`, `turn_ended`). Additive to
+   * the caller's `onStream` contract. Returns the unsubscribe.
+   */
+  subscribeEvents(listener: (event: HubEvent) => void): () => void {
+    this.eventListeners.add(listener);
+    return () => {
+      this.eventListeners.delete(listener);
+    };
+  }
+
+  /** Publish one bus event. Listener faults are isolated per listener,
+   *  exactly like safeEmitStream: a broken observer must never fail or delay
+   *  the turn it is watching. */
+  private publishEvent(event: HubEvent): void {
+    for (const listener of [...this.eventListeners]) {
+      try {
+        listener(event);
+      } catch {
+        // Swallow observer exceptions (same contract as safeEmitStream).
+      }
+    }
+  }
+
+  /** Announce an accepted turn (after validation, before it runs). */
+  private startTurn(conversationId: string, turn: TurnBusState): void {
+    turn.started = true;
+    this.publishEvent({
+      kind: "turn_started",
+      conversationId,
+      turnId: turn.turnId,
+    });
+  }
+
+  /** Close a started turn once: the settled outcome view, else unknown (a
+   *  rejected turn or the MaxTurnsExceeded branch, which carries no outcome). */
+  private settleTurn(
+    conversationId: string,
+    turn: TurnBusState,
+    outcome: TurnOutcomeView | undefined
+  ): void {
+    if (!turn.started) return;
+    this.publishEvent({
+      kind: "turn_ended",
+      conversationId,
+      turnId: turn.turnId,
+      outcome: outcome ?? { terminal: "unknown" },
+    });
+  }
+
+  /** `turn_ended` when the turn settles, on resolve and on rejection alike. */
+  private withTurnEnd(
+    conversationId: string,
+    turn: TurnBusState,
+    operation: Promise<PostMessageResponse>
+  ): Promise<PostMessageResponse> {
+    return operation.then(
+      (response) => {
+        this.settleTurn(conversationId, turn, response.turn.answer.outcome);
+        return response;
+      },
+      (error: unknown) => {
+        this.settleTurn(conversationId, turn, undefined);
+        throw error;
+      }
+    );
   }
 
   /** T1: TUI/host read-only terminal subscription scoped to one session. */
@@ -2048,20 +2444,65 @@ export class SessionHub {
    * process closes MCP background connections and SIGTERMs subagent stdio
    * children before exit. ask/deps-injected shapes have no built → no-op.
    */
-  async shutdown(): Promise<void> {
-    this.subagentWake?.dispose();
-    // ADR-0136 §3: abort first. A publication issued from here on fails fast
-    // instead of queueing behind a turn that will never finish writing, so a
-    // going-down host reports the loss instead of reporting a success it
-    // cannot back on disk.
-    this.shutdownSignal.abort();
-    // Session end (hub release) destroys all live-graph ledgers so none
-    // leak into later sessions.
-    this.liveGraphLedger?.destroyAll();
-    await this.cachedShutdown?.();
-    for (const entry of this.engineByRoot.values()) {
-      await entry.shutdown?.();
-    }
+  shutdown(): Promise<void> {
+    if (this.shutdownPromise !== undefined) return this.shutdownPromise;
+    let resolveShutdown!: () => void;
+    let rejectShutdown!: (reason: unknown) => void;
+    this.shutdownPromise = new Promise<void>((resolve, reject) => {
+      resolveShutdown = resolve;
+      rejectShutdown = reject;
+    });
+    const stops = [
+      startShutdownOperation(() => this.subagentWake?.dispose()),
+      // ADR-0136 §3: abort first. A publication issued from here on fails fast
+      // instead of queueing behind a turn that will never finish writing, so a
+      // going-down host reports the loss instead of reporting a success it
+      // cannot back on disk.
+      startShutdownOperation(() => this.shutdownSignal.abort()),
+      // Session end (hub release) destroys all live-graph ledgers so none
+      // leak into later sessions.
+      startShutdownOperation(() => this.liveGraphLedger?.destroyAll()),
+      startShutdownOperation(() => this.cachedShutdown?.()),
+      ...[...this.engineByRoot.values()].map((entry) =>
+        startShutdownOperation(() => entry.shutdown?.())
+      ),
+    ];
+    const writers = this.pendingWritersForShutdown();
+    void Promise.allSettled([...stops, ...writers])
+      .then((results) => {
+        // ADR-0145: the route map dies with the hub; the session files keep their
+        // routes, so a later process restores them from there. Every route owner
+        // dies with it: a dead route's key must not stay in the output mask.
+        const routes = [...new Set(this.sessionRoutes.values())];
+        this.sessionRoutes.clear();
+        for (const route of routes) this.releaseRoute(route);
+        this.routeAdapters.clear();
+
+        const failures = results
+          .filter(
+            (result): result is PromiseRejectedResult =>
+              result.status === "rejected"
+          )
+          .map((result) => result.reason);
+        if (failures.length > 0) {
+          throw new AggregateError(failures, "SessionHub shutdown failed");
+        }
+      })
+      .then(resolveShutdown, rejectShutdown);
+    return this.shutdownPromise;
+  }
+
+  private pendingWritersForShutdown(): ReadonlyArray<Promise<void>> {
+    const currentSlot = this.writerSlot.getStore();
+    return [...this.inflight.entries()]
+      .filter(
+        ([conversationId]) =>
+          !(
+            currentSlot?.held === true &&
+            currentSlot.conversationId === conversationId
+          )
+      )
+      .map(([, pending]) => pending);
   }
 
   /** Sum the live JSONL trace service write-failure counters for health. */
@@ -2074,21 +2515,231 @@ export class SessionHub {
   }
 
   /**
-   * Env used when rebuilding the adapter for a per-turn thinking override —
-   * latest value wins.
+   * The env a route resolves against (ADR-0145 §5) — the tier every route
+   * resolution and every per-turn adapter is derived from.
    *
-   * `overrideEnv` is a startup snapshot captured at bridge construction and
-   * never refreshed; `/model` switching only shows up via `envProvider`
-   * (EnvLoader.get). Using the snapshot in the override branch would silently
-   * revert baseUrl/apiKey/model (and headers) on thinking turns. When
-   * envProvider is absent (test seams passing only overrideEnv), keep the
-   * snapshot semantics.
+   * `envProvider` wins: it is the live env (EnvLoader.get), so a `/model`
+   * switch or a settings reload shows up here. Its reference is the route
+   * cache's key half — the loader hands out a NEW object after a reload,
+   * which is how a credential edit invalidates the cached adapter.
    *
-   * Called only from the override branch: turns without thinking never read
-   * env an extra time because of this method.
+   * `overrideEnv` is the startup snapshot captured at bridge construction and
+   * never refreshed; it is the tier when the host injects no live env. The
+   * ambient `loadIknowEnv()` is the last resort (its reference is pinned so
+   * the cache key does not change under it).
    */
-  private overrideEnvForTurn(): { readonly llm: LlmEnv } | undefined {
-    return this.envProvider ? this.envProvider() : this.overrideEnv;
+  private routeTier(): { readonly llm: LlmEnv } {
+    if (this.envProvider !== undefined) return this.envProvider();
+    if (this.overrideEnv !== undefined) return this.overrideEnv;
+    return this.defaultEnv();
+  }
+
+  /**
+   * The default env — the tier that decides what a NEW conversation starts
+   * with (ADR-0145 §1). Production hosts (TUI / serve) inject `envProvider`
+   * (EnvLoader.get), whose reference is stable until a settings reload hands
+   * out a new one; that new reference is the invalidation signal for the
+   * derived route cache. Without it, `loadIknowEnv()` is the canonical source
+   * (the same fallback the engine assembly uses) and its reference is pinned
+   * so the cache key does not change under it.
+   */
+  private defaultEnv(): IknowEnv {
+    if (this.envProvider) return this.envProvider();
+    this.pinnedDefaultEnv ??= loadIknowEnv();
+    return this.pinnedDefaultEnv;
+  }
+
+  /**
+   * The default route a new conversation starts with, or undefined when this
+   * hub cannot name one. A default that is not a `provider/model` route id
+   * owns no route: the session file and the route map carry route ids only
+   * (a bare model name is not one, and the file schema rejects it).
+   */
+  private defaultRoute(): string | undefined {
+    let model: string;
+    try {
+      model = this.routeTier().llm.model;
+    } catch (err) {
+      // EXIT: this hub cannot name a default tier (the provider config is
+      // broken, or `settings.llm.model` is unset) → the conversation gets no
+      // route of its own and the turn path keeps using the ambient env.
+      // Creation must not fail over a model configuration problem that only
+      // the turn needs. Any OTHER failure propagates.
+      if (!isAbsentDefaultTier(err)) throw err;
+      return undefined;
+    }
+    return routeIdOf(model);
+  }
+
+  /**
+   * ADR-0145 §5: is this route the TIER's own route?
+   *
+   * The tier's own route is its model when that model is a route id
+   * (`provider/model`). The base adapter IS the tier's adapter, so a
+   * conversation on the tier's own route needs no per-turn overlay. This is
+   * the one place the rule lives.
+   */
+  private isTierOwnRoute(
+    route: string,
+    tier: { readonly llm: LlmEnv }
+  ): boolean {
+    return routeIdOf(tier.llm.model) === route;
+  }
+
+  /**
+   * ADR-0145 §5: the ONE place that answers "which route does this
+   * conversation own".
+   *
+   * `route` is the conversation's map entry, else the current default route.
+   * `tier` is the env every route resolves against. `onTierRoute` says the
+   * conversation's route IS the tier's own route — the base adapter already
+   * serves it, so no per-turn overlay is needed.
+   *
+   * `tier` is absent exactly when the route is: a route with no tier to
+   * resolve against is no route at all — either the tier could not be read
+   * (a broken provider config or an unset model, absorbed by the
+   * default-route read) or the default is not a route id. A conversation that
+   * DOES own a route never degrades: its tier is read here, and a failure
+   * propagates.
+   */
+  private routeDecision(conversationId: string): {
+    readonly route: string | undefined;
+    readonly tier: { readonly llm: LlmEnv } | undefined;
+    readonly onTierRoute: boolean;
+  } {
+    const route = this.sessionRoutes.get(conversationId) ?? this.defaultRoute();
+    if (route === undefined) {
+      return { route: undefined, tier: undefined, onTierRoute: false };
+    }
+    const tier = this.routeTier();
+    return {
+      route,
+      tier,
+      onTierRoute: this.isTierOwnRoute(route, tier),
+    };
+  }
+
+  /**
+   * ADR-0145 §5: the route's env and the adapter built from it.
+   *
+   * The route is resolved through the registry against the tier the caller
+   * decided with: a route that does not resolve throws the typed
+   * `LlmProviderConfigError` — it never falls back to the default, because a
+   * silent fallback would run the conversation on a model it did not choose.
+   *
+   * The cache is keyed by the TIER reference: the host's loader hands out a
+   * NEW object after a reload, so a credential or limit edit misses the cache
+   * and the adapter is rebuilt with the new values. The RESOLVED env is
+   * stored next to the adapter: a hit must hand back the route's own env, not
+   * the tier's.
+   */
+  private routeRuntime(
+    route: string,
+    tier: { readonly llm: LlmEnv }
+  ): {
+    env: { readonly llm: LlmEnv };
+    adapter: LoopEngineDeps["adapter"];
+  } {
+    const hit = this.routeAdapters.get(route);
+    if (hit !== undefined && hit.envRef === tier) {
+      return { env: hit.env, adapter: hit.adapter };
+    }
+    const env = resolveLlmEnvForRoute(tier, route);
+    const { adapter } = createAdapterFromEnv(env);
+    this.routeAdapters.set(route, { envRef: tier, env, adapter });
+    // The output mask set is the union of every live owner's secrets: this
+    // route contributes its own resolved credentials under its own owner key.
+    // No other owner's values are removed — the union only ever grows.
+    setActiveExtraSecrets(
+      `route:${route}`,
+      [env.llm.apiKey, ...Object.values(env.llm.headers ?? {})].filter(
+        (value): value is string => typeof value === "string" && value !== ""
+      )
+    );
+    return { env, adapter };
+  }
+
+  /**
+   * Reclaim a route's resources once no conversation owns it any more: the
+   * cached adapter and the route's mask contribution. A route another
+   * conversation still owns keeps both.
+   */
+  private releaseRoute(route: string): void {
+    for (const owned of this.sessionRoutes.values()) {
+      if (owned === route) return;
+    }
+    this.routeAdapters.delete(route);
+    clearActiveExtraSecrets(`route:${route}`);
+  }
+
+  /**
+   * ADR-0145 §5: the turn's deps for the conversation's OWN route.
+   *
+   * A conversation with a route takes that route's adapter, and the thinking
+   * override — when the caller asks for one — is built from the ROUTE's env,
+   * so a thinking turn runs on the conversation's model. A conversation with
+   * no route keeps the base deps and the tier's env, exactly as before.
+   */
+  private routeTurnDeps(
+    conversationId: string,
+    baseDeps: LoopEngineDeps,
+    thinking: ThinkingOverride | undefined
+  ): LoopEngineDeps {
+    const { route, tier, onTierRoute } = this.routeDecision(conversationId);
+    if (route === undefined || tier === undefined) {
+      return thinking === undefined
+        ? baseDeps
+        : withThinkingOverride({
+            deps: baseDeps,
+            override: thinking,
+            env: this.routeTier(),
+          });
+    }
+    // The base adapter IS the tier's adapter: it was built from the tier, so
+    // it already serves the tier's route. The overlay is therefore needed
+    // exactly when the conversation's route is NOT the tier's route — and only
+    // then. Replacing the base adapter for the tier's own route would discard
+    // a host-injected adapter (the SDK / test seam) for no behavioural gain.
+    const runtime = onTierRoute ? undefined : this.routeRuntime(route, tier);
+    const routeDeps: LoopEngineDeps =
+      runtime === undefined
+        ? { ...baseDeps, parentModelRoute: route }
+        : {
+            ...baseDeps,
+            adapter: runtime.adapter,
+            parentModelRoute: route,
+          };
+    return thinking === undefined
+      ? routeDeps
+      : withThinkingOverride({
+          deps: routeDeps,
+          override: thinking,
+          env: runtime?.env ?? tier,
+        });
+  }
+
+  /**
+   * ADR-0145 §5: the conversation's route adapter, or the given fallback when
+   * the conversation owns no route or runs on the tier's own route.
+   */
+  private routeAdapterFor(
+    conversationId: string,
+    fallback: LoopEngineDeps["adapter"] | undefined
+  ): LoopEngineDeps["adapter"] | undefined {
+    const { route, tier, onTierRoute } = this.routeDecision(conversationId);
+    if (route === undefined || tier === undefined) return fallback;
+    if (onTierRoute) return fallback;
+    return this.routeRuntime(route, tier).adapter;
+  }
+
+  /**
+   * The base adapter — the tier's own adapter. It is the FALLBACK for a
+   * conversation that owns no route (or one on the tier's own route); it is
+   * not a model choice: the route decision lives in `routeAdapterFor`.
+   */
+  private baseAdapter(): LoopEngineDeps["adapter"] | undefined {
+    const base = this.cachedDeps;
+    return base?.adapter;
   }
 
   /**
@@ -2097,6 +2748,14 @@ export class SessionHub {
    * rerun the whole buildHarnessEngine assembly (MCP / subagent / skill are
    * skipped). registry / executor / maxTurns / timeoutMs reuse the old
    * cachedDeps.
+   *
+   * ADR-0145 §6: this is the BASE adapter refresh and the credential
+   * baseline — it is no longer the model source for a conversation. A
+   * conversation with a route takes its adapter from the per-turn route
+   * overlay, so a default-model change here moves no live conversation's
+   * model. The restamp still serves a conversation that has no route: there
+   * the base adapter IS the turn's adapter, and it must carry the new
+   * credentials.
    *
    * Semantics:
    *   - If the key env fields (model / apiKey / fallback / thinking /
@@ -2149,7 +2808,8 @@ export class SessionHub {
    *                        next identical tool call is auto-approved.
    *
    * Ordering: for `always-allow` the rule is added AFTER settle() succeeds;
-   * if the ask already timed out, settle returns false and no rule is added
+   * if the ask already settled (resolved, cancelled, or a configured timeout
+   * elapsed), settle returns false and no rule is added
    * (defensive contract — no orphan rules from a UI click that lost the race).
    *
    * Returns true iff the ask was still pending at resolve time.
@@ -2263,6 +2923,10 @@ export class SessionHub {
     const root = requireCreateWorkspaceRoot(this.boundRoot);
     const id = randomUUID();
     const now = new Date().toISOString();
+    // ADR-0145 §2: the creation snapshot. The default tier decides what a
+    // NEW conversation starts with; from here on the conversation owns its
+    // route and no other conversation's change can move it.
+    const route = this.defaultRoute();
     const file: SessionFileV1 = {
       schemaVersion: CURRENT_SCHEMA_VERSION,
       conversation_id: id,
@@ -2281,8 +2945,12 @@ export class SessionHub {
       // being genuinely new. That is what makes `unsupported_format` honest
       // for every session this host never created (SC23).
       nativeStateFormat: NATIVE_STATE_FORMAT_VERSION,
+      ...(route === undefined ? {} : { model: route }),
     };
     await this.store.save({ id, file });
+    // The map is seeded only once the file exists: a failed creation leaves
+    // no route behind for a conversation that was never written.
+    if (route !== undefined) this.sessionRoutes.set(id, route);
     return {
       session: this.summarize({ file }),
       turns: [],
@@ -2310,7 +2978,7 @@ export class SessionHub {
         turns: [],
       };
     }
-    const file = opened.file;
+    const file = this.resolveAndRememberRoute(conversationId, opened.file);
     // ADR-0126: reopened history is projected against the ACTIVE head chain's
     // persisted outcomes, so a rewind/reopen can never surface an abandoned
     // branch's terminal state.
@@ -2330,14 +2998,108 @@ export class SessionHub {
     };
   }
 
+  /**
+   * ADR-0145 §4: resolve the conversation's effective route, REMEMBER it in
+   * the runtime map, and return the session file that carries it into the next
+   * save. The name says it writes: this is not a getter.
+   *
+   * A present map entry is the runtime truth and is never replaced — not by a
+   * snapshot, not by a file read (spec invariant 4). An absent entry is
+   * restored from the file's `model`, or — for a file written before
+   * conversations owned a route — snapshotted from the current default. The
+   * returned file carries the effective route, so the next save of that
+   * conversation persists the backfill; until then the file stays as it is.
+   */
+  private resolveAndRememberRoute(
+    conversationId: string,
+    file: SessionFileV1
+  ): SessionFileV1 {
+    const present = this.sessionRoutes.get(conversationId);
+    const route = present ?? file.model ?? this.defaultRoute();
+    if (route === undefined) return file;
+    if (present === undefined) this.sessionRoutes.set(conversationId, route);
+    return file.model === route ? file : { ...file, model: route };
+  }
+
+  /**
+   * ADR-0145 §4: the conversation's effective model route — its map entry,
+   * else the route its session file carries, else the current default.
+   *
+   * Read-only: it restores nothing and writes nothing. The file is read
+   * because a conversation this process never attached owns its route only
+   * there.
+   */
+  async getSessionModel(conversationId: string): Promise<string | undefined> {
+    const present = this.sessionRoutes.get(conversationId);
+    if (present !== undefined) return present;
+    const file = await this.store.load(conversationId);
+    return file.model ?? this.defaultRoute();
+  }
+
+  /**
+   * ADR-0145 §5: the conversation's own model act — the only way a live
+   * conversation's route changes.
+   *
+   * The route is resolved FIRST: a route that does not resolve throws the
+   * typed `LlmProviderConfigError` and nothing changes (no map entry, no file
+   * write) — it never falls back to the default route, because a silent
+   * fallback would run the conversation on a model it did not choose. A route
+   * that IS the tier's own route needs no resolution: it is the tier, and a
+   * hand-made env carries no provider registry to resolve it through.
+   *
+   * The map entry and the session file are written inside the conversation's
+   * serialize slot, so the file write is sequenced against that
+   * conversation's other writes. The file goes first: a failed write leaves
+   * the runtime map untouched, so the two copies never disagree.
+   */
+  async setSessionModel(conversationId: string, route: string): Promise<void> {
+    const routeId = route.trim();
+    const tier = this.routeTier();
+    if (!this.isTierOwnRoute(routeId, tier)) {
+      resolveLlmEnvForRoute(tier, routeId);
+    }
+    await this.serialize({
+      conversationId,
+      work: async () => {
+        const session = await this.store.load(conversationId);
+        await this.store.save({
+          id: conversationId,
+          file: { ...session, model: routeId },
+        });
+        // The route this conversation owned before the switch: its map entry,
+        // else the route its file carries, else the default it ran on.
+        const previous =
+          this.sessionRoutes.get(conversationId) ??
+          session.model ??
+          this.defaultRoute();
+        this.sessionRoutes.set(conversationId, routeId);
+        // The route this conversation gave up is reclaimed unless another
+        // conversation still owns it.
+        if (previous !== undefined && previous !== routeId) {
+          this.releaseRoute(previous);
+        }
+      },
+    });
+  }
+
   async postMessage(opts: {
     readonly conversationId: string;
     readonly text: string;
+    /** Ordered text + image payload (additive; absent → text-only turn). */
+    readonly content?: readonly UserContentBlock[];
     readonly signal?: AbortSignal;
     readonly thinking?: ThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
     /** T4 internal host wake; not accepted by the HTTP adapter. */
     readonly silent?: boolean;
+    /** ADR-0150: a sub-agent drain the caller already claimed (the wake
+     *  gate). The turn uses it instead of claiming again, and the turn's
+     *  write that carries the digest settles the claim. Internal — not
+     *  accepted by the HTTP adapter. */
+    readonly preclaimedDrain?: ClaimedSubagentDrain;
+    /** Who sent the message (spec remote-sync §4.1); default "local". Only
+     *  projected on the event bus, never into the turn. */
+    readonly origin?: "local" | "remote";
   }): Promise<PostMessageResponse> {
     const { conversationId, text } = opts;
     const silent = opts.silent === true;
@@ -2370,7 +3132,24 @@ export class SessionHub {
     }
     const query =
       pinText ?? (goalDirective !== null ? goalDirective : text.trim());
-    if (!silent) this.validateText(query);
+    const userContent = acceptUserContent({
+      content: opts.content,
+      silent,
+      goalDirective,
+    });
+    if (!silent) this.validateUserInput(query, userContent);
+    // Bus bracket for this accepted turn: one opaque id streams carry, an
+    // announcement before any work runs, and turn_ended when it settles.
+    const turn: TurnBusState = { turnId: randomUUID(), started: false };
+    if (!silent) {
+      this.publishEvent({
+        kind: "user_message",
+        conversationId,
+        text,
+        origin: opts.origin ?? "local",
+      });
+    }
+    this.startTurn(conversationId, turn);
     this.lastConversationId = conversationId;
     const activeCount = this.activeTurnCounts.get(conversationId) ?? 0;
     this.activeTurnCounts.set(conversationId, activeCount + 1);
@@ -2426,20 +3205,15 @@ export class SessionHub {
         // overlay key flips therefore "take effect on the next message",
         // matching chat's "next query line" semantics.
         this.activeGraphAssembly?.beginRound();
-        // T2: per-turn override — rebuild deps with a one-shot adapter only;
-        // executor / registry / maxTurns / timeoutMs are reused from the
-        // cached deps. When absent, the cached path is unchanged.
-        // The override branch reads the latest env via overrideEnvForTurn
-        // (switched provider/model takes effect next turn; the construction
-        // snapshot is only a fallback when envProvider is absent).
-        const deps =
-          opts.thinking !== undefined
-            ? withThinkingOverride({
-                deps: baseDeps,
-                override: opts.thinking,
-                env: this.overrideEnvForTurn(),
-              })
-            : baseDeps;
+        // ADR-0145 §5: the turn runs on the CONVERSATION's route, not on the
+        // process-global default. A conversation with no route (the default
+        // model is not a `provider/model` id, or the default tier is
+        // unreadable) keeps the base deps untouched.
+        const deps = this.routeTurnDeps(
+          conversationId,
+          baseDeps,
+          opts.thinking
+        );
         // Lazy commit of the user query: the engine itself never commits the
         // query (only assistant / tool_result), so if the chain lacks the
         // query, the projection and the chain always differ by one entry and
@@ -2457,16 +3231,63 @@ export class SessionHub {
         // forks at the query.
         let queryCommitPending = true;
         let queryCommitPrefix: ReadonlyArray<AnthropicNativeMessage> = [];
-        const buildUserCommit = (userText: string): AnthropicNativeMessage => {
-          let effective = userText;
-          if (
-            deps.secretsMode !== "block" &&
-            deps.secretRegistry !== undefined
-          ) {
-            effective = recognize(userText, deps.secretRegistry).replaced;
+        // ADR-0150: the delivery latches of this turn's sub-agent digest
+        // claims. One latch per auto-loop iteration: the write that actually
+        // carries the digest acknowledges the claim, every other outcome
+        // releases it so the next round can offer the result again.
+        const digestLatches = createDeliveryLatchSet();
+        // A drain the caller already claimed (the wake gate) is consumed by
+        // the first iteration; a later iteration claims its own.
+        let pendingPreclaim: ClaimedSubagentDrain | undefined =
+          opts.preclaimedDrain;
+        const buildUserCommit = (
+          input: UserCommitInput
+        ): AnthropicNativeMessage => {
+          if (input.content === undefined) {
+            return deps.adapter.encodeUserText(maskUserText(input.text, deps));
           }
-          return deps.adapter.encodeUserText(effective);
+          return encodeUserCommit(deps, maskUserContent(input.content, deps));
         };
+        // The accepted payload for one round. `effective` is the overlay-prefixed
+        // text the engine sees, so a block payload takes the advisory in front of
+        // the user's own text and keeps the image bytes out of it.
+        // The submitted payload is the accepted input of exactly ONE round: the
+        // round whose text still derives from it. A verify-loop retry feeds
+        // different text (judge feedback, or the goal in goal mode) and is not a
+        // new acceptance, so it goes back to the plain text path — the same latch
+        // that makes the commit one-shot is what scopes the payload.
+        const isPayloadRound = (effective: string): boolean =>
+          queryCommitPending && effective.endsWith(query);
+        const commitInput = (effective: string): UserCommitInput =>
+          userContent === undefined || !isPayloadRound(effective)
+            ? { text: effective }
+            : {
+                text: effective,
+                content: applyOverlayToBlocks(userContent, query, effective),
+              };
+        // An image-only turn carries no text at all, so the commit gate reads the
+        // payload rather than the length of one string.
+        const carriesInput = (effective: string): boolean =>
+          effective.length > 0 || userContent !== undefined;
+        // The accepted user message for one round, or `undefined` when the round
+        // carries no input at all (a silent host wake). One builder for the commit
+        // prefix AND for the engine's `userMessage` option is what keeps the two
+        // byte-identical — the save's LCP alignment depends on it.
+        const acceptedUserMessage = (
+          effective: string
+        ): AnthropicNativeMessage | undefined =>
+          carriesInput(effective)
+            ? buildUserCommit(commitInput(effective))
+            : undefined;
+        // A payload turn hands the engine the message the hub already committed
+        // (block masking is the hub's decision, not the engine's); a text-only
+        // turn keeps the engine's own encode path byte-for-byte untouched.
+        const presentRunUserMessage = (
+          accepted: AnthropicNativeMessage | undefined
+        ): { userMessage?: AnthropicNativeMessage } =>
+          accepted !== undefined && userContent !== undefined
+            ? { userMessage: accepted }
+            : {};
         // ADR-0136 §3: the accepted input is committed here — after the prefix
         // is known and BEFORE the engine can issue its first model request, so
         // the engine's own input-boundary publication anchors at the input's own
@@ -2488,6 +3309,10 @@ export class SessionHub {
             session,
             acceptedInput: opts.acceptedInput,
           });
+          // ADR-0150: this write is a carrier when it carries the digest
+          // (the accepted input holds the drain message when the turn has
+          // one).
+          digestLatches.observe(opts.acceptedInput);
         };
         // T6: wrap the executor with the violation kill-session hook. Serve/TUI
         // is long-running, so on kill we write the violation event to the JSONL
@@ -2574,6 +3399,10 @@ export class SessionHub {
               session,
               events,
               ...(thinkingMs !== undefined ? { thinkingMs } : {}),
+            }).then(() => {
+              // ADR-0150: the written array (prefix included) is the carrier
+              // when it holds the digest.
+              digestLatches.observe(events);
             });
           },
           ...(trace !== undefined ? { trace } : {}),
@@ -2584,7 +3413,16 @@ export class SessionHub {
           // Queue discipline matches commitMessages: the engine publishes from
           // inside this turn's serialize slot, and the binder's queue is
           // re-entrant, so the publication lands in the slot already held.
-          ...persistenceSinkOption(this.runtimePersistence, conversationId),
+          ...persistenceSinkOption(
+            this.runtimePersistence,
+            conversationId,
+            // ADR-0150: a published saved state is a carrier when it holds
+            // the digest (the terminal boundary publishes the whole
+            // context, digest included).
+            (messages) => {
+              digestLatches.observe(messages);
+            }
+          ),
           // Compact-boundary rendering seam: inject a boundaryAttachment
           // closure that renders the session's most recent qualifying user
           // task quotes verbatim (a pure function over session.messages,
@@ -2619,6 +3457,12 @@ export class SessionHub {
           if (event.type === "stop_summary") {
             capturedStopSummary = event.text;
           }
+          this.publishEvent({
+            kind: "stream",
+            conversationId,
+            turnId: turn.turnId,
+            event,
+          });
           opts.onStream?.(event);
         };
         // auto-memory T1: session-level prefetch dedup. Lazily recover the
@@ -2645,17 +3489,32 @@ export class SessionHub {
         try {
           return await runAutoLoopSteps({
             run: async () => {
-              // Host drain: before each run() at the serve entrypoint, digest
-              // completed subagent results from the manager into a user
-              // message and append it to priorMessages. Empty manager /
+              // Host drain (ADR-0150): before each run() at the serve
+              // entrypoint, CLAIM the undelivered terminal subagent results
+              // from the manager and condense them into a user message
+              // appended to priorMessages. The claim is what makes delivery
+              // exactly-once: a claimed generation that no write carries is
+              // released and offered again in a later round. Empty manager /
               // nothing completed → priorMessages unchanged (zero behavior
               // change).
-              const drained = await drainPendingSubagents(
+              const drain = await takeClaimedDrain(
                 this.subagentManagers,
-                {
-                  conversationId,
-                }
+                conversationId,
+                pendingPreclaim
               );
+              pendingPreclaim = undefined;
+              const drained = drain.text;
+              // The latch that settles this iteration's claim: the write
+              // that actually carries the digest acknowledges it, any other
+              // outcome releases it (ADR-0150 H1).
+              digestLatches.begin({
+                claims: drain.claims,
+                digestText: drain.digestText,
+                // The hub always wires a durable carrier (the commit hook
+                // and the closing save), so the run never falls back to
+                // resolve-time acknowledgement.
+                hasDurableCarrier: true,
+              });
               // ADR-0112: the drained digest is a host-injected commit — stamp
               // its provenance so the outbound projection passes the "##
               // Sub-agent " prefix anchor through as an official frame.
@@ -2670,9 +3529,10 @@ export class SessionHub {
               // actually entering the engine this round (the drained digest
               // precedes the query in in-memory history, so it must too in
               // the chain).
+              const preflight = acceptedUserMessage(query);
               queryCommitPrefix = [
                 ...(drained ? [drainedMsg] : []),
-                ...(query.length > 0 ? [buildUserCommit(query)] : []),
+                ...(preflight === undefined ? [] : [preflight]),
               ];
               // #408 T5: verify-loop terminal outcome (only set when verifyConfig
               // is configured). Captured here so the post-run write-back can
@@ -2702,9 +3562,15 @@ export class SessionHub {
                   ? await runVerifyLoop({
                       runFn: (text, o) =>
                         attachPrefetch(text).then((effective) => {
+                          // A verify round always carries its task text, so the
+                          // fallback keeps today's unconditional commit of the
+                          // round text while a payload round takes the block form.
+                          const accepted =
+                            acceptedUserMessage(effective) ??
+                            buildUserCommit(commitInput(effective));
                           const acceptedInput = [
                             ...(drained ? [drainedMsg] : []),
-                            buildUserCommit(effective),
+                            accepted,
                           ];
                           queryCommitPrefix = acceptedInput;
                           return acceptInput({ acceptedInput }).then(() =>
@@ -2712,6 +3578,7 @@ export class SessionHub {
                               priorMessages: o?.priorMessages ?? priorMessages,
                               onStream: o?.onStream ?? wrappedOnStream,
                               hostStreamPresent: opts.onStream !== undefined,
+                              ...presentRunUserMessage(accepted),
                             })
                           );
                         }),
@@ -2743,8 +3610,8 @@ export class SessionHub {
                       // difference from the fsMode line above: yolo's consumer
                       // (`makeDefaultRunVerify`) wants the holder itself (it
                       // takes the snapshot `get()` internally for vintage), so
-                      // this passes `this.yolo`, not a snapshot boolean.
-                      ...presentFields("yolo", this.yolo),
+                      // this passes `this.fenceRetired`, not a snapshot boolean.
+                      ...presentFields("fenceRetired", this.fenceRetired),
                       // homeRoot is this process's homedir() — this call site
                       // is independent of build-engine, whose default is the
                       // `opts.userHome ?? homedir()` fallback branch.
@@ -2823,11 +3690,10 @@ export class SessionHub {
                       const effective = silent
                         ? ""
                         : await attachPrefetch(query);
+                      const accepted = acceptedUserMessage(effective);
                       const acceptedInput = [
                         ...(drained ? [drainedMsg] : []),
-                        ...(effective.length > 0
-                          ? [buildUserCommit(effective)]
-                          : []),
+                        ...(accepted === undefined ? [] : [accepted]),
                       ];
                       queryCommitPrefix = acceptedInput;
                       // ADR-0136 §3: nothing is issued to the model
@@ -2835,7 +3701,7 @@ export class SessionHub {
                       // own input-boundary publication then anchors at it, and
                       // a failed commit or publication rejects the run before
                       // the request is made.
-                      if (effective.length > 0) {
+                      if (accepted !== undefined) {
                         await acceptInput({ acceptedInput });
                       }
                       // ADR-0135: the turn's escalation abort rides the run
@@ -2851,6 +3717,7 @@ export class SessionHub {
                           priorMessages,
                           onStream: wrappedOnStream,
                           hostStreamPresent: opts.onStream !== undefined,
+                          ...presentRunUserMessage(accepted),
                         }
                       );
                     })();
@@ -2888,13 +3755,19 @@ export class SessionHub {
                 conversationId,
                 session,
                 result: s.finalResult,
-                // priorMessages = the file BEFORE this run; only the messages THIS
-                // run appended count as progress for the cancelled-delta decision.
+                // Turn-start snapshot: a fallback only when no JSONL chain exists
+                // yet — the commit hook has already extended the chain past this.
                 priorMessages: session.messages,
                 // ADR-0135: this turn's security cause, when the escalation
                 // stopped it. Persisted beside the `cancelled` outcome so a
                 // reopened session can tell a security stop from a Ctrl+C.
                 ...securityInterruptionOption(securityInterruption),
+                // ADR-0150: the closing save is the carrier for a digest no
+                // in-flight commit carried (an auto-loop iteration whose
+                // commit prefix was already consumed).
+                onPersisted: (written) => {
+                  digestLatches.observe(written);
+                },
               });
               void saved;
               // Each turn hands the result to the auto-memory hook, which owns
@@ -2973,6 +3846,11 @@ export class SessionHub {
                   });
                 }
               }
+              // ADR-0150: the iteration ends. A digest no write carried goes
+              // back to claimable, so the next round offers it again. A
+              // digest a write carried is already acknowledged and stays
+              // delivered.
+              digestLatches.settle(true);
             },
             decideContinue: async (s) =>
               silent
@@ -3026,10 +3904,20 @@ export class SessionHub {
             reloadSession: async () => {
               // Hub refreshes session state between auto-loop iterations.
               // (Chat passes a no-op since its session lives in `ctx.state`.)
-              session = await this.store.load(conversationId);
+              // ADR-0145: the refreshed file is re-routed, so the closing save
+              // still carries the conversation's route (a backfilled one
+              // included) into the header it writes.
+              session = this.resolveAndRememberRoute(
+                conversationId,
+                await this.store.load(conversationId)
+              );
             },
           });
         } catch (err) {
+          // ADR-0150: the turn threw. A claim no write carried is released
+          // (the next round offers the result again); a claim a write
+          // already carried stays delivered.
+          digestLatches.releaseAll();
           if (!silent) await this.applyHubAutoError(conversationId, err);
           if (err instanceof MaxTurnsExceeded) {
             // ADR-0011: do not save — the session was already on disk before
@@ -3056,17 +3944,24 @@ export class SessionHub {
         }
       },
     });
-    void operation.then(
+    const settled = this.withTurnEnd(conversationId, turn, operation);
+    void settled.then(
       () => this.releaseActiveTurn(conversationId),
       () => this.releaseActiveTurn(conversationId)
     );
-    return operation;
+    return settled;
   }
 
   /**
    * T4: run one silent parent turn for a terminal subagent handoff.
    * `undefined` means the manager has no host-visible terminal result; no
    * model call is made and no synthetic success is returned.
+   *
+   * ADR-0150: the wake gate IS the claim, and it runs inside the
+   * conversation's serialize slot — the claim and the turn it feeds are one
+   * serialized unit, so a concurrent user turn cannot take the same
+   * generation in between. `serialize` is re-entrant for a held slot, so the
+   * nested postMessage runs inline instead of deadlocking.
    */
   async wakeFromSubagent(opts: {
     readonly conversationId: string;
@@ -3074,29 +3969,37 @@ export class SessionHub {
     readonly thinking?: ThinkingOverride;
     readonly onStream?: (event: HarnessStreamEvent) => void;
   }): Promise<PostMessageResponse | undefined> {
-    const drained = await drainPendingSubagents(this.subagentManagers, {
+    return this.serialize({
       conversationId: opts.conversationId,
+      work: async () => {
+        const drain = await claimPendingSubagents(this.subagentManagers, {
+          conversationId: opts.conversationId,
+        });
+        if (drain.text.length === 0) return undefined;
+        try {
+          return await this.postMessage({
+            conversationId: opts.conversationId,
+            text: "",
+            signal: opts.signal,
+            thinking: opts.thinking,
+            onStream: opts.onStream,
+            silent: true,
+            preclaimedDrain: drain,
+          });
+        } catch (error) {
+          // The turn never carried the digest → the claim goes back, so the
+          // next wake can offer the result again.
+          drain.claims?.release();
+          throw toSubagentWakeError(error, {
+            taskIds: queryableSubagentTaskIds(
+              this.subagentManagers,
+              opts.conversationId
+            ),
+            queryable: this.subagentManager !== undefined,
+          });
+        }
+      },
     });
-    if (drained.length === 0) return undefined;
-    const taskIds = queryableSubagentTaskIds(
-      this.subagentManagers,
-      opts.conversationId
-    );
-    try {
-      return await this.postMessage({
-        conversationId: opts.conversationId,
-        text: "",
-        signal: opts.signal,
-        thinking: opts.thinking,
-        onStream: opts.onStream,
-        silent: true,
-      });
-    } catch (error) {
-      throw toSubagentWakeError(error, {
-        taskIds,
-        queryable: this.subagentManager !== undefined,
-      });
-    }
   }
 
   async resetSession(
@@ -3125,6 +4028,13 @@ export class SessionHub {
           checkpoints: [],
         };
         await this.store.save({ id: conversationId, file: reset });
+        // ADR-0145: the route leaves the runtime map; the reset file keeps
+        // its `model` (the spread above), so the next attach restores the
+        // same route — a reset wipes the conversation, not its model. The
+        // route's resources are reclaimed unless another conversation owns it.
+        const owned = this.sessionRoutes.get(conversationId);
+        this.sessionRoutes.delete(conversationId);
+        if (owned !== undefined) this.releaseRoute(owned);
         return {
           session: this.summarize({ file: reset }),
           turns: [],
@@ -3238,7 +4148,26 @@ export class SessionHub {
         // truncation, no save, cancelled:true) — cancel = no change.
         let nextMessages: ReadonlyArray<AnthropicNativeMessage> | undefined;
         let cancelled = false;
-        const hubAdapter = this.cachedDeps?.adapter;
+        // ADR-0145 §5: the summary call runs on the CONVERSATION's route —
+        // a compaction is a model call for that conversation. A conversation
+        // with no route keeps the base adapter.
+        const hubAdapter = this.routeAdapterFor(
+          conversationId,
+          this.baseAdapter()
+        );
+        // Bus correlation for this compaction: a turnId of its own so its
+        // stream events are groupable, but no turn_started / turn_ended — a
+        // compaction is not a turn.
+        const compactionTurnId = randomUUID();
+        const busOnStream = (event: HarnessStreamEvent): void => {
+          this.publishEvent({
+            kind: "stream",
+            conversationId,
+            turnId: compactionTurnId,
+            event,
+          });
+          safeEmitStream(opts?.onStream, event);
+        };
         if (hubAdapter !== undefined) {
           try {
             const outcome = await runFullCompact({
@@ -3254,9 +4183,9 @@ export class SessionHub {
               },
               dropped: split.dropped,
               ...(opts?.signal !== undefined ? { signal: opts.signal } : {}),
-              ...(opts?.onStream !== undefined
-                ? { onStream: opts.onStream }
-                : {}),
+              // Wrapped, never passed through: the compaction stream reaches
+              // bus subscribers even when the caller passed no onStream.
+              onStream: busOnStream,
             });
             if (outcome.kind === "summarized") {
               // The resume summary goes through the same buildCompactedMessages
@@ -3378,18 +4307,27 @@ export class SessionHub {
     conversationId: string,
     opts?: CompactCallerOpts
   ): Promise<PostMessageResponse> {
-    return this.serialize({
+    const turn: TurnBusState = { turnId: randomUUID(), started: false };
+    const operation = this.serialize<PostMessageResponse>({
       conversationId,
-      work: () => this.runContinuePending(conversationId, opts),
+      work: () => this.runContinuePending(conversationId, opts, turn),
     });
+    return this.withTurnEnd(conversationId, turn, operation);
   }
 
   /** Load, gate unbound/predicate, skip-append run, map skip_append → ValidationError. */
   private async runContinuePending(
     conversationId: string,
-    opts?: CompactCallerOpts
+    opts: CompactCallerOpts | undefined,
+    turn: TurnBusState
   ): Promise<PostMessageResponse> {
-    const session = await this.store.load(conversationId);
+    // ADR-0145 §4: the route is restored (or backfilled) at the load this
+    // path already performs, so a continue turn runs on the conversation's
+    // route even when no turn attached it first.
+    const session = this.resolveAndRememberRoute(
+      conversationId,
+      await this.store.load(conversationId)
+    );
     // EXIT: reject-execute-before-engine — continue has the same boundary
     // contract as postMessage on every host surface.
     const boundRoot = requireBoundRoot(session.workspaceRoot);
@@ -3400,7 +4338,11 @@ export class SessionHub {
     if (!verdict.ok) {
       throw continuePredicateError(verdict.exit);
     }
-    const deps = await this.ensureDeps(boundRoot);
+    // Accepted: the continuation is a turn like any other on the bus.
+    this.startTurn(conversationId, turn);
+    const baseDeps = await this.ensureDeps(boundRoot);
+    // ADR-0145 §5: the continued turn runs on the conversation's route.
+    const deps = this.routeTurnDeps(conversationId, baseDeps, undefined);
     const trace = this.createTrace(conversationId);
     const runDeps: LoopEngineDeps = {
       ...deps,
@@ -3420,6 +4362,12 @@ export class SessionHub {
       if (event.type === "stop_summary") {
         capturedStopSummary = event.text;
       }
+      this.publishEvent({
+        kind: "stream",
+        conversationId,
+        turnId: turn.turnId,
+        event,
+      });
       opts?.onStream?.(event);
     };
     try {
@@ -3509,53 +4457,118 @@ export class SessionHub {
    * whether a restore happened; a restore that fails on an unreadable blob, or
    * that still has ops but no locatable live task root, aborts the whole call
    * and leaves the head where it was.
+   *
+   * A rewind whose head commit lands also stops the live workers it abandoned
+   * (see `cancelAbandonedWorkers`); one that never committed stops nothing.
    */
   async rewindSession(
     conversationId: string,
     head: string | null,
     restoreCode = false
   ): Promise<RewindSessionResponse> {
-    return this.serialize({
+    const acceptance: RewindAcceptance = {
+      spawnIds: undefined,
+      committed: false,
+    };
+    try {
+      return await this.serialize({
+        conversationId,
+        work: () =>
+          this.rewindCommitted(conversationId, head, restoreCode, acceptance),
+      });
+    } finally {
+      await this.cancelAbandonedWorkers(conversationId, acceptance);
+    }
+  }
+
+  /** The rewind's serialized phase: capture what it abandons, restore the
+   *  abandoned code if asked, commit the head move — the acceptance point —
+   *  then assemble the response against the new chain. */
+  private async rewindCommitted(
+    conversationId: string,
+    head: string | null,
+    restoreCode: boolean,
+    acceptance: RewindAcceptance
+  ): Promise<RewindSessionResponse> {
+    // A rewind moves the chain the published state was anchored on, so a
+    // restored state adopted before it no longer describes this session.
+    this.restoredContexts.delete(conversationId);
+    acceptance.spawnIds = await this.abandonedSpawnIdsWhenWorkersLive(
       conversationId,
-      work: async () => {
-        // A rewind moves the chain the published state was anchored on, so a
-        // restored state adopted before it no longer describes this session.
-        this.restoredContexts.delete(conversationId);
-        const codeRestore = restoreCode
-          ? await this.restoreAbandonedCode(conversationId, head)
-          : undefined;
-        let file: SessionFileV1;
-        try {
-          ({ file } = await this.store.rewindToHead({
-            id: conversationId,
-            head,
-          }));
-        } catch (err) {
-          if (!isSessionStoreError(err) || err.kind !== "write_failed") {
-            throw err;
-          }
-          const legacy = await this.store.load(conversationId);
-          await this.store.save({ id: conversationId, file: legacy });
-          ({ file } = await this.store.rewindToHead({
-            id: conversationId,
-            head,
-          }));
-        }
-        return {
-          session: this.summarize({ file }),
-          // ADR-0126: outcomes resolve against the NEW head chain, so the
-          // rewound-away branch's terminal state drops out with its messages.
-          turns: projectMessagesToTurns(
-            file.messages,
-            file.thinkingMs,
-            file.lastUsage,
-            await this.store.projectTurnOutcomes(conversationId)
-          ),
-          head: await this.store.readHead(conversationId),
-          ...(codeRestore !== undefined ? { codeRestore } : {}),
-        };
-      },
-    });
+      head
+    );
+    const codeRestore = restoreCode
+      ? await this.restoreAbandonedCode(conversationId, head)
+      : undefined;
+    const file = await this.commitRewindHead(conversationId, head);
+    // Acceptance is recorded here, with no await between the commit and it:
+    // every path out of `commitRewindHead` returned from a landed commit.
+    acceptance.committed = true;
+    return this.rewindResponse(conversationId, file, codeRestore);
+  }
+
+  /** Move the persisted head, load+save migrating a legacy `.json`-only session
+   *  and retrying once. Only ever returns from a commit that landed. */
+  private async commitRewindHead(
+    conversationId: string,
+    head: string | null
+  ): Promise<SessionFileV1> {
+    try {
+      const { file } = await this.store.rewindToHead({
+        id: conversationId,
+        head,
+      });
+      return file;
+    } catch (err) {
+      if (!isSessionStoreError(err) || err.kind !== "write_failed") {
+        throw err;
+      }
+      const legacy = await this.store.load(conversationId);
+      await this.store.save({ id: conversationId, file: legacy });
+      const { file } = await this.store.rewindToHead({
+        id: conversationId,
+        head,
+      });
+      return file;
+    }
+  }
+
+  /** The accepted rewind's wire view. Its outcome / head reads can still fault
+   *  typed after the commit, which is why acceptance is recorded upstream. */
+  private async rewindResponse(
+    conversationId: string,
+    file: SessionFileV1,
+    codeRestore: CodeRestoreReport | undefined
+  ): Promise<RewindSessionResponse> {
+    return {
+      session: this.summarize({ file }),
+      // ADR-0126: outcomes resolve against the NEW head chain, so the
+      // rewound-away branch's terminal state drops out with its messages.
+      turns: projectMessagesToTurns(
+        file.messages,
+        file.thinkingMs,
+        file.lastUsage,
+        await this.store.projectTurnOutcomes(conversationId)
+      ),
+      head: await this.store.readHead(conversationId),
+      ...(codeRestore !== undefined ? { codeRestore } : {}),
+    };
+  }
+
+  /** The abandoned `spawn_subagent` ids of a rewind to `head`, or `undefined`
+   *  when this conversation has no live worker to cancel. The in-memory list is
+   *  the guard: with nothing live, a rewind that does not ask for code restore
+   *  runs zero extra transcript / meta IO. */
+  private async abandonedSpawnIdsWhenWorkersLive(
+    conversationId: string,
+    head: string | null
+  ): Promise<ReadonlySet<string> | undefined> {
+    for (const info of this.listSubagents(conversationId)) {
+      if (info.state === "starting" || info.state === "running") {
+        return this.abandonedSpawnToolUseIds(conversationId, head);
+      }
+    }
+    return undefined;
   }
 
   /** Restore the workspace files a rewind to `head` would abandon (ADR-0121).
@@ -3634,23 +4647,55 @@ export class SessionHub {
 
   /** Preimage-bearing events of workers spawned from the segment a rewind to
    *  `head` would abandon, grouped per worker transcript so the plan can
-   *  attribute each path to the transcript that wrote it. Join key:
-   *  `spawn_subagent` tool_use ids in the segment ↔
-   *  `subagents/<taskId>/agent-<taskId>.meta.json`'s `toolUseId`.
-   *  Absent meta/transcript → skipped (legacy worker or one that exited
-   *  before its first commit — no link or no stamped history exists). A
-   *  corrupt meta or transcript propagates typed: an unreadable link is
-   *  indistinguishable from a matching one, so the whole restore aborts
-   *  before the head moves, same posture as an unreadable blob. */
+   *  attribute each path to the transcript that wrote it. Join key: see
+   *  `workerTaskIdsForSpawnIds`. Absent meta/transcript → skipped (legacy
+   *  worker or one that exited before its first commit — no link or no stamped
+   *  history exists). A corrupt meta or transcript propagates typed: this runs
+   *  pre-move, so an unreadable link aborts the whole restore before the head
+   *  moves, same posture as an unreadable blob. */
   private async abandonedWorkerPreimages(
     conversationId: string,
     head: string | null
   ): Promise<
     ReadonlyArray<{ taskId: string; events: ReadonlyArray<SessionEventRecord> }>
   > {
-    const segment = await this.store.abandonedEvents(conversationId, head);
+    const spawnIds = await this.abandonedSpawnToolUseIds(conversationId, head);
+    if (spawnIds.size === 0) return [];
+    const subagentsDir = this.subagentsDirOf(conversationId);
+    const out: Array<{
+      taskId: string;
+      events: ReadonlyArray<SessionEventRecord>;
+    }> = [];
+    for (const taskId of await this.workerTaskIdsForSpawnIds(
+      conversationId,
+      spawnIds
+    )) {
+      // The group is kept even when empty: a transcript with no refs claims no
+      // path, so it cannot make any other transcript's path shared.
+      out.push({
+        taskId,
+        events: await loadWorkerPreimageEvents({
+          transcriptPath: workerTranscriptPath(subagentsDir, taskId),
+          taskId,
+        }),
+      });
+    }
+    return out;
+  }
+
+  /** The `spawn_subagent` tool_use ids inside the segment a rewind to `head`
+   *  would abandon — the id set both rewind sides (preimage restore, worker
+   *  cancellation) join through. Read-only, and it must be read BEFORE the head
+   *  moves: `abandonedEvents` returns the empty set afterwards. */
+  private async abandonedSpawnToolUseIds(
+    conversationId: string,
+    head: string | null
+  ): Promise<ReadonlySet<string>> {
     const spawnIds = new Set<string>();
-    for (const event of segment) {
+    for (const event of await this.store.abandonedEvents(
+      conversationId,
+      head
+    )) {
       const content = event.message.content;
       if (!Array.isArray(content)) continue;
       for (const block of content) {
@@ -3664,15 +4709,22 @@ export class SessionHub {
         }
       }
     }
-    if (spawnIds.size === 0) return [];
-    const subagentsDir = resolveSubagentTraceDir({
-      projectDir: this.store.getProjectDir(),
-      conversationId,
-    });
-    const out: Array<{
-      taskId: string;
-      events: ReadonlyArray<SessionEventRecord>;
-    }> = [];
+    return spawnIds;
+  }
+
+  /** Worker task ids whose spawn link is in `spawnIds`. The join is the
+   *  on-disk `subagents/<taskId>/agent-<taskId>.meta.json` `toolUseId` — the
+   *  ORIGINAL spawn id, written once — and never `SubagentInfo.toolUseId`: a
+   *  resume re-attaches that field to the newest `subagent_continue` call, so
+   *  the in-memory value describes a different dispatch. A corrupt or
+   *  unreadable meta propagates typed; the caller decides whether that aborts
+   *  (restore, pre-move) or degrades (cancellation, post-accept). */
+  private async workerTaskIdsForSpawnIds(
+    conversationId: string,
+    spawnIds: ReadonlySet<string>
+  ): Promise<ReadonlyArray<string>> {
+    const subagentsDir = this.subagentsDirOf(conversationId);
+    const matched: string[] = [];
     for (const recordPath of listSubagentRecordPaths(subagentsDir)) {
       // Glob guarantees `agent-<taskId>.jsonl`; the nested layout (ADR-0102)
       // names the directory the same, so the record's basename identifies the
@@ -3682,16 +4734,54 @@ export class SessionHub {
         workerMetaPath(subagentsDir, taskId),
         taskId
       );
-      if (toolUseId === undefined || !spawnIds.has(toolUseId)) continue;
-      const events = await loadWorkerPreimageEvents({
-        transcriptPath: workerTranscriptPath(subagentsDir, taskId),
-        taskId,
-      });
-      // The group is kept even when empty: a transcript with no refs claims no
-      // path, so it cannot make any other transcript's path shared.
-      out.push({ taskId, events });
+      if (toolUseId !== undefined && spawnIds.has(toolUseId)) {
+        matched.push(taskId);
+      }
     }
-    return out;
+    return matched;
+  }
+
+  /** The folder this session's worker records (meta + transcript) live under. */
+  private subagentsDirOf(conversationId: string): string {
+    return resolveSubagentTraceDir({
+      projectDir: this.store.getProjectDir(),
+      conversationId,
+    });
+  }
+
+  /** Hard-stop every worker an ACCEPTED rewind orphaned, background and
+   *  foreground alike — the abandoned branch, not the delivery channel, is what
+   *  makes an in-flight worker an orphan. Runs from the caller's `finally`, so it
+   *  rides acceptance rather than a clean return, and OUTSIDE the serialize slot
+   *  on purpose: `abortTask` emits its terminal notice synchronously, and the
+   *  wake behind it posts into this conversation's queue, so an abort inside the
+   *  slot's inline work would rewrite the head and turns the response reports.
+   *  Nothing captured (no live worker) and an empty abandoned set (no spawn in
+   *  it) both stay at zero meta IO. Unknown / already-terminal ids are a no-op
+   *  (`abortTask` returns false, never throws). */
+  private async cancelAbandonedWorkers(
+    conversationId: string,
+    acceptance: RewindAcceptance
+  ): Promise<void> {
+    const spawnIds = acceptance.spawnIds;
+    if (!acceptance.committed || spawnIds === undefined || spawnIds.size === 0)
+      return;
+    try {
+      for (const taskId of await this.workerTaskIdsForSpawnIds(
+        conversationId,
+        spawnIds
+      )) {
+        this.subagentManagers.abortTask(taskId);
+      }
+    } catch (err) {
+      // EXIT: the head commit is already durable, and an unreadable worker meta
+      // cannot un-accept the rewind — so an accepted rewind plus an unreadable
+      // meta reports a diagnostic and continues, leaving the orphan to run to
+      // its own end, instead of turning an accepted rewind into a failure.
+      console.warn(
+        `[serve] rewind abandoned-worker cancel skipped: ${errorMessage(err)}`
+      );
+    }
   }
 
   /** The live project-identity root a captured preimage `rootIdentity` is
@@ -3944,6 +5034,34 @@ export class SessionHub {
 
   // -- private helpers ---------------------------------------------------------
 
+  /** Admission of one user input. Without a payload the rule is unchanged:
+   *  non-empty text inside the cap. With a payload the two classes are judged
+   *  on their own terms — the message is empty only when NEITHER carries
+   *  anything, and the cap measures TEXT only: an image payload's serialized
+   *  size is bounded by the store's own image tier, so applying
+   *  `MAX_MESSAGE_CHARS` to it would reject a screenshot at the door. Each
+   *  typed error names the class it violated (`field` plus the message). */
+  private validateUserInput(
+    query: string,
+    content: readonly UserContentBlock[] | undefined
+  ): void {
+    if (content === undefined) {
+      this.validateText(query);
+      return;
+    }
+    const payloadText = userContentText(content);
+    const userText = payloadText.trim().length > 0 ? payloadText : query;
+    if (userText.trim().length === 0 && !hasImageBlock(content)) {
+      throw new ValidationError(
+        "message carries neither text nor image content blocks",
+        { field: "content" }
+      );
+    }
+    if (exceedsUserInputCap(userText, MAX_MESSAGE_CHARS)) {
+      throw inputTooLongError(userText);
+    }
+  }
+
   private validateText(text: string): void {
     const query = text.trim();
     if (!query) {
@@ -3959,10 +5077,7 @@ export class SessionHub {
     // `exceedsUserInputCap` is shared by hub.validateText, chat-session
     // processChatLine and the same-side predicate unit test.
     if (exceedsUserInputCap(text, MAX_MESSAGE_CHARS)) {
-      throw new ValidationError(
-        `message text exceeds max length ${MAX_MESSAGE_CHARS}`,
-        { field: "text", max: MAX_MESSAGE_CHARS, length: query.length }
-      );
+      throw inputTooLongError(text);
     }
   }
 
@@ -4214,7 +5329,13 @@ export class SessionHub {
       });
     } catch (err) {
       if (!isSessionStoreError(err)) throw err;
-      await this.store.save({ id: opts.conversationId, file: opts.session });
+      // The input commit can have grown the chain past this turn-start
+      // snapshot, so the bootstrap must never rewind it: `keepHead`.
+      await this.store.save({
+        id: opts.conversationId,
+        file: opts.session,
+        keepHead: true,
+      });
       await this.store.appendEvents({
         id: opts.conversationId,
         events: opts.events,
@@ -4418,10 +5539,13 @@ export class SessionHub {
     // already performs, so a publication never pays a second store read to
     // learn whether this session is one it may write into.
     this.newFormatSessions.set(conversationId, isNewFormatSession(session));
+    // ADR-0145: the route is restored (or backfilled) at the load the turn
+    // already performs, so the attach never pays a second store read for it.
+    // The routed session carries the route into the closing save, which is
+    // what persists a backfill.
+    const routed = this.resolveAndRememberRoute(conversationId, session);
     const restored = this.takeRestoredContext(conversationId);
-    return restored === undefined
-      ? session
-      : { ...session, messages: restored };
+    return restored === undefined ? routed : { ...routed, messages: restored };
   }
 
   /** The wire view of one entry recovery: the status plus the reconciled
@@ -4430,118 +5554,144 @@ export class SessionHub {
     return { ...recovery.status, operations: recovery.operations };
   }
 
-  /** Save condition based on stopReason and progress delta.
-   *  `priorMessages` = messages the model saw at the start of THIS run
-   *  (delta = result.messages.length - priorMessages.length drives the
-   *  cancelled-delta check and the appendCheckpoint messagesCount). Disk
-   *  persistence uses `diskPrior` (defaults to priorMessages for the
-   *  postMessage path; /continue sets it to session.messages so the trailing
-   *  interrupt system message stays on disk even though the model prior
-   *  omitted it).
-   *
-   *  decideCheckpointPersist picks one of three outcomes:
-   *    "none"              — skip save entirely
-   *    "full"              — save result.messages wholesale (completed /
-   *                          maxTurns / timeout / nonSuccessStop /
-   *                          cancelled-with-delta)
-   *    "partial_user_only" — splice ONLY user-role messages from this run's
-   *                          delta onto disk (spec:
-   *                          protocolError / emptyFinalResponse keep the
-   *                          user message, drop the failed assistant).
-   *
-   *  Interrupting stops (cancelled with delta>0) also append a checkpoint
-   *  record so the interrupted turn is recoverable / rewind-able.
-   *
-   *  B1: return value = true when actually persisted / false when not
-   *  (decideCheckpointPersist declined or store.save threw). Error-handling
-   *  semantics unchanged — save failures propagate upward and are settled by
+  /** Save condition based on stopReason and progress delta, built on the
+   *  PERSISTED HEAD CHAIN loaded here: the commit hook extends that chain
+   *  mid-run, so a projection from the turn-start snapshot can be shorter than
+   *  disk. Both close saves therefore declare `keepHead`: only the store owns
+   *  the alignment relation that decides "behind the chain" (it counts a
+   *  coalesced tool_result batch as the per-call events behind it), so it is the
+   *  one that refuses such a close with `concurrent_write` and writes nothing —
+   *  a backward head move belongs to `resetSession` / `rewindSession` alone.
+   *  Outcomes: "none" = no new messages to append; "full" = save result.messages
+   *  wholesale (completed / maxTurns / timeout / nonSuccessStop /
+   *  cancelled-with-delta); "partial_user_only" = splice only this run's
+   *  user-role delta onto disk (protocolError / emptyFinalResponse keep the
+   *  query, drop the assistant that never reached the commit).
+   *  B1: true = the session FILE was rewritten, false = nothing was owed (a
+   *  "none" decision that grew no chain and carries no pending root, or no chain
+   *  exists yet); the turn's terminal outcome record is a tail record, not a file
+   *  rewrite, so it can still land on a `false` close. A failing save is not a
+   *  `false` — the store's typed error (concurrent_write / write_failed) rejects
+   *  out of here. Save failures propagate upward and are settled by
    *  postMessage's serialize queue; no warn here. */
   private async conditionalSave(opts: {
     readonly conversationId: string;
     readonly session: SessionFileV1;
     readonly result: RunResult;
+    /** Messages the model saw at the start of THIS run: delta =
+     *  result.messages.length - this.length drives the cancelled-delta check, the
+     *  delta slice and the appendCheckpoint messagesCount. */
     readonly priorMessages: ReadonlyArray<AnthropicNativeMessage>;
-    /** /continue only: messages to splice the new delta onto for disk. When
-     *  omitted, defaults to priorMessages (postMessage path — model prior ==
-     *  disk prior). */
+    /** /continue only: the file the new delta splices onto, which still carries
+     *  the trailing interrupt system message the model prior omitted. When
+     *  omitted, the head chain loaded here is BOTH the predicate prior and the
+     *  disk baseline (postMessage path — model prior == disk prior). */
     readonly diskPrior?: ReadonlyArray<AnthropicNativeMessage>;
     /** ADR-0135: the interrupted turn's security cause + bounded cleanup
      *  evidence, persisted with this turn's outcome. Absent on every other
      *  path (including a user Ctrl+C and /continue). */
     readonly securityInterruption?: SecurityInterruptionRecord;
+    /** ADR-0150: observe the messages a successful save actually wrote, so
+     *  the delivery latch can acknowledge the claim that write carried.
+     *  Absent → no observation (the `none` close writes nothing new and is
+     *  never a carrier). */
+    readonly onPersisted?: (
+      written: ReadonlyArray<AnthropicNativeMessage>
+    ) => void;
   }): Promise<boolean> {
     const { conversationId, session, result, priorMessages } = opts;
-    const diskPrior = opts.diskPrior ?? priorMessages;
-    const decision = decideCheckpointPersist(result, priorMessages);
+    const loaded = await this.loadHeadChainForSave(conversationId);
+    // No JSONL yet = no chain to be behind (a first turn whose input commit
+    // never landed), where the caller's prior already is the whole transcript.
+    const chainMessages = loaded?.messages ?? priorMessages;
+    const predicatePrior =
+      opts.diskPrior === undefined ? chainMessages : priorMessages;
+    const diskPrior = opts.diskPrior ?? chainMessages;
+    const decision = decideCheckpointPersist(result, predicatePrior);
     const pendingRoot = this.dirtyWorktreeRoots.get(conversationId);
-    if (decision.kind === "none" && pendingRoot === undefined) return false;
+    const interruptReason = toInterruptReason(result.stopReason);
+    if (decision.kind === "none") {
+      const closed = await this.persistCloseWithoutNewMessages({
+        conversationId,
+        session,
+        result,
+        loaded,
+        chainMessages,
+        interruptReason,
+        pendingRoot,
+        securityInterruption: opts.securityInterruption,
+      });
+      return closed;
+    }
     const now = new Date().toISOString();
-    const updated =
-      decision.kind === "none"
+    const turnCount = session.turnCount + result.turnCount;
+    // The postMessage "full" close is the one arm that writes the engine's
+    // history wholesale, because for a settled run that history IS the
+    // transcript (a run that compacted mid-flight diverges from the chain at its
+    // head, which the store reads as a fork). Whether a history is BEHIND that
+    // chain is the store's alignment relation to decide — it alone counts a
+    // coalesced tool_result batch as the per-call events the commit hook wrote —
+    // so this close declares `keepHead` below and lets the store refuse the
+    // rewind with its own typed error.
+    // Disk is the baseline for the spliced arms: the commit hook extends the
+    // chain while the run is in flight, so a projection assembled from the
+    // turn-start snapshot would write over those commits. Memory contributes only
+    // the entries past that baseline.
+    // "partial_user_only" filters with the SSOT `isTurnQuery` — the same predicate
+    // decideCheckpointPersist used to pick this outcome; a bare `role === "user"`
+    // check would also match tool_result-only continuation messages and orphan
+    // them.
+    const persistedMessages =
+      decision.kind === "full" && opts.diskPrior === undefined
+        ? result.messages
+        : decision.kind === "full"
+          ? [...diskPrior, ...result.messages.slice(predicatePrior.length)]
+          : [
+              ...diskPrior,
+              ...result.messages
+                .slice(predicatePrior.length)
+                .filter((m) => isTurnQuery(m)),
+            ];
+    // appendCheckpoint compares record.messagesCount to
+    // session.messages.length for its delta=0 guard, so it must
+    // receive the session BEFORE new messages are merged in.
+    const withCheckpoint =
+      interruptReason === null
         ? session
-        : (() => {
-            const turnCount = session.turnCount + result.turnCount;
-            const interruptReason = toInterruptReason(result.stopReason);
-            // Resolve the messages we want on disk for this decision.
-            // - "full": result.messages (or diskPrior + delta for /continue).
-            // - "partial_user_only": diskPrior + genuine user queries from this
-            //   run's delta (SSOT `isTurnQuery` — same predicate
-            //   decideCheckpointPersist used to pick this outcome; a bare
-            //   `role === "user"` check would also match tool_result-only
-            //   continuation messages and orphan them). The failed assistant
-            //   turn never reaches disk.
-            const persistedMessages =
-              decision.kind === "full"
-                ? diskPrior === priorMessages
-                  ? result.messages
-                  : [
-                      ...diskPrior,
-                      ...result.messages.slice(priorMessages.length),
-                    ]
-                : decision.kind === "partial_user_only"
-                  ? [
-                      ...diskPrior,
-                      ...result.messages
-                        .slice(priorMessages.length)
-                        .filter((m) => isTurnQuery(m)),
-                    ]
-                  : (session.messages as ReadonlyArray<AnthropicNativeMessage>);
-            // appendCheckpoint compares record.messagesCount to
-            // session.messages.length for its delta=0 guard, so it must
-            // receive the session BEFORE new messages are merged in.
-            const withCheckpoint =
-              interruptReason === null
-                ? session
-                : appendCheckpoint(session, {
-                    turnIndex: turnCount,
-                    messagesCount: persistedMessages.length,
-                    interruptedAt: now,
-                    interruptReason,
-                    ...persistedLastUsage(result.lastUsage),
-                  });
-            return {
-              ...withCheckpoint,
-              messages: persistedMessages,
-              turnCount,
-              updatedAt: now,
-              schemaVersion: CURRENT_SCHEMA_VERSION,
-              title: extractTitle(persistedMessages),
-              // #1079: file-level usage snapshot for reopen replay (TUI attach
-              // / web load must not fall back to 0%); covers every persisted
-              // decision, interrupt stops included.
-              ...persistedLastUsage(result.lastUsage),
-            };
-          })();
+        : appendCheckpoint(session, {
+            turnIndex: turnCount,
+            messagesCount: persistedMessages.length,
+            interruptedAt: now,
+            interruptReason,
+            ...persistedLastUsage(result.lastUsage),
+          });
+    const updated: SessionFileV1 = {
+      ...withCheckpoint,
+      messages: persistedMessages,
+      turnCount,
+      updatedAt: now,
+      schemaVersion: CURRENT_SCHEMA_VERSION,
+      title: extractTitle(persistedMessages),
+      // #1079: file-level usage snapshot for reopen replay (TUI attach
+      // / web load must not fall back to 0%); covers every persisted
+      // decision, interrupt stops included.
+      ...persistedLastUsage(result.lastUsage),
+    };
     await this.consumeDirtyRootOnSave(conversationId, async (root) => {
       // EXIT: report-save-failure-and-retain-dirty-root — SessionStore's
       // typed error propagates; consumeDirtyRootOnSave clears only after this
-      // write resolves successfully.
+      // write resolves successfully. `keepHead`: a closing save never owns a
+      // backward head move, so the store refuses one instead of writing it.
       await this.store.save({
         id: conversationId,
         file:
           root === undefined ? updated : { ...updated, workspaceRoot: root },
+        keepHead: true,
       });
     });
+    // ADR-0150: the save landed — the written array is a carrier when it
+    // holds the digest.
+    notifyPersisted(opts.onPersisted, persistedMessages);
     await this.appendTurnOutcome(
       conversationId,
       session,
@@ -4552,6 +5702,114 @@ export class SessionHub {
     return true;
   }
 
+  /** The `none` close: nothing new to append, but the turn may still own disk
+   *  writes. An interrupt checkpoint is owed only when this run grew the chain,
+   *  together with any pending worktree root; both go onto the loaded file,
+   *  whose messages stay verbatim as the head chain, so the head cannot move. A
+   *  close that grew nothing leaves the file untouched (checkpoint.ts's `none`
+   *  = skip save) while its outcome still gets its chance below. With no JSONL
+   *  loaded there is no chain to carry a record: the root stays dirty for the
+   *  next save and the close reports `false`. Returns whether the session FILE
+   *  was rewritten (B1). */
+  private async persistCloseWithoutNewMessages(opts: {
+    readonly conversationId: string;
+    readonly session: SessionFileV1;
+    readonly result: RunResult;
+    readonly loaded: SessionFileV1 | null;
+    readonly chainMessages: ReadonlyArray<AnthropicNativeMessage>;
+    readonly interruptReason: InterruptReason | null;
+    readonly pendingRoot:
+      { readonly root: string; readonly intent: RebindIntent } | undefined;
+    readonly securityInterruption?: SecurityInterruptionRecord;
+  }): Promise<boolean> {
+    const {
+      conversationId,
+      session,
+      result,
+      loaded,
+      chainMessages,
+      interruptReason,
+      pendingRoot,
+      securityInterruption,
+    } = opts;
+    if (loaded === null) return false;
+    // An interrupting stop whose transcript is already fully committed (a
+    // cancelled turn whose interrupt message landed via the commit hook, a
+    // protocolError whose query was accepted-and-committed first) must not lose
+    // the checkpoint that makes the turn recoverable / rewind-able. The `none`
+    // decision says this run added no user query, so the only thing worth a
+    // record is a chain this run itself grew: the same fact
+    // `appendTurnOutcome` gates its outcome on. A zero-delta /continue
+    // (interrupt-stripped prior, nothing committed) leaves the file untouched —
+    // the checkpoint the run reads is the one it is recovering from.
+    const advancedChain = chainMessages.length > session.messages.length;
+    const record: CheckpointRecord | null =
+      interruptReason !== null && advancedChain
+        ? {
+            turnIndex: session.turnCount + result.turnCount,
+            messagesCount: chainMessages.length,
+            interruptedAt: new Date().toISOString(),
+            interruptReason,
+            ...persistedLastUsage(result.lastUsage),
+          }
+        : null;
+    const rewroteFile = record !== null || pendingRoot !== undefined;
+    // `appendCheckpoint` would drop `record` on its delta<=0 guard, so it joins
+    // the loaded list directly.
+    const updated: SessionFileV1 = {
+      ...loaded,
+      // The chain's own counter wins: a stale snapshot must never move it
+      // backward either.
+      turnCount: Math.max(
+        loaded.turnCount,
+        session.turnCount + result.turnCount
+      ),
+      // Every file rewrite stamps the write, including the listing sort
+      // (`listSessions` orders by updatedAt).
+      updatedAt: new Date().toISOString(),
+      ...(record === null
+        ? {}
+        : { checkpoints: [...(loaded.checkpoints ?? []), record] }),
+    };
+    if (rewroteFile) {
+      await this.consumeDirtyRootOnSave(conversationId, async (root) => {
+        await this.store.save({
+          id: conversationId,
+          file:
+            root === undefined ? updated : { ...updated, workspaceRoot: root },
+          keepHead: true,
+        });
+      });
+    }
+    // `updated` IS the head chain, so appendTurnOutcome writes only when this
+    // turn's commits put the head there: a stop reason never lands on a head an
+    // earlier turn settled on, and a turn whose commits are on disk keeps its
+    // terminal record.
+    await this.appendTurnOutcome(
+      conversationId,
+      session,
+      updated,
+      result,
+      securityInterruption
+    );
+    return rewroteFile;
+  }
+
+  /** The file the closing save builds on: the persisted head chain, projected
+   *  through the production reader. `not_found` means no chain exists yet, so
+   *  nothing can be stale and the caller's prior stays authoritative; any other
+   *  typed failure propagates like every other store read on this path. */
+  private async loadHeadChainForSave(
+    conversationId: string
+  ): Promise<SessionFileV1 | null> {
+    try {
+      return await this.store.load(conversationId);
+    } catch (err) {
+      if (isSessionStoreError(err) && err.kind === "not_found") return null;
+      throw err;
+    }
+  }
+
   /** ADR-0126: persist the settled turn's terminal outcome. Anchored on the
    *  persisted head — the turn's terminal message event — which keeps the
    *  identity stable for a `/continue` that appended no human message; a
@@ -4560,7 +5818,11 @@ export class SessionHub {
    *
    *  Skipped when this turn added nothing to the transcript: the head still
    *  points at the PREVIOUS turn's terminal event, and writing there would
-   *  overwrite that turn's outcome with this one's stop reason. */
+   *  overwrite that turn's outcome with this one's stop reason. The measure is
+   *  the turn against ITS OWN starting snapshot, so it proves the turn grew the
+   *  history it began with and nothing more: a close that compacted re-branches
+   *  the chain with fewer messages than that snapshot (the store's fork arm, the
+   *  one `keepHead` does not refuse) and reads here like any zero-delta close. */
   private async appendTurnOutcome(
     conversationId: string,
     prior: SessionFileV1,

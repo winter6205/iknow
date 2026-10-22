@@ -8,28 +8,26 @@
 unset GIT_DIR GIT_INDEX_FILE GIT_WORK_TREE GIT_COMMON_DIR
 
 npx lint-staged
+npm run lint:s5:staged
 
 # docs-only 快速路径：vitest --changed 只按"与 HEAD 有差异的代码文件"挑相关测试，
 # staged diff 里一个代码文件都没有时（纯文档提交）它会退化成跑全量套件——5 个
 # markdown 的提交实测耗几分钟。纯文档改动既不影响类型也不影响测试结果，
 # typecheck + test:changed 没有可校验的对象，这里直接放行。
-# Note: lint-staged (including Prettier formatting for Markdown) still runs above;
-# quotePath=false prevents non-ASCII filenames from being escaped as
-# "docs/\346\226\207..." 而漏判。git 失败时置空 → 退回全量路径（保守）。
-staged=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMR) || staged=""
-if [ -n "$staged" ]; then
-  docs_only=1
-  set -f # 关闭 glob，避免文件名被意外展开
-  for f in $staged; do
-    case "$f" in
-      docs/*|specs/*) ;; # 文档/spec 目录下的任意文件
-      */*) docs_only=0 ;; # 其余带目录的（含 src/tests/scripts/web 等代码）
-      *.md) ;; # 仓库根部的 README.md / CHANGELOG.md 等
-      *) docs_only=0 ;;
-    esac
-  done
-  set +f
-  if [ "$docs_only" = 1 ]; then
+# 分类交给 git pathspec，不再用 shell 循环逐个 case：
+#   - --diff-filter 带 D，"只删一个 docs/x.md" 也算纯文档（原来漏判）；
+#   - 一条记录一个文件名，带空格的名字不会被 IFS 拆成两段（原来误判）；
+#   - 纯 exclude 的 pathspec 相对仓库根解析，与 cwd 无关；quotePath=false 让
+#     中文文件名不被转义成 "docs/\346\226\207..."；
+#   - ':(exclude,glob)*.md' 只把仓库根部的 *.md 算作文档，src/x.md 仍算代码；
+#   - 规则目录 .claude/rules/ 和 .codex/rules/ 是纯文字约定，也算文档；其它位置的
+#     .md（如 tests/fixtures/**/SKILL.md，被测试当输入消费）仍算代码，不放行。
+# git 失败时 nondocs 非空 → 退回全量路径（保守）。
+if [ -n "$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMRD)" ]; then
+  nondocs=$(git -c core.quotePath=false diff --cached --name-only --diff-filter=ACMRD -- \
+    ':(exclude)docs/' ':(exclude)specs/' ':(exclude).claude/rules/' ':(exclude).codex/rules/' \
+    ':(exclude,glob)*.md') || nondocs="git-failed"
+  if [ -z "$nondocs" ]; then
     echo "docs-only staged change: skipping typecheck + tests"
     exit 0
   fi

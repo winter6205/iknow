@@ -370,6 +370,7 @@ describe("runWorkerOnce — worker write-root prior end-to-end (T3)", () => {
           },
           supplierStop: "success",
           needsTools: false,
+          hasThinking: false,
           isEmptyFinalResponse: false,
         },
       ],

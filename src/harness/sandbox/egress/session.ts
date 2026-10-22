@@ -66,6 +66,7 @@
 
 import { chmodSync, existsSync, rmSync, unlinkSync } from "node:fs";
 import { randomBytes } from "node:crypto";
+import type { Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { IncomingHttpHeaders, Server } from "node:http";
@@ -157,6 +158,21 @@ export interface EgressPolicyInput {
    */
   readonly credentials?: EgressCredentialRoster;
 }
+
+/**
+ * Per-call policy — the call-scoped half of the egress decision input.
+ *
+ * It is `EgressPolicyInput` **without** the credential roster: the roster is
+ * session-level (one mint per session, see the agent profile), so a per-call
+ * policy must not be able to carry one. The approval gate stays in the
+ * per-call policy because the gate instance itself is session-level (the bash
+ * tool factory creates it once and every call passes the same instance — the
+ * session-scoped approval set accumulates inside it).
+ *
+ * The command label is the per-call half: it rides into every violation
+ * record produced by THAT call, which is what makes the attribution exact.
+ */
+export type EgressCallPolicy = Omit<EgressPolicyInput, "credentials">;
 
 /**
  * Optional factory inputs. Relay resolution / socket path / server factory /
@@ -348,6 +364,141 @@ export interface EgressSession {
 }
 
 /**
+ * The session-resident egress **profile** — the expensive, long-lived half of
+ * the seam (plan T4 "出口代理会话级常驻").
+ *
+ * What lives here (loaded ONCE per session):
+ *   - the bundled relay dependency set (node runtime + relay assets);
+ *   - the proxy auth token (one token per session, as before);
+ *   - the durable CA load + the fresh trust-bundle write and the credential
+ *     mint (sentinel registry / masked store / bind table / env delta);
+ *   - the ssh-agent availability verdict;
+ *   - the domain-matcher decision functions.
+ *
+ * What does NOT live here (per call, see `EgressCallEndpoint`): the unix
+ * socket, the proxy-server instance (its filter closure carries the call's
+ * policy + the call's sink), the violation sink and the fence spec.
+ */
+export interface EgressProfile {
+  /** Session id (16 hex chars) — the profile's identity in logs / socket names. */
+  readonly id: string;
+  /** The resolved bundled relay dependency set. */
+  readonly relay: EgressRelayPaths;
+  /** The per-session proxy auth token (embedded in the proxy URL userinfo). */
+  readonly token: string;
+  /** Absolute host SSH agent socket path (open state) or undefined (closed). */
+  readonly sshAuthSockPath: string | undefined;
+  /** The minted credential resources (registry / store / CA), when a roster is present. */
+  readonly credential: EgressCredentialResources | undefined;
+  /** The domain decision function (dynamic import of the matcher). */
+  readonly decideEgress: typeof import("./domain-matcher.js").decideEgress;
+  /** The default denied address tiers (domain-matcher's private ranges). */
+  readonly defaultDeniedRanges: readonly string[];
+}
+
+/**
+ * Minting inputs — the credential half of the profile resolution. Split out
+ * because the mint is session-level: the roster is minted once and its
+ * resources (registry / masked store / trust bundle) live as long as the
+ * profile does.
+ */
+export interface EgressMintOptions {
+  /** Credential roster — present = mint the masked credential layer. */
+  readonly credentials?: EgressCredentialRoster;
+  /** Test seam: inject the persistent CA loader (default `ca-store.loadEgressCa`). */
+  readonly loadEgressCa?: (opts?: {
+    readonly caDir?: string;
+    readonly onWarn?: (message: string) => void;
+  }) => EgressCaLoad;
+  /** Persistent CA directory (test injection point, passed to loadEgressCa). */
+  readonly caDir?: string;
+  /** Host env source for reading real values during minting (default `process.env`). */
+  readonly hostEnv?: Record<string, string | undefined>;
+  /** Observation seam: after a successful mint, observe the mint product. */
+  readonly onCredentialMint?: (cred: EgressCredentialResources) => void;
+}
+
+/**
+ * Profile resolution inputs — the session-resident half of the seam.
+ */
+export interface EgressProfileOptions extends EgressMintOptions {
+  /**
+   * Credential availability branch (default **off**): absolute host SSH agent
+   * socket path. Missing path / stale-to-nonexistent → fail-closed, throwing
+   * `SshAgentUnavailableError` (infra-classified, with guidance).
+   */
+  readonly sshAuthSockPath?: string;
+  /** Relay dependency resolver (default: the production `resolveEgressRelay`). */
+  readonly relayResolver?: () => EgressRelayPaths | undefined;
+  /**
+   * Pre-assigned session id (default: a fresh random 16-hex id). The agent
+   * assigns its id at factory time so the id is stable before the lazy start.
+   */
+  readonly id?: string;
+}
+
+/**
+ * The per-call egress **endpoint** — one socket, one proxy-server instance,
+ * one violation sink, one fence spec (plan T5 "按调用子 socket").
+ *
+ * The endpoint is created and disposed inside the call; the session-resident
+ * profile behind it outlives the call.
+ */
+export interface EgressCallEndpoint {
+  /** The one-shot call id (16 hex chars) — carried by the socket path. */
+  readonly id: string;
+  /** The endpoint's own unix socket path (mode 0600, bound into this call's fence). */
+  readonly socketPath: string;
+  /** The fence spec for THIS call (socket path + bridge script are call-scoped). */
+  readonly spec: EgressFenceSpec;
+  /** The call's own violation sink — holds only the violations THIS call produced. */
+  readonly violationSink: EgressViolationSink;
+  /**
+   * Teardown: drop this call's live connections (the upgraded CONNECT tunnels
+   * included) + close this call's proxy server + delete this call's socket.
+   * **Idempotent** (finally-safe). The credential layer is NOT released here —
+   * it belongs to the session-resident profile.
+   */
+  dispose(): Promise<void>;
+}
+
+/**
+ * The legacy per-call session as a call endpoint.
+ *
+ * The two callers that still own a legacy session — the foreground bash path
+ * and the background task path — need the same projection, and the projection
+ * belongs to the egress domain (it bridges two of its own types), so it lives
+ * here rather than being written twice. One copy, one shape: the day
+ * `EgressCallEndpoint` gains a field, this adapter is the single place that
+ * has to learn about it.
+ */
+export function adaptEgressSessionToEndpoint(
+  session: EgressSession
+): EgressCallEndpoint {
+  return {
+    id: session.id,
+    socketPath: session.spec.unixSocketPath,
+    spec: session.spec,
+    violationSink: session.violationSink,
+    dispose: () => session.dispose(),
+  };
+}
+
+/**
+ * Endpoint construction inputs — the injectable seams of one call's seam.
+ */
+export interface EgressEndpointDeps {
+  /** The proxy-server factory (test seam; production uses the upstream one). */
+  readonly createHttpProxy: (opts: HttpProxyServerOptions) => Server;
+  /** Unix socket path factory — receives the one-shot call id. */
+  readonly socketPathFactory: (id: string) => string;
+  /** Domain-pattern set exempt from TLS termination (agent-level setting). */
+  readonly tlsExemptHosts: readonly string[];
+  /** Optional sink injection (the caller owns the observation channel). */
+  readonly violationSink?: EgressViolationSink;
+}
+
+/**
  * Typed error for a missing product dependency: the node runtime or the
  * repo-bundled relay assets cannot be resolved (missing relay = egress
  * fail-closed, guidance names this product's dependency rather than socat).
@@ -402,8 +553,18 @@ export class SshAgentUnavailableError extends ToolExecutionError {
  * Why not crypto.randomUUID: the socket file name must stay short with no
  * hyphens / path separators.
  */
-function newSessionId(): string {
+export function newSessionId(): string {
   return randomBytes(8).toString("hex");
+}
+
+/**
+ * Default unix socket path factory — one path per call id. The id is
+ * one-shot (a fresh random value per endpoint), so two calls of the same
+ * session never share a socket; the stale-socket cleanup before listen covers
+ * the "a previous run never released it" case.
+ */
+export function defaultSocketPathFactory(id: string): string {
+  return join(tmpdir(), `iknow-egress-${id}.sock`);
 }
 
 /**
@@ -566,7 +727,7 @@ export function buildProxyEnv(
  * DEFAULT_PRIVATE_DENIED_RANGES (passed in after the dynamic import).
  */
 function effectiveDeniedRanges(
-  policyInput: EgressPolicyInput,
+  policyInput: EgressCallPolicy,
   defaultDeniedRanges: readonly string[]
 ): readonly string[] {
   return policyInput.deniedResolvedAddresses ?? defaultDeniedRanges;
@@ -580,13 +741,18 @@ function effectiveDeniedRanges(
  * tests can drive the filter independently without a real HTTP proxy (via the
  * `createHttpProxyServer` injection seam).
  *
+ * The closure is **per call**: it carries the call's policy and the call's
+ * violation sink, so the violations it records belong to exactly that call
+ * (the per-call attribution the plan's T5 asks for — the upstream proxy binds
+ * one filter per server instance, and the endpoint owns one instance).
+ *
  * Returning `Promise<boolean>` matches upstream's awaited
  * `options.filter(...)` signature. Synchronous denials (denied /
  * allowlist-empty / allowlist-malformed / address-denied) stay synchronous;
  * `not-in-allowlist` + a present gate is async.
  */
-function createFilterCallback(
-  policyInput: EgressPolicyInput,
+export function createFilterCallback(
+  policyInput: EgressCallPolicy,
   defaultDeniedRanges: readonly string[],
   sink: EgressViolationSink,
   decideEgress: typeof import("./domain-matcher.js").decideEgress
@@ -690,7 +856,7 @@ function createFilterCallback(
  * upstream order) so the diagnostic trace carries the real port; unknown hosts
  * fall to 0 (never fabricated).
  */
-function buildCredentialProxyOptions(
+export function buildCredentialProxyOptions(
   cred: EgressCredentialResources,
   sink: EgressViolationSink,
   commandLabel: string,
@@ -757,8 +923,8 @@ function buildCredentialProxyOptions(
  * in (the filter callback stays untouched — violation ownership; substitution
  * only happens on the forwarding leg after a pass).
  */
-function startHttpProxyStep(
-  policyInput: EgressPolicyInput,
+export function startHttpProxyStep(
+  policyInput: EgressCallPolicy,
   token: string,
   sink: EgressViolationSink,
   decideDeps: {
@@ -833,7 +999,7 @@ function startHttpProxyStep(
  * masked-file covers / deny covers (the fence emits them into the egressBind
  * segment).
  */
-function assembleFenceSpec(
+export function assembleFenceSpec(
   socketPath: string,
   relay: EgressRelayPaths,
   token: string,
@@ -882,16 +1048,20 @@ function assembleFenceSpec(
  * not start the proxy after this step ("never run a session with partial
  * substitution"). The returned bundle carries the CA reference (consumed by
  * the proxy mitmCA wiring and the dispose bundle cleanup).
+ *
+ * The inputs are the **session-level** mint options (not the per-call
+ * policy): the roster is minted once per session and the minted resources
+ * (registry / masked store / trust bundle) live as long as the profile does.
  */
-function mintCredentialsStep(
-  opts: EgressSessionOptions
+export function mintCredentialsStep(
+  opts: EgressMintOptions
 ): EgressCredentialResources | undefined {
-  if (opts.policy.credentials === undefined) return undefined;
+  if (opts.credentials === undefined) return undefined;
   const loadCa = opts.loadEgressCa ?? loadEgressCa;
   const caLoad = loadCa({ caDir: opts.caDir });
   const mint = mintEgressCredentialLayer({
     posture: "fenced",
-    roster: opts.policy.credentials,
+    roster: opts.credentials,
     ca: caLoad.ca,
     env: opts.hostEnv ?? process.env,
   });
@@ -911,7 +1081,7 @@ function mintCredentialsStep(
  * must not throw into the caller's finally / must not skip later resources
  * because one step failed.
  */
-async function releaseCredentialResources(
+export async function releaseCredentialResources(
   cred: EgressCredentialResources | undefined
 ): Promise<void> {
   if (cred === undefined) return;
@@ -933,34 +1103,17 @@ async function releaseCredentialResources(
 }
 
 /**
- * Main entry: create a per-call egress session.
+ * Step 1 of the session-resident profile: resolve the bundled relay
+ * dependencies (node + vendor/egress-relay assets; the resolver is
+ * injectable).
  *
- * Steps (abnormal and normal paths share one release channel):
- *   1) resolve the bundled relay dependencies (node + vendor/egress-relay
- *      assets; the resolver is injectable);
- *   1.5) roster present → load the persistent CA + mint fake values
- *        (registry / masked store / bind table / env delta); assembly-time
- *        defense failure = throw directly, no proxy started;
- *   2) start the HTTP proxy server (filter = decideEgress domain decision;
- *      lookupFor = the upstream ResolvedAddressGuard for DNS resolution);
- *   3) the server listens on the unix socket directly (ADR-0107: no socat bridge);
- *   4) build and return the fence spec.
- *
- * Any step failing → clean up what was started + throw a typed error (never silent).
+ * Fail-closed: unresolvable = no seam available, a product-semantics typed
+ * error is thrown (ADR-0107). The relay set is session-level — every call of
+ * the session rides the same relay assets.
  */
-export async function createEgressSession(
-  opts: EgressSessionOptions
-): Promise<EgressSession> {
-  const relayResolver = opts.relayResolver ?? resolveEgressRelay;
-  const socketPathFactory =
-    opts.socketPathFactory ??
-    ((id) => join(tmpdir(), `iknow-egress-${id}.sock`));
-  const sink = opts.violationSink ?? createEgressViolationSink();
-
-  // Step 1: relay dependency resolution (injectable so tests can simulate
-  // "product dependency missing").
-  // Fail-closed: unresolvable = no seam available, a product-semantics typed
-  // error is thrown (ADR-0107).
+function resolveRelayOrThrow(
+  relayResolver: () => EgressRelayPaths | undefined
+): EgressRelayPaths {
   const relay = relayResolver();
   if (relay === undefined) {
     throw new EgressRelayUnavailableError(
@@ -968,78 +1121,132 @@ export async function createEgressSession(
       "The relay ships with iknow; repair or reinstall the iknow install root (npm) so vendor/egress-relay and a Node >=20 runtime are present — no extra system package is part of this product."
     );
   }
+  return relay;
+}
 
-  // Credential availability branch (default off): in open state, verify the
-  // agent socket's existence first — missing = fail-closed infra-class error,
-  // raised before starting / listening on the server (no "bind without seam"
-  // half-open shape).
-  // stale-but-present (file exists, agent dead) cannot be probed cheaply; it
-  // is left to in-fence ssh reporting "agent refused" — classified infra, this
-  // seam never goes through the filter and produces no domain-denial record.
-  const sshAuthSockPath = opts.sshAuthSockPath;
-  if (sshAuthSockPath !== undefined && !existsSync(sshAuthSockPath)) {
+/**
+ * Step 1b of the profile: the credential availability branch (default off).
+ *
+ * In open state, verify the agent socket's existence first — missing =
+ * fail-closed infra-class error, raised before anything is started (no
+ * "bind without seam" half-open shape). Stale-but-present (file exists, agent
+ * dead) cannot be probed cheaply; it is left to in-fence ssh reporting "agent
+ * refused" — classified infra, this seam never goes through the filter and
+ * produces no domain-denial record.
+ */
+function resolveSshAuthSock(
+  sshAuthSockPath: string | undefined
+): string | undefined {
+  if (sshAuthSockPath === undefined) return undefined;
+  if (!existsSync(sshAuthSockPath)) {
     throw new SshAgentUnavailableError(sshAuthSockPath);
   }
+  return sshAuthSockPath;
+}
 
-  const id = newSessionId();
-  const socketPath = socketPathFactory(id);
-
-  // Stale socket cleanup (socket paths carry a per-session random id + cleanup
-  // before startup). Any residual socket = from a previous unreleased session;
-  // delete it to avoid mis-connection (same semantics as unlink-before-listen,
-  // in-package mux-proxy.js precedent).
-  removeSocketFile(socketPath);
-
+/**
+ * Resolve the **session-resident profile** — the expensive, long-lived half of
+ * the egress seam (plan T4 "出口代理会话级常驻").
+ *
+ * Loaded exactly once per session:
+ *   1) the bundled relay dependencies (injectable so tests can simulate
+ *      "product dependency missing");
+ *   1b) the ssh-agent availability verdict (fail-closed, infra-class);
+ *   1.5) the durable CA load + the credential mint (registry / masked store /
+ *        bind table / env delta) — assembly-time defense failure = throw
+ *        directly, nothing started ("never run a session with partial
+ *        substitution");
+ *   2) the shared proxy auth token (prevents other host processes from
+ *      connecting to the proxy directly and bypassing the filter);
+ *   3) the domain-matcher decision functions (dynamic import — one-way
+ *      references within the egress domain, no cycle).
+ *
+ * The per-call half (socket / proxy instance / sink / spec) lives in
+ * `startEgressCallEndpoint`.
+ */
+export async function resolveEgressProfile(
+  opts: EgressProfileOptions
+): Promise<EgressProfile> {
+  const relay = resolveRelayOrThrow(opts.relayResolver ?? resolveEgressRelay);
+  const sshAuthSockPath = resolveSshAuthSock(opts.sshAuthSockPath);
+  const id = opts.id ?? newSessionId();
   // Shared token — prevents other host processes from connecting to the proxy
-  // (ADR-0097)
-  // directly and bypassing the filter.
+  // (ADR-0097) directly and bypassing the filter.
   const token = randomBytes(32).toString("hex");
-
   // Dynamic import of domain-matcher (avoids a cycle; one-way references within the egress domain).
   const { decideEgress, DEFAULT_PRIVATE_DENIED_RANGES } =
     await import("./domain-matcher.js");
-
-  // Step 1.5: startup-time minting — must happen before the proxy starts
-  // (Step 2): the substring contract / fake-space assertion failures are typed
-  // errors thrown directly, with no proxy up and no session ("never run a
-  // session with partial substitution").
-  const credentialResources = mintCredentialsStep(opts);
-
-  // Step 2: start the HTTP proxy server. The createHttpProxyServer injection
-  // seam lets unit tests capture the filter callback and drive it directly;
-  // production uses the default createHttpProxyServer.
-  // When credential resources are present, the proxy gains the substitution
-  // wiring (mitmCA + forwarding-leg hooks).
-  const httpServer = startHttpProxyStep(opts.policy, token, sink, {
-    defaultDeniedRanges: DEFAULT_PRIVATE_DENIED_RANGES,
-    decideEgress,
-    createHttpProxy: opts.createHttpProxyServer ?? createHttpProxyServer,
-    credential: credentialResources,
-    tlsExemptHosts: opts.tlsExemptHosts,
-  });
-
-  // Step 3: the server listens on the unix socket directly (failure = cleanup
-  // leaves no half resources — the abnormal path uses the same release
-  // channel: registry / masked store / trust bundle released together, no
-  // stale left).
-  try {
-    await listenOnUnixSocket(httpServer, socketPath);
-  } catch (err) {
-    closeServerQuietly(httpServer);
-    removeSocketFile(socketPath);
-    await releaseCredentialResources(credentialResources);
-    throw err;
-  }
-
-  // Step 4: build the fence spec (fixed in-sandbox port + auth env + inner
-  // relay preamble + assets ro-bind directory + the conditional credential
-  // seam (sshAuthSockPath absent = closed) + credential binds / env delta).
-  const spec = assembleFenceSpec(
-    socketPath,
+  const credential = mintCredentialsStep(opts);
+  return {
+    id,
     relay,
     token,
     sshAuthSockPath,
-    credentialResources
+    credential,
+    decideEgress,
+    defaultDeniedRanges: DEFAULT_PRIVATE_DENIED_RANGES,
+  };
+}
+
+/**
+ * Start ONE call's endpoint — the per-call half of the egress seam (plan T5
+ * "按调用子 socket").
+ *
+ * Steps:
+ *   1) a fresh one-shot call id → the socket path (the path carries the call
+ *      id, so two calls of one session never share a socket);
+ *   1b) stale-socket cleanup (a residual socket = a previous run that never
+ *      released it — delete it to avoid mis-connection; same semantics as
+ *      unlink-before-listen, in-package mux-proxy.js precedent);
+ *   2) start the HTTP proxy server for THIS call — the filter closure carries
+ *      this call's policy and this call's violation sink, so the violations
+ *      belong to exactly this call (the upstream proxy binds one filter per
+ *      server instance, and the endpoint owns one instance);
+ *   3) the server listens on the unix socket directly (ADR-0107: no socat
+ *      bridge);
+ *   4) build the fence spec for this call.
+ *
+ * The credential layer is NOT released here — it belongs to the session-level
+ * profile (the endpoint only borrows the registry / CA).
+ */
+export async function startEgressCallEndpoint(
+  profile: EgressProfile,
+  policy: EgressCallPolicy,
+  deps: EgressEndpointDeps
+): Promise<EgressCallEndpoint> {
+  const callId = newSessionId();
+  const socketPath = deps.socketPathFactory(callId);
+  removeSocketFile(socketPath);
+  const sink = deps.violationSink ?? createEgressViolationSink();
+
+  const httpServer = startHttpProxyStep(policy, profile.token, sink, {
+    defaultDeniedRanges: profile.defaultDeniedRanges,
+    decideEgress: profile.decideEgress,
+    createHttpProxy: deps.createHttpProxy,
+    credential: profile.credential,
+    tlsExemptHosts: deps.tlsExemptHosts,
+  });
+  // The endpoint owns the live connections of THIS proxy instance — the
+  // teardown drops them (the upgraded CONNECT tunnels included).
+  const connections = trackProxyConnections(httpServer);
+
+  // The listen failure = cleanup leaves no half resources (the abnormal path
+  // uses the same release channel: server closed + socket file removed).
+  try {
+    await listenOnUnixSocket(httpServer, socketPath);
+  } catch (err) {
+    connections.dropAll();
+    closeServerQuietly(httpServer);
+    removeSocketFile(socketPath);
+    throw err;
+  }
+
+  const spec = assembleFenceSpec(
+    socketPath,
+    profile.relay,
+    profile.token,
+    profile.sshAuthSockPath,
+    profile.credential
   );
 
   let disposed = false;
@@ -1047,13 +1254,124 @@ export async function createEgressSession(
     // Idempotent: repeated dispose neither throws nor errors.
     if (disposed) return;
     disposed = true;
+    // Teardown order (plan T5 "断开其全部连接"): the live connections go
+    // FIRST (a CONNECT tunnel is an upgraded socket the HTTP server no longer
+    // tracks, so it survives a bare close()), then the listener closes, then
+    // the socket file is deleted.
+    connections.dropAll();
     closeServerQuietly(httpServer);
     removeSocketFile(socketPath);
-    // Credential layer releases through the same channel (registry.clear + store.dispose + bundle cleanup).
-    await releaseCredentialResources(credentialResources);
   };
 
-  return Object.freeze({ id, spec, violationSink: sink, dispose });
+  return Object.freeze({
+    id: callId,
+    socketPath,
+    spec,
+    violationSink: sink,
+    dispose,
+  });
+}
+
+/**
+ * Project the session-level policy input onto the per-call policy shape: the
+ * credential roster is dropped (the mint is session-level — the roster rides
+ * the profile, not the call).
+ *
+ * Public because the assembly layer needs the same projection: the bash tool
+ * and the background manager hand a FULL policy (roster included) to their
+ * own policy factory, and the per-call endpoint must receive the call policy
+ * only — the roster belongs to the agent's profile.
+ */
+export function toEgressCallPolicy(
+  policy: EgressPolicyInput
+): EgressCallPolicy {
+  return {
+    allowedDomains: policy.allowedDomains,
+    deniedDomains: policy.deniedDomains,
+    deniedResolvedAddresses: policy.deniedResolvedAddresses,
+    commandLabel: policy.commandLabel,
+    allowlistSource: policy.allowlistSource,
+    approvalGate: policy.approvalGate,
+  };
+}
+
+/**
+ * Compatibility entry: create a per-call egress session.
+ *
+ * This is the **legacy shape** kept for the three existing consumers (the
+ * bash tool, the background manager, the verify runner) until they migrate to
+ * the session-resident agent (`egress/agent.ts`): one session = one profile
+ * (relay / CA / mint / token / ssh-agent verdict) + exactly one endpoint
+ * (socket / proxy instance / sink / spec), released together on dispose.
+ *
+ * Steps (abnormal and normal paths share one release channel):
+ *   1) resolve the session-resident profile (relay + ssh-agent + CA + mint +
+ *      token);
+ *   2) start this call's endpoint (proxy server + unix socket + spec);
+ *   3) the server listens on the unix socket directly (ADR-0107: no socat bridge).
+ *
+ * Any step failing → clean up what was started + throw a typed error (never silent).
+ */
+export async function createEgressSession(
+  opts: EgressSessionOptions
+): Promise<EgressSession> {
+  const profile = await resolveEgressProfile({
+    credentials: opts.policy.credentials,
+    sshAuthSockPath: opts.sshAuthSockPath,
+    relayResolver: opts.relayResolver,
+    loadEgressCa: opts.loadEgressCa,
+    caDir: opts.caDir,
+    hostEnv: opts.hostEnv,
+    onCredentialMint: opts.onCredentialMint,
+  });
+  return startLegacySession(profile, opts);
+}
+
+/**
+ * The legacy session assembly: one profile + one endpoint, released together.
+ */
+async function startLegacySession(
+  profile: EgressProfile,
+  opts: EgressSessionOptions
+): Promise<EgressSession> {
+  let endpoint: EgressCallEndpoint;
+  try {
+    endpoint = await startEgressCallEndpoint(
+      profile,
+      toEgressCallPolicy(opts.policy),
+      {
+        createHttpProxy: opts.createHttpProxyServer ?? createHttpProxyServer,
+        socketPathFactory: opts.socketPathFactory ?? defaultSocketPathFactory,
+        tlsExemptHosts: opts.tlsExemptHosts ?? [],
+        violationSink: opts.violationSink,
+      }
+    );
+  } catch (err) {
+    // The endpoint never came up → the profile's credential layer is released
+    // through the same channel (no half-injected state left behind).
+    // EXIT: the endpoint could not start → its credential layer is released
+    // through the same channel, so no half-injected state is left behind; the
+    // original typed error propagates unchanged.
+    await releaseCredentialResources(profile.credential);
+    throw err;
+  }
+
+  let disposed = false;
+  const dispose = async (): Promise<void> => {
+    // Idempotent: repeated dispose neither throws nor errors.
+    if (disposed) return;
+    disposed = true;
+    await endpoint.dispose();
+    // Credential layer releases through the same channel (registry.clear + store.dispose + bundle cleanup).
+    await releaseCredentialResources(profile.credential);
+  };
+
+  return Object.freeze({
+    id: profile.id,
+    spec: endpoint.spec,
+    violationSink: endpoint.violationSink,
+    dispose,
+  });
 }
 
 /**
@@ -1061,7 +1379,7 @@ export async function createEgressSession(
  * the stale-socket defense). Split into its own function for the complexity
  * gate.
  */
-function removeSocketFile(socketPath: string): void {
+export function removeSocketFile(socketPath: string): void {
   try {
     if (existsSync(socketPath)) unlinkSync(socketPath);
   } catch {
@@ -1086,7 +1404,10 @@ function removeSocketFile(socketPath: string): void {
  * file header). A chmod failure is treated like a listen failure (reject → the
  * caller's same cleanup channel) — never run unprotected.
  */
-function listenOnUnixSocket(server: Server, socketPath: string): Promise<void> {
+export function listenOnUnixSocket(
+  server: Server,
+  socketPath: string
+): Promise<void> {
   return new Promise((resolve, reject) => {
     const onError = (err: Error): void => {
       server.off("listening", onListening);
@@ -1108,10 +1429,55 @@ function listenOnUnixSocket(server: Server, socketPath: string): Promise<void> {
   });
 }
 
-function closeServerQuietly(server: Server): void {
+export function closeServerQuietly(server: Server): void {
+  // The live connections go FIRST, then the listener: `closeAllConnections()`
+  // (Node >= 18.2) tears down the requests the server still tracks, and
+  // `close()` alone would keep them alive until the peers hang up. The
+  // upgraded CONNECT sockets are NOT covered by it (the server stops tracking
+  // an upgraded socket) — `trackProxyConnections` owns those.
+  try {
+    server.closeAllConnections();
+  } catch {
+    // EXIT: best-effort teardown — the tracked connections are dropped by
+    // `trackProxyConnections` regardless, so a failure here must not skip the
+    // listener close below.
+  }
   try {
     server.close();
   } catch {
-    // best-effort
+    // EXIT: best-effort teardown — the listener is already unreachable for
+    // new connections once the tracked sockets are dropped, so a failure here
+    // must not throw into the endpoint's dispose.
   }
+}
+
+/**
+ * Track the sockets one proxy-server instance accepted, so the endpoint's
+ * teardown can DROP its connections — not just close the listener.
+ *
+ * `server.closeAllConnections()` reaches only the connections the HTTP server
+ * still tracks. A CONNECT tunnel is an **upgraded** socket: once the request
+ * is upgraded the server hands the raw socket to the 'connect' handler and
+ * stops tracking it, so a live tunnel survives `server.close()` (and
+ * `closeAllConnections()`) — the tunnel would outlive the call that opened it.
+ * The 'connection' event is the one place that still sees EVERY accepted
+ * socket (tunnel or not), so the endpoint keeps its own registry and destroys
+ * the sockets itself at teardown.
+ */
+function trackProxyConnections(server: Server): {
+  readonly dropAll: () => void;
+} {
+  const sockets = new Set<Socket>();
+  const onConnection = (socket: Socket): void => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  };
+  server.on("connection", onConnection);
+  return {
+    dropAll: (): void => {
+      server.off("connection", onConnection);
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+    },
+  };
 }

@@ -54,10 +54,30 @@ describe("processChatLine onStream forwarding (#179 T6)", () => {
     });
     assert.equal(r.ranQuery, true);
     assert.equal(r.output.includes("hello world"), true);
-    assert.deepEqual(received, [
-      { type: "text_delta", text: "hello " },
-      { type: "text_delta", text: "world" },
-    ]);
+    // The chat host forwards the whole harness stream. The occupancy beat
+    // (ADR-0118) rides the same channel, so the tool/text sequence is
+    // asserted separately from the beat.
+    assert.deepEqual(
+      received.filter((event) => event.type !== "context_usage"),
+      [
+        { type: "text_delta", text: "hello " },
+        { type: "text_delta", text: "world" },
+      ]
+    );
+    const beats = received.filter(
+      (
+        event
+      ): event is Extract<HarnessStreamEvent, { type: "context_usage" }> =>
+        event.type === "context_usage"
+    );
+    assert.equal(beats.length > 0, true, "the run published an occupancy beat");
+    assert.equal(
+      beats.every(
+        (beat) => beat.phase === "projected" || beat.phase === "pre_call"
+      ),
+      true,
+      "a beat without a measurement is projected, never a fabricated confirmed one"
+    );
   });
 
   it("without onStream: identical behavior (no events observed, output unchanged)", async () => {
@@ -145,6 +165,37 @@ describe("createStreamPreviewSink (#179 T6 TTY spinner replacement)", () => {
     assert.ok(joined.includes("Running 1 shell command… · npm test"));
     // tool_call_start is a status hint, not answer text.
     assert.equal(sink.textStreamed, true);
+  });
+
+  it("an occupancy beat closes a pending tool line without writing anything", () => {
+    const { err, out, writers } = captureStreams();
+    const sink = createStreamPreviewSink(writers);
+    sink.feed({ type: "tool_call_start", name: "bash", id: "toolu_bash_beat" });
+    sink.feed({
+      type: "tool_input_delta",
+      id: "toolu_bash_beat",
+      partialJson: '{"command":"npm test"}',
+    });
+    // The beat is a closing point (ADR-0118: it arrives after a model phase,
+    // so the input JSON is complete), and it writes nothing itself.
+    sink.feed({
+      type: "context_usage",
+      phase: "projected",
+      occupancy: { tokens: 26_000, source: "projected" },
+    });
+    assert.equal(
+      err.join("").includes("Running 1 shell command… · npm test"),
+      true,
+      "the beat flushed the pending tool line"
+    );
+    assert.deepEqual(out, [], "the beat itself wrote nothing");
+    // A second closing point must not repeat the line.
+    sink.feed({ type: "text_delta", text: "done" });
+    assert.equal(
+      err.join("").split("Running 1 shell command…").length - 1,
+      1,
+      "exactly one line per call"
+    );
   });
 
   it("writer errors are swallowed (observer must not break the turn)", () => {

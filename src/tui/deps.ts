@@ -26,6 +26,7 @@
 import type { LoopEngineDeps } from "../harness/index.js";
 import {
   buildHarnessEngine,
+  type BuildEngineOpts,
   type EngineBundle,
 } from "../harness/build-engine.js";
 import { LLM_API_KEY_MISSING_MESSAGE } from "../config/messages.js";
@@ -33,8 +34,9 @@ import type { PostToolUseHook } from "../harness/permission/types.js";
 import type { PermissionModeContext } from "../harness/permission/modes.js";
 import type { GraphModeContext } from "../harness/graph/mode.js";
 import type { FsModeContext } from "../harness/sandbox/fs-mode.js";
-import type { YoloContext } from "../harness/sandbox/yolo.js";
+import type { FenceRetirementReader } from "../harness/sandbox/yolo.js";
 import type { SubagentCapacityHolder } from "../harness/subagent/manager.js";
+import type { BackgroundTaskManager } from "../harness/background/manager.js";
 import type { WorktreeOnMutateHolder } from "../harness/isolation/worktree-gate.js";
 import type { LiveGraphLedgerHost } from "../harness/graph/ledger.js";
 import type { SessionGrants } from "../harness/permission/session-grants.js";
@@ -141,16 +143,24 @@ export interface BuildTuiDepsOptions {
    */
   readonly fsMode?: FsModeContext;
   /**
-   * ADR-0119 / specs/yolo-mode.md: yolo no-sandbox holder (same shape as
-   * fsMode). Passed through to build-engine — `BuildEngineOpts.yolo` → the bash
-   * factory reads per call (foreground fence / background spawn / verify /
-   * subagent env wire share one source). Absent = this entry point did not wire
-   * the yolo axis (the engine uses the non-yolo fail-closed default).
+   * ADR-0141: the derived fence posture (same shape as fsMode). Passed through
+   * to build-engine — `BuildEngineOpts.fenceRetired` → the bash factory reads
+   * per call (foreground fence / background spawn / verify / subagent env wire
+   * share one source). Absent = this entry point did not wire the axis (the
+   * engine uses the fenced fail-closed default).
    *
-   * Not persisted: the yolo axis never enters settings / session files / a
+   * Not persisted: the fence posture never enters settings / session files / a
    * config panel row (spec §5).
    */
-  readonly yolo?: YoloContext;
+  readonly fenceRetired?: FenceRetirementReader;
+  /**
+   * Turn cap for the engine this assembly builds — the CLI `--max-turns` face.
+   * `buildHarnessEngine` seeds `LoopEngineDeps.maxTurns` from `env.llm.maxTurns`
+   * (env / settings only), so the flag has to override that seed here: present →
+   * this value wins, absent → the seed stays untouched. A caller that rebuilds
+   * at another root passes the same option object and gets the same cap.
+   */
+  readonly maxTurns?: number;
   /**
    * Runtime subagent concurrency cap holder (ADR-0096; same shape as fsMode).
    * Passed through to build-engine — `BuildEngineOpts.subagentCapacityHolder`
@@ -260,6 +270,13 @@ export interface BuildTuiDepsOptions {
    * deadlock (known bun 1.3.14 issue).
    */
   readonly createMcpManager?: typeof import("../harness/mcp/manager.js").createMcpManager;
+  /**
+   * Test seam: assembly-time token measurement override (same shape as
+   * build-engine's `countTokens`; production omits it and the real adapter is
+   * used). The TUI runs these measurements in the background — readiness does
+   * not wait for the gateway (plan T2).
+   */
+  readonly countTokens?: BuildEngineOpts["countTokens"];
   /**
    * Synchronous callback fired after assembly, exposing the extension surface
    * (skillCatalog / mcp / shutdown) for consumption: slash candidate
@@ -437,6 +454,11 @@ export async function buildTuiDeps(
     Omit<EngineBundle, "deps"> & {
       readonly memoryFlags?: MemoryLiveFlags;
       readonly invalidateMemorySystem?: () => void;
+      /**
+       * `backgroundManager` is a `BuiltEngine` field, so the `Omit` above does
+       * not carry it; declared here because the return block forwards it.
+       */
+      readonly backgroundManager?: BackgroundTaskManager;
     }
 > {
   if (!bundle.env.llm.apiKey) {
@@ -513,6 +535,15 @@ export async function buildTuiDeps(
     // absent (undefined passes as absent) → reviews deny typed at the gates.
     securityReview: opts.securityReview,
     surface: "tui",
+    // Plan T2 readiness contract: the TUI must reach usable input and quit
+    // even when optional integrations are unreachable or hung. The ADR-0043
+    // first-turn-ready window and the two countTokens judgments (overflow
+    // governance + index demotion, both HTTP to the model gateway) move to
+    // one background task instead of being awaited by assembly. Its settled
+    // result is frozen at the first turn's system assembly and dropped if it
+    // arrives later (first-turn constancy). Required local configuration
+    // errors (model / provider / key) still throw above, before any render.
+    deferFirstTurnOptionalWork: true,
     memory: { enabled: true },
     todoDir: todoProjectDir,
     // ADR-0132: the current identity's session scratch, read live. Same
@@ -541,10 +572,10 @@ export async function buildTuiDeps(
     // call (build-engine guards on `!== undefined`, so absent and explicit
     // undefined are equivalent).
     fsMode: opts.fsMode,
-    // ADR-0119 / specs/yolo-mode.md: yolo holder passthrough — the bash factory
-    // reads per call (build-engine treats `undefined` and "key absent" the same
-    // = non-yolo fail-closed).
-    yolo: opts.yolo,
+    // ADR-0141: fence-posture passthrough — the bash factory reads per call
+    // (build-engine treats `undefined` and "key absent" the same = fenced
+    // fail-closed).
+    fenceRetired: opts.fenceRetired,
     // ADR-0096: cap holder passthrough — build-engine uses it instead of a
     // one-shot boot snapshot of env.subagent.maxConcurrentWorkers (the spawn
     // gate reads holder.get() each time); forwarded in the same source to
@@ -589,6 +620,8 @@ export async function buildTuiDeps(
     // prettier-ignore kept on one line verbatim (88 chars > 80 cols; reformatting disabled here).
     // prettier-ignore
     ...(opts.createMcpManager ? { createMcpManager: opts.createMcpManager } : {}),
+    // Test seam: assembly-time token measurement override (background task).
+    ...(opts.countTokens ? { countTokens: opts.countTokens } : {}),
     // Test seam: MCP client factory override.
     ...(opts.createMcpClient ? { createMcpClient: opts.createMcpClient } : {}),
     // Boot-assembly settings object + worktree isolation host seam
@@ -684,7 +717,15 @@ export async function buildTuiDeps(
 
   return {
     ...built.deps,
+    // An explicit `--max-turns` wins over the env/settings seed build-engine
+    // computed from `env.llm.maxTurns`; absent leaves that seed exactly as
+    // assembled, so a launch without the flag keeps its byte-identical cap
+    // (including the ADR-0012 unlimited default). Rebind rebuilds arrive here
+    // through the same options object, so the cap survives a root switch.
+    ...presentFields("maxTurns", opts.maxTurns),
     ...presentFields("subagentManager", built.subagentManager),
+    // /quit reads live background tasks through this handle (the cell in run.tsx).
+    ...presentFields("backgroundManager", built.backgroundManager),
     ...presentFields("shutdown", built.shutdown),
     ...presentFields("graphAssembly", built.graphAssembly),
     // Auto-memory hooks flattened out with deps; run.tsx destructures and

@@ -44,6 +44,7 @@
 
 import { execFileSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -82,6 +83,9 @@ const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 /** Where the committed shape fixtures live. */
 export const CORPUS_DIR = join(REPO_ROOT, "tests", "fixtures", "shell-corpus");
 
+/** The #1188 expectation roster that sits beside the corpus in the same dir. */
+const EXPECTATIONS_FILENAME = "backslash-whitespace-expectations.jsonl";
+
 /**
  * This tool's own rows go to a separate directory: `shell-corpus/` has a
  * committed schema contract (every `.jsonl` there is one-key `{command}` corpus
@@ -95,6 +99,19 @@ const DIFFERENTIAL_DIR = join(
   "shell-divergence"
 );
 
+/**
+ * #1188: the emitted ledger reproduces its committed file byte-for-byte with one
+ * documented exception — the two `echo\ test` rows, which record the historical
+ * false positive from the incident report. `echo\ test` is no longer a corpus
+ * command, so this tool cannot emit it, and regenerating drops those two lines.
+ * They stay hand-pinned because the declarative and segmentation parity
+ * batteries derive their population from this file and pin counts that include
+ * the shape. Re-add the pair from
+ * `docs/evidence/1188-backslash-whitespace-investigation.md` if a regeneration
+ * removes them. The four admission rows and two amendment rows that #1188 added
+ * ARE tool-emitted, priced from the expectation roster, not hand-pinned.
+ */
+
 const DEFAULT_OUT = join(DIFFERENTIAL_DIR, "stage2-differential.jsonl");
 
 export type WallName = "pattern" | "sensitive";
@@ -104,6 +121,8 @@ export type DivergenceLabel =
   | "expected-relaxation"
   | "authorized-id-move"
   | "authorized-diagnostic-move"
+  | "authorized-fidelity-admission"
+  | "authorized-roster-amendment"
   | "fixed"
   | "security-review"
   | "open";
@@ -743,6 +762,68 @@ function withdrawnReadOnlyRootSearch(
   return isReadOnlyRootSearchCommand(command) ? relaxation("4") : null;
 }
 
+/**
+ * The hand-authored #1188 expectation roster that sits beside the corpus. It
+ * states what real Bash does with each backslash-whitespace spelling, so it is
+ * an independent fact and not a question for the rule under test: this
+ * generator never asks the wall or the parser to price its own change.
+ */
+function expectationRoster(): ReadonlyMap<string, string> {
+  let roster = rosterCache;
+  if (roster !== null) return roster;
+  roster = new Map<string, string>();
+  const path = join(CORPUS_DIR, EXPECTATIONS_FILENAME);
+  if (existsSync(path)) {
+    for (const line of readFileSync(path, "utf8").split("\n")) {
+      if (line.length === 0) continue;
+      const record = JSON.parse(line) as { command: string; expectation: string };
+      roster.set(record.command, record.expectation);
+    }
+  }
+  rosterCache = roster;
+  return roster;
+}
+
+let rosterCache: Map<string, string> | null = null;
+
+/**
+ * A base denial that was the blanket backslash-whitespace veto, on a spelling
+ * the roster records as agreeing with Bash. Narrowing that veto is what turned
+ * it into an admission, so the label is the roster's own word.
+ */
+function fidelityAdmission(
+  command: string,
+  base: DangerousPatternHit
+): { label: "authorized-fidelity-admission" } | null {
+  if (!isBackslashWhitespaceVeto(base)) return null;
+  if (expectationRoster().get(command) !== "supported-benign") return null;
+  return { label: "authorized-fidelity-admission" };
+}
+
+/**
+ * A retained spelling whose denial reason text changed because the roster
+ * amendment removed the generated rewrite from it. Still a denial, still the
+ * same class, so this is a diagnostic move rather than a behavior move.
+ */
+function rosterAmendment(
+  command: string,
+  base: DangerousPatternHit,
+  head: DangerousPatternHit
+): { label: "authorized-roster-amendment" } | null {
+  if (!isBackslashWhitespaceVeto(base) || !isBackslashWhitespaceVeto(head)) {
+    return null;
+  }
+  if (expectationRoster().get(command) !== "retained-fidelity") return null;
+  return { label: "authorized-roster-amendment" };
+}
+
+function isBackslashWhitespaceVeto(hit: DangerousPatternHit): boolean {
+  return (
+    hit.id === "unparseable" &&
+    hit.pattern.includes("解析分歧字符（backslash-whitespace）")
+  );
+}
+
 export function classifyPattern(
   command: string,
   base: DangerousPatternHit | null,
@@ -757,8 +838,11 @@ export function classifyPattern(
   }
   if (head !== null) {
     const move = authorizedMoveLabel(base, head);
-    return move === null ? { label: "open" } : { label: move };
+    if (move !== null) return { label: move };
+    return rosterAmendment(command, base, head) ?? { label: "open" };
   }
+  const admission = fidelityAdmission(command, base);
+  if (admission !== null) return admission;
   const quotes = quoteLicensedSpans(command);
   if (excusedBy(command, quotes, oracle)) return relaxation("1");
   const spans = [...quotes, ...operandLicensedSpans(command)];
@@ -1080,6 +1164,10 @@ function corpusCommands(dir: string): string[] {
   const commands: string[] = [];
   for (const name of readdirSync(dir).sort()) {
     if (!name.endsWith(".jsonl")) continue;
+    // The expectations roster is a sibling label file, not a corpus: it carries
+    // `expectation` and `rationale` beside `command`, so the one-key schema
+    // contract below does not apply to it.
+    if (name === EXPECTATIONS_FILENAME) continue;
     const lines = readFileSync(join(dir, name), "utf8").split("\n");
     for (const [index, line] of lines.entries()) {
       if (line.length === 0) continue;
@@ -1555,6 +1643,8 @@ const LABEL_ROW_BUMPS: Readonly<
   fixed: () => ["authorized-new-deny"],
   "authorized-id-move": () => ["authorized-id-move"],
   "authorized-diagnostic-move": () => ["authorized-diagnostic-move"],
+  "authorized-fidelity-admission": () => ["authorized-fidelity-admission"],
+  "authorized-roster-amendment": () => ["authorized-roster-amendment"],
 };
 
 /** The report buckets one row falls into. */

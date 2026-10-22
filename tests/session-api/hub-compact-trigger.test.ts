@@ -170,7 +170,7 @@ describe("plan manual-compact-trigger T1: hub.compactSession 绕开 auto token �
     const hub = new SessionHub({
       store,
       // thresholdTokens deliberately absent → getAutoCompactThreshold default
-      // = floor(0.95 × contextWindow) = 190000. Manual /compact counts as
+      // = floor(0.9 × contextWindow) = 180000. Manual /compact counts as
       // past the gate, skips evaluateCompactTrigger, and goes straight to
       // splitForCompaction → windowed branch (8 > 6 keepRecent → dropped=2, kept=6).
       deps: {
